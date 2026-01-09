@@ -1,0 +1,99 @@
+[package]
+name = "rag"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust Abstract GPU - A modern GPU abstraction for Vulkan 1.4+, Metal, and DX12"
+repository = "https://github.com/koubaa/rag"
+keywords = ["gpu", "graphics", "vulkan", "rendering"]
+categories = ["graphics", "rendering"]
+
+[dependencies]
+# Vulkan bindings
+ash = "0.38"
+
+# Shader compilation (WGSL -> SPIR-V)
+naga = { version = "24.0", features = ["wgsl-in", "spv-out"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+
+# Utilities
+bitflags = "2.6"
+bytemuck = { version = "1.21", features = ["derive"] }
+
+[dev-dependencies]
+# PNG output for examples
+image = "0.25"
+
+# Tracing subscriber for examples
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Windowing for interactive examples
+winit = "0.30"
+softbuffer = "0.4"
+
+[features]
+default = ["vulkan"]
+vulkan = []
+
+[[example]]
+name = "triangle"
+path = "examples/triangle.rs"
+
+[[example]]
+name = "digital_clock"
+path = "examples/digital_clock.rs"
+
+[[example]]
+name = "gradient"
+path = "examples/gradient.rs"
+
+[[example]]
+name = "plasma"
+path = "examples/plasma.rs"
+
+[[example]]
+name = "starfield"
+path = "examples/starfield.rs"
+
+[[example]]
+name = "mandelbrot"
+path = "examples/mandelbrot.rs"
+
+[[example]]
+name = "bouncing_lines"
+path = "examples/bouncing_lines.rs"
+
+[[example]]
+name = "spinning_cube"
+path = "examples/spinning_cube.rs"
+
+[[example]]
+name = "metaballs"
+path = "examples/metaballs.rs"
+
+[[example]]
+name = "checkerboard"
+path = "examples/checkerboard.rs"
+
+[[example]]
+name = "instancing"
+path = "examples/instancing.rs"
+
+[[example]]
+name = "particles"
+path = "examples/particles.rs"
+
+[[example]]
+name = "waveform"
+path = "examples/waveform.rs"
+
+[[example]]
+name = "tunnel"
+path = "examples/tunnel.rs"
+

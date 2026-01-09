@@ -1,0 +1,12 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# Output files from examples
+*.png
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
