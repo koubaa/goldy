@@ -776,6 +776,18 @@ impl GpuBackend for VulkanBackend {
                         }
                     }
                 }
+                RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                    if let Some(buf_state) = self.buffers.get(buffer) {
+                        unsafe {
+                            logical_device.device.cmd_bind_index_buffer(
+                                cmd,
+                                buf_state.buffer,
+                                *offset,
+                                index_format_to_vk(*format),
+                            );
+                        }
+                    }
+                }
                 RenderCommand::Draw {
                     vertex_count,
                     instance_count,
@@ -788,6 +800,24 @@ impl GpuBackend for VulkanBackend {
                             *vertex_count,
                             *instance_count,
                             *first_vertex,
+                            *first_instance,
+                        );
+                    }
+                }
+                RenderCommand::DrawIndexed {
+                    index_count,
+                    instance_count,
+                    first_index,
+                    base_vertex,
+                    first_instance,
+                } => {
+                    unsafe {
+                        logical_device.device.cmd_draw_indexed(
+                            cmd,
+                            *index_count,
+                            *instance_count,
+                            *first_index,
+                            *base_vertex,
                             *first_instance,
                         );
                     }
@@ -1700,6 +1730,18 @@ impl GpuBackend for VulkanBackend {
                         }
                     }
                 }
+                RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                    if let Some(buf_state) = self.buffers.get(buffer) {
+                        unsafe {
+                            logical_device.device.cmd_bind_index_buffer(
+                                cmd,
+                                buf_state.buffer,
+                                *offset,
+                                index_format_to_vk(*format),
+                            );
+                        }
+                    }
+                }
                 RenderCommand::Draw {
                     vertex_count,
                     instance_count,
@@ -1712,6 +1754,24 @@ impl GpuBackend for VulkanBackend {
                             *vertex_count,
                             *instance_count,
                             *first_vertex,
+                            *first_instance,
+                        );
+                    }
+                }
+                RenderCommand::DrawIndexed {
+                    index_count,
+                    instance_count,
+                    first_index,
+                    base_vertex,
+                    first_instance,
+                } => {
+                    unsafe {
+                        logical_device.device.cmd_draw_indexed(
+                            cmd,
+                            *index_count,
+                            *instance_count,
+                            *first_index,
+                            *base_vertex,
                             *first_instance,
                         );
                     }

@@ -2,7 +2,7 @@
 //!
 //! Format conversions and memory helpers.
 
-use crate::types::{TextureFormat, VertexFormat, PrimitiveTopology};
+use crate::types::{IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
 use ash::vk;
 
 /// Convert RAG TextureFormat to Vulkan format.
@@ -39,6 +39,14 @@ pub fn topology_to_vk(topology: PrimitiveTopology) -> vk::PrimitiveTopology {
         PrimitiveTopology::LineStrip => vk::PrimitiveTopology::LINE_STRIP,
         PrimitiveTopology::TriangleList => vk::PrimitiveTopology::TRIANGLE_LIST,
         PrimitiveTopology::TriangleStrip => vk::PrimitiveTopology::TRIANGLE_STRIP,
+    }
+}
+
+/// Convert RAG IndexFormat to Vulkan index type.
+pub fn index_format_to_vk(format: IndexFormat) -> vk::IndexType {
+    match format {
+        IndexFormat::Uint16 => vk::IndexType::UINT16,
+        IndexFormat::Uint32 => vk::IndexType::UINT32,
     }
 }
 

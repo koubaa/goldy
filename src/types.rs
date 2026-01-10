@@ -162,6 +162,26 @@ pub enum PrimitiveTopology {
     TriangleStrip,
 }
 
+/// Index buffer format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum IndexFormat {
+    /// 16-bit unsigned indices (0-65535).
+    #[default]
+    Uint16,
+    /// 32-bit unsigned indices (0-4 billion).
+    Uint32,
+}
+
+impl IndexFormat {
+    /// Get the size in bytes of one index.
+    pub fn size(&self) -> u32 {
+        match self {
+            IndexFormat::Uint16 => 2,
+            IndexFormat::Uint32 => 4,
+        }
+    }
+}
+
 /// Type of GPU device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceType {
@@ -354,6 +374,17 @@ mod tests {
         assert!(usage.contains(BufferUsage::VERTEX));
         assert!(usage.contains(BufferUsage::COPY_DST));
         assert!(!usage.contains(BufferUsage::INDEX));
+    }
+
+    #[test]
+    fn test_index_format_size() {
+        assert_eq!(IndexFormat::Uint16.size(), 2);
+        assert_eq!(IndexFormat::Uint32.size(), 4);
+    }
+
+    #[test]
+    fn test_index_format_default() {
+        assert_eq!(IndexFormat::default(), IndexFormat::Uint16);
     }
 }
 

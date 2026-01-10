@@ -235,9 +235,17 @@ impl Drop for SlangCompiler {
 /// Global Slang compiler instance.
 ///
 /// Lazily initialized on first use.
+///
+/// **Deprecated**: Each VulkanBackend now owns its own SlangCompiler to avoid
+/// test isolation issues. This global remains for backward compatibility.
 static GLOBAL_COMPILER: std::sync::OnceLock<Result<SlangCompiler, String>> = std::sync::OnceLock::new();
 
 /// Get or create the global Slang compiler.
+///
+/// **Deprecated**: Prefer creating a `SlangCompiler::new()` per context to avoid
+/// session state pollution when compiling the same shader source multiple times.
+/// The Vulkan backend now uses per-backend compiler instances.
+#[deprecated(since = "0.2.0", note = "Use SlangCompiler::new() per context instead")]
 pub fn global_compiler() -> Result<&'static SlangCompiler> {
     GLOBAL_COMPILER
         .get_or_init(|| SlangCompiler::new().map_err(|e| e.to_string()))

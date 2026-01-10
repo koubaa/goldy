@@ -12,7 +12,7 @@ mod types;
 mod utils;
 
 use types::*;
-use utils::{format_to_vk, vertex_format_to_vk, topology_to_vk};
+use utils::{format_to_vk, index_format_to_vk, vertex_format_to_vk, topology_to_vk};
 
 use super::*;
 use crate::types::Color;
@@ -48,6 +48,8 @@ pub struct VulkanBackend {
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
     next_surface_handle: SurfaceHandle,
+    /// Per-backend Slang compiler instance (avoids global state issues in tests)
+    slang_compiler: crate::slang::SlangCompiler,
 }
 
 impl VulkanBackend {
@@ -90,12 +92,27 @@ impl VulkanBackend {
         #[cfg(target_os = "linux")]
         extensions.push(khr::wayland_surface::NAME.as_ptr());
 
+        // Enable validation layers if RAG_VALIDATION=1
+        let enable_validation = std::env::var("RAG_VALIDATION").map(|v| v == "1").unwrap_or(false);
+        let validation_layers: Vec<*const i8> = if enable_validation {
+            tracing::info!("Vulkan validation layers ENABLED");
+            extensions.push(ash::ext::debug_utils::NAME.as_ptr());
+            vec![c"VK_LAYER_KHRONOS_validation".as_ptr()]
+        } else {
+            vec![]
+        };
+
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
-            .enabled_extension_names(&extensions);
+            .enabled_extension_names(&extensions)
+            .enabled_layer_names(&validation_layers);
 
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .context("Failed to create Vulkan instance")?;
+        
+        if enable_validation {
+            tracing::info!("Vulkan instance created with validation layers");
+        }
 
         // Enumerate physical devices
         let physical_devices_raw = unsafe { instance.enumerate_physical_devices() }
@@ -125,6 +142,10 @@ impl VulkanBackend {
             );
         }
 
+        // Create per-backend Slang compiler (avoids global state issues)
+        let slang_compiler = crate::slang::SlangCompiler::new()
+            .context("Failed to create Slang compiler")?;
+
         Ok(Self {
             entry,
             instance,
@@ -145,6 +166,7 @@ impl VulkanBackend {
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
             next_surface_handle: 1,
+            slang_compiler,
         })
     }
 
@@ -239,12 +261,13 @@ impl VulkanBackend {
             _ => anyhow::bail!("Unsupported shader stage"),
         };
         
-        // Compile with Slang
-        let compiler = crate::slang::global_compiler()
-            .context("Failed to get Slang compiler")?;
+        // Clone source to avoid borrow issues
+        let slang_source = shader.slang_source.clone();
+        let device_handle = shader.device_handle;
         
-        let compiled = compiler.compile_entry_point(
-            &shader.slang_source,
+        // Compile with per-backend Slang compiler (avoids global state issues)
+        let compiled = self.slang_compiler.compile_entry_point(
+            &slang_source,
             crate::slang::ShaderTarget::Spirv,
             Some((entry_point_name, stage)),
         ).with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
@@ -253,7 +276,7 @@ impl VulkanBackend {
             .context("Invalid SPIR-V output")?;
         
         // Get device
-        let logical_device = self.devices.get(&shader.device_handle)
+        let logical_device = self.devices.get(&device_handle)
             .context("Shader's device no longer valid")?;
         
         // Create Vulkan shader module

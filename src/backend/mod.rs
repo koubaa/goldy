@@ -18,7 +18,10 @@ pub mod metal;
 // #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
 // pub mod webgpu;
 
-use crate::types::*;
+use crate::types::{
+    BackendType, BufferUsage, Color, DeviceType, IndexFormat, PrimitiveTopology, TextureFormat,
+    VertexBufferLayout,
+};
 use anyhow::Result;
 
 // Re-export raw_window_handle for Surface API users
@@ -59,13 +62,24 @@ pub enum RenderCommand {
     SetPipeline(PipelineHandle),
     /// Set a vertex buffer.
     SetVertexBuffer { slot: u32, buffer: BufferHandle, offset: u64 },
+    /// Set an index buffer.
+    SetIndexBuffer { buffer: BufferHandle, offset: u64, format: IndexFormat },
     /// Set a bind group.
     SetBindGroup { index: u32, bind_group: BindGroupHandle },
-    /// Draw primitives.
+    /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
         instance_count: u32,
         first_vertex: u32,
+        first_instance: u32,
+    },
+    /// Draw indexed primitives.
+    DrawIndexed {
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        /// Offset added to each index value before fetching the vertex.
+        base_vertex: i32,
         first_instance: u32,
     },
 }

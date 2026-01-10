@@ -572,5 +572,112 @@ mod tests {
         // Only one target was created
         assert_eq!(backend.targets_created.len(), 1);
     }
+
+    #[test]
+    fn test_indexed_drawing_commands() {
+        use crate::types::IndexFormat;
+        
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let target = backend.create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
+        
+        // Create an index buffer
+        let index_buffer = backend.create_buffer(device, 12, BufferUsage::INDEX).unwrap();
+        
+        // Write some indices (6 u16 indices for 2 triangles)
+        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
+        backend.write_buffer(index_buffer, 0, bytemuck::cast_slice(&indices)).unwrap();
+        
+        // Record indexed drawing commands
+        let commands = vec![
+            RenderCommand::Clear(Color::BLACK),
+            RenderCommand::SetIndexBuffer {
+                buffer: index_buffer,
+                offset: 0,
+                format: IndexFormat::Uint16,
+            },
+            RenderCommand::DrawIndexed {
+                index_count: 6,
+                instance_count: 1,
+                first_index: 0,
+                base_vertex: 0,
+                first_instance: 0,
+            },
+        ];
+        
+        backend.render_to_target(device, target, &commands).unwrap();
+        
+        // Verify commands were recorded
+        assert_eq!(backend.recorded_commands.len(), 1);
+        assert_eq!(backend.recorded_commands[0].len(), 3);
+        
+        // Check SetIndexBuffer was recorded correctly
+        match &backend.recorded_commands[0][1] {
+            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                assert_eq!(*buffer, index_buffer);
+                assert_eq!(*offset, 0);
+                assert_eq!(*format, IndexFormat::Uint16);
+            }
+            _ => panic!("Expected SetIndexBuffer command"),
+        }
+        
+        // Check DrawIndexed was recorded correctly
+        match &backend.recorded_commands[0][2] {
+            RenderCommand::DrawIndexed { index_count, instance_count, first_index, base_vertex, first_instance } => {
+                assert_eq!(*index_count, 6);
+                assert_eq!(*instance_count, 1);
+                assert_eq!(*first_index, 0);
+                assert_eq!(*base_vertex, 0);
+                assert_eq!(*first_instance, 0);
+            }
+            _ => panic!("Expected DrawIndexed command"),
+        }
+    }
+
+    #[test]
+    fn test_indexed_drawing_with_offset() {
+        use crate::types::IndexFormat;
+        
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let target = backend.create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
+        let index_buffer = backend.create_buffer(device, 24, BufferUsage::INDEX).unwrap();
+        
+        // Test with offset and base_vertex
+        let commands = vec![
+            RenderCommand::SetIndexBuffer {
+                buffer: index_buffer,
+                offset: 12, // Skip first 3 u32 indices
+                format: IndexFormat::Uint32,
+            },
+            RenderCommand::DrawIndexed {
+                index_count: 3,
+                instance_count: 10,
+                first_index: 0,
+                base_vertex: 100, // Offset into vertex buffer
+                first_instance: 5,
+            },
+        ];
+        
+        backend.render_to_target(device, target, &commands).unwrap();
+        
+        // Verify the offset and base_vertex were preserved
+        match &backend.recorded_commands[0][0] {
+            RenderCommand::SetIndexBuffer { offset, format, .. } => {
+                assert_eq!(*offset, 12);
+                assert_eq!(*format, IndexFormat::Uint32);
+            }
+            _ => panic!("Expected SetIndexBuffer command"),
+        }
+        
+        match &backend.recorded_commands[0][1] {
+            RenderCommand::DrawIndexed { base_vertex, first_instance, instance_count, .. } => {
+                assert_eq!(*base_vertex, 100);
+                assert_eq!(*first_instance, 5);
+                assert_eq!(*instance_count, 10);
+            }
+            _ => panic!("Expected DrawIndexed command"),
+        }
+    }
 }
 

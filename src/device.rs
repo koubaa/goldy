@@ -1,4 +1,28 @@
 //! GPU device management.
+//!
+//! # Thread Safety
+//!
+//! RAG uses a single-threaded command submission model with lock-free command recording:
+//!
+//! - **Command Recording**: [`CommandEncoder`](crate::CommandEncoder) is completely lock-free.
+//!   You can create and record commands on any thread without any synchronization.
+//!   
+//! - **Resource Creation**: Creating resources ([`Buffer`](crate::Buffer),
+//!   [`RenderPipeline`](crate::RenderPipeline), etc.) acquires the backend lock.
+//!   These operations are safe from any thread but serialize internally.
+//!
+//! - **Command Submission**: Submitting commands via [`RenderTarget::render()`](crate::RenderTarget::render)
+//!   or [`SurfaceFrame::render()`](crate::SurfaceFrame::render) acquires the backend lock.
+//!
+//! ## Best Practices
+//!
+//! For optimal performance:
+//! 1. Create resources during initialization, not per-frame
+//! 2. Record commands lock-free using `CommandEncoder` on any thread
+//! 3. Submit commands from a single thread (typically the main/render thread)
+//!
+//! This model is sufficient for most applications. Future versions may add
+//! multi-queue support for parallel command submission if needed.
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
 use crate::types::*;
@@ -92,6 +116,18 @@ impl Adapter {
 }
 
 /// A GPU device - used to create resources and render.
+///
+/// The `Device` is the primary interface for GPU operations. It is `Send + Sync`,
+/// so it can be safely shared across threads (typically via `Arc<Device>`).
+///
+/// # Thread Safety
+///
+/// Internally, `Device` uses a `Mutex` to serialize backend operations. This means:
+/// - Resource creation is thread-safe but serializes internally
+/// - Command recording via [`CommandEncoder`](crate::CommandEncoder) is lock-free
+/// - Command submission acquires the lock
+///
+/// See the [module documentation](self) for best practices.
 pub struct Device {
     pub(crate) backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: DeviceHandle,
