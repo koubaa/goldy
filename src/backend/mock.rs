@@ -28,12 +28,16 @@ pub struct MockBackend {
     next_bind_group_handle: BindGroupHandle,
     render_targets: HashMap<RenderTargetHandle, MockRenderTarget>,
     next_render_target_handle: RenderTargetHandle,
+    surfaces: HashMap<SurfaceHandle, MockSurface>,
+    next_surface_handle: SurfaceHandle,
     /// Commands recorded during the last render operation
     pub recorded_commands: Vec<Vec<RenderCommand>>,
     /// Targets that were created (for verification)
     pub targets_created: Vec<(u32, u32, TextureFormat)>,
     /// Count of CPU readbacks performed
     pub cpu_readback_count: usize,
+    /// Count of surface presents performed
+    pub surface_present_count: usize,
 }
 
 struct MockDevice {
@@ -73,6 +77,13 @@ struct MockRenderTarget {
     data: Vec<u8>,
 }
 
+struct MockSurface {
+    device_handle: DeviceHandle,
+    width: u32,
+    height: u32,
+    next_image: SwapchainImageHandle,
+}
+
 impl MockBackend {
     /// Create a new mock backend with one simulated adapter.
     pub fn new() -> Self {
@@ -100,9 +111,12 @@ impl MockBackend {
             next_bind_group_handle: 1,
             render_targets: HashMap::new(),
             next_render_target_handle: 1,
+            surfaces: HashMap::new(),
+            next_surface_handle: 1,
             recorded_commands: Vec::new(),
             targets_created: Vec::new(),
             cpu_readback_count: 0,
+            surface_present_count: 0,
         }
     }
 
@@ -111,6 +125,7 @@ impl MockBackend {
         self.recorded_commands.clear();
         self.targets_created.clear();
         self.cpu_readback_count = 0;
+        self.surface_present_count = 0;
     }
 }
 
@@ -411,6 +426,76 @@ impl GpuBackend for MockBackend {
         self.cpu_readback_count += 1;
 
         Ok(())
+    }
+
+    // Surface API (mock implementation)
+    fn create_surface(
+        &mut self,
+        device: DeviceHandle,
+        _window: &dyn raw_window_handle::HasWindowHandle,
+        _display: &dyn raw_window_handle::HasDisplayHandle,
+    ) -> Result<SurfaceHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let handle = self.next_surface_handle;
+        self.next_surface_handle += 1;
+
+        self.surfaces.insert(handle, MockSurface {
+            device_handle: device,
+            width: 800,  // Default size
+            height: 600,
+            next_image: 1,
+        });
+
+        Ok(handle)
+    }
+
+    fn destroy_surface(&mut self, surface: SurfaceHandle) {
+        self.surfaces.remove(&surface);
+    }
+
+    fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle> {
+        let surf = self.surfaces.get_mut(&surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
+
+        let image = surf.next_image;
+        surf.next_image += 1;
+        Ok(image)
+    }
+
+    fn surface_render(&mut self, surface: SurfaceHandle, _image: SwapchainImageHandle, commands: &[RenderCommand]) -> Result<()> {
+        if !self.surfaces.contains_key(&surface) {
+            anyhow::bail!("Invalid surface handle");
+        }
+
+        self.recorded_commands.push(commands.to_vec());
+        Ok(())
+    }
+
+    fn surface_present(&mut self, surface: SurfaceHandle, _image: SwapchainImageHandle) -> Result<()> {
+        if !self.surfaces.contains_key(&surface) {
+            anyhow::bail!("Invalid surface handle");
+        }
+
+        self.surface_present_count += 1;
+        Ok(())
+    }
+
+    fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+        let surf = self.surfaces.get_mut(&surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
+
+        surf.width = width;
+        surf.height = height;
+        Ok(())
+    }
+
+    fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32) {
+        self.surfaces.get(&surface)
+            .map(|s| (s.width, s.height))
+            .unwrap_or((0, 0))
     }
 }
 

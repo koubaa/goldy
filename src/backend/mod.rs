@@ -9,6 +9,10 @@ pub mod vulkan;
 // Mock backend for testing (always available)
 pub mod mock;
 
+// Metal backend for macOS (native Metal, not MoltenVK)
+#[cfg(target_os = "macos")]
+pub mod metal;
+
 // WebGPU backend is currently native-only (uses native Slang compiler)
 // For browser WASM builds, use rag-web which uses wgpu directly with slang-wasm
 // #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
@@ -16,6 +20,9 @@ pub mod mock;
 
 use crate::types::*;
 use anyhow::Result;
+
+// Re-export raw_window_handle for Surface API users
+pub use raw_window_handle;
 
 /// Information about a GPU adapter (physical device).
 #[derive(Debug, Clone)]
@@ -40,6 +47,8 @@ pub type PipelineHandle = u64;
 pub type BindGroupHandle = u64;
 pub type BindGroupLayoutHandle = u64;
 pub type RenderTargetHandle = u64;
+pub type SurfaceHandle = u64;
+pub type SwapchainImageHandle = u64;
 
 /// Render command for command buffer recording.
 #[derive(Debug, Clone)]
@@ -121,6 +130,29 @@ pub trait GpuBackend: Send + Sync {
     fn destroy_render_target(&mut self, target: RenderTargetHandle);
     fn render_to_target(&mut self, device: DeviceHandle, target: RenderTargetHandle, commands: &[RenderCommand]) -> Result<()>;
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()>;
+
+    // Surface API - zero-copy presentation to window
+    /// Create a surface for presenting to a window.
+    /// The window handle is platform-specific (HWND on Windows, wl_surface on Wayland, NSView on macOS).
+    fn create_surface(&mut self, device: DeviceHandle, window: &dyn raw_window_handle::HasWindowHandle, display: &dyn raw_window_handle::HasDisplayHandle) -> Result<SurfaceHandle>;
+    
+    /// Destroy a surface.
+    fn destroy_surface(&mut self, surface: SurfaceHandle);
+    
+    /// Acquire the next swapchain image to render to.
+    fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle>;
+    
+    /// Render commands to a swapchain image.
+    fn surface_render(&mut self, surface: SurfaceHandle, image: SwapchainImageHandle, commands: &[RenderCommand]) -> Result<()>;
+    
+    /// Present a swapchain image to the screen.
+    fn surface_present(&mut self, surface: SurfaceHandle, image: SwapchainImageHandle) -> Result<()>;
+    
+    /// Resize the surface (recreates swapchain).
+    fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()>;
+    
+    /// Get the current surface dimensions.
+    fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32);
 }
 
 /// Trait for consuming render output.

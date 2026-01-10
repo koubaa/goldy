@@ -30,6 +30,10 @@ bitflags = "2.6"
 bytemuck = { version = "1.21", features = ["derive"] }
 scopeguard = "1.2"
 
+# Windowing / Surface support
+raw-window-handle = "0.6"
+winit = { version = "0.30", optional = true }
+
 # Web dependencies (optional)
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
