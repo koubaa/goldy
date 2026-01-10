@@ -1,16 +1,15 @@
 //! Mandelbrot example - interactive fractal explorer.
 //!
-//! Demonstrates complex math in fragment shader with zoom/pan.
+//! Demonstrates complex math in fragment shader with zoom/pan using Surface API.
 //!
 //! Run with: cargo run --example mandelbrot
 
 use rag::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, RenderTarget,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     VertexBufferLayout, VertexAttribute, VertexFormat,
     shaders,
 };
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -56,11 +55,11 @@ fn create_quad(center: [f32; 2], zoom: f32) -> [MandelbrotVertex; 6] {
 
 struct App {
     instance: Instance,
-    device: Option<rag::Device>,
+    device: Option<Arc<rag::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
-    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    surface: Option<Surface>,
     center: [f32; 2],
     zoom: f32,
 }
@@ -76,33 +75,35 @@ impl App {
         })
     }
 
-    fn init_gpu(&mut self) -> anyhow::Result<()> {
-        let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
+    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
+        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let shader = ShaderModule::from_slang(&device, shaders::MANDELBROT)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: MandelbrotVertex::layout(),
-            target_format: TextureFormat::Rgba8Unorm,
+            target_format: TextureFormat::Bgra8UnormSrgb,
             ..Default::default()
         })?;
+        let surface = Surface::new(device.clone(), window.as_ref())?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
+        self.surface = Some(surface);
         Ok(())
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        let (width, height) = (size.width, size.height);
-        if width == 0 || height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 { return Ok(()); }
 
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
+        let surface = self.surface.as_ref().unwrap();
 
         let vertices = create_quad(self.center, self.zoom);
-        let vertex_buffer = Buffer::with_data(device, &vertices, BufferUsage::VERTEX)?;
+        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
 
-        let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)?;
+        let frame = surface.acquire()?;
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -112,21 +113,17 @@ impl App {
             pass.draw(0..6, 0..1);
         }
 
-        target.render(encoder)?;
-        let output = target.read_to_cpu()?;
-        let surface = self.surface.as_mut().unwrap();
-        surface.resize(NonZeroU32::new(width).unwrap(), NonZeroU32::new(height).unwrap())
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let mut buffer = surface.buffer_mut()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        for (i, pixel) in buffer.iter_mut().enumerate() {
-            let o = i * 4;
-            if o + 2 < output.len() {
-                *pixel = ((output[o] as u32) << 16) | ((output[o + 1] as u32) << 8) | (output[o + 2] as u32);
+        frame.render(encoder)?;
+        surface.present(frame)?;
+        Ok(())
+    }
+
+    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width > 0 && new_size.height > 0 {
+            if let Some(surface) = &mut self.surface {
+                let _ = surface.resize(new_size.width, new_size.height);
             }
         }
-        buffer.present().map_err(|e| anyhow::anyhow!("{}", e))?;
-        Ok(())
     }
 }
 
@@ -135,13 +132,11 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("RAG - Mandelbrot (Arrows=pan, +/-=zoom, R=reset)")
+                    .with_title("RAG - Mandelbrot (Surface API, Arrows=pan, +/-=zoom, R=reset)")
                     .with_inner_size(winit::dpi::LogicalSize::new(800, 800))
             ).unwrap());
-            let ctx = softbuffer::Context::new(window.clone()).unwrap();
-            self.surface = Some(softbuffer::Surface::new(&ctx, window.clone()).unwrap());
-            self.window = Some(window);
-            self.init_gpu().unwrap();
+            self.window = Some(window.clone());
+            self.init_gpu(&window).unwrap();
         }
     }
 
@@ -167,7 +162,15 @@ impl ApplicationHandler for App {
                 if let Some(w) = &self.window { w.request_redraw(); }
             }
             WindowEvent::RedrawRequested => {
-                self.render_frame().ok();
+                if let Err(e) = self.render_frame() {
+                    eprintln!("Render error: {}", e);
+                }
+            }
+            WindowEvent::Resized(new_size) => {
+                self.handle_resize(new_size);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -186,4 +189,3 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }
-

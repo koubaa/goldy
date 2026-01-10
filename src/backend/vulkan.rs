@@ -2400,20 +2400,38 @@ impl GpuBackend for VulkanBackend {
         // Acquire next swapchain image
         let swapchain_loader = khr::swapchain::Device::new(&self.instance, &logical_device.device);
 
-        let (image_index, _suboptimal) = unsafe {
+        let acquire_result = unsafe {
             swapchain_loader.acquire_next_image(
                 swapchain,
                 u64::MAX,
                 image_available_semaphore,
                 vk::Fence::null(),
             )
-        }.context("Failed to acquire swapchain image")?;
+        };
 
-        // Update surface state
-        let surface_state = self.surfaces.get_mut(&surface_handle).unwrap();
-        surface_state.current_image_index = Some(image_index);
-
-        Ok(image_index as SwapchainImageHandle)
+        match acquire_result {
+            Ok((image_index, suboptimal)) => {
+                if suboptimal {
+                    tracing::debug!("Swapchain suboptimal - consider resizing");
+                }
+                // Update surface state
+                let surface_state = self.surfaces.get_mut(&surface_handle).unwrap();
+                surface_state.current_image_index = Some(image_index);
+                Ok(image_index as SwapchainImageHandle)
+            }
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                // Swapchain is out of date - caller should resize and retry
+                tracing::info!("Swapchain out of date - resize required");
+                anyhow::bail!("Surface out of date - call resize() and retry")
+            }
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
+                tracing::error!("Surface lost");
+                anyhow::bail!("Surface lost - recreate surface")
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to acquire swapchain image: {:?}", e)
+            }
+        }
     }
 
     fn surface_render(&mut self, surface_handle: SurfaceHandle, _image: SwapchainImageHandle, commands: &[RenderCommand]) -> Result<()> {

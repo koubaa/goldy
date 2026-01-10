@@ -2,18 +2,18 @@
 //!
 //! This example uses shared rendering code from `rag::examples::digital_clock`,
 //! demonstrating that the same logic can be used on both native and web platforms.
+//! Now uses the Surface API for zero-copy presentation.
 //!
 //! Run with: cargo run --example digital_clock
 
 use rag::{
-    Buffer, BufferUsage, CommandEncoder, DeviceType, RenderTarget,
+    Buffer, BufferUsage, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     examples::digital_clock::{
         ClockVertex, ClockState, TimeData, SHADER_SOURCE,
         generate_clock_vertices,
     },
 };
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -26,12 +26,12 @@ use winit::{
 
 struct App {
     instance: Instance,
-    device: Option<rag::Device>,
+    device: Option<Arc<rag::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     
     window: Option<Arc<Window>>,
-    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    surface: Option<Surface>,
     
     start_time: Instant,
     clock_state: ClockState,
@@ -52,21 +52,23 @@ impl App {
         })
     }
 
-    fn init_gpu(&mut self) -> anyhow::Result<()> {
-        let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
+    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
+        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         
         // Use the SHARED shader source from the examples module
         let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;
         let pipeline_desc = RenderPipelineDesc {
             vertex_layout: ClockVertex::layout(), // Use shared vertex type
-            target_format: TextureFormat::Rgba8Unorm,
+            target_format: TextureFormat::Bgra8UnormSrgb,
             ..Default::default()
         };
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
+        let surface = Surface::new(device.clone(), window.as_ref())?;
         
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
+        self.surface = Some(surface);
         
         Ok(())
     }
@@ -100,6 +102,7 @@ impl App {
 
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
+        let surface = self.surface.as_ref().unwrap();
 
         let elapsed = self.elapsed_secs();
         let time = TimeData::from_elapsed_secs(elapsed);
@@ -111,10 +114,10 @@ impl App {
         
         // Convert ClockVertex to bytes for the buffer
         let vertex_data: &[u8] = bytemuck::cast_slice(&vertices);
-        let vertex_buffer = Buffer::with_bytes(device, vertex_data, BufferUsage::VERTEX)?;
+        let vertex_buffer = Buffer::with_bytes(device.as_ref(), vertex_data, BufferUsage::VERTEX)?;
 
-        // Render
-        let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)?;
+        // Render directly to surface
+        let frame = surface.acquire()?;
         
         let mut encoder = CommandEncoder::new();
         {
@@ -125,33 +128,18 @@ impl App {
             pass.draw(0..vertices.len() as u32, 0..1);
         }
 
-        target.render(encoder)?;
-        let output = target.read_to_cpu()?;
-
-        // Display in window using softbuffer
-        let surface = self.surface.as_mut().unwrap();
-        surface.resize(
-            NonZeroU32::new(width).unwrap(),
-            NonZeroU32::new(height).unwrap(),
-        ).map_err(|e| anyhow::anyhow!("Failed to resize surface: {}", e))?;
-
-        let mut buffer = surface.buffer_mut()
-            .map_err(|e| anyhow::anyhow!("Failed to get buffer: {}", e))?;
-
-        for (i, pixel) in buffer.iter_mut().enumerate() {
-            let offset = i * 4;
-            if offset + 3 < output.len() {
-                let r = output[offset] as u32;
-                let g = output[offset + 1] as u32;
-                let b = output[offset + 2] as u32;
-                *pixel = (r << 16) | (g << 8) | b;
-            }
-        }
-
-        buffer.present()
-            .map_err(|e| anyhow::anyhow!("Failed to present: {}", e))?;
+        frame.render(encoder)?;
+        surface.present(frame)?;
 
         Ok(())
+    }
+
+    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width > 0 && new_size.height > 0 {
+            if let Some(surface) = &mut self.surface {
+                let _ = surface.resize(new_size.width, new_size.height);
+            }
+        }
     }
 }
 
@@ -159,18 +147,13 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let attrs = Window::default_attributes()
-                .with_title("RAG - Clock (Space: pause, Click: color)")
+                .with_title("RAG - Clock (Surface API, Space: pause, Click: color)")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
             
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
+            self.window = Some(window.clone());
             
-            let context = softbuffer::Context::new(window.clone()).unwrap();
-            let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
-            
-            self.window = Some(window);
-            self.surface = Some(surface);
-            
-            if let Err(e) = self.init_gpu() {
+            if let Err(e) = self.init_gpu(&window) {
                 eprintln!("Failed to initialize GPU: {}", e);
             }
         }
@@ -202,7 +185,8 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
             }
-            WindowEvent::Resized(_) => {
+            WindowEvent::Resized(new_size) => {
+                self.handle_resize(new_size);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -217,8 +201,8 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    println!("RAG Clock Example (using shared rendering code)");
-    println!("================================================");
+    println!("RAG Clock Example (using shared rendering code, Surface API)");
+    println!("=============================================================");
     println!("Controls:");
     println!("  Space - Toggle pause");
     println!("  Click - Change color");
