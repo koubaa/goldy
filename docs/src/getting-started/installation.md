@@ -91,12 +91,11 @@ brew install molten-vk
 
 ## Windowing (for examples)
 
-The examples use `winit` and `softbuffer` for windowing. Add them to dev-dependencies:
+The examples use `winit` for windowing and RAG's built-in Surface API for zero-copy GPU presentation:
 
 ```toml
 [dev-dependencies]
 winit = "0.30"
-softbuffer = "0.4"
 anyhow = "1.0"
 ```
 

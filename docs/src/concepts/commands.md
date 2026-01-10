@@ -143,11 +143,18 @@ For effects requiring multiple render targets:
 
 ## Executing Commands
 
-Commands are executed when you render a frame:
+Commands are executed when you render to a surface or render target:
 
 ```rust
-let frame = FrameOutput::new(&device, width, height, format);
-let pixels = frame.render(encoder)?;  // Execute all recorded commands
+// For window display (zero-copy)
+let frame = surface.acquire()?;
+frame.render(encoder)?;
+surface.present(frame)?;
+
+// For headless/streaming (with optional CPU readback)
+let target = RenderTarget::new(&device, width, height, format)?;
+target.render(encoder)?;
+let pixels = target.read_to_cpu()?;  // Only when needed
 ```
 
 ## Best Practices

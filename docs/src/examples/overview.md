@@ -1,6 +1,6 @@
 # Examples Overview
 
-RAG includes 13 interactive examples demonstrating various GPU rendering techniques. Many are available as interactive WebGPU demos embedded in these docs!
+RAG includes 14 interactive examples demonstrating various GPU rendering techniques. Many are available as interactive WebGPU demos embedded in these docs!
 
 <div class="rag-demo" data-canvas="gradient-canvas" data-demo="GradientDemo">
     <canvas id="gradient-canvas"></canvas>
@@ -27,6 +27,7 @@ All examples support:
 |---------|-------------|--------------|
 | `triangle` | Colored triangle | Vertex buffers, basic pipeline |
 | `gradient` | Animated gradient | Fragment shaders, UV coordinates |
+| `window` | Triangle with animation | Surface API basics |
 
 ### Classic Demoscene
 
@@ -62,6 +63,7 @@ All examples are in `rag/examples/`:
 ```
 rag/examples/
 ├── triangle.rs        # Basic triangle
+├── window.rs          # Surface API basics
 ├── digital_clock.rs   # 7-segment clock
 ├── gradient.rs        # Animated gradient
 ├── plasma.rs          # Plasma effect
@@ -84,18 +86,23 @@ rag/examples/
 ```rust
 struct App {
     instance: Instance,
-    device: Option<rag::Device>,
+    device: Option<Arc<rag::Device>>,
     pipeline: Option<RenderPipeline>,
     window: Option<Arc<Window>>,
-    surface: Option<softbuffer::Surface<...>>,
+    surface: Option<Surface>,
 }
 ```
 
-### Render Loop
+### Render Loop (Surface API)
 
 ```rust
 fn render_frame(&mut self) -> anyhow::Result<()> {
-    let frame = FrameOutput::new(&device, width, height, format);
+    let surface = self.surface.as_ref().unwrap();
+    
+    // Acquire next swapchain image
+    let frame = surface.acquire()?;
+    
+    // Record render commands
     let mut encoder = CommandEncoder::new();
     {
         let mut pass = encoder.begin_render_pass();
@@ -104,33 +111,47 @@ fn render_frame(&mut self) -> anyhow::Result<()> {
         pass.set_vertex_buffer(0, &vertices);
         pass.draw(0..count, 0..1);
     }
-    let output = frame.render(encoder)?;
-    // Display output via softbuffer
+    
+    // Render and present (zero-copy!)
+    frame.render(encoder)?;
+    surface.present(frame)?;
+    
+    Ok(())
 }
 ```
 
-### Custom Shaders
+### Resize Handling
 
 ```rust
-const MY_SHADER: &str = r#"
+fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
+    if new_size.width > 0 && new_size.height > 0 {
+        if let Some(surface) = &mut self.surface {
+            let _ = surface.resize(new_size.width, new_size.height);
+        }
+    }
+}
+```
+
+### Custom Shaders (Slang)
+
+```slang
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    float4 position : SV_Position;
+    float2 uv;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(float2 pos : POSITION, float2 uv : TEXCOORD) {
+    VertexOutput output;
+    output.position = float4(pos, 0.0, 1.0);
+    output.uv = uv;
+    return output;
 }
 
-@vertex
-fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(pos, 0.0, 1.0);
-    out.uv = uv;
-    return out;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return float4(input.uv, 0.5, 1.0);
 }
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.uv, 0.5, 1.0);
-}
-"#;
 ```
 
 ## Next Steps
@@ -141,4 +162,3 @@ Pick an example that interests you:
 - [Digital Clock](./digital-clock.md) - More complex vertex generation
 - [Plasma](./plasma.md) - Fragment shader effects
 - [Mandelbrot](./mandelbrot.md) - Interactive exploration
-

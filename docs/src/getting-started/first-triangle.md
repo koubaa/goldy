@@ -6,7 +6,7 @@ Let's draw a colored triangle in a window using RAG.
 
 ```rust
 use rag::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, FrameOutput,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     Vertex2D, shader::builtins,
 };
@@ -20,11 +20,11 @@ use winit::{
 
 struct App {
     instance: Instance,
-    device: Option<rag::Device>,
+    device: Option<Arc<rag::Device>>,
     vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     window: Option<Arc<Window>>,
-    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    surface: Option<Surface>,
 }
 
 impl App {
@@ -39,8 +39,8 @@ impl App {
         })
     }
 
-    fn init_gpu(&mut self) -> anyhow::Result<()> {
-        let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
+    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
+        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         
         // Triangle vertices with colors
         let vertices = [
@@ -51,16 +51,20 @@ impl App {
         let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
         
         // Load built-in vertex color shader
-        let shader = ShaderModule::from_wgsl(&device, builtins::VERTEX_COLOR_2D)?;
+        let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
-            target_format: TextureFormat::Rgba8Unorm,
+            target_format: TextureFormat::Bgra8UnormSrgb, // Swapchain format
             ..Default::default()
         })?;
+        
+        // Create Surface for zero-copy presentation
+        let surface = Surface::new(device.clone(), window.as_ref())?;
         
         self.device = Some(device);
         self.vertex_buffer = Some(vertex_buffer);
         self.pipeline = Some(pipeline);
+        self.surface = Some(surface);
         Ok(())
     }
 
@@ -69,12 +73,14 @@ impl App {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 { return Ok(()); }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
+        let surface = self.surface.as_ref().unwrap();
 
-        // Create frame and encode commands
-        let frame = FrameOutput::new(device, size.width, size.height, TextureFormat::Rgba8Unorm);
+        // Acquire next frame from swapchain
+        let frame = surface.acquire()?;
+        
+        // Record render commands
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -84,27 +90,20 @@ impl App {
             pass.draw(0..3, 0..1);
         }
 
-        // Render and display
-        let output = frame.render(encoder)?;
-        self.display_frame(&output, size.width, size.height)?;
+        // Render to swapchain (zero-copy - no CPU readback!)
+        frame.render(encoder)?;
+        
+        // Present to screen
+        surface.present(frame)?;
         Ok(())
     }
 
-    fn display_frame(&mut self, pixels: &[u8], width: u32, height: u32) -> anyhow::Result<()> {
-        use std::num::NonZeroU32;
-        let surface = self.surface.as_mut().unwrap();
-        surface.resize(NonZeroU32::new(width).unwrap(), NonZeroU32::new(height).unwrap())
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let mut buffer = surface.buffer_mut().map_err(|e| anyhow::anyhow!("{}", e))?;
-        
-        for (i, pixel) in buffer.iter_mut().enumerate() {
-            let o = i * 4;
-            if o + 2 < pixels.len() {
-                *pixel = ((pixels[o] as u32) << 16) | ((pixels[o+1] as u32) << 8) | pixels[o+2] as u32;
+    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width > 0 && new_size.height > 0 {
+            if let Some(surface) = &mut self.surface {
+                let _ = surface.resize(new_size.width, new_size.height);
             }
         }
-        buffer.present().map_err(|e| anyhow::anyhow!("{}", e))?;
-        Ok(())
     }
 }
 
@@ -116,10 +115,8 @@ impl ApplicationHandler for App {
                     .with_title("RAG - Triangle")
                     .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
             ).unwrap());
-            let ctx = softbuffer::Context::new(window.clone()).unwrap();
-            self.surface = Some(softbuffer::Surface::new(&ctx, window.clone()).unwrap());
-            self.window = Some(window);
-            self.init_gpu().unwrap();
+            self.window = Some(window.clone());
+            self.init_gpu(&window).unwrap();
         }
     }
 
@@ -129,6 +126,12 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.render().ok();
                 self.window.as_ref().unwrap().request_redraw();
+            }
+            WindowEvent::Resized(new_size) => {
+                self.handle_resize(new_size);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -149,10 +152,10 @@ fn main() -> anyhow::Result<()> {
 
 ```rust
 let instance = Instance::new()?;
-let device = instance.create_device(DeviceType::DiscreteGpu)?;
+let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
 ```
 
-The `Instance` discovers available GPUs. `create_device` opens a connection to one.
+The `Instance` discovers available GPUs. `create_device` opens a connection to one. We wrap in `Arc` for Surface lifetime management.
 
 ### 2. Create Vertex Buffer
 
@@ -170,15 +173,25 @@ let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
 ### 3. Create Pipeline
 
 ```rust
-let shader = ShaderModule::from_wgsl(&device, builtins::VERTEX_COLOR_2D)?;
+let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
 let pipeline = RenderPipeline::new(&device, &shader, &shader, &desc)?;
 ```
 
-RAG includes built-in shaders for common cases. The pipeline combines vertex and fragment shaders with rendering state.
+RAG uses Slang shaders compiled at runtime. The pipeline combines vertex and fragment shaders with rendering state.
 
-### 4. Record Commands
+### 4. Create Surface
 
 ```rust
+let surface = Surface::new(device.clone(), window.as_ref())?;
+```
+
+`Surface` manages the swapchain for zero-copy GPU presentation. Unlike CPU-readback approaches, rendering happens directly to the window's framebuffer.
+
+### 5. Render and Present
+
+```rust
+let frame = surface.acquire()?;  // Get next swapchain image
+
 let mut encoder = CommandEncoder::new();
 {
     let mut pass = encoder.begin_render_pass();
@@ -187,19 +200,12 @@ let mut encoder = CommandEncoder::new();
     pass.set_vertex_buffer(0, vertex_buffer);
     pass.draw(0..3, 0..1);  // 3 vertices, 1 instance
 }
+
+frame.render(encoder)?;    // Render to swapchain
+surface.present(frame)?;   // Present to screen
 ```
 
-Commands are recorded into an encoder, then executed by `frame.render()`.
-
-### 5. Render and Display
-
-```rust
-let frame = FrameOutput::new(device, width, height, format);
-let output = frame.render(encoder)?;
-// output is Vec<u8> of RGBA pixels
-```
-
-`FrameOutput` manages the render target. After rendering, you get raw pixels that can be displayed with `softbuffer` or saved to an image.
+Commands are recorded into an encoder, then rendered directly to the swapchain. No CPU readback needed!
 
 ## Run It
 
@@ -213,5 +219,4 @@ You should see a window with a colored triangle on a dark blue background.
 
 - [Understanding the API](./understanding-api.md) - Deeper dive into concepts
 - [Digital Clock Example](../examples/digital-clock.md) - More complex rendering
-- [Shaders](../reference/shaders.md) - Write your own WGSL shaders
-
+- [Shaders](../reference/shaders.md) - Write your own Slang shaders

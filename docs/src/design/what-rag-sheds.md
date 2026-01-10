@@ -88,11 +88,15 @@ RAG's equivalent:
 
 ```rust
 let instance = Instance::new()?;
-let device = instance.create_device(DeviceType::DiscreteGpu)?;
-let shader = ShaderModule::from_wgsl(&device, SHADER)?;
+let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
+let shader = ShaderModule::from_slang(&device, SHADER)?;
 let pipeline = RenderPipeline::new(&device, &shader, &shader, &desc)?;
 
-let frame = FrameOutput::new(&device, width, height, format);
+// Create surface for zero-copy window presentation
+let surface = Surface::new(device.clone(), &window)?;
+
+// Render loop
+let frame = surface.acquire()?;
 let mut encoder = CommandEncoder::new();
 {
     let mut pass = encoder.begin_render_pass();
@@ -100,7 +104,8 @@ let mut encoder = CommandEncoder::new();
     pass.set_vertex_buffer(0, &vertices);
     pass.draw(0..3, 0..1);
 }
-let output = frame.render(encoder)?;
+frame.render(encoder)?;
+surface.present(frame)?;
 ```
 
 That's it. No render passes, no framebuffers, no command pools, no explicit synchronization. RAG handles the complexity internally using modern GPU features.

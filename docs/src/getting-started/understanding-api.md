@@ -19,15 +19,15 @@ There's no hidden reference counting. If you need shared ownership, use `Arc<Buf
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Vertex    │────▶│   Shader    │────▶│   Frame     │
-│   Buffer    │     │  Pipeline   │     │   Output    │
+│   Vertex    │────▶│   Shader    │────▶│  Surface /  │
+│   Buffer    │     │  Pipeline   │     │RenderTarget │
 └─────────────┘     └─────────────┘     └─────────────┘
        │                   │                   │
        │            ┌──────┴──────┐            │
        │            │             │            │
        ▼            ▼             ▼            ▼
-    Vertices    Vertex Shader  Fragment    Pixels
-                               Shader
+    Vertices    Vertex Shader  Fragment    Display /
+                               Shader      Pixels
 ```
 
 ### 1. Buffers Hold Data
@@ -47,11 +47,11 @@ uniforms.write(&data)?;
 ### 2. Shaders Process Data
 
 ```rust
-// From WGSL source
-let shader = ShaderModule::from_wgsl(&device, wgsl_source)?;
+// From Slang source
+let shader = ShaderModule::from_slang(&device, slang_source)?;
 
 // Built-in shaders
-let shader = ShaderModule::from_wgsl(&device, builtins::VERTEX_COLOR_2D)?;
+let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
 ```
 
 ### 3. Pipelines Configure Rendering
@@ -78,11 +78,19 @@ let mut encoder = CommandEncoder::new();
 // encoder now contains recorded commands
 ```
 
-### 5. Frames Execute and Output
+### 5. Surfaces Present to Windows
 
 ```rust
-let frame = FrameOutput::new(&device, width, height, TextureFormat::Rgba8Unorm);
-let pixels: Vec<u8> = frame.render(encoder)?;
+// For window display (zero-copy)
+let surface = Surface::new(device.clone(), &window)?;
+let frame = surface.acquire()?;
+frame.render(encoder)?;
+surface.present(frame)?;
+
+// For headless/streaming (with optional CPU readback)
+let target = RenderTarget::new(&device, width, height, TextureFormat::Rgba8Unorm)?;
+target.render(encoder)?;
+let pixels = target.read_to_cpu()?;  // Only when needed
 ```
 
 ## Vertex Types
@@ -191,6 +199,6 @@ PrimitiveTopology::TriangleStrip  // Connected triangles
 ## Next Steps
 
 - [Buffers](../concepts/buffers.md) - Deep dive into buffer management
-- [Shaders](../concepts/shaders.md) - Writing WGSL shaders
+- [Shaders](../concepts/shaders.md) - Writing Slang shaders
 - [Examples](../examples/overview.md) - See these concepts in action
 

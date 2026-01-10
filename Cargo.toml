@@ -51,10 +51,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Windowing for interactive examples
 winit = "0.30"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-# CPU software rendering fallback for native examples (until GPU windowed works)
-softbuffer = "0.4"
-
 [features]
 default = ["vulkan"]
 vulkan = ["dep:ash"]

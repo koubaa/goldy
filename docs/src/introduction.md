@@ -3,22 +3,27 @@
 **RAG** is a modern Rust GPU library that deliberately sheds legacy baggage. It targets only modern GPU APIs (Vulkan 1.4+, Metal 2+, DX12) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
 
 ```rust
-use rag::{Instance, DeviceType, Color, CommandEncoder, FrameOutput};
+use rag::{Instance, DeviceType, Color, CommandEncoder, Surface};
+use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
     // Create instance and device
     let instance = Instance::new()?;
-    let device = instance.create_device(DeviceType::DiscreteGpu)?;
+    let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
     
-    // Create a frame and clear it
-    let frame = FrameOutput::new(&device, 800, 600, TextureFormat::Rgba8Unorm);
+    // Create surface for zero-copy window presentation
+    let surface = Surface::new(device.clone(), &window)?;
+    
+    // Acquire frame and render
+    let frame = surface.acquire()?;
     let mut encoder = CommandEncoder::new();
     {
         let mut pass = encoder.begin_render_pass();
         pass.clear(Color::CORNFLOWER_BLUE);
     }
     
-    let pixels = frame.render(encoder)?;
+    frame.render(encoder)?;
+    surface.present(frame)?;
     Ok(())
 }
 ```
@@ -51,4 +56,3 @@ fn main() -> anyhow::Result<()> {
 ## License
 
 RAG is MIT licensed. See [License](./license.md) for details.
-

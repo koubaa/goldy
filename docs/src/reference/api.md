@@ -108,8 +108,8 @@ bitflags! {
 pub struct ShaderModule { /* ... */ }
 
 impl ShaderModule {
-    /// Create shader from WGSL source
-    pub fn from_wgsl(device: &Device, source: &str) -> Result<Self>;
+    /// Create shader from Slang source
+    pub fn from_slang(device: &Device, source: &str) -> Result<Self>;
 }
 ```
 
@@ -250,19 +250,66 @@ impl<'a> RenderPass<'a> {
 }
 ```
 
-## Frame Output
+## Surface (Window Display)
 
-### FrameOutput
+### Surface
 
 ```rust
-pub struct FrameOutput { /* ... */ }
+pub struct Surface { /* ... */ }
 
-impl FrameOutput {
-    /// Create a new frame output
-    pub fn new(device: &Device, width: u32, height: u32, format: TextureFormat) -> Self;
+impl Surface {
+    /// Create a surface for a window
+    pub fn new(device: Arc<Device>, window: &impl HasWindowHandle) -> Result<Self>;
     
-    /// Execute commands and get pixel data
-    pub fn render(self, encoder: CommandEncoder) -> Result<Vec<u8>>;
+    /// Acquire next swapchain image
+    pub fn acquire(&self) -> Result<SurfaceFrame>;
+    
+    /// Present a rendered frame
+    pub fn present(&self, frame: SurfaceFrame) -> Result<()>;
+    
+    /// Resize the swapchain
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<()>;
+    
+    /// Current dimensions
+    pub fn width(&self) -> u32;
+    pub fn height(&self) -> u32;
+}
+```
+
+### SurfaceFrame
+
+```rust
+pub struct SurfaceFrame { /* ... */ }
+
+impl SurfaceFrame {
+    /// Render commands to this frame
+    pub fn render(&self, encoder: CommandEncoder) -> Result<()>;
+}
+```
+
+## RenderTarget (Headless/Streaming)
+
+### RenderTarget
+
+```rust
+pub struct RenderTarget { /* ... */ }
+
+impl RenderTarget {
+    /// Create a render target
+    pub fn new(device: &Device, width: u32, height: u32, format: TextureFormat) -> Result<Self>;
+    
+    /// Render commands to GPU texture (stays on GPU)
+    pub fn render(&self, encoder: CommandEncoder) -> Result<()>;
+    
+    /// Explicit CPU readback (lazy staging buffer allocation)
+    pub fn read_to_cpu(&self) -> Result<Vec<u8>>;
+    pub fn read_to_buffer(&self, output: &mut [u8]) -> Result<()>;
+    
+    /// Dimensions
+    pub fn width(&self) -> u32;
+    pub fn height(&self) -> u32;
+    pub fn format(&self) -> TextureFormat;
+    pub fn buffer_size(&self) -> usize;
 }
 ```
 
@@ -314,6 +361,7 @@ pub use buffer::*;
 pub use shader::*;
 pub use pipeline::*;
 pub use encoder::*;
-pub use frame::*;
+pub use surface::*;
+pub use render_target::*;
 ```
 
