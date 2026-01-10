@@ -59,6 +59,8 @@ fn waveform_to_vertices(samples: &[f32], y_offset: f32, color: Color) -> Vec<Ver
         .collect()
 }
 
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 struct App {
     instance: Instance,
     device: Option<Arc<rag::Device>>,
@@ -67,6 +69,8 @@ struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     start_time: Instant,
+    // Each frame may have multiple channel buffers
+    frame_buffers: Vec<Vec<Buffer>>,
 }
 
 impl App {
@@ -76,6 +80,7 @@ impl App {
             device: None, pipeline: None, shader: None,
             window: None, surface: None,
             start_time: Instant::now(),
+            frame_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
@@ -116,26 +121,42 @@ impl App {
         // Y offsets for each channel
         let y_offsets = [0.6, 0.2, -0.2, -0.6];
 
+        // Pre-create all buffers for this frame
+        let mut channel_buffers = Vec::with_capacity(NUM_CHANNELS);
+        let mut vertex_counts = Vec::with_capacity(NUM_CHANNELS);
+        for ch in 0..NUM_CHANNELS {
+            let samples = generate_waveform(time, ch);
+            let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
+            vertex_counts.push(vertices.len() as u32);
+            channel_buffers.push(Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?);
+        }
+
         let frame = surface.acquire()?;
-        let mut encoder = CommandEncoder::new();
         
+        // Drop oldest frame's buffers now that GPU is done
+        if self.frame_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
+            self.frame_buffers.remove(0);
+        }
+        
+        let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color { r: 0.02, g: 0.02, b: 0.08, a: 1.0 });
             pass.set_pipeline(pipeline);
 
             // Draw each channel
-            for ch in 0..NUM_CHANNELS {
-                let samples = generate_waveform(time, ch);
-                let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
-                let vb = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
-                pass.set_vertex_buffer(0, &vb);
-                pass.draw(0..vertices.len() as u32, 0..1);
+            for (ch, vb) in channel_buffers.iter().enumerate() {
+                pass.set_vertex_buffer(0, vb);
+                pass.draw(0..vertex_counts[ch], 0..1);
             }
         }
 
         frame.render(encoder)?;
         surface.present(frame)?;
+        
+        // Keep this frame's buffers alive
+        self.frame_buffers.push(channel_buffers);
+        
         Ok(())
     }
 
@@ -192,3 +213,4 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }
+

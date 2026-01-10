@@ -60,7 +60,11 @@ struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     start_time: Instant,
+    // Keep buffers alive for multiple frames to prevent destruction while GPU uses them
+    vertex_buffers: Vec<Buffer>,
 }
+
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 impl App {
     fn new() -> anyhow::Result<Self> {
@@ -69,6 +73,7 @@ impl App {
             device: None, pipeline: None, shader: None,
             window: None, surface: None,
             start_time: Instant::now(),
+            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
@@ -101,7 +106,14 @@ impl App {
         let vertices = create_quad(time);
         let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
 
+        // Acquire frame - this waits for the oldest in-flight frame to complete
         let frame = surface.acquire()?;
+        
+        // Now it's safe to drop the oldest buffer (GPU is done with it)
+        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
+            self.vertex_buffers.remove(0);
+        }
+        
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -113,6 +125,10 @@ impl App {
 
         frame.render(encoder)?;
         surface.present(frame)?;
+        
+        // Keep the buffer alive until the GPU is done with it
+        self.vertex_buffers.push(vertex_buffer);
+        
         Ok(())
     }
 

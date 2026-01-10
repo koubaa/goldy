@@ -52,6 +52,8 @@ fn create_fullscreen_quad(time: f32) -> [GradientVertex; 6] {
     ]
 }
 
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 struct App {
     instance: Instance,
     device: Option<Arc<rag::Device>>,
@@ -60,6 +62,7 @@ struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     start_time: Instant,
+    vertex_buffers: Vec<Buffer>,
 }
 
 impl App {
@@ -72,6 +75,7 @@ impl App {
             window: None,
             surface: None,
             start_time: Instant::now(),
+            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
@@ -106,6 +110,12 @@ impl App {
         let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
 
         let frame = surface.acquire()?;
+        
+        // Drop oldest buffer now that GPU is done with it
+        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
+            self.vertex_buffers.remove(0);
+        }
+        
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -117,6 +127,10 @@ impl App {
 
         frame.render(encoder)?;
         surface.present(frame)?;
+        
+        // Keep buffer alive for in-flight frames
+        self.vertex_buffers.push(vertex_buffer);
+        
         Ok(())
     }
 
