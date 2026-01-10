@@ -36,6 +36,13 @@ impl Buffer {
         Ok(buffer)
     }
 
+    /// Create a buffer initialized with raw bytes.
+    pub fn with_bytes(device: &Device, data: &[u8], usage: BufferUsage) -> Result<Self> {
+        let buffer = Self::new(device, data.len() as u64, usage)?;
+        buffer.write(0, data)?;
+        Ok(buffer)
+    }
+
     /// Write data to the buffer.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();

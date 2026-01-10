@@ -22,6 +22,10 @@ pub struct VulkanBackend {
     next_shader_handle: ShaderHandle,
     pipelines: HashMap<PipelineHandle, PipelineState>,
     next_pipeline_handle: PipelineHandle,
+    bind_group_layouts: HashMap<BindGroupLayoutHandle, BindGroupLayoutState>,
+    next_bind_group_layout_handle: BindGroupLayoutHandle,
+    bind_groups: HashMap<BindGroupHandle, BindGroupState>,
+    next_bind_group_handle: BindGroupHandle,
 }
 
 struct PhysicalDeviceInfo {
@@ -73,6 +77,17 @@ struct PipelineState {
     device_handle: DeviceHandle,
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
+}
+
+struct BindGroupLayoutState {
+    device_handle: DeviceHandle,
+    layout: vk::DescriptorSetLayout,
+}
+
+struct BindGroupState {
+    device_handle: DeviceHandle,
+    descriptor_set: vk::DescriptorSet,
+    pool: vk::DescriptorPool,
 }
 
 impl VulkanBackend {
@@ -149,6 +164,10 @@ impl VulkanBackend {
             next_shader_handle: 1,
             pipelines: HashMap::new(),
             next_pipeline_handle: 1,
+            bind_group_layouts: HashMap::new(),
+            next_bind_group_layout_handle: 1,
+            bind_groups: HashMap::new(),
+            next_bind_group_handle: 1,
         })
     }
 
@@ -1007,6 +1026,23 @@ impl GpuBackend for VulkanBackend {
                         }
                     }
                 }
+                RenderCommand::SetBindGroup { index, bind_group } => {
+                    if let (Some(bg), Some(pipeline)) = (
+                        self.bind_groups.get(bind_group),
+                        self.pipelines.values().next(), // Get current pipeline layout
+                    ) {
+                        unsafe {
+                            logical_device.device.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline.layout,
+                                *index,
+                                std::slice::from_ref(&bg.descriptor_set),
+                                &[],
+                            );
+                        }
+                    }
+                }
                 RenderCommand::Draw {
                     vertex_count,
                     instance_count,
@@ -1141,6 +1177,295 @@ impl GpuBackend for VulkanBackend {
         }
 
         Ok(())
+    }
+
+    fn create_bind_group_layout(&mut self, device_handle: DeviceHandle, entries: &[BindGroupLayoutEntry]) -> Result<BindGroupLayoutHandle> {
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let bindings: Vec<_> = entries
+            .iter()
+            .map(|e| {
+                let stage_flags = if e.visibility.0 & ShaderStages::VERTEX.0 != 0 && e.visibility.0 & ShaderStages::FRAGMENT.0 != 0 {
+                    vk::ShaderStageFlags::ALL_GRAPHICS
+                } else if e.visibility.0 & ShaderStages::VERTEX.0 != 0 {
+                    vk::ShaderStageFlags::VERTEX
+                } else {
+                    vk::ShaderStageFlags::FRAGMENT
+                };
+
+                let descriptor_type = match &e.ty {
+                    BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
+                    BindingType::StorageBuffer { .. } => vk::DescriptorType::STORAGE_BUFFER,
+                };
+
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(e.binding)
+                    .descriptor_type(descriptor_type)
+                    .descriptor_count(1)
+                    .stage_flags(stage_flags)
+            })
+            .collect();
+
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&bindings);
+
+        let layout = unsafe { logical_device.device.create_descriptor_set_layout(&layout_info, None) }
+            .context("Failed to create descriptor set layout")?;
+
+        let handle = self.next_bind_group_layout_handle;
+        self.next_bind_group_layout_handle += 1;
+
+        self.bind_group_layouts.insert(handle, BindGroupLayoutState {
+            device_handle,
+            layout,
+        });
+
+        Ok(handle)
+    }
+
+    fn create_bind_group(&mut self, device_handle: DeviceHandle, layout_handle: BindGroupLayoutHandle, entries: &[BindGroupEntry]) -> Result<BindGroupHandle> {
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let layout_state = self
+            .bind_group_layouts
+            .get(&layout_handle)
+            .context("Invalid bind group layout handle")?;
+
+        // Create a descriptor pool for this bind group
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(entries.len() as u32),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(entries.len() as u32),
+        ];
+
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .pool_sizes(&pool_sizes)
+            .max_sets(1);
+
+        let pool = unsafe { logical_device.device.create_descriptor_pool(&pool_info, None) }
+            .context("Failed to create descriptor pool")?;
+
+        // Allocate descriptor set
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(std::slice::from_ref(&layout_state.layout));
+
+        let descriptor_sets = unsafe { logical_device.device.allocate_descriptor_sets(&alloc_info) }
+            .context("Failed to allocate descriptor set")?;
+
+        let descriptor_set = descriptor_sets[0];
+
+        // Write descriptors
+        let buffer_infos: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match &e.resource {
+                BindingResource::Buffer { buffer, offset, size } => {
+                    self.buffers.get(buffer).map(|b| (e.binding, b.buffer, *offset, *size))
+                }
+            })
+            .collect();
+
+        let vk_buffer_infos: Vec<_> = buffer_infos
+            .iter()
+            .map(|(_, buf, offset, size)| {
+                vk::DescriptorBufferInfo::default()
+                    .buffer(*buf)
+                    .offset(*offset)
+                    .range(*size)
+            })
+            .collect();
+
+        let writes: Vec<_> = buffer_infos
+            .iter()
+            .enumerate()
+            .map(|(idx, (binding, _, _, _))| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(*binding)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(std::slice::from_ref(&vk_buffer_infos[idx]))
+            })
+            .collect();
+
+        unsafe { logical_device.device.update_descriptor_sets(&writes, &[]) };
+
+        let handle = self.next_bind_group_handle;
+        self.next_bind_group_handle += 1;
+
+        self.bind_groups.insert(handle, BindGroupState {
+            device_handle,
+            descriptor_set,
+            pool,
+        });
+
+        Ok(handle)
+    }
+
+    fn destroy_bind_group(&mut self, bind_group_handle: BindGroupHandle) {
+        if let Some(bg) = self.bind_groups.remove(&bind_group_handle) {
+            if let Some(device) = self.devices.get(&bg.device_handle) {
+                unsafe {
+                    device.device.destroy_descriptor_pool(bg.pool, None);
+                }
+            }
+        }
+    }
+
+    fn create_pipeline_with_layout(
+        &mut self,
+        device_handle: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+    ) -> Result<PipelineHandle> {
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let vs = self.shaders.get(&vertex_shader).context("Invalid vertex shader")?;
+        let fs = self.shaders.get(&fragment_shader).context("Invalid fragment shader")?;
+
+        // Collect descriptor set layouts
+        let vk_layouts: Vec<_> = bind_group_layouts
+            .iter()
+            .filter_map(|h| self.bind_group_layouts.get(h).map(|s| s.layout))
+            .collect();
+
+        // Shader stages
+        let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs.module)
+            .name(c"vs_main");
+
+        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs.module)
+            .name(c"fs_main");
+
+        let shader_stages = [vs_stage, fs_stage];
+
+        // Vertex input
+        let binding_desc = vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(vertex_layout.stride)
+            .input_rate(vk::VertexInputRate::VERTEX);
+
+        let attribute_descs: Vec<_> = vertex_layout
+            .attributes
+            .iter()
+            .map(|attr| {
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(attr.location)
+                    .format(Self::vertex_format_to_vk(attr.format))
+                    .offset(attr.offset)
+            })
+            .collect();
+
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
+            .vertex_attribute_descriptions(&attribute_descs);
+
+        // Input assembly
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(Self::topology_to_vk(topology))
+            .primitive_restart_enable(false);
+
+        // Viewport/scissor (dynamic)
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+
+        // Rasterization
+        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(false);
+
+        // Multisampling
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        // Color blending
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(false);
+
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .attachments(std::slice::from_ref(&color_blend_attachment));
+
+        // Dynamic state
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&dynamic_states);
+
+        // Pipeline layout with descriptor set layouts
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&vk_layouts);
+        let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+            .context("Failed to create pipeline layout")?;
+
+        // Dynamic rendering info (Vulkan 1.3)
+        let color_format = Self::format_to_vk(target_format);
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(std::slice::from_ref(&color_format));
+
+        // Create pipeline
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending)
+            .dynamic_state(&dynamic_state)
+            .layout(layout)
+            .push_next(&mut rendering_info);
+
+        let pipelines = unsafe {
+            logical_device.device.create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                std::slice::from_ref(&pipeline_info),
+                None,
+            )
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to create pipeline: {:?}", e.1))?;
+
+        let handle = self.next_pipeline_handle;
+        self.next_pipeline_handle += 1;
+
+        self.pipelines.insert(
+            handle,
+            PipelineState {
+                device_handle,
+                pipeline: pipelines[0],
+                layout,
+            },
+        );
+
+        tracing::debug!("Created render pipeline with layout {}", handle);
+        Ok(handle)
     }
 }
 

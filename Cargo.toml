@@ -9,11 +9,14 @@ keywords = ["gpu", "graphics", "vulkan", "rendering"]
 categories = ["graphics", "rendering"]
 
 [dependencies]
-# Vulkan bindings
-ash = "0.38"
+# Vulkan bindings (native only)
+ash = { version = "0.38", optional = true }
 
-# Shader compilation (WGSL -> SPIR-V)
-naga = { version = "24.0", features = ["wgsl-in", "spv-out"] }
+# Shader compilation (WGSL -> SPIR-V) - native Vulkan only
+naga = { version = "24.0", features = ["wgsl-in", "spv-out"], optional = true }
+
+# wgpu for WebGPU backend (used on wasm32)
+wgpu = { version = "24", optional = true }
 
 # Error handling
 anyhow = "1.0"
@@ -26,6 +29,13 @@ tracing = "0.1"
 bitflags = "2.6"
 bytemuck = { version = "1.21", features = ["derive"] }
 
+# Web dependencies (optional)
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"], optional = true }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
 [dev-dependencies]
 # PNG output for examples
 image = "0.25"
@@ -35,11 +45,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Windowing for interactive examples
 winit = "0.30"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# CPU software rendering fallback for native examples (until GPU windowed works)
 softbuffer = "0.4"
 
 [features]
 default = ["vulkan"]
-vulkan = []
+vulkan = ["dep:ash", "dep:naga"]
+webgpu = ["dep:wgpu", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:console_error_panic_hook"]
 
 [[example]]
 name = "triangle"

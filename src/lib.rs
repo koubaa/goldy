@@ -19,6 +19,7 @@ pub mod shader;
 pub mod pipeline;
 pub mod encoder;
 pub mod frame;
+pub mod examples;
 
 // Re-export main types
 pub use types::*;

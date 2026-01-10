@@ -1,10 +1,13 @@
 //! GPU backend abstraction.
 //!
 //! This module defines the `GpuBackend` trait that each graphics API
-//! (Vulkan, Metal, DX12) must implement.
+//! (Vulkan, Metal, DX12, WebGPU) must implement.
 
-#[cfg(feature = "vulkan")]
+#[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
 pub mod vulkan;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
+pub mod webgpu;
 
 use crate::types::*;
 use anyhow::Result;
@@ -29,6 +32,8 @@ pub type DeviceHandle = u64;
 pub type BufferHandle = u64;
 pub type ShaderHandle = u64;
 pub type PipelineHandle = u64;
+pub type BindGroupHandle = u64;
+pub type BindGroupLayoutHandle = u64;
 
 /// Render command for command buffer recording.
 #[derive(Debug, Clone)]
@@ -39,6 +44,8 @@ pub enum RenderCommand {
     SetPipeline(PipelineHandle),
     /// Set a vertex buffer.
     SetVertexBuffer { slot: u32, buffer: BufferHandle, offset: u64 },
+    /// Set a bind group.
+    SetBindGroup { index: u32, bind_group: BindGroupHandle },
     /// Draw primitives.
     Draw {
         vertex_count: u32,
@@ -48,7 +55,7 @@ pub enum RenderCommand {
     },
 }
 
-/// GPU backend trait - implemented by Vulkan, Metal, DX12.
+/// GPU backend trait - implemented by Vulkan, Metal, DX12, WebGPU.
 pub trait GpuBackend: Send + Sync {
     /// Get the backend type.
     fn backend_type(&self) -> BackendType;
@@ -71,6 +78,11 @@ pub trait GpuBackend: Send + Sync {
     fn create_shader(&mut self, device: DeviceHandle, wgsl_source: &str) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
+    // Bind group management
+    fn create_bind_group_layout(&mut self, device: DeviceHandle, entries: &[BindGroupLayoutEntry]) -> Result<BindGroupLayoutHandle>;
+    fn create_bind_group(&mut self, device: DeviceHandle, layout: BindGroupLayoutHandle, entries: &[BindGroupEntry]) -> Result<BindGroupHandle>;
+    fn destroy_bind_group(&mut self, bind_group: BindGroupHandle);
+
     // Pipeline management
     fn create_pipeline(
         &mut self,
@@ -81,6 +93,16 @@ pub trait GpuBackend: Send + Sync {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle>;
+    fn create_pipeline_with_layout(
+        &mut self,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+    ) -> Result<PipelineHandle>;
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
     // Rendering
@@ -89,17 +111,64 @@ pub trait GpuBackend: Send + Sync {
     fn end_frame(&mut self, device: DeviceHandle, output: &mut [u8]) -> Result<()>;
 }
 
+/// Bind group layout entry.
+#[derive(Debug, Clone)]
+pub struct BindGroupLayoutEntry {
+    pub binding: u32,
+    pub visibility: ShaderStages,
+    pub ty: BindingType,
+}
+
+/// Shader stage visibility flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShaderStages(pub u32);
+
+impl ShaderStages {
+    pub const VERTEX: ShaderStages = ShaderStages(1);
+    pub const FRAGMENT: ShaderStages = ShaderStages(2);
+    pub const ALL: ShaderStages = ShaderStages(3);
+}
+
+/// Binding type for bind groups.
+#[derive(Debug, Clone)]
+pub enum BindingType {
+    UniformBuffer,
+    StorageBuffer { read_only: bool },
+}
+
+/// Bind group entry.
+#[derive(Debug, Clone)]
+pub struct BindGroupEntry {
+    pub binding: u32,
+    pub resource: BindingResource,
+}
+
+/// Resource for a bind group entry.
+#[derive(Debug, Clone)]
+pub enum BindingResource {
+    Buffer { buffer: BufferHandle, offset: u64, size: u64 },
+}
+
 /// Create the default backend for the current platform.
 pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
-    #[cfg(feature = "vulkan")]
+    #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
     {
         tracing::info!("Creating Vulkan backend");
         Ok(Box::new(vulkan::VulkanBackend::new()?))
     }
 
-    #[cfg(not(feature = "vulkan"))]
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
     {
-        anyhow::bail!("No GPU backend available - enable 'vulkan' feature")
+        // WebGPU backend requires async initialization
+        anyhow::bail!("WebGPU backend must be created asynchronously using create_webgpu_backend()")
+    }
+
+    #[cfg(not(any(
+        all(feature = "vulkan", not(target_arch = "wasm32")),
+        all(feature = "webgpu", target_arch = "wasm32")
+    )))]
+    {
+        anyhow::bail!("No GPU backend available - enable 'vulkan' or 'webgpu' feature")
     }
 }
 

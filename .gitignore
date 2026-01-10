@@ -5,6 +5,9 @@ Cargo.lock
 # Output files from examples
 *.png
 
+# Documentation build output
+/docs/book/
+
 # IDE
 .idea/
 .vscode/

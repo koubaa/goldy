@@ -1,0 +1,196 @@
+# Understanding the API
+
+RAG's API is designed to be minimal and predictable. This page covers the core concepts.
+
+## Resource Ownership
+
+All GPU resources are owned values. When dropped, resources are destroyed:
+
+```rust
+{
+    let buffer = Buffer::with_data(&device, &data, BufferUsage::VERTEX)?;
+    // buffer is valid here
+} // buffer is destroyed here
+```
+
+There's no hidden reference counting. If you need shared ownership, use `Arc<Buffer>`.
+
+## The Rendering Pipeline
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Vertex    │────▶│   Shader    │────▶│   Frame     │
+│   Buffer    │     │  Pipeline   │     │   Output    │
+└─────────────┘     └─────────────┘     └─────────────┘
+       │                   │                   │
+       │            ┌──────┴──────┐            │
+       │            │             │            │
+       ▼            ▼             ▼            ▼
+    Vertices    Vertex Shader  Fragment    Pixels
+                               Shader
+```
+
+### 1. Buffers Hold Data
+
+```rust
+// Vertex data
+let vertices = Buffer::with_data(&device, &vertex_array, BufferUsage::VERTEX)?;
+
+// Index data
+let indices = Buffer::with_data(&device, &index_array, BufferUsage::INDEX)?;
+
+// General data
+let uniforms = Buffer::new(&device, size, BufferUsage::UNIFORM)?;
+uniforms.write(&data)?;
+```
+
+### 2. Shaders Process Data
+
+```rust
+// From WGSL source
+let shader = ShaderModule::from_wgsl(&device, wgsl_source)?;
+
+// Built-in shaders
+let shader = ShaderModule::from_wgsl(&device, builtins::VERTEX_COLOR_2D)?;
+```
+
+### 3. Pipelines Configure Rendering
+
+```rust
+let pipeline = RenderPipeline::new(&device, &vertex_shader, &fragment_shader, &RenderPipelineDesc {
+    vertex_layout: Vertex2D::layout(),
+    target_format: TextureFormat::Rgba8Unorm,
+    topology: PrimitiveTopology::TriangleList,
+})?;
+```
+
+### 4. Commands Record Work
+
+```rust
+let mut encoder = CommandEncoder::new();
+{
+    let mut pass = encoder.begin_render_pass();
+    pass.clear(Color::BLACK);
+    pass.set_pipeline(&pipeline);
+    pass.set_vertex_buffer(0, &vertices);
+    pass.draw(0..vertex_count, 0..1);
+}
+// encoder now contains recorded commands
+```
+
+### 5. Frames Execute and Output
+
+```rust
+let frame = FrameOutput::new(&device, width, height, TextureFormat::Rgba8Unorm);
+let pixels: Vec<u8> = frame.render(encoder)?;
+```
+
+## Vertex Types
+
+RAG provides `Vertex2D` for simple cases:
+
+```rust
+#[repr(C)]
+pub struct Vertex2D {
+    pub position: [f32; 2],
+    pub color: [f32; 4],
+}
+
+impl Vertex2D {
+    pub fn new(x: f32, y: f32, color: Color) -> Self;
+    pub fn layout() -> VertexBufferLayout;
+}
+```
+
+For custom vertices, implement the layout:
+
+```rust
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MyVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+fn my_layout() -> VertexBufferLayout {
+    VertexBufferLayout {
+        stride: std::mem::size_of::<MyVertex>() as u32,
+        attributes: vec![
+            VertexAttribute { location: 0, format: VertexFormat::Float32x3, offset: 0 },
+            VertexAttribute { location: 1, format: VertexFormat::Float32x3, offset: 12 },
+            VertexAttribute { location: 2, format: VertexFormat::Float32x2, offset: 24 },
+        ],
+    }
+}
+```
+
+## Colors
+
+```rust
+// Named colors
+Color::RED
+Color::GREEN
+Color::BLUE
+Color::BLACK
+Color::WHITE
+Color::CORNFLOWER_BLUE
+
+// Custom RGBA (0.0 to 1.0)
+Color { r: 0.5, g: 0.2, b: 0.8, a: 1.0 }
+```
+
+## Error Handling
+
+RAG uses `anyhow::Result` for most operations:
+
+```rust
+fn setup() -> anyhow::Result<()> {
+    let instance = Instance::new()?;  // May fail
+    let device = instance.create_device(DeviceType::DiscreteGpu)?;  // May fail
+    let shader = ShaderModule::from_wgsl(&device, source)?;  // May fail
+    Ok(())
+}
+```
+
+Common error cases:
+- No compatible GPU found
+- Invalid shader code
+- Out of GPU memory
+- Invalid buffer/pipeline usage
+
+## Coordinate System
+
+RAG uses normalized device coordinates (NDC):
+
+```
+        +Y (1.0)
+           │
+           │
+-X (-1.0) ─┼─ +X (1.0)
+           │
+           │
+        -Y (-1.0)
+```
+
+- Center is (0, 0)
+- Top is +Y, bottom is -Y
+- Right is +X, left is -X
+- Z ranges from 0.0 (near) to 1.0 (far)
+
+## Primitive Topologies
+
+```rust
+PrimitiveTopology::PointList      // Individual points
+PrimitiveTopology::LineList       // Pairs of vertices form lines
+PrimitiveTopology::LineStrip      // Connected line segments
+PrimitiveTopology::TriangleList   // Every 3 vertices form a triangle
+PrimitiveTopology::TriangleStrip  // Connected triangles
+```
+
+## Next Steps
+
+- [Buffers](../concepts/buffers.md) - Deep dive into buffer management
+- [Shaders](../concepts/shaders.md) - Writing WGSL shaders
+- [Examples](../examples/overview.md) - See these concepts in action
+

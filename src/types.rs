@@ -181,6 +181,7 @@ pub enum BackendType {
     Vulkan,
     Metal,
     Dx12,
+    WebGPU,
 }
 
 /// A simple 2D vertex with position and color.

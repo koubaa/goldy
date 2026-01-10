@@ -1,0 +1,48 @@
+[package]
+name = "rag-web"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "WebGPU backend for RAG - runs in browsers"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# RAG core library (for shared examples)
+rag = { path = "..", default-features = false }
+
+# WebGPU via wgpu (supports web target)
+wgpu = { version = "24.0", features = ["webgpu"] }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# Web APIs
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Performance",
+    "console",
+] }
+
+# For Date in clock demo
+js-sys = "0.3"
+
+# Logging for web
+console_error_panic_hook = "0.1"
+console_log = "1.0"
+log = "0.4"
+
+# Async
+futures = "0.3"
+
+# Utils
+bytemuck = { version = "1.21", features = ["derive"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+

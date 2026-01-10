@@ -1,0 +1,22 @@
+[book]
+title = "RAG - Rust Abstract GPU"
+authors = ["Mohamed Koubaa"]
+description = "A modern Rust GPU library for Vulkan 1.4+, Metal 2+, and DX12"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/koubaa/rag"
+edit-url-template = "https://github.com/koubaa/rag/edit/main/docs/{path}"
+additional-css = ["theme/rag-demos.css"]
+additional-js = ["theme/rag-demos.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+

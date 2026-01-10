@@ -1,77 +1,100 @@
-# RAG - Rust Abstract GPU
+# RAG: Rust Abstract GPU
 
-A modern GPU abstraction library for Rust that targets only modern graphics APIs.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Philosophy
+A modern Rust GPU library that deliberately sheds legacy baggage. RAG targets only modern GPU APIs (Vulkan 1.4+, Metal 2+, DX12) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
 
-RAG deliberately sheds legacy baggage:
-
-- **Modern-only**: Requires Vulkan 1.4+, Metal 2+, or DX12
-- **No OpenGL**: No compatibility layer for legacy APIs
-- **No Vulkan <1.4**: Assumes dynamic rendering, bindless descriptors
-- **Fast-moving**: Not a standard, can iterate quickly
-
-## Features
-
-- Device enumeration and selection
-- Buffer creation with automatic memory allocation
-- WGSL shader compilation to native (SPIR-V, MSL, DXIL)
-- Render pipeline with dynamic rendering
-- Offscreen rendering with CPU readback
-
-## Quick Start
+## Quick Example
 
 ```rust
-use rag::{Instance, DeviceType};
+use rag::{Instance, DeviceType, Buffer, BufferUsage, Color, CommandEncoder, FrameOutput, TextureFormat};
 
 fn main() -> anyhow::Result<()> {
-    // Create instance and enumerate GPUs
     let instance = Instance::new()?;
-    
-    for adapter in instance.enumerate_adapters() {
-        println!("{}: {} ({:?})", 
-            adapter.id, 
-            adapter.name, 
-            adapter.device_type
-        );
-    }
-    
-    // Create device on discrete GPU
     let device = instance.create_device(DeviceType::DiscreteGpu)?;
     
-    // ... render something ...
+    let frame = FrameOutput::new(&device, 800, 600, TextureFormat::Rgba8Unorm);
+    let mut encoder = CommandEncoder::new();
+    {
+        let mut pass = encoder.begin_render_pass();
+        pass.clear(Color::CORNFLOWER_BLUE);
+    }
     
+    let pixels = frame.render(encoder)?;
     Ok(())
 }
 ```
 
-## Examples
+## Features
 
-```bash
-# List GPUs and clear to blue
-cargo run --example clear
+| Attribute | Description |
+|-----------|-------------|
+| **Rust-native** | Idiomatic Rust API, not a wrapper around C |
+| **Modern-only** | Vulkan 1.4+, Metal 2+, DX12 baseline |
+| **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL |
+| **Unified** | Graphics and compute in one API |
+| **Fast-moving** | Not a standard—can iterate quickly |
+| **WASI-ready** | Designed for sandboxed GPU access |
 
-# Render a colored triangle
-cargo run --example triangle
+## Installation
 
-# Render a 7-segment clock display
-cargo run --example clock
+```toml
+[dependencies]
+rag = "0.1"
 ```
 
-## Minimum Requirements
+## Documentation
 
-| Platform | Minimum API |
-|----------|-------------|
-| NVIDIA | Vulkan 1.3+ (RTX 2000 / GTX 1600) |
-| AMD | Vulkan 1.3+ (RDNA 1 / RX 5000) |
-| Intel | Vulkan 1.3+ (Xe / Arc) |
-| Apple | Metal 2+ (M1 / A14) |
+📖 **[Full Documentation](https://koubaa.github.io/rag/)**
+
+- [Getting Started](https://koubaa.github.io/rag/getting-started/installation.html)
+- [Examples](https://koubaa.github.io/rag/examples/overview.html)
+- [API Reference](https://koubaa.github.io/rag/reference/api.html)
+- [Design Philosophy](https://koubaa.github.io/rag/design/motivation.html)
+
+## Examples
+
+Run the interactive examples:
+
+```bash
+cargo run --example triangle --release      # Basic triangle
+cargo run --example digital_clock --release # 7-segment clock
+cargo run --example plasma --release        # Demoscene plasma
+cargo run --example mandelbrot --release    # Fractal explorer
+cargo run --example starfield --release     # 3D starfield
+cargo run --example particles --release     # Rain/snow
+```
+
+See [all 13 examples](https://koubaa.github.io/rag/examples/overview.html).
+
+## Motivation
+
+RAG is inspired by Sebastian Aaltonen's ["No Graphics API"](https://www.sebastianaaltonen.com/blog/no-graphics-api) vision of what's possible with modern GPU hardware. By targeting only modern GPUs (2018+), RAG can:
+
+- Use dynamic rendering (no render pass objects)
+- Use bindless descriptors (no descriptor sets)
+- Assume coherent caches (simpler synchronization)
+- Provide a dramatically simpler API
+
+Read more in [Design Philosophy](https://koubaa.github.io/rag/design/motivation.html).
+
+## Target Hardware
+
+| Platform | Minimum |
+|----------|---------|
+| NVIDIA | RTX 2000 / GTX 1600 (2018+) |
+| AMD | RDNA 1 / RX 5000 (2019+) |
+| Intel | Xe / Alchemist (2022+) |
+| Apple | M1 / A14 (2020+) |
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## LLM disclosure
+## Author
 
-Development was done with the help of AI tools.
+Mohamed Koubaa
 
+## Contributing
+
+Contributions welcome! See [CONTRIBUTING](https://koubaa.github.io/rag/contributing.html).
