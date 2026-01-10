@@ -1,11 +1,15 @@
 //! 3D Starfield - flying forward through space
 //! Single uniform speed for all stars
+//!
+//! Supports two modes:
+//! 1. Embedded WGSL shader (fallback)
+//! 2. Slang-compiled WGSL passed from JavaScript
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
-const STARFIELD_SHADER: &str = r#"
+const STARFIELD_SHADER_FALLBACK: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -85,20 +89,16 @@ pub struct StarfieldDemo {
     start_time: f64,
 }
 
-#[wasm_bindgen]
-pub async fn create_starfield_demo(canvas_id: &str) -> Result<StarfieldDemo, JsValue> {
-    init();
-    
-    let canvas = get_canvas(canvas_id)?;
-    let renderer = WebRenderer::new(canvas).await
-        .map_err(|e| JsValue::from_str(&e))?;
+async fn create_starfield_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<StarfieldDemo, String> {
+    let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
+    let renderer = WebRenderer::new(canvas).await?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Starfield Shader"),
-        source: wgpu::ShaderSource::Wgsl(STARFIELD_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
     });
 
     let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -180,6 +180,24 @@ pub async fn create_starfield_demo(canvas_id: &str) -> Result<StarfieldDemo, JsV
         bind_group,
         start_time,
     })
+}
+
+/// Create starfield demo with embedded fallback shader
+#[wasm_bindgen]
+pub async fn create_starfield_demo(canvas_id: &str) -> Result<StarfieldDemo, JsValue> {
+    init();
+    create_starfield_demo_internal(canvas_id, STARFIELD_SHADER_FALLBACK)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Create starfield demo with Slang-compiled WGSL shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_starfield_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<StarfieldDemo, JsValue> {
+    init();
+    create_starfield_demo_internal(canvas_id, wgsl_source)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]

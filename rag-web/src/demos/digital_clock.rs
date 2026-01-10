@@ -2,16 +2,47 @@
 //!
 //! This demonstrates that the same vertex generation and shader code
 //! works on both native (Vulkan) and web (WebGPU) platforms.
+//!
+//! Supports two modes:
+//! 1. Embedded WGSL shader (fallback)
+//! 2. Slang-compiled WGSL passed from JavaScript
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init};
 
-// Import shared code from RAG
+// Import shared code from RAG (vertex generation, clock state, etc.)
 use rag::examples::digital_clock::{
-    ClockVertex, ClockState, TimeData, SHADER_SOURCE,
+    ClockVertex, ClockState, TimeData,
     generate_clock_vertices,
 };
+
+// Fallback WGSL shader - equivalent to the Slang SHADER_SOURCE
+// Used when Slang compilation is not available
+const CLOCK_SHADER_FALLBACK: &str = r#"
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.position = vec4<f32>(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
 
 #[wasm_bindgen]
 pub struct DigitalClockDemo {
@@ -23,24 +54,19 @@ pub struct DigitalClockDemo {
     height: u32,
 }
 
-#[wasm_bindgen]
-pub async fn create_digital_clock_demo(canvas_id: &str) -> Result<DigitalClockDemo, JsValue> {
-    init();
-    
-    let canvas = get_canvas(canvas_id)?;
+async fn create_digital_clock_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<DigitalClockDemo, String> {
+    let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
     let width = canvas.width();
     let height = canvas.height();
     
-    let renderer = WebRenderer::new(canvas).await
-        .map_err(|e| JsValue::from_str(&e))?;
+    let renderer = WebRenderer::new(canvas).await?;
 
     let device = renderer.device();
     let format = renderer.format();
 
-    // Use the SHARED shader source from rag::examples::digital_clock
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Shared Clock Shader"),
-        source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
+        label: Some("Clock Shader"),
+        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
     });
 
     // Vertex layout matching ClockVertex from shared code
@@ -68,7 +94,7 @@ pub async fn create_digital_clock_demo(canvas_id: &str) -> Result<DigitalClockDe
     });
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Shared Clock Pipeline"),
+        label: Some("Clock Pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -109,78 +135,74 @@ pub async fn create_digital_clock_demo(canvas_id: &str) -> Result<DigitalClockDe
     })
 }
 
+/// Create digital clock demo with embedded fallback shader
+#[wasm_bindgen]
+pub async fn create_digital_clock_demo(canvas_id: &str) -> Result<DigitalClockDemo, JsValue> {
+    init();
+    create_digital_clock_demo_internal(canvas_id, CLOCK_SHADER_FALLBACK)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Create digital clock demo with Slang-compiled WGSL shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_digital_clock_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<DigitalClockDemo, JsValue> {
+    init();
+    create_digital_clock_demo_internal(canvas_id, wgsl_source)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 #[wasm_bindgen]
 impl DigitalClockDemo {
-    #[wasm_bindgen]
-    pub fn toggle_pause(&mut self) {
-        let current = self.elapsed_secs();
-        if self.clock_state.paused {
-            // Resuming - reset start time
-            let window = web_sys::window().unwrap();
-            self.start_time = window.performance().unwrap().now();
-        }
-        self.clock_state.toggle_pause(current);
-    }
-    
-    #[wasm_bindgen]
-    pub fn change_color(&mut self) {
-        self.clock_state.next_color();
-    }
-
-    fn elapsed_secs(&self) -> u64 {
-        if self.clock_state.paused {
-            self.clock_state.accumulated_secs
-        } else {
-            let window = web_sys::window().unwrap();
-            let now = window.performance().unwrap().now();
-            let elapsed_ms = now - self.start_time;
-            (elapsed_ms / 1000.0) as u64 + self.clock_state.accumulated_secs
-        }
-    }
-
+    /// Render one frame
     #[wasm_bindgen]
     pub fn render(&self) -> Result<(), JsValue> {
-        let elapsed = self.elapsed_secs();
-        let time = TimeData::from_elapsed_secs(elapsed);
+        // Get current time from browser
+        let window = web_sys::window().unwrap();
+        let date = js_sys::Date::new_0();
+        let hours = date.get_hours();
+        let minutes = date.get_minutes();
+        let seconds = date.get_seconds();
+        
+        let time_data = TimeData {
+            hours: hours as u8,
+            minutes: minutes as u8,
+            seconds: seconds as u8,
+        };
         let color = self.clock_state.color();
-        let bg_color = self.clock_state.background_color();
-
+        
         // Generate vertices using SHARED function from rag::examples::digital_clock
-        let vertices = generate_clock_vertices(time, color, self.width, self.height);
+        let vertices = generate_clock_vertices(time_data, color, self.width, self.height);
         
         if vertices.is_empty() {
             return Ok(());
         }
-
-        // Create vertex buffer with generated vertices
+        
+        // Create vertex buffer for this frame
         let vertex_buffer = self.renderer.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Clock Vertex Buffer"),
+            label: Some("Clock Vertices"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-
+        
         let output = self.renderer.get_current_texture()
             .map_err(|e| JsValue::from_str(&format!("Surface error: {:?}", e)))?;
         
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.renderer.device().create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("Clock Encoder") }
+            &wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") }
         );
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clock Render Pass"),
+                label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg_color.r as f64,
-                            g: bg_color.g as f64,
-                            b: bg_color.b as f64,
-                            a: bg_color.a as f64,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -198,5 +220,19 @@ impl DigitalClockDemo {
         output.present();
 
         Ok(())
+    }
+    
+    /// Toggle pause state
+    #[wasm_bindgen]
+    pub fn toggle_pause(&mut self) {
+        // For real-time clock, just toggle the paused flag
+        // (the elapsed time tracking in ClockState is for stopwatch mode)
+        self.clock_state.paused = !self.clock_state.paused;
+    }
+    
+    /// Change to next color
+    #[wasm_bindgen]
+    pub fn change_color(&mut self) {
+        self.clock_state.next_color();
     }
 }

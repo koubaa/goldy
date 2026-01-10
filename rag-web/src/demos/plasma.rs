@@ -1,10 +1,15 @@
 //! Plasma effect demo - exported for WASM
+//!
+//! Supports two modes:
+//! 1. Embedded WGSL shader (fallback)
+//! 2. Slang-compiled WGSL passed from JavaScript
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
-const PLASMA_SHADER: &str = r#"
+// Fallback WGSL shader - used when Slang compilation is not available
+const PLASMA_SHADER_FALLBACK: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -62,99 +67,94 @@ pub struct PlasmaDemo {
     start_time: f64,
 }
 
-/// Create a new plasma demo (async factory function)
-#[wasm_bindgen]
-pub async fn create_plasma_demo(canvas_id: &str) -> Result<PlasmaDemo, JsValue> {
-        init();
-        
-        let canvas = get_canvas(canvas_id)?;
-        let renderer = WebRenderer::new(canvas).await
-            .map_err(|e| JsValue::from_str(&e))?;
+async fn create_plasma_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<PlasmaDemo, String> {
+    let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
+    let renderer = WebRenderer::new(canvas).await?;
 
-        let device = renderer.device();
-        let format = renderer.format();
+    let device = renderer.device();
+    let format = renderer.format();
 
-        // Create shader
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Plasma Shader"),
-            source: wgpu::ShaderSource::Wgsl(PLASMA_SHADER.into()),
-        });
+    // Create shader
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Plasma Shader"),
+        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+    });
 
-        // Create time uniform buffer
-        let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Time Buffer"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    // Create time uniform buffer
+    let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Time Buffer"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
-        // Bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: time_buffer.as_entire_binding(),
-            }],
-        });
-
-        // Pipeline layout
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        // Create vertex buffer
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&types::FULLSCREEN_QUAD),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        // Create pipeline
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Plasma Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[types::Vertex2D::desc()],
-                compilation_options: Default::default(),
+    // Bind group layout
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Bind Group Layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+            count: None,
+        }],
+    });
 
-        let window = web_sys::window().unwrap();
-        let start_time = window.performance().unwrap().now();
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Bind Group"),
+        layout: &bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: time_buffer.as_entire_binding(),
+        }],
+    });
+
+    // Pipeline layout
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Pipeline Layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    // Create vertex buffer
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Vertex Buffer"),
+        contents: bytemuck::cast_slice(&types::FULLSCREEN_QUAD),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    // Create pipeline
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Plasma Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[types::Vertex2D::desc()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let window = web_sys::window().unwrap();
+    let start_time = window.performance().unwrap().now();
 
     Ok(PlasmaDemo {
         renderer,
@@ -164,6 +164,24 @@ pub async fn create_plasma_demo(canvas_id: &str) -> Result<PlasmaDemo, JsValue> 
         bind_group,
         start_time,
     })
+}
+
+/// Create a new plasma demo with embedded fallback shader
+#[wasm_bindgen]
+pub async fn create_plasma_demo(canvas_id: &str) -> Result<PlasmaDemo, JsValue> {
+    init();
+    create_plasma_demo_internal(canvas_id, PLASMA_SHADER_FALLBACK)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Create a new plasma demo with Slang-compiled WGSL shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_plasma_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<PlasmaDemo, JsValue> {
+    init();
+    create_plasma_demo_internal(canvas_id, wgsl_source)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]
@@ -219,4 +237,3 @@ impl PlasmaDemo {
         Ok(())
     }
 }
-

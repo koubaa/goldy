@@ -1,0 +1,3 @@
+# WASM build output goes here
+# Built with: cd rag-web && wasm-pack build --target web --out-dir ../docs/src/wasm
+

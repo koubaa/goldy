@@ -1,10 +1,14 @@
 //! Spinning 3D wireframe cube
+//!
+//! Supports two modes:
+//! 1. Embedded WGSL shader (fallback)
+//! 2. Slang-compiled WGSL passed from JavaScript
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
-const CUBE_SHADER: &str = r#"
+const CUBE_SHADER_FALLBACK: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -123,20 +127,16 @@ pub struct SpinningCubeDemo {
     start_time: f64,
 }
 
-#[wasm_bindgen]
-pub async fn create_spinning_cube_demo(canvas_id: &str) -> Result<SpinningCubeDemo, JsValue> {
-    init();
-    
-    let canvas = get_canvas(canvas_id)?;
-    let renderer = WebRenderer::new(canvas).await
-        .map_err(|e| JsValue::from_str(&e))?;
+async fn create_spinning_cube_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<SpinningCubeDemo, String> {
+    let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
+    let renderer = WebRenderer::new(canvas).await?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Cube Shader"),
-        source: wgpu::ShaderSource::Wgsl(CUBE_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
     });
 
     let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -218,6 +218,24 @@ pub async fn create_spinning_cube_demo(canvas_id: &str) -> Result<SpinningCubeDe
         bind_group,
         start_time,
     })
+}
+
+/// Create spinning cube demo with embedded fallback shader
+#[wasm_bindgen]
+pub async fn create_spinning_cube_demo(canvas_id: &str) -> Result<SpinningCubeDemo, JsValue> {
+    init();
+    create_spinning_cube_demo_internal(canvas_id, CUBE_SHADER_FALLBACK)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Create spinning cube demo with Slang-compiled WGSL shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_spinning_cube_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<SpinningCubeDemo, JsValue> {
+    init();
+    create_spinning_cube_demo_internal(canvas_id, wgsl_source)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]

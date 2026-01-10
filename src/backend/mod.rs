@@ -6,8 +6,10 @@
 #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
 pub mod vulkan;
 
-#[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
-pub mod webgpu;
+// WebGPU backend is currently native-only (uses native Slang compiler)
+// For browser WASM builds, use rag-web which uses wgpu directly with slang-wasm
+// #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
+// pub mod webgpu;
 
 use crate::types::*;
 use anyhow::Result;
@@ -157,18 +159,12 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
         Ok(Box::new(vulkan::VulkanBackend::new()?))
     }
 
-    #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
-    {
-        // WebGPU backend requires async initialization
-        anyhow::bail!("WebGPU backend must be created asynchronously using create_webgpu_backend()")
-    }
+    // WebGPU backend is disabled - for browser WASM builds, use rag-web
+    // which uses wgpu directly with slang-wasm for shader compilation
 
-    #[cfg(not(any(
-        all(feature = "vulkan", not(target_arch = "wasm32")),
-        all(feature = "webgpu", target_arch = "wasm32")
-    )))]
+    #[cfg(not(all(feature = "vulkan", not(target_arch = "wasm32"))))]
     {
-        anyhow::bail!("No GPU backend available - enable 'vulkan' or 'webgpu' feature")
+        anyhow::bail!("No GPU backend available - enable 'vulkan' feature (native only)")
     }
 }
 

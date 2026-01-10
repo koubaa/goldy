@@ -20,6 +20,10 @@ pub mod pipeline;
 pub mod encoder;
 pub mod frame;
 pub mod examples;
+
+// Slang compiler is only available on native targets (not WASM)
+// For web builds, use slang-wasm in JavaScript
+#[cfg(not(target_arch = "wasm32"))]
 pub mod slang;
 
 // Re-export main types

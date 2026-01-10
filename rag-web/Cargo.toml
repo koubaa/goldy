@@ -8,6 +8,9 @@ description = "WebGPU backend for RAG - runs in browsers"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false  # Don't optimize vendored slang-wasm.wasm in output dir
+
 [dependencies]
 # RAG core library (for shared examples)
 rag = { path = "..", default-features = false }

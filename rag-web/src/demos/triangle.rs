@@ -1,10 +1,15 @@
 //! Triangle demo - simplest RAG example
+//!
+//! Supports two modes:
+//! 1. Embedded WGSL shader (fallback)
+//! 2. Slang-compiled WGSL passed from JavaScript
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
-const TRIANGLE_SHADER: &str = r#"
+// Fallback WGSL shader - used when Slang compilation is not available
+const TRIANGLE_SHADER_FALLBACK: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -41,20 +46,16 @@ pub struct TriangleDemo {
     pipeline: wgpu::RenderPipeline,
 }
 
-#[wasm_bindgen]
-pub async fn create_triangle_demo(canvas_id: &str) -> Result<TriangleDemo, JsValue> {
-    init();
-    
-    let canvas = get_canvas(canvas_id)?;
-    let renderer = WebRenderer::new(canvas).await
-        .map_err(|e| JsValue::from_str(&e))?;
+async fn create_triangle_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<TriangleDemo, String> {
+    let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
+    let renderer = WebRenderer::new(canvas).await?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Triangle Shader"),
-        source: wgpu::ShaderSource::Wgsl(TRIANGLE_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -90,6 +91,24 @@ pub async fn create_triangle_demo(canvas_id: &str) -> Result<TriangleDemo, JsVal
     });
 
     Ok(TriangleDemo { renderer, pipeline })
+}
+
+/// Create triangle demo with embedded fallback shader
+#[wasm_bindgen]
+pub async fn create_triangle_demo(canvas_id: &str) -> Result<TriangleDemo, JsValue> {
+    init();
+    create_triangle_demo_internal(canvas_id, TRIANGLE_SHADER_FALLBACK)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Create triangle demo with Slang-compiled WGSL shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_triangle_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<TriangleDemo, JsValue> {
+    init();
+    create_triangle_demo_internal(canvas_id, wgsl_source)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]
@@ -131,4 +150,3 @@ impl TriangleDemo {
         Ok(())
     }
 }
-

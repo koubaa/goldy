@@ -1,10 +1,14 @@
 //! Particle rain/snow demo with toggle
+//!
+//! Supports two modes:
+//! 1. Embedded WGSL shader (fallback)
+//! 2. Slang-compiled WGSL passed from JavaScript
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
-const PARTICLES_SHADER: &str = r#"
+const PARTICLES_SHADER_FALLBACK: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -121,20 +125,16 @@ pub struct ParticlesDemo {
     is_snow: bool,
 }
 
-#[wasm_bindgen]
-pub async fn create_particles_demo(canvas_id: &str) -> Result<ParticlesDemo, JsValue> {
-    init();
-    
-    let canvas = get_canvas(canvas_id)?;
-    let renderer = WebRenderer::new(canvas).await
-        .map_err(|e| JsValue::from_str(&e))?;
+async fn create_particles_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<ParticlesDemo, String> {
+    let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
+    let renderer = WebRenderer::new(canvas).await?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Particles Shader"),
-        source: wgpu::ShaderSource::Wgsl(PARTICLES_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
     });
 
     let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -217,6 +217,24 @@ pub async fn create_particles_demo(canvas_id: &str) -> Result<ParticlesDemo, JsV
         start_time,
         is_snow: false,
     })
+}
+
+/// Create particles demo with embedded fallback shader
+#[wasm_bindgen]
+pub async fn create_particles_demo(canvas_id: &str) -> Result<ParticlesDemo, JsValue> {
+    init();
+    create_particles_demo_internal(canvas_id, PARTICLES_SHADER_FALLBACK)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Create particles demo with Slang-compiled WGSL shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_particles_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<ParticlesDemo, JsValue> {
+    init();
+    create_particles_demo_internal(canvas_id, wgsl_source)
+        .await
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]
