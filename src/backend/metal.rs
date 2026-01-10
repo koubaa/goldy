@@ -297,32 +297,6 @@ impl GpuBackend for MetalBackend {
         self.pipelines.remove(&pipeline);
     }
 
-    fn begin_frame(&mut self, device: DeviceHandle, _width: u32, _height: u32, _format: TextureFormat) -> Result<()> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-        Ok(())
-    }
-
-    fn execute_commands(&mut self, device: DeviceHandle, _commands: &[RenderCommand]) -> Result<()> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-        // In actual implementation: encode commands to MTLCommandBuffer
-        Ok(())
-    }
-
-    fn end_frame(&mut self, device: DeviceHandle, output: &mut [u8]) -> Result<()> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-        // Fill with test pattern
-        for byte in output.iter_mut() {
-            *byte = 128;
-        }
-        Ok(())
-    }
-
     fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");

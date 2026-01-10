@@ -185,40 +185,4 @@ fn test_multiple_render_targets() {
     assert_eq!(pixels2[2], 255); // B
 }
 
-#[test]
-#[allow(deprecated)]
-fn test_cpu_readback_matches_legacy() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    };
-
-    use rag::FrameOutput;
-
-    let clear_color = Color::from_rgb(100, 150, 200);
-
-    // Render with legacy FrameOutput
-    let frame = FrameOutput::new(&device, 8, 8, TextureFormat::Rgba8Unorm);
-    let mut encoder1 = CommandEncoder::new();
-    {
-        let mut pass = encoder1.begin_render_pass();
-        pass.clear(clear_color);
-    }
-    let legacy_pixels = frame.render(encoder1).expect("Legacy render failed");
-
-    // Render with new RenderTarget
-    let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
-    let mut encoder2 = CommandEncoder::new();
-    {
-        let mut pass = encoder2.begin_render_pass();
-        pass.clear(clear_color);
-    }
-    target.render(encoder2).expect("RenderTarget render failed");
-    let new_pixels = target.read_to_cpu().expect("RenderTarget read failed");
-
-    // Both should produce identical output
-    assert_eq!(legacy_pixels.len(), new_pixels.len());
-    assert_eq!(legacy_pixels, new_pixels, "Legacy and new API should produce identical output");
-}
 

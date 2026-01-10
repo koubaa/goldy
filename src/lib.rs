@@ -19,7 +19,6 @@ pub mod shader;
 pub mod shaders;
 pub mod pipeline;
 pub mod encoder;
-pub mod frame;
 pub mod render_target;
 pub mod surface;
 pub mod examples;
@@ -38,6 +37,4 @@ pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use render_target::RenderTarget;
 pub use surface::{Surface, SurfaceFrame};
-#[allow(deprecated)]
-pub use frame::FrameOutput;
 

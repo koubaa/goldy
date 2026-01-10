@@ -120,11 +120,6 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<PipelineHandle>;
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
-    // Rendering (legacy - use RenderTarget API instead)
-    fn begin_frame(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<()>;
-    fn execute_commands(&mut self, device: DeviceHandle, commands: &[RenderCommand]) -> Result<()>;
-    fn end_frame(&mut self, device: DeviceHandle, output: &mut [u8]) -> Result<()>;
-
     // RenderTarget API - GPU buffer stays on GPU, readback is optional
     fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle>;
     fn destroy_render_target(&mut self, target: RenderTargetHandle);

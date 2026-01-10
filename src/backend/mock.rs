@@ -305,35 +305,7 @@ impl GpuBackend for MockBackend {
         self.pipelines.remove(&pipeline);
     }
 
-    // Legacy frame rendering (for backward compatibility)
-    fn begin_frame(&mut self, device: DeviceHandle, _width: u32, _height: u32, _format: TextureFormat) -> Result<()> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-        Ok(())
-    }
-
-    fn execute_commands(&mut self, device: DeviceHandle, commands: &[RenderCommand]) -> Result<()> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-        self.recorded_commands.push(commands.to_vec());
-        Ok(())
-    }
-
-    fn end_frame(&mut self, device: DeviceHandle, output: &mut [u8]) -> Result<()> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-        // Fill with a test pattern (gray)
-        for byte in output.iter_mut() {
-            *byte = 128;
-        }
-        self.cpu_readback_count += 1;
-        Ok(())
-    }
-
-    // New RenderTarget API
+    // RenderTarget API
     fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
