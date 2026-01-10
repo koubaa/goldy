@@ -31,6 +31,7 @@ fn main() -> anyhow::Result<()> {
 |-----------|-------------|
 | **Rust-native** | Idiomatic Rust API, not a wrapper around C |
 | **Modern-only** | Vulkan 1.4+, Metal 2+, DX12 baseline |
+| **Slang shaders** | Single shader language for all backends |
 | **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL |
 | **Unified** | Graphics and compute in one API |
 | **Fast-moving** | Not a standard—can iterate quickly |

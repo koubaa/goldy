@@ -69,8 +69,10 @@ struct BufferState {
 
 struct ShaderState {
     device_handle: DeviceHandle,
-    module: vk::ShaderModule,
-    spirv: Vec<u32>,
+    slang_source: String,
+    // Cached compiled modules for each stage
+    vertex_module: Option<vk::ShaderModule>,
+    fragment_module: Option<vk::ShaderModule>,
 }
 
 struct PipelineState {
@@ -221,6 +223,68 @@ impl VulkanBackend {
             PrimitiveTopology::TriangleList => vk::PrimitiveTopology::TRIANGLE_LIST,
             PrimitiveTopology::TriangleStrip => vk::PrimitiveTopology::TRIANGLE_STRIP,
         }
+    }
+    
+    /// Compile a shader for a specific stage on demand.
+    fn ensure_shader_stage_compiled(
+        &mut self,
+        shader_handle: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Result<vk::ShaderModule> {
+        let shader = self.shaders.get_mut(&shader_handle)
+            .context("Invalid shader handle")?;
+        
+        // Check if already compiled for this stage
+        let cached_module = match stage {
+            crate::slang::SlangStage::Vertex => shader.vertex_module,
+            crate::slang::SlangStage::Fragment => shader.fragment_module,
+            _ => None,
+        };
+        
+        if let Some(module) = cached_module {
+            return Ok(module);
+        }
+        
+        // Get the entry point name based on stage
+        let entry_point_name = match stage {
+            crate::slang::SlangStage::Vertex => "vs_main",
+            crate::slang::SlangStage::Fragment => "fs_main",
+            _ => anyhow::bail!("Unsupported shader stage"),
+        };
+        
+        // Compile with Slang
+        let compiler = crate::slang::global_compiler()
+            .context("Failed to get Slang compiler")?;
+        
+        let compiled = compiler.compile_entry_point(
+            &shader.slang_source,
+            crate::slang::ShaderTarget::Spirv,
+            Some((entry_point_name, stage)),
+        ).with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
+        
+        let spirv = compiled.as_spirv()
+            .context("Invalid SPIR-V output")?;
+        
+        // Get device
+        let logical_device = self.devices.get(&shader.device_handle)
+            .context("Shader's device no longer valid")?;
+        
+        // Create Vulkan shader module
+        let create_info = vk::ShaderModuleCreateInfo::default().code(spirv);
+        let module = unsafe { logical_device.device.create_shader_module(&create_info, None) }
+            .context("Failed to create Vulkan shader module")?;
+        
+        tracing::debug!("Compiled {} ({} SPIR-V words)", entry_point_name, spirv.len());
+        
+        // Cache the module - need to re-get shader as mutable
+        let shader = self.shaders.get_mut(&shader_handle).unwrap();
+        match stage {
+            crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
+            crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
+            _ => {}
+        }
+        
+        Ok(module)
     }
 }
 
@@ -389,7 +453,12 @@ impl GpuBackend for VulkanBackend {
                     .collect();
                 for handle in shader_handles {
                     if let Some(shader) = self.shaders.remove(&handle) {
-                        logical_device.device.destroy_shader_module(shader.module, None);
+                        if let Some(module) = shader.vertex_module {
+                            logical_device.device.destroy_shader_module(module, None);
+                        }
+                        if let Some(module) = shader.fragment_module {
+                            logical_device.device.destroy_shader_module(module, None);
+                        }
                     }
                 }
 
@@ -535,42 +604,12 @@ impl GpuBackend for VulkanBackend {
         self.buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
     }
 
-    fn create_shader(&mut self, device_handle: DeviceHandle, wgsl_source: &str) -> Result<ShaderHandle> {
-        let logical_device = self
+    fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
+        // Just validate the device exists - actual compilation happens at pipeline creation
+        let _ = self
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-
-        // Parse WGSL
-        let module = naga::front::wgsl::parse_str(wgsl_source)
-            .map_err(|e| anyhow::anyhow!("WGSL parse error: {:?}", e))?;
-
-        // Validate
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        let module_info = validator
-            .validate(&module)
-            .map_err(|e| anyhow::anyhow!("WGSL validation error: {:?}", e))?;
-
-        // Generate SPIR-V
-        let options = naga::back::spv::Options {
-            lang_version: (1, 5),
-            flags: naga::back::spv::WriterFlags::empty(),
-            ..Default::default()
-        };
-
-        let spirv = naga::back::spv::write_vec(&module, &module_info, &options, None)
-            .map_err(|e| anyhow::anyhow!("SPIR-V generation error: {:?}", e))?;
-
-        // Create shader module
-        let create_info = vk::ShaderModuleCreateInfo::default().code(&spirv);
-
-        let vk_module = unsafe { logical_device.device.create_shader_module(&create_info, None) }
-            .context("Failed to create shader module")?;
-
-        let spirv_len = spirv.len();
 
         let handle = self.next_shader_handle;
         self.next_shader_handle += 1;
@@ -579,12 +618,13 @@ impl GpuBackend for VulkanBackend {
             handle,
             ShaderState {
                 device_handle,
-                module: vk_module,
-                spirv,
+                slang_source: slang_source.to_string(),
+                vertex_module: None,
+                fragment_module: None,
             },
         );
 
-        tracing::debug!("Created shader module {} ({} SPIR-V words)", handle, spirv_len);
+        tracing::debug!("Created shader handle {} (compilation deferred)", handle);
         Ok(handle)
     }
 
@@ -592,7 +632,12 @@ impl GpuBackend for VulkanBackend {
         if let Some(shader) = self.shaders.remove(&shader_handle) {
             if let Some(device) = self.devices.get(&shader.device_handle) {
                 unsafe {
-                    device.device.destroy_shader_module(shader.module, None);
+                    if let Some(module) = shader.vertex_module {
+                        device.device.destroy_shader_module(module, None);
+                    }
+                    if let Some(module) = shader.fragment_module {
+                        device.device.destroy_shader_module(module, None);
+                    }
                 }
             }
         }
@@ -607,24 +652,25 @@ impl GpuBackend for VulkanBackend {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
+        // Compile shaders on-demand
+        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+
         let logical_device = self
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        let vs = self.shaders.get(&vertex_shader).context("Invalid vertex shader")?;
-        let fs = self.shaders.get(&fragment_shader).context("Invalid fragment shader")?;
-
-        // Shader stages
+        // Shader stages - Slang outputs "main" as the entry point name in SPIR-V
         let vs_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vs.module)
-            .name(c"vs_main");
+            .module(vs_module)
+            .name(c"main");
 
         let fs_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(fs.module)
-            .name(c"fs_main");
+            .module(fs_module)
+            .name(c"main");
 
         let shader_stages = [vs_stage, fs_stage];
 
@@ -1331,13 +1377,14 @@ impl GpuBackend for VulkanBackend {
         target_format: TextureFormat,
         bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<PipelineHandle> {
+        // Compile shaders on-demand
+        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+
         let logical_device = self
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-
-        let vs = self.shaders.get(&vertex_shader).context("Invalid vertex shader")?;
-        let fs = self.shaders.get(&fragment_shader).context("Invalid fragment shader")?;
 
         // Collect descriptor set layouts
         let vk_layouts: Vec<_> = bind_group_layouts
@@ -1345,16 +1392,16 @@ impl GpuBackend for VulkanBackend {
             .filter_map(|h| self.bind_group_layouts.get(h).map(|s| s.layout))
             .collect();
 
-        // Shader stages
+        // Shader stages - Slang outputs "main" as the entry point name in SPIR-V
         let vs_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vs.module)
-            .name(c"vs_main");
+            .module(vs_module)
+            .name(c"main");
 
         let fs_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(fs.module)
-            .name(c"fs_main");
+            .module(fs_module)
+            .name(c"main");
 
         let shader_stages = [vs_stage, fs_stage];
 

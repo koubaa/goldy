@@ -1,6 +1,20 @@
 # Shaders
 
-RAG uses WGSL (WebGPU Shading Language) for shaders, compiled to SPIR-V for Vulkan.
+RAG uses [Slang](https://shader-slang.org/) as its sole shading language. Slang is compiled to:
+
+- **SPIR-V** for Vulkan
+- **WGSL** for WebGPU
+- **HLSL** for DirectX (future)
+- **MSL** for Metal (future)
+
+## Why Slang?
+
+Slang offers:
+
+1. **Portability**: Single shader source for all backends
+2. **Familiar Syntax**: HLSL-like, industry-standard
+3. **Modern Features**: Modules, generics, automatic differentiation
+4. **Khronos Governance**: Long-term stability
 
 ## Creating Shaders
 
@@ -8,18 +22,24 @@ RAG uses WGSL (WebGPU Shading Language) for shaders, compiled to SPIR-V for Vulk
 use rag::ShaderModule;
 
 const MY_SHADER: &str = r#"
-@vertex
-fn vs_main(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
-    return vec4<f32>(position, 0.0, 1.0);
+struct VertexOutput {
+    float4 position : SV_Position;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(float2 pos : POSITION) {
+    VertexOutput output;
+    output.position = float4(pos, 0.0, 1.0);
+    return output;
 }
 
-@fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 0.0, 1.0);  // Red
+[shader("fragment")]
+float4 fs_main() : SV_Target {
+    return float4(1.0, 0.0, 0.0, 1.0);  // Red
 }
 "#;
 
-let shader = ShaderModule::from_wgsl(&device, MY_SHADER)?;
+let shader = ShaderModule::from_slang(&device, MY_SHADER)?;
 ```
 
 ## Built-in Shaders
@@ -30,183 +50,170 @@ RAG includes common shaders:
 use rag::shader::builtins;
 
 // 2D colored vertices
-let shader = ShaderModule::from_wgsl(&device, builtins::VERTEX_COLOR_2D)?;
+let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
 ```
 
 ### VERTEX_COLOR_2D
 
-```wgsl
+```hlsl
+struct VertexInput {
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
+
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    float4 position : SV_Position;
+    float4 color : COLOR;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
 }
 
-@vertex
-fn vs_main(
-    @location(0) position: vec2<f32>,
-    @location(1) color: vec4<f32>
-) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return input.color;
 }
 ```
 
-## WGSL Basics
+## Slang Basics
 
 ### Types
 
-```wgsl
+```hlsl
 // Scalars
-let a: f32 = 1.0;
-let b: i32 = -5;
-let c: u32 = 10u;
-let d: bool = true;
+float a = 1.0;
+int b = -5;
+uint c = 10;
+bool d = true;
 
 // Vectors
-let v2: vec2<f32> = vec2<f32>(1.0, 2.0);
-let v3: vec3<f32> = vec3<f32>(1.0, 2.0, 3.0);
-let v4: vec4<f32> = vec4<f32>(1.0, 2.0, 3.0, 4.0);
+float2 v2 = float2(1.0, 2.0);
+float3 v3 = float3(1.0, 2.0, 3.0);
+float4 v4 = float4(1.0, 2.0, 3.0, 4.0);
 
 // Matrices
-let m: mat4x4<f32> = mat4x4<f32>(...);
+float4x4 m = float4x4(...);
 ```
 
-### Vertex Inputs
+### Shader Entry Points
 
-```wgsl
-@vertex
-fn vs_main(
-    @location(0) position: vec2<f32>,  // First attribute
-    @location(1) color: vec4<f32>,      // Second attribute
-    @builtin(vertex_index) idx: u32,    // Built-in vertex index
-) -> VertexOutput {
-    // ...
+Entry points are marked with `[shader("type")]`:
+
+```hlsl
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    // Vertex processing
+}
+
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    // Fragment/pixel processing
+}
+
+[shader("compute")]
+void cs_main() {
+    // Compute processing
 }
 ```
 
-### Fragment Outputs
+### Semantics
 
-```wgsl
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 0.0, 1.0);  // RGBA output
-}
-```
+Slang uses HLSL-style semantics:
 
-### Structs
+```hlsl
+struct VertexInput {
+    float2 position : POSITION;      // Vertex attribute 0
+    float4 color : COLOR;             // Vertex attribute 1
+    uint vertexId : SV_VertexID;      // Built-in vertex index
+};
 
-```wgsl
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
+    float4 position : SV_Position;    // Clip-space position
+    float4 color : COLOR;             // Interpolated to fragment
+};
+
+// Fragment output
+float4 fs_main(VertexOutput input) : SV_Target {
+    return input.color;               // Output to render target 0
+}
+```
+
+### Uniform Buffers
+
+```hlsl
+cbuffer Uniforms {
+    float4x4 modelViewProj;
+    float time;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = mul(modelViewProj, float4(input.position, 1.0));
+    return output;
+}
+```
+
+### Textures and Samplers
+
+```hlsl
+Texture2D myTexture;
+SamplerState mySampler;
+
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return myTexture.Sample(mySampler, input.uv);
 }
 ```
 
 ## Common Patterns
 
-### Pass-through Vertex Shader
+### Fullscreen Quad
 
-```wgsl
-@vertex
-fn vs_main(@location(0) pos: vec2<f32>) -> @builtin(position) vec4<f32> {
-    return vec4<f32>(pos, 0.0, 1.0);
-}
-```
-
-### Full-screen Quad
-
-```wgsl
-@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
-    // Generate full-screen triangle
-    let x = f32(i32(idx) - 1);
-    let y = f32(i32(idx & 1u) * 2 - 1);
-    return vec4<f32>(x, y, 0.0, 1.0);
-}
-```
-
-### Time Animation
-
-Pass time through vertex attributes:
-
-```wgsl
+```hlsl
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) time: f32,
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(uint vertexId : SV_VertexID) {
+    VertexOutput output;
+    // Generate fullscreen triangle
+    output.uv = float2((vertexId << 1) & 2, vertexId & 2);
+    output.position = float4(output.uv * 2.0 - 1.0, 0.0, 1.0);
+    return output;
 }
 
-@vertex
-fn vs_main(@location(0) pos: vec2<f32>, @location(1) time: f32) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(pos, 0.0, 1.0);
-    out.time = time;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let t = in.time;
-    return vec4<f32>(sin(t), cos(t), 0.5, 1.0);
-}
-```
-
-## Math Functions
-
-WGSL includes standard math:
-
-```wgsl
-sin(x), cos(x), tan(x)
-asin(x), acos(x), atan(x), atan2(y, x)
-pow(x, y), exp(x), log(x), sqrt(x)
-abs(x), sign(x), floor(x), ceil(x), fract(x)
-min(a, b), max(a, b), clamp(x, low, high)
-mix(a, b, t)  // Linear interpolation
-length(v), distance(a, b), dot(a, b), cross(a, b)
-normalize(v), reflect(v, n)
-```
-
-## Shader Compilation
-
-RAG uses [naga](https://github.com/gfx-rs/wgpu/tree/trunk/naga) to compile WGSL to SPIR-V:
-
-```
-WGSL source → naga → SPIR-V → Vulkan
-```
-
-Compilation happens at `ShaderModule::from_wgsl()`. Errors are returned if the shader is invalid:
-
-```rust
-let result = ShaderModule::from_wgsl(&device, bad_shader);
-match result {
-    Ok(shader) => { /* use shader */ }
-    Err(e) => eprintln!("Shader error: {}", e),
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    // Post-processing effect using input.uv
+    return float4(input.uv, 0.0, 1.0);
 }
 ```
 
-## Shader Error Messages
+### Animated Effects
 
-naga provides helpful error messages:
+```hlsl
+cbuffer TimeData {
+    float time;
+};
 
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float r = sin(time * 2.0) * 0.5 + 0.5;
+    float g = cos(time * 3.0) * 0.5 + 0.5;
+    return float4(r, g, 0.5, 1.0);
+}
 ```
-error: unknown function 'sine'
-  ┌─ wgsl:10:13
-  │
-10 │     let x = sine(t);
-  │             ^^^^ unknown function
-  │
-  = note: did you mean 'sin'?
-```
 
-## Further Reading
+## Resources
 
-- [WGSL Specification](https://www.w3.org/TR/WGSL/)
-- [naga Documentation](https://docs.rs/naga)
-
+- [Slang Documentation](https://shader-slang.com/slang/user-guide/)
+- [Slang GitHub](https://github.com/shader-slang/slang)
+- [HLSL Reference](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-reference)

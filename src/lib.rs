@@ -20,6 +20,7 @@ pub mod pipeline;
 pub mod encoder;
 pub mod frame;
 pub mod examples;
+pub mod slang;
 
 // Re-export main types
 pub use types::*;

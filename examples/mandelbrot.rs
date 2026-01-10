@@ -20,59 +20,51 @@ use winit::{
 };
 
 const MANDELBROT_SHADER: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 center : TEXCOORD0;
+    float zoom : TEXCOORD1;
+    float2 uv : TEXCOORD2;
+};
+
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) complex_coord: vec2<f32>,
-}
+    float4 position : SV_Position;
+    float2 complex_coord : TEXCOORD0;
+};
 
-struct Params {
-    center_x: f32,
-    center_y: f32,
-    zoom: f32,
-    max_iter: f32,
-}
-
-@vertex
-fn vs_main(
-    @location(0) position: vec2<f32>,
-    @location(1) center: vec2<f32>,
-    @location(2) zoom: f32,
-    @location(3) uv: vec2<f32>
-) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
     // Map UV to complex plane around center with zoom
-    out.complex_coord = center + (uv - 0.5) * 4.0 / zoom;
-    return out;
+    output.complex_coord = input.center + (input.uv - 0.5) * 4.0 / input.zoom;
+    return output;
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let c = in.complex_coord;
-    var z = vec2<f32>(0.0, 0.0);
-    var i: u32 = 0u;
-    let max_iter: u32 = 256u;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float2 c = input.complex_coord;
+    float2 z = float2(0.0, 0.0);
+    uint i = 0;
+    const uint max_iter = 256;
     
-    loop {
-        if i >= max_iter { break; }
-        if dot(z, z) > 4.0 { break; }
-        
+    for (i = 0; i < max_iter; i++) {
+        if (dot(z, z) > 4.0) break;
         // z = z^2 + c
-        z = vec2<f32>(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
-        i = i + 1u;
+        z = float2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
     }
     
-    if i >= max_iter {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (i >= max_iter) {
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
     
     // Smooth coloring
-    let t = f32(i) / f32(max_iter);
-    let r = sin(t * 5.0) * 0.5 + 0.5;
-    let g = sin(t * 7.0 + 1.0) * 0.5 + 0.5;
-    let b = sin(t * 11.0 + 2.0) * 0.5 + 0.5;
+    float t = float(i) / float(max_iter);
+    float r = sin(t * 5.0) * 0.5 + 0.5;
+    float g = sin(t * 7.0 + 1.0) * 0.5 + 0.5;
+    float b = sin(t * 11.0 + 2.0) * 0.5 + 0.5;
     
-    return vec4<f32>(r, g, b, 1.0);
+    return float4(r, g, b, 1.0);
 }
 "#;
 
@@ -134,7 +126,7 @@ impl App {
 
     fn init_gpu(&mut self) -> anyhow::Result<()> {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
-        let shader = ShaderModule::from_wgsl(&device, MANDELBROT_SHADER)?;
+        let shader = ShaderModule::from_slang(&device, MANDELBROT_SHADER)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: MandelbrotVertex::layout(),
             target_format: TextureFormat::Rgba8Unorm,

@@ -75,7 +75,7 @@ pub trait GpuBackend: Send + Sync {
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
 
     // Shader management
-    fn create_shader(&mut self, device: DeviceHandle, wgsl_source: &str) -> Result<ShaderHandle>;
+    fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
     // Bind group management

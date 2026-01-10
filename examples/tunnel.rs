@@ -21,63 +21,65 @@ use winit::{
 };
 
 const TUNNEL_SHADER: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) time: f32,
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.time = input.time;
+    return output;
 }
 
-@vertex
-fn vs_main(
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) time: f32
-) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
-    out.uv = uv;
-    out.time = time;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = (in.uv - 0.5) * 2.0;
-    let t = in.time;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float2 uv = (input.uv - 0.5) * 2.0;
+    float t = input.time;
     
     // Polar coordinates
-    let dist = length(uv);
-    let angle = atan2(uv.y, uv.x);
+    float dist = length(uv);
+    float angle = atan2(uv.y, uv.x);
     
     // Tunnel coordinates
-    let tunnel_depth = 1.0 / (dist + 0.1);
-    let tunnel_angle = angle / 3.14159 + t * 0.2;
+    float tunnel_depth = 1.0 / (dist + 0.1);
+    float tunnel_angle = angle / 3.14159 + t * 0.2;
     
     // Animated texture coordinates
-    let tx = tunnel_angle * 4.0;
-    let ty = tunnel_depth - t * 2.0;
+    float tx = tunnel_angle * 4.0;
+    float ty = tunnel_depth - t * 2.0;
     
     // Checkerboard pattern
-    let checker = floor(tx) + floor(ty);
-    let is_white = (checker % 2.0) == 0.0;
+    float checker = floor(tx) + floor(ty);
+    bool is_white = fmod(checker, 2.0) == 0.0;
     
     // Color based on depth and checker
-    let depth_color = 1.0 - dist * 0.5;
-    var color: vec3<f32>;
+    float depth_color = 1.0 - dist * 0.5;
+    float3 color;
     
-    if is_white {
-        color = vec3<f32>(0.8, 0.2, 0.4) * depth_color;
+    if (is_white) {
+        color = float3(0.8, 0.2, 0.4) * depth_color;
     } else {
-        color = vec3<f32>(0.2, 0.4, 0.8) * depth_color;
+        color = float3(0.2, 0.4, 0.8) * depth_color;
     }
     
     // Add glow at center
-    color += vec3<f32>(0.3, 0.5, 1.0) * (1.0 - dist) * (1.0 - dist);
+    color += float3(0.3, 0.5, 1.0) * (1.0 - dist) * (1.0 - dist);
     
     // Fog at edges
     color *= 1.0 - dist * 0.3;
     
-    return vec4<f32>(color, 1.0);
+    return float4(color, 1.0);
 }
 "#;
 
@@ -135,7 +137,7 @@ impl App {
 
     fn init_gpu(&mut self) -> anyhow::Result<()> {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
-        let shader = ShaderModule::from_wgsl(&device, TUNNEL_SHADER)?;
+        let shader = ShaderModule::from_slang(&device, TUNNEL_SHADER)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: TunnelVertex::layout(),
             target_format: TextureFormat::Rgba8Unorm,

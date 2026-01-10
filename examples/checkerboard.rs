@@ -21,46 +21,48 @@ use winit::{
 };
 
 const CHECKER_SHADER: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) time: f32,
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.time = input.time;
+    return output;
 }
 
-@vertex
-fn vs_main(
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) time: f32
-) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
-    out.uv = uv;
-    out.time = time;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let t = in.time;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float t = input.time;
     
     // Animated wave distortion
-    var uv = in.uv;
+    float2 uv = input.uv;
     uv.x += sin(uv.y * 10.0 + t * 2.0) * 0.02;
     uv.y += cos(uv.x * 10.0 + t * 1.5) * 0.02;
     
     // Scale for checker pattern
-    let scale = 8.0;
-    let checker = floor(uv * scale);
-    let is_white = ((checker.x + checker.y) % 2.0) == 0.0;
+    float scale = 8.0;
+    float2 checker = floor(uv * scale);
+    bool is_white = fmod(checker.x + checker.y, 2.0) == 0.0;
     
     // Animate colors
-    var color1 = vec3<f32>(
+    float3 color1 = float3(
         0.2 + 0.1 * sin(t),
         0.1 + 0.1 * cos(t * 1.3),
         0.3 + 0.1 * sin(t * 0.7)
     );
-    var color2 = vec3<f32>(
+    float3 color2 = float3(
         0.9 + 0.1 * cos(t * 0.8),
         0.85 + 0.1 * sin(t * 1.1),
         0.8 + 0.1 * cos(t)
@@ -70,10 +72,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     color1 += uv.y * 0.1;
     color2 -= uv.y * 0.1;
     
-    if is_white {
-        return vec4<f32>(color2, 1.0);
+    if (is_white) {
+        return float4(color2, 1.0);
     } else {
-        return vec4<f32>(color1, 1.0);
+        return float4(color1, 1.0);
     }
 }
 "#;
@@ -132,7 +134,7 @@ impl App {
 
     fn init_gpu(&mut self) -> anyhow::Result<()> {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
-        let shader = ShaderModule::from_wgsl(&device, CHECKER_SHADER)?;
+        let shader = ShaderModule::from_slang(&device, CHECKER_SHADER)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: CheckerVertex::layout(),
             target_format: TextureFormat::Rgba8Unorm,

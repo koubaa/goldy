@@ -21,31 +21,35 @@ use winit::{
 };
 
 const GRADIENT_SHADER: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 uv : TEXCOORD0;
+};
+
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    return output;
 }
 
-@vertex
-fn vs_main(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
-    out.uv = uv;
-    return out;
-}
-
-// Time uniform would go here, but for now we bake it in vertex colors
-@fragment  
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
     // Create animated gradient based on UV coordinates
-    let uv = in.uv;
+    float2 uv = input.uv;
     
     // Multiple gradient layers
-    let c1 = vec3<f32>(uv.x, 0.2, 1.0 - uv.x);
-    let c2 = vec3<f32>(1.0 - uv.y, uv.y * 0.5, uv.x * uv.y);
+    float3 c1 = float3(uv.x, 0.2, 1.0 - uv.x);
+    float3 c2 = float3(1.0 - uv.y, uv.y * 0.5, uv.x * uv.y);
     
-    let color = mix(c1, c2, uv.y);
-    return vec4<f32>(color, 1.0);
+    float3 color = lerp(c1, c2, uv.y);
+    return float4(color, 1.0);
 }
 "#;
 
@@ -106,7 +110,7 @@ impl App {
 
     fn init_gpu(&mut self) -> anyhow::Result<()> {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
-        let shader = ShaderModule::from_wgsl(&device, GRADIENT_SHADER)?;
+        let shader = ShaderModule::from_slang(&device, GRADIENT_SHADER)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: GradientVertex::layout(),
             target_format: TextureFormat::Rgba8Unorm,

@@ -335,11 +335,21 @@ impl GpuBackend for WebGpuBackend {
         self.buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
     }
 
-    fn create_shader(&mut self, device_handle: DeviceHandle, wgsl_source: &str) -> Result<ShaderHandle> {
+    fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
         let device = self
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
+
+        // Compile Slang to WGSL
+        let compiler = crate::slang::global_compiler()
+            .context("Failed to get Slang compiler")?;
+        
+        let compiled = compiler.compile(slang_source, crate::slang::ShaderTarget::Wgsl)
+            .context("Slang to WGSL compilation failed")?;
+        
+        let wgsl_source = compiled.as_str()
+            .context("Invalid WGSL output from Slang")?;
 
         let module = device.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("RAG Shader"),

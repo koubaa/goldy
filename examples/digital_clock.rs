@@ -56,7 +56,7 @@ impl App {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
         
         // Use the SHARED shader source from the examples module
-        let shader = ShaderModule::from_wgsl(&device, SHADER_SOURCE)?;
+        let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;
         let pipeline_desc = RenderPipelineDesc {
             vertex_layout: ClockVertex::layout(), // Use shared vertex type
             target_format: TextureFormat::Rgba8Unorm,

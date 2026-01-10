@@ -21,47 +21,49 @@ use winit::{
 };
 
 const PLASMA_SHADER: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) time: f32,
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.time = input.time;
+    return output;
 }
 
-@vertex
-fn vs_main(
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) time: f32
-) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
-    out.uv = uv;
-    out.time = time;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = in.uv * 4.0;
-    let t = in.time;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float2 uv = input.uv * 4.0;
+    float t = input.time;
     
     // Classic plasma formula
-    var v = sin(uv.x + t);
+    float v = sin(uv.x + t);
     v += sin(uv.y + t);
     v += sin(uv.x + uv.y + t);
     
-    let cx = uv.x + 0.5 * sin(t / 3.0);
-    let cy = uv.y + 0.5 * cos(t / 2.0);
+    float cx = uv.x + 0.5 * sin(t / 3.0);
+    float cy = uv.y + 0.5 * cos(t / 2.0);
     v += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
     
     v = v / 2.0;
     
     // Color palette
-    let r = sin(v * 3.14159);
-    let g = sin(v * 3.14159 + 2.094);
-    let b = sin(v * 3.14159 + 4.188);
+    float r = sin(v * 3.14159);
+    float g = sin(v * 3.14159 + 2.094);
+    float b = sin(v * 3.14159 + 4.188);
     
-    return vec4<f32>(r * 0.5 + 0.5, g * 0.5 + 0.5, b * 0.5 + 0.5, 1.0);
+    return float4(r * 0.5 + 0.5, g * 0.5 + 0.5, b * 0.5 + 0.5, 1.0);
 }
 "#;
 
@@ -119,7 +121,7 @@ impl App {
 
     fn init_gpu(&mut self) -> anyhow::Result<()> {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
-        let shader = ShaderModule::from_wgsl(&device, PLASMA_SHADER)?;
+        let shader = ShaderModule::from_slang(&device, PLASMA_SHADER)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: PlasmaVertex::layout(),
             target_format: TextureFormat::Rgba8Unorm,

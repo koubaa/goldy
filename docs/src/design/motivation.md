@@ -78,11 +78,25 @@ RAG follows this principle:
 
 wgpu is the right choice for web compatibility and broad device support. RAG is for when you want simplicity and can require modern hardware.
 
+## Slang: One Shader Language
+
+RAG uses [Slang](https://shader-slang.org/) as its sole shading language. This is a deliberate choice:
+
+| Aspect | Benefit |
+|--------|---------|
+| **Portability** | Single source compiles to SPIR-V, WGSL, HLSL, MSL |
+| **Familiar syntax** | HLSL-like, industry-standard |
+| **Modern features** | Modules, generics, automatic differentiation |
+| **Khronos governance** | Long-term stability and active development |
+
+Rather than supporting multiple shader languages (WGSL, GLSL, HLSL) and maintaining translation layers, RAG trusts Slang to handle cross-platform compilation. This keeps RAG's codebase simple while providing maximum portability.
+
 ## Inspiration
 
 RAG draws inspiration from:
 
 - **Sebastian Aaltonen's "No Graphics API"** - The vision of what's possible with modern hardware
+- **Slang** - A modern shader language with cross-platform compilation
 - **CUDA** - A composable language exposing memory directly with a broad library ecosystem
 - **Metal's evolution** - Moving toward 64-bit pointers and simpler binding models
 - **Rust's ownership model** - Explicit resource management without hidden costs

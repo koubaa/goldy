@@ -8,6 +8,9 @@ Cargo.lock
 # Documentation build output
 /docs/book/
 
+# Vendored Slang binaries (download with slang/download.sh)
+/slang/bin/
+
 # IDE
 .idea/
 .vscode/

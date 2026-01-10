@@ -12,8 +12,8 @@ categories = ["graphics", "rendering"]
 # Vulkan bindings (native only)
 ash = { version = "0.38", optional = true }
 
-# Shader compilation (WGSL -> SPIR-V) - native Vulkan only
-naga = { version = "24.0", features = ["wgsl-in", "spv-out"], optional = true }
+# Dynamic library loading for Slang compiler
+libloading = "0.8"
 
 # wgpu for WebGPU backend (used on wasm32)
 wgpu = { version = "24", optional = true }
@@ -28,6 +28,7 @@ tracing = "0.1"
 # Utilities
 bitflags = "2.6"
 bytemuck = { version = "1.21", features = ["derive"] }
+scopeguard = "1.2"
 
 # Web dependencies (optional)
 wasm-bindgen = { version = "0.2", optional = true }
@@ -52,7 +53,7 @@ softbuffer = "0.4"
 
 [features]
 default = ["vulkan"]
-vulkan = ["dep:ash", "dep:naga"]
+vulkan = ["dep:ash"]
 webgpu = ["dep:wgpu", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:console_error_panic_hook"]
 
 [[example]]

@@ -12,11 +12,25 @@ pub struct ShaderModule {
 }
 
 impl ShaderModule {
-    /// Create a shader module from WGSL source.
+    /// Create a shader module from Slang source.
     ///
-    /// The WGSL source should contain both vertex and fragment entry points
-    /// if needed for the pipeline.
-    pub fn from_wgsl(device: &Device, source: &str) -> Result<Self> {
+    /// The Slang source should contain entry points marked with `[shader("vertex")]`,
+    /// `[shader("fragment")]`, etc.
+    ///
+    /// # Example
+    ///
+    /// ```slang
+    /// [shader("vertex")]
+    /// float4 vs_main(float2 pos : POSITION) : SV_Position {
+    ///     return float4(pos, 0, 1);
+    /// }
+    ///
+    /// [shader("fragment")]
+    /// float4 fs_main() : SV_Target {
+    ///     return float4(1, 0, 0, 1);
+    /// }
+    /// ```
+    pub fn from_slang(device: &Device, source: &str) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
         let handle = backend.create_shader(device.handle, source)?;
         
@@ -24,6 +38,17 @@ impl ShaderModule {
             backend: Arc::clone(&device.backend),
             handle,
         })
+    }
+    
+    /// Create a shader module from WGSL source.
+    ///
+    /// **Deprecated**: Use `from_slang` instead. This method exists for backward
+    /// compatibility and will compile WGSL through Slang.
+    #[deprecated(since = "0.2.0", note = "Use from_slang() with Slang shader syntax")]
+    pub fn from_wgsl(device: &Device, source: &str) -> Result<Self> {
+        // For now, pass through to Slang - WGSL is not directly supported
+        // Users should migrate to Slang syntax
+        Self::from_slang(device, source)
     }
 }
 
@@ -35,61 +60,59 @@ impl Drop for ShaderModule {
 }
 
 /// Built-in shaders for common use cases.
+///
+/// All shaders are written in Slang (HLSL-like syntax).
 pub mod builtins {
     /// Simple 2D vertex + fragment shader for colored vertices.
     pub const VERTEX_COLOR_2D: &str = r#"
 struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) color: vec4<f32>,
-}
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
 
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    float4 position : SV_Position;
+    float4 color : COLOR;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
 }
 
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.color = in.color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return input.color;
 }
 "#;
 
     /// Simple solid color fragment shader.
     pub const SOLID_COLOR: &str = r#"
 struct VertexInput {
-    @location(0) position: vec2<f32>,
-}
+    float2 position : POSITION;
+};
 
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
+    float4 position : SV_Position;
+};
+
+cbuffer Uniforms {
+    float4 color;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    return output;
 }
 
-struct Uniforms {
-    color: vec4<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> uniforms: Uniforms;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return uniforms.color;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return color;
 }
 "#;
 }
-

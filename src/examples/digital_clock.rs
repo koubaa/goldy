@@ -1,7 +1,7 @@
 //! Shared Digital Clock rendering logic.
 //!
 //! This module provides the core rendering components for the digital clock demo:
-//! - WGSL shader source
+//! - Slang shader source
 //! - Vertex data structures
 //! - Digit pattern generation
 //! - Time formatting
@@ -12,31 +12,31 @@
 use crate::types::{Color, VertexBufferLayout, VertexAttribute, VertexFormat};
 use bytemuck::{Pod, Zeroable};
 
-/// WGSL shader for the digital clock.
+/// Slang shader for the digital clock.
 /// 
 /// Uses standard vertex coloring with position and color attributes.
 pub const SHADER_SOURCE: &str = r#"
 struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) color: vec4<f32>,
-}
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
 
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    float4 position : SV_Position;
+    float4 color : COLOR;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
 }
 
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.color = in.color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return input.color;
 }
 "#;
 

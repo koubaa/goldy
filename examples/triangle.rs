@@ -59,7 +59,7 @@ impl App {
         let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
         
         // Create shader and pipeline
-        let shader = ShaderModule::from_wgsl(&device, builtins::VERTEX_COLOR_2D)?;
+        let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
         let pipeline_desc = RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
             target_format: TextureFormat::Rgba8Unorm,

@@ -21,44 +21,46 @@ use winit::{
 };
 
 const METABALLS_SHADER: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) time: f32,
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.time = input.time;
+    return output;
 }
 
-@vertex
-fn vs_main(
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) time: f32
-) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
-    out.uv = uv;
-    out.time = time;
-    return out;
-}
-
-fn metaball(p: vec2<f32>, center: vec2<f32>, radius: f32) -> f32 {
-    let d = distance(p, center);
+float metaball(float2 p, float2 center, float radius) {
+    float d = distance(p, center);
     return radius / (d * d + 0.001);
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = (in.uv - 0.5) * 2.0;
-    let t = in.time;
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float2 uv = (input.uv - 0.5) * 2.0;
+    float t = input.time;
     
     // Moving metaball centers
-    let c1 = vec2<f32>(sin(t * 1.1) * 0.5, cos(t * 0.9) * 0.5);
-    let c2 = vec2<f32>(sin(t * 0.8 + 1.0) * 0.6, cos(t * 1.2 + 2.0) * 0.4);
-    let c3 = vec2<f32>(sin(t * 1.3 + 2.0) * 0.4, cos(t * 0.7 + 1.0) * 0.6);
-    let c4 = vec2<f32>(cos(t * 0.9) * 0.5, sin(t * 1.1 + 3.0) * 0.5);
-    let c5 = vec2<f32>(cos(t * 1.0 + 1.5) * 0.3, sin(t * 0.8 + 0.5) * 0.7);
+    float2 c1 = float2(sin(t * 1.1) * 0.5, cos(t * 0.9) * 0.5);
+    float2 c2 = float2(sin(t * 0.8 + 1.0) * 0.6, cos(t * 1.2 + 2.0) * 0.4);
+    float2 c3 = float2(sin(t * 1.3 + 2.0) * 0.4, cos(t * 0.7 + 1.0) * 0.6);
+    float2 c4 = float2(cos(t * 0.9) * 0.5, sin(t * 1.1 + 3.0) * 0.5);
+    float2 c5 = float2(cos(t * 1.0 + 1.5) * 0.3, sin(t * 0.8 + 0.5) * 0.7);
     
     // Sum metaball influences
-    var v = 0.0;
+    float v = 0.0;
     v += metaball(uv, c1, 0.15);
     v += metaball(uv, c2, 0.12);
     v += metaball(uv, c3, 0.18);
@@ -66,18 +68,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     v += metaball(uv, c5, 0.14);
     
     // Threshold and color
-    let threshold = 1.0;
-    if v > threshold {
+    float threshold = 1.0;
+    if (v > threshold) {
         // Inside blob - gradient based on intensity
-        let intensity = (v - threshold) / 2.0;
-        let r = 0.2 + intensity * 0.3;
-        let g = 0.5 + intensity * 0.4;
-        let b = 0.8 + intensity * 0.2;
-        return vec4<f32>(r, g, b, 1.0);
+        float intensity = (v - threshold) / 2.0;
+        float r = 0.2 + intensity * 0.3;
+        float g = 0.5 + intensity * 0.4;
+        float b = 0.8 + intensity * 0.2;
+        return float4(r, g, b, 1.0);
     } else {
         // Outside - dark background with glow
-        let glow = v * 0.3;
-        return vec4<f32>(glow * 0.2, glow * 0.3, glow * 0.5, 1.0);
+        float glow = v * 0.3;
+        return float4(glow * 0.2, glow * 0.3, glow * 0.5, 1.0);
     }
 }
 "#;
@@ -136,7 +138,7 @@ impl App {
 
     fn init_gpu(&mut self) -> anyhow::Result<()> {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
-        let shader = ShaderModule::from_wgsl(&device, METABALLS_SHADER)?;
+        let shader = ShaderModule::from_slang(&device, METABALLS_SHADER)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: MetaVertex::layout(),
             target_format: TextureFormat::Rgba8Unorm,
