@@ -151,6 +151,7 @@ impl ApplicationHandler for App {
             if let Err(e) = self.init_gpu(&window) {
                 eprintln!("Failed to initialize GPU: {}", e);
             }
+            window.request_redraw();
         }
     }
 

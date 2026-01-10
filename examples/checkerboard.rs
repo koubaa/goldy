@@ -144,6 +144,7 @@ impl ApplicationHandler for App {
             ).unwrap());
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
+            window.request_redraw();
         }
     }
 

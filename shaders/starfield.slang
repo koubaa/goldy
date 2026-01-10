@@ -1,19 +1,16 @@
 // 3D Starfield - flying forward through space
-// Rendered entirely in fragment shader using time uniform
+// Uses vertex time attribute for animation (same pattern as plasma/tunnel)
 
 struct VertexInput {
     float2 position : POSITION;
     float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
 };
 
 struct VertexOutput {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
-};
-
-[[vk::binding(0, 0)]]
-cbuffer TimeBuffer {
-    float time;
+    float time : TEXCOORD1;
 };
 
 [shader("vertex")]
@@ -21,6 +18,7 @@ VertexOutput vs_main(VertexInput input) {
     VertexOutput output;
     output.position = float4(input.position, 0.0, 1.0);
     output.uv = input.uv;
+    output.time = input.time;
     return output;
 }
 
@@ -31,10 +29,11 @@ float hash(float p) {
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
+    float t = input.time;
     float3 color = float3(0.0, 0.0, 0.02);
     
     int num_stars = 200;
-    float speed = 0.3;  // Single speed for all stars
+    float speed = 0.3;
     
     for (int i = 0; i < num_stars; i++) {
         float fi = float(i);
@@ -46,7 +45,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
         
         // All stars cycle at same speed, just different phases
         float phase = hash(fi + 100.0);
-        float cycle = frac(time * speed + phase);
+        float cycle = frac(t * speed + phase);
         
         // Distance from center increases as cycle goes 0->1
         float dist = max_dist * cycle;
@@ -62,7 +61,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
         // Brightness increases with distance
         float brightness = cycle * smoothstep(size, 0.0, pixel_dist);
         
-        // Fade in at spawn, no fade out (stars just disappear at edge)
+        // Fade in at spawn
         float fade = smoothstep(0.0, 0.1, cycle);
         
         color += float3(0.9, 0.95, 1.0) * brightness * fade;
@@ -70,4 +69,3 @@ float4 fs_main(VertexOutput input) : SV_Target {
     
     return float4(clamp(color, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0)), 1.0);
 }
-
