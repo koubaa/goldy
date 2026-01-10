@@ -185,6 +185,7 @@ pub enum BackendType {
 }
 
 /// A simple 2D vertex with position and color.
+/// Use for colored primitives (triangle, particles, etc.)
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct Vertex2D {
@@ -217,6 +218,142 @@ impl Vertex2D {
                 },
             ],
         }
+    }
+}
+
+/// A 2D vertex with position and UV coordinates.
+/// Use for textured/shader effects (plasma, gradient, etc.)
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct Vertex2DUv {
+    pub position: [f32; 2],
+    pub uv: [f32; 2],
+}
+
+impl Vertex2DUv {
+    pub const fn new(x: f32, y: f32, u: f32, v: f32) -> Self {
+        Self {
+            position: [x, y],
+            uv: [u, v],
+        }
+    }
+
+    /// Get the vertex buffer layout for this vertex type.
+    pub fn layout() -> VertexBufferLayout {
+        VertexBufferLayout {
+            stride: std::mem::size_of::<Self>() as u32,
+            attributes: vec![
+                VertexAttribute {
+                    location: 0,
+                    format: VertexFormat::Float32x2,
+                    offset: 0,
+                },
+                VertexAttribute {
+                    location: 1,
+                    format: VertexFormat::Float32x2,
+                    offset: 8,
+                },
+            ],
+        }
+    }
+}
+
+/// Fullscreen quad vertices using Vertex2DUv (position + UV)
+pub const FULLSCREEN_QUAD: [Vertex2DUv; 6] = [
+    Vertex2DUv { position: [-1.0, -1.0], uv: [0.0, 1.0] },
+    Vertex2DUv { position: [1.0, -1.0], uv: [1.0, 1.0] },
+    Vertex2DUv { position: [1.0, 1.0], uv: [1.0, 0.0] },
+    Vertex2DUv { position: [-1.0, -1.0], uv: [0.0, 1.0] },
+    Vertex2DUv { position: [1.0, 1.0], uv: [1.0, 0.0] },
+    Vertex2DUv { position: [-1.0, 1.0], uv: [0.0, 0.0] },
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_color_from_rgb() {
+        let color = Color::from_rgb(255, 128, 0);
+        assert!((color.r - 1.0).abs() < 0.01);
+        assert!((color.g - 0.502).abs() < 0.01);
+        assert!((color.b - 0.0).abs() < 0.01);
+        assert!((color.a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_color_to_rgba8() {
+        let color = Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 };
+        let rgba = color.to_rgba8();
+        assert_eq!(rgba[0], 255);
+        assert_eq!(rgba[1], 127);
+        assert_eq!(rgba[2], 0);
+        assert_eq!(rgba[3], 255);
+    }
+
+    #[test]
+    fn test_color_constants() {
+        assert_eq!(Color::BLACK.r, 0.0);
+        assert_eq!(Color::WHITE.r, 1.0);
+        assert_eq!(Color::RED.r, 1.0);
+        assert_eq!(Color::RED.g, 0.0);
+    }
+
+    #[test]
+    fn test_texture_format_bytes_per_pixel() {
+        assert_eq!(TextureFormat::Rgba8Unorm.bytes_per_pixel(), 4);
+        assert_eq!(TextureFormat::Rgba16Float.bytes_per_pixel(), 8);
+        assert_eq!(TextureFormat::Rgba32Float.bytes_per_pixel(), 16);
+    }
+
+    #[test]
+    fn test_vertex_format_size() {
+        assert_eq!(VertexFormat::Float32.size(), 4);
+        assert_eq!(VertexFormat::Float32x2.size(), 8);
+        assert_eq!(VertexFormat::Float32x3.size(), 12);
+        assert_eq!(VertexFormat::Float32x4.size(), 16);
+    }
+
+    #[test]
+    fn test_vertex2d_layout() {
+        let layout = Vertex2D::layout();
+        assert_eq!(layout.stride, 24); // 2 floats + 4 floats = 6 * 4 = 24
+        assert_eq!(layout.attributes.len(), 2);
+        assert_eq!(layout.attributes[0].location, 0);
+        assert_eq!(layout.attributes[1].location, 1);
+    }
+
+    #[test]
+    fn test_vertex2duv_layout() {
+        let layout = Vertex2DUv::layout();
+        assert_eq!(layout.stride, 16); // 2 floats + 2 floats = 4 * 4 = 16
+        assert_eq!(layout.attributes.len(), 2);
+    }
+
+    #[test]
+    fn test_fullscreen_quad_vertices() {
+        // Check we have 6 vertices (2 triangles)
+        assert_eq!(FULLSCREEN_QUAD.len(), 6);
+        
+        // Check positions span -1 to 1
+        for v in &FULLSCREEN_QUAD {
+            assert!(v.position[0] >= -1.0 && v.position[0] <= 1.0);
+            assert!(v.position[1] >= -1.0 && v.position[1] <= 1.0);
+        }
+        
+        // Check UVs span 0 to 1
+        for v in &FULLSCREEN_QUAD {
+            assert!(v.uv[0] >= 0.0 && v.uv[0] <= 1.0);
+            assert!(v.uv[1] >= 0.0 && v.uv[1] <= 1.0);
+        }
+    }
+
+    #[test]
+    fn test_buffer_usage_flags() {
+        let usage = BufferUsage::VERTEX | BufferUsage::COPY_DST;
+        assert!(usage.contains(BufferUsage::VERTEX));
+        assert!(usage.contains(BufferUsage::COPY_DST));
+        assert!(!usage.contains(BufferUsage::INDEX));
     }
 }
 

@@ -1,4 +1,7 @@
 //! Interactive demos for documentation
+//!
+//! All demos require Slang shaders compiled via slang-wasm in JavaScript.
+//! The compiled shader source is passed to each create_*_demo() function.
 
 pub mod plasma;
 pub mod triangle;
@@ -19,4 +22,3 @@ pub use gradient::*;
 pub use particles::*;
 pub use tunnel::*;
 pub use spinning_cube::*;
-

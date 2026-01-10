@@ -1,83 +1,11 @@
 //! 3D Starfield - flying forward through space
-//! Single uniform speed for all stars
 //!
-//! Supports two modes:
-//! 1. Embedded WGSL shader (fallback)
-//! 2. Slang-compiled WGSL passed from JavaScript
+//! Requires Slang shader compiled via slang-wasm in JavaScript.
+//! The compiled shader is passed to create_starfield_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
-
-const STARFIELD_SHADER_FALLBACK: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> time: f32;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.uv = in.uv;
-    return out;
-}
-
-fn hash(p: f32) -> f32 {
-    return fract(sin(p * 127.1) * 43758.5453);
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = (in.uv - 0.5) * 2.0;
-    var color = vec3<f32>(0.0, 0.0, 0.02);
-    
-    let num_stars = 200;
-    let speed = 0.3;  // SINGLE speed for all stars
-    
-    for (var i = 0; i < num_stars; i += 1) {
-        let fi = f32(i);
-        
-        // Random angle for each star
-        let angle = hash(fi) * 6.28318;
-        // Random max distance (how far from center it can go)
-        let max_dist = 0.3 + hash(fi + 50.0) * 1.2;
-        
-        // All stars cycle at same speed, just different phases
-        let phase = hash(fi + 100.0);
-        let cycle = fract(time * speed + phase);
-        
-        // Distance from center increases as cycle goes 0->1
-        let dist = max_dist * cycle;
-        
-        let star_x = cos(angle) * dist;
-        let star_y = sin(angle) * dist;
-        
-        let pixel_dist = length(uv - vec2<f32>(star_x, star_y));
-        
-        // Size increases with distance (closer = bigger)
-        let size = 0.002 + cycle * 0.015;
-        
-        // Brightness increases with distance
-        let brightness = cycle * smoothstep(size, 0.0, pixel_dist);
-        
-        // Fade in at spawn, no fade out (stars just disappear at edge)
-        let fade = smoothstep(0.0, 0.1, cycle);
-        
-        color += vec3<f32>(0.9, 0.95, 1.0) * brightness * fade;
-    }
-    
-    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-}
-"#;
 
 #[wasm_bindgen]
 pub struct StarfieldDemo {
@@ -89,16 +17,21 @@ pub struct StarfieldDemo {
     start_time: f64,
 }
 
-async fn create_starfield_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<StarfieldDemo, String> {
+/// Create starfield demo with Slang-compiled shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_starfield_demo(canvas_id: &str, compiled_shader: &str) -> Result<StarfieldDemo, JsValue> {
+    init();
+    
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
-    let renderer = WebRenderer::new(canvas).await?;
+    let renderer = WebRenderer::new(canvas).await
+        .map_err(|e| JsValue::from_str(&e))?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Starfield Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
     let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -180,24 +113,6 @@ async fn create_starfield_demo_internal(canvas_id: &str, wgsl_source: &str) -> R
         bind_group,
         start_time,
     })
-}
-
-/// Create starfield demo with embedded fallback shader
-#[wasm_bindgen]
-pub async fn create_starfield_demo(canvas_id: &str) -> Result<StarfieldDemo, JsValue> {
-    init();
-    create_starfield_demo_internal(canvas_id, STARFIELD_SHADER_FALLBACK)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// Create starfield demo with Slang-compiled WGSL shader from JavaScript
-#[wasm_bindgen]
-pub async fn create_starfield_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<StarfieldDemo, JsValue> {
-    init();
-    create_starfield_demo_internal(canvas_id, wgsl_source)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]

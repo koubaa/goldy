@@ -1,1 +1,10 @@
-*
+# WASM build artifacts - generated, not tracked
+*.wasm
+*.js
+*.d.ts
+package.json
+LICENSE
+
+# Keep this file
+!.gitignore
+!.gitkeep

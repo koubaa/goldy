@@ -8,6 +8,7 @@ use rag::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, FrameOutput,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     Vertex2D, VertexBufferLayout, VertexAttribute, VertexFormat,
+    shaders,
 };
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -19,39 +20,6 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
-
-const GRADIENT_SHADER: &str = r#"
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    // Create animated gradient based on UV coordinates
-    float2 uv = input.uv;
-    
-    // Multiple gradient layers
-    float3 c1 = float3(uv.x, 0.2, 1.0 - uv.x);
-    float3 c2 = float3(1.0 - uv.y, uv.y * 0.5, uv.x * uv.y);
-    
-    float3 color = lerp(c1, c2, uv.y);
-    return float4(color, 1.0);
-}
-"#;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -110,7 +78,7 @@ impl App {
 
     fn init_gpu(&mut self) -> anyhow::Result<()> {
         let device = self.instance.create_device(DeviceType::DiscreteGpu)?;
-        let shader = ShaderModule::from_slang(&device, GRADIENT_SHADER)?;
+        let shader = ShaderModule::from_slang(&device, shaders::GRADIENT)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: GradientVertex::layout(),
             target_format: TextureFormat::Rgba8Unorm,

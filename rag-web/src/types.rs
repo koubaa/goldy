@@ -1,8 +1,12 @@
 //! Common types for rag-web
+//!
+//! These types mirror rag::types but include wgpu-specific implementations.
+//! The data layouts match, allowing interop when needed.
 
 use bytemuck::{Pod, Zeroable};
 
 /// RGBA color with float components (0.0 - 1.0)
+/// Mirrors rag::types::Color
 #[derive(Clone, Copy, Debug)]
 pub struct Color {
     pub r: f32,
@@ -30,7 +34,10 @@ impl From<Color> for wgpu::Color {
     }
 }
 
-/// 2D vertex with position and UV
+/// 2D vertex with position and UV coordinates.
+/// Mirrors rag::types::Vertex2DUv
+///
+/// Used for fullscreen quad effects (plasma, gradient, tunnel, etc.)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex2D {
@@ -59,7 +66,11 @@ impl Vertex2D {
     }
 }
 
-/// Full-screen quad vertices
+/// Alias for Vertex2D for clarity (matches rag::types::Vertex2DUv)
+pub type Vertex2DUv = Vertex2D;
+
+/// Full-screen quad vertices (two triangles, CCW winding)
+/// Matches rag::types::FULLSCREEN_QUAD
 pub const FULLSCREEN_QUAD: [Vertex2D; 6] = [
     Vertex2D { position: [-1.0, -1.0], uv: [0.0, 1.0] },
     Vertex2D { position: [1.0, -1.0], uv: [1.0, 1.0] },
@@ -68,4 +79,3 @@ pub const FULLSCREEN_QUAD: [Vertex2D; 6] = [
     Vertex2D { position: [1.0, 1.0], uv: [1.0, 0.0] },
     Vertex2D { position: [-1.0, 1.0], uv: [0.0, 0.0] },
 ];
-

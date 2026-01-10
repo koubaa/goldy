@@ -1,121 +1,11 @@
 //! Spinning 3D wireframe cube
 //!
-//! Supports two modes:
-//! 1. Embedded WGSL shader (fallback)
-//! 2. Slang-compiled WGSL passed from JavaScript
+//! Requires Slang shader compiled via slang-wasm in JavaScript.
+//! The compiled shader is passed to create_spinning_cube_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
-
-const CUBE_SHADER_FALLBACK: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> time: f32;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.uv = in.uv;
-    return out;
-}
-
-fn rotate_y(p: vec3<f32>, a: f32) -> vec3<f32> {
-    let c = cos(a);
-    let s = sin(a);
-    return vec3<f32>(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
-}
-
-fn rotate_x(p: vec3<f32>, a: f32) -> vec3<f32> {
-    let c = cos(a);
-    let s = sin(a);
-    return vec3<f32>(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
-}
-
-fn project(p: vec3<f32>) -> vec2<f32> {
-    let z = p.z + 4.0;
-    let scale = 2.0 / z;
-    return vec2<f32>(p.x * scale, p.y * scale);
-}
-
-fn line_dist(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-    let pa = p - a;
-    let ba = b - a;
-    let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-    return length(pa - ba * h);
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = (in.uv - 0.5) * 2.0;
-    
-    // Cube vertices
-    var verts: array<vec3<f32>, 8>;
-    verts[0] = vec3<f32>(-1.0, -1.0, -1.0);
-    verts[1] = vec3<f32>(1.0, -1.0, -1.0);
-    verts[2] = vec3<f32>(1.0, 1.0, -1.0);
-    verts[3] = vec3<f32>(-1.0, 1.0, -1.0);
-    verts[4] = vec3<f32>(-1.0, -1.0, 1.0);
-    verts[5] = vec3<f32>(1.0, -1.0, 1.0);
-    verts[6] = vec3<f32>(1.0, 1.0, 1.0);
-    verts[7] = vec3<f32>(-1.0, 1.0, 1.0);
-    
-    // Rotate vertices
-    for (var i = 0; i < 8; i += 1) {
-        verts[i] = rotate_y(verts[i], time * 0.7);
-        verts[i] = rotate_x(verts[i], time * 0.5);
-    }
-    
-    // Project to 2D
-    var proj: array<vec2<f32>, 8>;
-    for (var i = 0; i < 8; i += 1) {
-        proj[i] = project(verts[i]);
-    }
-    
-    // Cube edges
-    var min_dist = 1000.0;
-    
-    // Back face
-    min_dist = min(min_dist, line_dist(uv, proj[0], proj[1]));
-    min_dist = min(min_dist, line_dist(uv, proj[1], proj[2]));
-    min_dist = min(min_dist, line_dist(uv, proj[2], proj[3]));
-    min_dist = min(min_dist, line_dist(uv, proj[3], proj[0]));
-    
-    // Front face
-    min_dist = min(min_dist, line_dist(uv, proj[4], proj[5]));
-    min_dist = min(min_dist, line_dist(uv, proj[5], proj[6]));
-    min_dist = min(min_dist, line_dist(uv, proj[6], proj[7]));
-    min_dist = min(min_dist, line_dist(uv, proj[7], proj[4]));
-    
-    // Connecting edges
-    min_dist = min(min_dist, line_dist(uv, proj[0], proj[4]));
-    min_dist = min(min_dist, line_dist(uv, proj[1], proj[5]));
-    min_dist = min(min_dist, line_dist(uv, proj[2], proj[6]));
-    min_dist = min(min_dist, line_dist(uv, proj[3], proj[7]));
-    
-    // Draw edges with glow
-    let edge = smoothstep(0.02, 0.005, min_dist);
-    let glow = 0.01 / (min_dist + 0.01);
-    
-    let edge_color = vec3<f32>(0.3, 0.7, 1.0);
-    let glow_color = vec3<f32>(0.1, 0.3, 0.6);
-    
-    var color = edge_color * edge + glow_color * glow * 0.3;
-    color += vec3<f32>(0.02, 0.02, 0.04);  // Background
-    
-    return vec4<f32>(color, 1.0);
-}
-"#;
 
 #[wasm_bindgen]
 pub struct SpinningCubeDemo {
@@ -127,16 +17,21 @@ pub struct SpinningCubeDemo {
     start_time: f64,
 }
 
-async fn create_spinning_cube_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<SpinningCubeDemo, String> {
+/// Create spinning cube demo with Slang-compiled shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_spinning_cube_demo(canvas_id: &str, compiled_shader: &str) -> Result<SpinningCubeDemo, JsValue> {
+    init();
+    
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
-    let renderer = WebRenderer::new(canvas).await?;
+    let renderer = WebRenderer::new(canvas).await
+        .map_err(|e| JsValue::from_str(&e))?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Cube Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
     let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -220,24 +115,6 @@ async fn create_spinning_cube_demo_internal(canvas_id: &str, wgsl_source: &str) 
     })
 }
 
-/// Create spinning cube demo with embedded fallback shader
-#[wasm_bindgen]
-pub async fn create_spinning_cube_demo(canvas_id: &str) -> Result<SpinningCubeDemo, JsValue> {
-    init();
-    create_spinning_cube_demo_internal(canvas_id, CUBE_SHADER_FALLBACK)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// Create spinning cube demo with Slang-compiled WGSL shader from JavaScript
-#[wasm_bindgen]
-pub async fn create_spinning_cube_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<SpinningCubeDemo, JsValue> {
-    init();
-    create_spinning_cube_demo_internal(canvas_id, wgsl_source)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
 #[wasm_bindgen]
 impl SpinningCubeDemo {
     #[wasm_bindgen]
@@ -289,4 +166,3 @@ impl SpinningCubeDemo {
         Ok(())
     }
 }
-

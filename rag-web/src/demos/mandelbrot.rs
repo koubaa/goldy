@@ -1,86 +1,11 @@
 //! Mandelbrot set explorer demo
 //!
-//! Supports two modes:
-//! 1. Embedded WGSL shader (fallback)
-//! 2. Slang-compiled WGSL passed from JavaScript
+//! Requires Slang shader compiled via slang-wasm in JavaScript.
+//! The compiled shader is passed to create_mandelbrot_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
-
-// Fallback WGSL shader
-const MANDELBROT_SHADER_FALLBACK: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-struct Uniforms {
-    center: vec2<f32>,
-    zoom: f32,
-    max_iter: f32,
-}
-
-@group(0) @binding(0)
-var<uniform> uniforms: Uniforms;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.uv = in.uv;
-    return out;
-}
-
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
-    let c = v * s;
-    let x = c * (1.0 - abs(((h * 6.0) % 2.0) - 1.0));
-    let m = v - c;
-    
-    var rgb: vec3<f32>;
-    let hi = u32(h * 6.0) % 6u;
-    switch hi {
-        case 0u: { rgb = vec3<f32>(c, x, 0.0); }
-        case 1u: { rgb = vec3<f32>(x, c, 0.0); }
-        case 2u: { rgb = vec3<f32>(0.0, c, x); }
-        case 3u: { rgb = vec3<f32>(0.0, x, c); }
-        case 4u: { rgb = vec3<f32>(x, 0.0, c); }
-        default: { rgb = vec3<f32>(c, 0.0, x); }
-    }
-    return rgb + vec3<f32>(m);
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let aspect = 16.0 / 9.0;
-    let c = uniforms.center + (in.uv - 0.5) * vec2<f32>(aspect, 1.0) * 3.0 / uniforms.zoom;
-    
-    var z = vec2<f32>(0.0);
-    var iter = 0.0;
-    let max_iter = uniforms.max_iter;
-    
-    for (var i = 0.0; i < max_iter; i += 1.0) {
-        if (dot(z, z) > 4.0) { break; }
-        z = vec2<f32>(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
-        iter = i;
-    }
-    
-    if (iter >= max_iter - 1.0) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-    
-    let smooth_iter = iter - log2(log2(dot(z, z))) + 4.0;
-    let hue = smooth_iter / 50.0;
-    let color = hsv_to_rgb(hue % 1.0, 0.8, 1.0);
-    
-    return vec4<f32>(color, 1.0);
-}
-"#;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -102,16 +27,21 @@ pub struct MandelbrotDemo {
     target_zoom: f32,
 }
 
-async fn create_mandelbrot_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<MandelbrotDemo, String> {
+/// Create mandelbrot demo with Slang-compiled shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_mandelbrot_demo(canvas_id: &str, compiled_shader: &str) -> Result<MandelbrotDemo, JsValue> {
+    init();
+    
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
-    let renderer = WebRenderer::new(canvas).await?;
+    let renderer = WebRenderer::new(canvas).await
+        .map_err(|e| JsValue::from_str(&e))?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Mandelbrot Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
     let uniforms = Uniforms {
@@ -197,24 +127,6 @@ async fn create_mandelbrot_demo_internal(canvas_id: &str, wgsl_source: &str) -> 
         zoom: 1.0,
         target_zoom: 1.0,
     })
-}
-
-/// Create mandelbrot demo with embedded fallback shader
-#[wasm_bindgen]
-pub async fn create_mandelbrot_demo(canvas_id: &str) -> Result<MandelbrotDemo, JsValue> {
-    init();
-    create_mandelbrot_demo_internal(canvas_id, MANDELBROT_SHADER_FALLBACK)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// Create mandelbrot demo with Slang-compiled WGSL shader from JavaScript
-#[wasm_bindgen]
-pub async fn create_mandelbrot_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<MandelbrotDemo, JsValue> {
-    init();
-    create_mandelbrot_demo_internal(canvas_id, wgsl_source)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]

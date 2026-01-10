@@ -1,60 +1,11 @@
-//! Plasma effect demo - exported for WASM
+//! Plasma effect demo - exported to JavaScript
 //!
-//! Supports two modes:
-//! 1. Embedded WGSL shader (fallback)
-//! 2. Slang-compiled WGSL passed from JavaScript
+//! Requires Slang shader compiled via slang-wasm in JavaScript.
+//! The compiled shader is passed to create_plasma_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
-
-// Fallback WGSL shader - used when Slang compilation is not available
-const PLASMA_SHADER_FALLBACK: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> time: f32;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.uv = in.uv;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = in.uv * 4.0;
-    let t = time;
-    
-    // Classic plasma formula
-    var v = sin(uv.x + t);
-    v += sin(uv.y + t);
-    v += sin(uv.x + uv.y + t);
-    
-    let cx = uv.x + 0.5 * sin(t / 3.0);
-    let cy = uv.y + 0.5 * cos(t / 2.0);
-    v += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
-    
-    v = v / 2.0;
-    
-    // Color palette
-    let r = sin(v * 3.14159);
-    let g = sin(v * 3.14159 + 2.094);
-    let b = sin(v * 3.14159 + 4.188);
-    
-    return vec4<f32>(r * 0.5 + 0.5, g * 0.5 + 0.5, b * 0.5 + 0.5, 1.0);
-}
-"#;
 
 /// Plasma demo - exported to JavaScript
 #[wasm_bindgen]
@@ -67,17 +18,22 @@ pub struct PlasmaDemo {
     start_time: f64,
 }
 
-async fn create_plasma_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<PlasmaDemo, String> {
+/// Create a new plasma demo with Slang-compiled shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_plasma_demo(canvas_id: &str, compiled_shader: &str) -> Result<PlasmaDemo, JsValue> {
+    init();
+    
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
-    let renderer = WebRenderer::new(canvas).await?;
+    let renderer = WebRenderer::new(canvas).await
+        .map_err(|e| JsValue::from_str(&e))?;
 
     let device = renderer.device();
     let format = renderer.format();
 
-    // Create shader
+    // Create shader from Slang-compiled source
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Plasma Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
     // Create time uniform buffer
@@ -164,24 +120,6 @@ async fn create_plasma_demo_internal(canvas_id: &str, wgsl_source: &str) -> Resu
         bind_group,
         start_time,
     })
-}
-
-/// Create a new plasma demo with embedded fallback shader
-#[wasm_bindgen]
-pub async fn create_plasma_demo(canvas_id: &str) -> Result<PlasmaDemo, JsValue> {
-    init();
-    create_plasma_demo_internal(canvas_id, PLASMA_SHADER_FALLBACK)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// Create a new plasma demo with Slang-compiled WGSL shader from JavaScript
-#[wasm_bindgen]
-pub async fn create_plasma_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<PlasmaDemo, JsValue> {
-    init();
-    create_plasma_demo_internal(canvas_id, wgsl_source)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]

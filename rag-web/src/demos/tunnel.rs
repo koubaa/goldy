@@ -1,74 +1,11 @@
 //! Demoscene tunnel effect
 //!
-//! Supports two modes:
-//! 1. Embedded WGSL shader (fallback)
-//! 2. Slang-compiled WGSL passed from JavaScript
+//! Requires Slang shader compiled via slang-wasm in JavaScript.
+//! The compiled shader is passed to create_tunnel_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
-
-const TUNNEL_SHADER_FALLBACK: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> time: f32;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.uv = in.uv;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = (in.uv - 0.5) * 2.0;
-    
-    // Convert to polar coordinates
-    let angle = atan2(uv.y, uv.x);
-    let radius = length(uv);
-    
-    // Tunnel effect - depth mapped from radius
-    let depth = 1.0 / (radius + 0.1);
-    
-    // Texture coordinates
-    let tx = angle / 3.14159 + time * 0.2;
-    let ty = depth + time * 0.5;
-    
-    // Create checkerboard pattern
-    let checker = step(0.5, fract(tx * 4.0)) * step(0.5, fract(ty * 2.0)) +
-                  step(0.5, 1.0 - fract(tx * 4.0)) * step(0.5, 1.0 - fract(ty * 2.0));
-    
-    // Color gradient based on depth
-    let color1 = vec3<f32>(0.8, 0.2, 0.4);
-    let color2 = vec3<f32>(0.2, 0.4, 0.8);
-    let base_color = mix(color1, color2, sin(ty * 0.5 + time) * 0.5 + 0.5);
-    
-    // Apply fog based on depth
-    let fog = exp(-depth * 0.3);
-    var color = base_color * checker * fog;
-    
-    // Add glow at center
-    let center_glow = 0.1 / (radius + 0.1);
-    color += vec3<f32>(1.0, 0.8, 0.6) * center_glow * 0.2;
-    
-    // Vignette
-    let vignette = 1.0 - radius * 0.3;
-    color *= vignette;
-    
-    return vec4<f32>(color, 1.0);
-}
-"#;
 
 #[wasm_bindgen]
 pub struct TunnelDemo {
@@ -80,16 +17,21 @@ pub struct TunnelDemo {
     start_time: f64,
 }
 
-async fn create_tunnel_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<TunnelDemo, String> {
+/// Create tunnel demo with Slang-compiled shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_tunnel_demo(canvas_id: &str, compiled_shader: &str) -> Result<TunnelDemo, JsValue> {
+    init();
+    
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
-    let renderer = WebRenderer::new(canvas).await?;
+    let renderer = WebRenderer::new(canvas).await
+        .map_err(|e| JsValue::from_str(&e))?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Tunnel Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
     let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -173,24 +115,6 @@ async fn create_tunnel_demo_internal(canvas_id: &str, wgsl_source: &str) -> Resu
     })
 }
 
-/// Create tunnel demo with embedded fallback shader
-#[wasm_bindgen]
-pub async fn create_tunnel_demo(canvas_id: &str) -> Result<TunnelDemo, JsValue> {
-    init();
-    create_tunnel_demo_internal(canvas_id, TUNNEL_SHADER_FALLBACK)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// Create tunnel demo with Slang-compiled WGSL shader from JavaScript
-#[wasm_bindgen]
-pub async fn create_tunnel_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<TunnelDemo, JsValue> {
-    init();
-    create_tunnel_demo_internal(canvas_id, wgsl_source)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
 #[wasm_bindgen]
 impl TunnelDemo {
     #[wasm_bindgen]
@@ -242,4 +166,3 @@ impl TunnelDemo {
         Ok(())
     }
 }
-

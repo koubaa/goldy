@@ -1,109 +1,11 @@
 //! Particle rain/snow demo with toggle
 //!
-//! Supports two modes:
-//! 1. Embedded WGSL shader (fallback)
-//! 2. Slang-compiled WGSL passed from JavaScript
+//! Requires Slang shader compiled via slang-wasm in JavaScript.
+//! The compiled shader is passed to create_particles_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
-
-const PARTICLES_SHADER_FALLBACK: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-struct Params {
-    time: f32,
-    is_snow: f32,
-    _pad1: f32,
-    _pad2: f32,
-}
-
-@group(0) @binding(0)
-var<uniform> params: Params;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.uv = in.uv;
-    return out;
-}
-
-fn hash(p: f32) -> f32 {
-    return fract(sin(p * 127.1) * 43758.5453);
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = in.uv;
-    let is_snow = params.is_snow > 0.5;
-    
-    var bg_color: vec3<f32>;
-    var particle_color: vec3<f32>;
-    var trail_color: vec3<f32>;
-    
-    if (is_snow) {
-        bg_color = vec3<f32>(0.02, 0.02, 0.04);
-        particle_color = vec3<f32>(0.9, 0.95, 1.0);
-        trail_color = vec3<f32>(0.5, 0.55, 0.7);
-    } else {
-        bg_color = vec3<f32>(0.01, 0.01, 0.02);
-        particle_color = vec3<f32>(0.3, 0.6, 1.0);
-        trail_color = vec3<f32>(0.2, 0.4, 0.8);
-    }
-    
-    var color = bg_color;
-    
-    for (var i = 0; i < 60; i += 1) {
-        let fi = f32(i);
-        var x = hash(fi);
-        
-        // Snow drifts horizontally
-        if (is_snow) {
-            x += sin(params.time * 0.5 + fi * 0.3) * 0.05;
-            x = fract(x);
-        }
-        
-        // Snow is slower
-        let base_speed = select(0.3, 0.12, is_snow);
-        let speed = base_speed + hash(fi + 100.0) * select(0.4, 0.08, is_snow);
-        let phase = hash(fi + 200.0) * 10.0;
-        
-        let t = fract(params.time * speed + phase);
-        let particle_y = t;
-        
-        let particle_pos = vec2<f32>(x, particle_y);
-        let dist = length(uv - particle_pos);
-        
-        // Snow has bigger particles
-        let base_size = select(0.002, 0.004, is_snow);
-        let size = base_size + hash(fi + 300.0) * select(0.002, 0.004, is_snow);
-        let brightness = size / (dist + 0.001);
-        let fade = smoothstep(0.0, 0.15, t) * smoothstep(1.0, 0.85, t);
-        
-        color += particle_color * brightness * fade * 0.06;
-        
-        // Trail (shorter for snow)
-        let trail_len = select(0.08, 0.03, is_snow);
-        let trail_top = particle_y - trail_len;
-        
-        if (uv.x > x - 0.003 && uv.x < x + 0.003 && uv.y > trail_top && uv.y < particle_y) {
-            let trail_t = (uv.y - trail_top) / trail_len;
-            color += trail_color * trail_t * fade * 0.2;
-        }
-    }
-    
-    return vec4<f32>(color, 1.0);
-}
-"#;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -125,16 +27,21 @@ pub struct ParticlesDemo {
     is_snow: bool,
 }
 
-async fn create_particles_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<ParticlesDemo, String> {
+/// Create particles demo with Slang-compiled shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_particles_demo(canvas_id: &str, compiled_shader: &str) -> Result<ParticlesDemo, JsValue> {
+    init();
+    
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
-    let renderer = WebRenderer::new(canvas).await?;
+    let renderer = WebRenderer::new(canvas).await
+        .map_err(|e| JsValue::from_str(&e))?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Particles Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
     let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -217,24 +124,6 @@ async fn create_particles_demo_internal(canvas_id: &str, wgsl_source: &str) -> R
         start_time,
         is_snow: false,
     })
-}
-
-/// Create particles demo with embedded fallback shader
-#[wasm_bindgen]
-pub async fn create_particles_demo(canvas_id: &str) -> Result<ParticlesDemo, JsValue> {
-    init();
-    create_particles_demo_internal(canvas_id, PARTICLES_SHADER_FALLBACK)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// Create particles demo with Slang-compiled WGSL shader from JavaScript
-#[wasm_bindgen]
-pub async fn create_particles_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<ParticlesDemo, JsValue> {
-    init();
-    create_particles_demo_internal(canvas_id, wgsl_source)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]

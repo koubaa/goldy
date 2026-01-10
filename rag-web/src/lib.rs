@@ -2,6 +2,11 @@
 //!
 //! This crate provides a browser-compatible implementation of RAG
 //! using the WebGPU API.
+//!
+//! ## Slang Shader Sources
+//!
+//! All shader sources are exposed via `get_*_shader_source()` functions.
+//! JavaScript should compile these with slang-wasm at runtime.
 
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -13,6 +18,84 @@ pub mod demos;
 pub use types::*;
 pub use render::*;
 pub use demos::*;
+
+// ============================================================================
+// Slang Shader Source Exports
+// ============================================================================
+// These functions expose RAG's Slang shader sources to JavaScript.
+// JavaScript uses slang-wasm to compile these to WGSL at runtime.
+
+/// Get the vertex_color_2d shader source (Slang)
+#[wasm_bindgen]
+pub fn get_vertex_color_2d_shader() -> String {
+    rag::shaders::VERTEX_COLOR_2D.to_string()
+}
+
+/// Get the triangle shader source (Slang)
+#[wasm_bindgen]
+pub fn get_triangle_shader() -> String {
+    rag::shaders::TRIANGLE.to_string()
+}
+
+/// Get the digital clock shader source (Slang)
+#[wasm_bindgen]
+pub fn get_digital_clock_shader() -> String {
+    rag::shaders::DIGITAL_CLOCK.to_string()
+}
+
+/// Get the plasma shader source (Slang)
+#[wasm_bindgen]
+pub fn get_plasma_shader() -> String {
+    rag::shaders::PLASMA.to_string()
+}
+
+/// Get the gradient shader source (Slang)
+#[wasm_bindgen]
+pub fn get_gradient_shader() -> String {
+    rag::shaders::GRADIENT.to_string()
+}
+
+/// Get the mandelbrot shader source (Slang)
+#[wasm_bindgen]
+pub fn get_mandelbrot_shader() -> String {
+    rag::shaders::MANDELBROT.to_string()
+}
+
+/// Get the tunnel shader source (Slang)
+#[wasm_bindgen]
+pub fn get_tunnel_shader() -> String {
+    rag::shaders::TUNNEL.to_string()
+}
+
+/// Get the starfield shader source (Slang)
+#[wasm_bindgen]
+pub fn get_starfield_shader() -> String {
+    rag::shaders::STARFIELD.to_string()
+}
+
+/// Get the particles shader source (Slang)
+#[wasm_bindgen]
+pub fn get_particles_shader() -> String {
+    rag::shaders::PARTICLES.to_string()
+}
+
+/// Get the spinning cube shader source (Slang)
+#[wasm_bindgen]
+pub fn get_spinning_cube_shader() -> String {
+    rag::shaders::SPINNING_CUBE.to_string()
+}
+
+/// Get the metaballs shader source (Slang)
+#[wasm_bindgen]
+pub fn get_metaballs_shader() -> String {
+    rag::shaders::METABALLS.to_string()
+}
+
+/// Get the checkerboard shader source (Slang)
+#[wasm_bindgen]
+pub fn get_checkerboard_shader() -> String {
+    rag::shaders::CHECKERBOARD.to_string()
+}
 
 /// Initialize panic hook and logging for better error messages
 pub fn init() {

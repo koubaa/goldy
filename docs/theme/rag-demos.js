@@ -1,403 +1,23 @@
 // RAG Interactive Demo Loader
 // Loads WebGPU-based examples into canvas elements
-// Uses slang-wasm to compile Slang shaders to WGSL at runtime
+//
+// SLANG-ONLY ARCHITECTURE:
+// - All shaders are written in Slang (single source of truth in rag::shaders)
+// - Shader sources are exported from rag-web via wasm-bindgen
+// - slang-wasm compiles Slang to WGSL at runtime in the browser
+// - No embedded shaders or fallbacks - everything flows from Rust
 
-// ============================================================================
-// Slang Shader Sources (embedded from rag/shaders/*.slang)
-// ============================================================================
-const SLANG_SHADERS = {
-    vertex_color_2d: `
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
-}
-`,
-
-    triangle: `
-struct VertexOutput {
-    float4 position : SV_Position;
-    float3 color : COLOR;
-};
-
-static const float2 positions[3] = {
-    float2(0.0, 0.5),
-    float2(-0.5, -0.5),
-    float2(0.5, -0.5)
-};
-
-static const float3 colors[3] = {
-    float3(1.0, 0.0, 0.0),
-    float3(0.0, 1.0, 0.0),
-    float3(0.0, 0.0, 1.0)
-};
-
-[shader("vertex")]
-VertexOutput vs_main(uint idx : SV_VertexID) {
-    VertexOutput output;
-    output.position = float4(positions[idx], 0.0, 1.0);
-    output.color = colors[idx];
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return float4(input.color, 1.0);
-}
-`,
-
-    plasma: `
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-
-// Uniform buffer for time - Slang generates @group(0) @binding(0)
-[[vk::binding(0, 0)]]
-cbuffer TimeBuffer {
-    float time;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    float2 uv = input.uv * 4.0;
-    float t = time;
-    
-    float v = sin(uv.x + t);
-    v += sin(uv.y + t);
-    v += sin(uv.x + uv.y + t);
-    
-    float cx = uv.x + 0.5 * sin(t / 3.0);
-    float cy = uv.y + 0.5 * cos(t / 2.0);
-    v += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
-    
-    v = v / 2.0;
-    
-    float r = sin(v * 3.14159);
-    float g = sin(v * 3.14159 + 2.094);
-    float b = sin(v * 3.14159 + 4.188);
-    
-    return float4(r * 0.5 + 0.5, g * 0.5 + 0.5, b * 0.5 + 0.5, 1.0);
-}
-`,
-
-    digital_clock: `
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
-}
-`,
-
-    mandelbrot: `
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-
-// Uniform buffer for mandelbrot parameters
-[[vk::binding(0, 0)]]
-cbuffer Uniforms {
-    float2 center;
-    float zoom;
-    float max_iter;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
-}
-
-float3 hsv_to_rgb(float h, float s, float v) {
-    float c = v * s;
-    float x = c * (1.0 - abs(fmod(h * 6.0, 2.0) - 1.0));
-    float m = v - c;
-    
-    float3 rgb;
-    int hi = int(h * 6.0) % 6;
-    if (hi == 0) rgb = float3(c, x, 0.0);
-    else if (hi == 1) rgb = float3(x, c, 0.0);
-    else if (hi == 2) rgb = float3(0.0, c, x);
-    else if (hi == 3) rgb = float3(0.0, x, c);
-    else if (hi == 4) rgb = float3(x, 0.0, c);
-    else rgb = float3(c, 0.0, x);
-    
-    return rgb + float3(m, m, m);
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    float aspect = 16.0 / 9.0;
-    float2 c = center + (input.uv - 0.5) * float2(aspect, 1.0) * 3.0 / zoom;
-    
-    float2 z = float2(0.0, 0.0);
-    float iter = 0.0;
-    
-    for (float i = 0.0; i < max_iter; i += 1.0) {
-        if (dot(z, z) > 4.0) break;
-        z = float2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
-        iter = i;
-    }
-    
-    if (iter >= max_iter - 1.0) {
-        return float4(0.0, 0.0, 0.0, 1.0);
-    }
-    
-    float smooth_iter = iter - log2(log2(dot(z, z))) + 4.0;
-    float hue = smooth_iter / 50.0;
-    float3 color = hsv_to_rgb(fmod(hue, 1.0), 0.8, 1.0);
-    
-    return float4(color, 1.0);
-}
-`,
-
-    gradient: `
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-
-[[vk::binding(0, 0)]]
-cbuffer TimeBuffer {
-    float time;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    float2 uv = input.uv;
-    float t = time * 0.5;
-    
-    float angle1 = t;
-    float angle2 = t * 0.7 + 1.0;
-    float angle3 = t * 0.3 + 2.0;
-    
-    float d1 = dot(uv - 0.5, float2(cos(angle1), sin(angle1)));
-    float d2 = dot(uv - 0.5, float2(cos(angle2), sin(angle2)));
-    float d3 = dot(uv - 0.5, float2(cos(angle3), sin(angle3)));
-    
-    float3 c1 = float3(0.2, 0.4, 0.8) * (d1 + 0.5);
-    float3 c2 = float3(0.8, 0.2, 0.5) * (d2 + 0.5);
-    float3 c3 = float3(0.3, 0.8, 0.4) * (d3 + 0.5);
-    
-    float3 color = c1 + c2 + c3;
-    color = color / (color + 1.0);
-    
-    return float4(color, 1.0);
-}
-`,
-
-    tunnel: `
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-
-[[vk::binding(0, 0)]]
-cbuffer TimeBuffer {
-    float time;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    float2 uv = (input.uv - 0.5) * 2.0;
-    float t = time;
-    
-    float dist = length(uv);
-    float angle = atan2(uv.y, uv.x);
-    
-    float tunnel_depth = 1.0 / (dist + 0.1);
-    float tunnel_angle = angle / 3.14159 + t * 0.2;
-    
-    float tx = tunnel_angle * 4.0;
-    float ty = tunnel_depth - t * 2.0;
-    
-    float checker = floor(tx) + floor(ty);
-    bool is_white = fmod(checker, 2.0) == 0.0;
-    
-    float depth_color = 1.0 - dist * 0.5;
-    float3 color;
-    
-    if (is_white) {
-        color = float3(0.8, 0.2, 0.4) * depth_color;
-    } else {
-        color = float3(0.2, 0.4, 0.8) * depth_color;
-    }
-    
-    color += float3(0.3, 0.5, 1.0) * (1.0 - dist) * (1.0 - dist);
-    color *= 1.0 - dist * 0.3;
-    
-    return float4(color, 1.0);
-}
-`,
-
-    starfield: `
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
-}
-`,
-
-    particles: `
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
-}
-`,
-
-    spinning_cube: `
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
-}
-`
-};
-
-// Map demo types to shader sources
-const DEMO_SHADER_MAP = {
-    'TriangleDemo': 'triangle',
-    'PlasmaDemo': 'plasma',
-    'DigitalClockDemo': 'digital_clock',
-    'MandelbrotDemo': 'mandelbrot',
-    'GradientDemo': 'gradient',
-    'TunnelDemo': 'tunnel',
-    'StarfieldDemo': 'starfield',
-    'ParticlesDemo': 'particles',
-    'SpinningCubeDemo': 'spinning_cube'
+// Map demo types to shader getter function names in the WASM module
+const DEMO_SHADER_GETTERS = {
+    'TriangleDemo': 'get_triangle_shader',
+    'PlasmaDemo': 'get_plasma_shader',
+    'DigitalClockDemo': 'get_digital_clock_shader',
+    'MandelbrotDemo': 'get_mandelbrot_shader',
+    'GradientDemo': 'get_gradient_shader',
+    'TunnelDemo': 'get_tunnel_shader',
+    'StarfieldDemo': 'get_starfield_shader',
+    'ParticlesDemo': 'get_particles_shader',
+    'SpinningCubeDemo': 'get_spinning_cube_shader'
 };
 
 // ============================================================================
@@ -529,33 +149,39 @@ function compileSlangToWgsl(slangSource, vertexEntry = 'vs_main', fragmentEntry 
 // Cache for compiled shaders
 const compiledShaderCache = {};
 
-async function getCompiledShader(demoType) {
-    const shaderName = DEMO_SHADER_MAP[demoType];
-    if (!shaderName) {
-        console.warn(`No shader mapping for demo type: ${demoType}`);
-        return null;
+// Get Slang source from WASM module and compile to WGSL
+async function getCompiledShader(demoType, wasmModule) {
+    const getterName = DEMO_SHADER_GETTERS[demoType];
+    if (!getterName) {
+        throw new Error(`No shader getter mapping for demo type: ${demoType}`);
     }
     
     // Check cache
-    if (compiledShaderCache[shaderName]) {
-        return compiledShaderCache[shaderName];
+    if (compiledShaderCache[demoType]) {
+        return compiledShaderCache[demoType];
     }
     
-    // Get Slang source
-    const slangSource = SLANG_SHADERS[shaderName];
-    if (!slangSource) {
-        console.warn(`No Slang shader found for: ${shaderName}`);
-        return null;
+    // Get Slang source from WASM module
+    const getterFn = wasmModule[getterName];
+    if (!getterFn) {
+        throw new Error(`Shader getter function '${getterName}' not found in WASM module`);
     }
+    
+    const slangSource = getterFn();
+    if (!slangSource) {
+        throw new Error(`No Slang shader returned for: ${demoType}`);
+    }
+    
+    console.log(`Got Slang shader for ${demoType} from WASM (${slangSource.length} chars)`);
     
     try {
         const compiled = compileSlangToWgsl(slangSource);
-        compiledShaderCache[shaderName] = compiled;
-        console.log(`Compiled shader '${shaderName}' from Slang to WGSL`);
+        compiledShaderCache[demoType] = compiled;
+        console.log(`Compiled shader for '${demoType}' from Slang to WGSL`);
         return compiled;
     } catch (e) {
-        console.error(`Failed to compile shader '${shaderName}':`, e);
-        return null;
+        console.error(`Failed to compile shader for '${demoType}':`, e);
+        throw e;
     }
 }
 
@@ -603,20 +229,16 @@ class RagDemo {
             await wasm.default();
             console.timeEnd(`⏱️ ${this.demoClass}: 2. wasm.default() (WASM instantiation)`);
             
-            // Compile shader from Slang - REQUIRED
+            // Get Slang source from WASM and compile to WGSL - REQUIRED
             console.time(`⏱️ ${this.demoClass}: 3. getCompiledShader (Slang→WGSL)`);
-            const wgslShader = await getCompiledShader(this.demoClass);
+            const wgslShader = await getCompiledShader(this.demoClass, wasm);
             console.timeEnd(`⏱️ ${this.demoClass}: 3. getCompiledShader (Slang→WGSL)`);
-            
-            if (!wgslShader) {
-                throw new Error(`No Slang shader found for ${this.demoClass}`);
-            }
             
             // Create the demo using factory function with compiled WGSL
             const factoryName = 'create_' + this.demoClass.replace(/([A-Z])/g, '_$1').toLowerCase().slice(1);
             
             console.time(`⏱️ ${this.demoClass}: 4. create demo (WebGPU setup)`);
-            this.demo = await wasm[factoryName](this.canvasId, wgslShader.vertex, wgslShader.fragment);
+            this.demo = await wasm[factoryName](this.canvasId, wgslShader.combined);
             console.log(`Created ${this.demoClass} with Slang-compiled shader`);
             console.timeEnd(`⏱️ ${this.demoClass}: 4. create demo (WebGPU setup)`);
             
@@ -795,8 +417,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // Export for potential external use
 window.RAG = {
-    SLANG_SHADERS,
-    DEMO_SHADER_MAP,
+    DEMO_SHADER_GETTERS,
     initSlangCompiler,
     compileSlangToWgsl,
     getCompiledShader,

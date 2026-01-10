@@ -16,6 +16,7 @@ pub mod backend;
 pub mod device;
 pub mod buffer;
 pub mod shader;
+pub mod shaders;
 pub mod pipeline;
 pub mod encoder;
 pub mod frame;

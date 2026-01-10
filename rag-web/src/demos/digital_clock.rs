@@ -3,9 +3,8 @@
 //! This demonstrates that the same vertex generation and shader code
 //! works on both native (Vulkan) and web (WebGPU) platforms.
 //!
-//! Supports two modes:
-//! 1. Embedded WGSL shader (fallback)
-//! 2. Slang-compiled WGSL passed from JavaScript
+//! Requires Slang shader compiled via slang-wasm in JavaScript.
+//! The compiled shader is passed to create_digital_clock_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
@@ -17,33 +16,6 @@ use rag::examples::digital_clock::{
     generate_clock_vertices,
 };
 
-// Fallback WGSL shader - equivalent to the Slang SHADER_SOURCE
-// Used when Slang compilation is not available
-const CLOCK_SHADER_FALLBACK: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) color: vec4<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-}
-
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
-    var output: VertexOutput;
-    output.position = vec4<f32>(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return input.color;
-}
-"#;
-
 #[wasm_bindgen]
 pub struct DigitalClockDemo {
     renderer: WebRenderer,
@@ -54,19 +26,24 @@ pub struct DigitalClockDemo {
     height: u32,
 }
 
-async fn create_digital_clock_demo_internal(canvas_id: &str, wgsl_source: &str) -> Result<DigitalClockDemo, String> {
+/// Create digital clock demo with Slang-compiled shader from JavaScript
+#[wasm_bindgen]
+pub async fn create_digital_clock_demo(canvas_id: &str, compiled_shader: &str) -> Result<DigitalClockDemo, JsValue> {
+    init();
+    
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
     let width = canvas.width();
     let height = canvas.height();
     
-    let renderer = WebRenderer::new(canvas).await?;
+    let renderer = WebRenderer::new(canvas).await
+        .map_err(|e| JsValue::from_str(&e))?;
 
     let device = renderer.device();
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Clock Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
     // Vertex layout matching ClockVertex from shared code
@@ -135,31 +112,12 @@ async fn create_digital_clock_demo_internal(canvas_id: &str, wgsl_source: &str) 
     })
 }
 
-/// Create digital clock demo with embedded fallback shader
-#[wasm_bindgen]
-pub async fn create_digital_clock_demo(canvas_id: &str) -> Result<DigitalClockDemo, JsValue> {
-    init();
-    create_digital_clock_demo_internal(canvas_id, CLOCK_SHADER_FALLBACK)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// Create digital clock demo with Slang-compiled WGSL shader from JavaScript
-#[wasm_bindgen]
-pub async fn create_digital_clock_demo_with_shader(canvas_id: &str, wgsl_source: &str) -> Result<DigitalClockDemo, JsValue> {
-    init();
-    create_digital_clock_demo_internal(canvas_id, wgsl_source)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
 #[wasm_bindgen]
 impl DigitalClockDemo {
     /// Render one frame
     #[wasm_bindgen]
     pub fn render(&self) -> Result<(), JsValue> {
         // Get current time from browser
-        let window = web_sys::window().unwrap();
         let date = js_sys::Date::new_0();
         let hours = date.get_hours();
         let minutes = date.get_minutes();
@@ -225,8 +183,6 @@ impl DigitalClockDemo {
     /// Toggle pause state
     #[wasm_bindgen]
     pub fn toggle_pause(&mut self) {
-        // For real-time clock, just toggle the paused flag
-        // (the elapsed time tracking in ClockState is for stopwatch mode)
         self.clock_state.paused = !self.clock_state.paused;
     }
     
