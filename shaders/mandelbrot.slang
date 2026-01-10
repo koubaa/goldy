@@ -1,30 +1,36 @@
 // Interactive Mandelbrot fractal explorer
-// Uses zoom and center uniforms for navigation
+// Uses uniform buffer for center and zoom
 
 struct VertexInput {
     float2 position : POSITION;
-    float2 center : TEXCOORD0;
-    float zoom : TEXCOORD1;
-    float2 uv : TEXCOORD2;
+    float2 uv : TEXCOORD0;
 };
 
 struct VertexOutput {
     float4 position : SV_Position;
-    float2 complex_coord : TEXCOORD0;
+    float2 uv : TEXCOORD0;
+};
+
+// Uniform buffer for view parameters (updated on input)
+[[vk::binding(0, 0)]]
+cbuffer Uniforms {
+    float2 center;
+    float zoom;
+    float _padding;  // Align to 16 bytes
 };
 
 [shader("vertex")]
 VertexOutput vs_main(VertexInput input) {
     VertexOutput output;
     output.position = float4(input.position, 0.0, 1.0);
-    // Map UV to complex plane around center with zoom
-    output.complex_coord = input.center + (input.uv - 0.5) * 4.0 / input.zoom;
+    output.uv = input.uv;
     return output;
 }
 
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
-    float2 c = input.complex_coord;
+    // Map UV to complex plane around center with zoom
+    float2 c = center + (input.uv - 0.5) * 4.0 / zoom;
     float2 z = float2(0.0, 0.0);
     uint i = 0;
     const uint max_iter = 256;
@@ -47,4 +53,3 @@ float4 fs_main(VertexOutput input) : SV_Target {
     
     return float4(r, g, b, 1.0);
 }
-

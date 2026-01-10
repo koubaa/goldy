@@ -1,14 +1,13 @@
 //! Plasma example - classic demoscene plasma effect.
 //!
-//! Demonstrates complex fragment shader math with time animation.
+//! Demonstrates uniform buffers with bind groups for time animation.
 //!
 //! Run with: cargo run --example plasma
 
 use rag::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
-    VertexBufferLayout, VertexAttribute, VertexFormat,
-    shaders,
+    BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding, BufferUsage,
+    Color, CommandEncoder, DeviceType, Surface, Instance, RenderPipeline, RenderPipelineDesc,
+    ShaderModule, TextureFormat, Vertex2DUv, FULLSCREEN_QUAD, shaders,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,36 +19,11 @@ use winit::{
     window::{Window, WindowId},
 };
 
+/// Uniform buffer data (must match shader cbuffer layout)
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct PlasmaVertex {
-    position: [f32; 2],
-    uv: [f32; 2],
+struct Uniforms {
     time: f32,
-}
-
-impl PlasmaVertex {
-    fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute { location: 0, format: VertexFormat::Float32x2, offset: 0 },
-                VertexAttribute { location: 1, format: VertexFormat::Float32x2, offset: 8 },
-                VertexAttribute { location: 2, format: VertexFormat::Float32, offset: 16 },
-            ],
-        }
-    }
-}
-
-fn create_quad(time: f32) -> [PlasmaVertex; 6] {
-    [
-        PlasmaVertex { position: [-1.0, -1.0], uv: [0.0, 1.0], time },
-        PlasmaVertex { position: [1.0, -1.0], uv: [1.0, 1.0], time },
-        PlasmaVertex { position: [1.0, 1.0], uv: [1.0, 0.0], time },
-        PlasmaVertex { position: [-1.0, -1.0], uv: [0.0, 1.0], time },
-        PlasmaVertex { position: [1.0, 1.0], uv: [1.0, 0.0], time },
-        PlasmaVertex { position: [-1.0, 1.0], uv: [0.0, 0.0], time },
-    ]
 }
 
 struct App {
@@ -57,77 +31,117 @@ struct App {
     device: Option<Arc<rag::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
+    bind_group_layout: Option<BindGroupLayout>,
+    bind_group: Option<BindGroup>,
+    uniform_buffer: Option<Buffer>,
+    vertex_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     start_time: Instant,
-    // Keep buffers alive for multiple frames to prevent destruction while GPU uses them
-    vertex_buffers: Vec<Buffer>,
 }
-
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            bind_group_layout: None,
+            bind_group: None,
+            uniform_buffer: None,
+            vertex_buffer: None,
+            window: None,
+            surface: None,
             start_time: Instant::now(),
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        
+        // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::PLASMA)?;
+        
+        // Create bind group layout for uniforms (binding 0)
+        let bind_group_layout = BindGroupLayout::new(&device, &[
+            BindGroupLayoutBinding::uniform_fragment(0),
+        ])?;
+        
+        // Create pipeline with bind group layout
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: PlasmaVertex::layout(),
+            vertex_layout: Vertex2DUv::layout(),
             target_format: TextureFormat::Bgra8UnormSrgb,
+            bind_group_layouts: &[&bind_group_layout],
             ..Default::default()
         })?;
+        
+        // Create static vertex buffer (fullscreen quad)
+        let vertex_buffer = Buffer::with_data(
+            device.as_ref(),
+            &FULLSCREEN_QUAD,
+            BufferUsage::VERTEX,
+        )?;
+        
+        // Create uniform buffer
+        let uniform_buffer = Buffer::new(
+            device.as_ref(),
+            std::mem::size_of::<Uniforms>() as u64,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+        )?;
+        
+        // Create bind group
+        let bind_group = BindGroup::new(&device, &bind_group_layout, &[
+            BufferBinding::new(0, &uniform_buffer),
+        ])?;
+        
         let surface = Surface::new(device.clone(), window.as_ref())?;
+        
         self.device = Some(device);
         self.shader = Some(shader);
+        self.bind_group_layout = Some(bind_group_layout);
         self.pipeline = Some(pipeline);
+        self.vertex_buffer = Some(vertex_buffer);
+        self.uniform_buffer = Some(uniform_buffer);
+        self.bind_group = Some(bind_group);
         self.surface = Some(surface);
+        
         Ok(())
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let time = self.start_time.elapsed().as_secs_f32();
-
-        let vertices = create_quad(time);
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
-
-        // Acquire frame - this waits for the oldest in-flight frame to complete
-        let frame = surface.acquire()?;
+        let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
+        let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
+        let bind_group = self.bind_group.as_ref().unwrap();
         
-        // Now it's safe to drop the oldest buffer (GPU is done with it)
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
+        // Update uniform buffer with current time
+        let time = self.start_time.elapsed().as_secs_f32();
+        let uniforms = Uniforms { time };
+        uniform_buffer.write_data(0, &[uniforms])?;
+
+        // Acquire frame
+        let frame = surface.acquire()?;
         
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.set_bind_group(0, bind_group);
+            pass.set_vertex_buffer(0, vertex_buffer);
             pass.draw(0..6, 0..1);
         }
 
         frame.render(encoder)?;
         surface.present(frame)?;
-        
-        // Keep the buffer alive until the GPU is done with it
-        self.vertex_buffers.push(vertex_buffer);
         
         Ok(())
     }
@@ -144,11 +158,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("RAG - Plasma Effect (Surface API)")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("RAG - Plasma Effect (Uniform Buffers)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -159,7 +177,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { event_loop.exit(); }
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
@@ -180,10 +200,9 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("RAG Plasma Example - Press Escape to exit");
+    println!("RAG Plasma Example (Uniform Buffers) - Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }
-

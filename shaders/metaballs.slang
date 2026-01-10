@@ -1,16 +1,20 @@
 // Animated metaballs effect
-// Uses distance field blending for smooth blob shapes
+// Uses uniform buffer for time animation
 
 struct VertexInput {
     float2 position : POSITION;
     float2 uv : TEXCOORD0;
-    float time : TEXCOORD1;
 };
 
 struct VertexOutput {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
-    float time : TEXCOORD1;
+};
+
+// Uniform buffer for time (updated each frame)
+[[vk::binding(0, 0)]]
+cbuffer Uniforms {
+    float time;
 };
 
 [shader("vertex")]
@@ -18,7 +22,6 @@ VertexOutput vs_main(VertexInput input) {
     VertexOutput output;
     output.position = float4(input.position, 0.0, 1.0);
     output.uv = input.uv;
-    output.time = input.time;
     return output;
 }
 
@@ -30,7 +33,7 @@ float metaball(float2 p, float2 center, float radius) {
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
-    float t = input.time;
+    float t = time;
     
     // Moving metaball centers
     float2 c1 = float2(sin(t * 1.1) * 0.5, cos(t * 0.9) * 0.5);
@@ -62,4 +65,3 @@ float4 fs_main(VertexOutput input) : SV_Target {
         return float4(glow * 0.2, glow * 0.3, glow * 0.5, 1.0);
     }
 }
-

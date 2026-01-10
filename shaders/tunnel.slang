@@ -1,16 +1,20 @@
 // Classic demoscene tunnel effect
-// Uses polar coordinate transformation with time animation
+// Uses uniform buffer for time animation
 
 struct VertexInput {
     float2 position : POSITION;
     float2 uv : TEXCOORD0;
-    float time : TEXCOORD1;
 };
 
 struct VertexOutput {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
-    float time : TEXCOORD1;
+};
+
+// Uniform buffer for time (updated each frame)
+[[vk::binding(0, 0)]]
+cbuffer Uniforms {
+    float time;
 };
 
 [shader("vertex")]
@@ -18,14 +22,13 @@ VertexOutput vs_main(VertexInput input) {
     VertexOutput output;
     output.position = float4(input.position, 0.0, 1.0);
     output.uv = input.uv;
-    output.time = input.time;
     return output;
 }
 
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
-    float t = input.time;
+    float t = time;
     
     // Polar coordinates
     float dist = length(uv);
@@ -61,4 +64,3 @@ float4 fs_main(VertexOutput input) : SV_Target {
     
     return float4(color, 1.0);
 }
-

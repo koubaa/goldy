@@ -112,6 +112,7 @@ impl App {
             vertex_layout: Vertex2D::layout(),
             target_format: TextureFormat::Bgra8UnormSrgb,
             topology: PrimitiveTopology::TriangleList,
+            ..Default::default()
         })?;
         let surface = Surface::new(device.clone(), window.as_ref())?;
         self.device = Some(device);

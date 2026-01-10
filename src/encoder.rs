@@ -1,6 +1,7 @@
 //! Command encoding for GPU operations.
 
 use crate::backend::RenderCommand;
+use crate::bind_group::BindGroup;
 use crate::buffer::Buffer;
 use crate::pipeline::RenderPipeline;
 use crate::types::Color;
@@ -71,6 +72,17 @@ impl<'a> RenderPass<'a> {
             slot,
             buffer: buffer.handle,
             offset,
+        });
+    }
+
+    /// Set a bind group for shader resources (uniforms, storage buffers).
+    ///
+    /// The `index` corresponds to the bind group set in the shader
+    /// (e.g., `[[vk::binding(0, 0)]]` uses index 0).
+    pub fn set_bind_group(&mut self, index: u32, bind_group: &BindGroup) {
+        self.encoder.commands.push(RenderCommand::SetBindGroup {
+            index,
+            bind_group: bind_group.handle,
         });
     }
 
