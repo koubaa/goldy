@@ -6,7 +6,7 @@
 //! Run with: cargo run --example digital_clock
 
 use rag::{
-    Buffer, BufferUsage, CommandEncoder, DeviceType, FrameOutput,
+    Buffer, BufferUsage, CommandEncoder, DeviceType, RenderTarget,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     examples::digital_clock::{
         ClockVertex, ClockState, TimeData, SHADER_SOURCE,
@@ -114,7 +114,7 @@ impl App {
         let vertex_buffer = Buffer::with_bytes(device, vertex_data, BufferUsage::VERTEX)?;
 
         // Render
-        let frame = FrameOutput::new(device, width, height, TextureFormat::Rgba8Unorm);
+        let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)?;
         
         let mut encoder = CommandEncoder::new();
         {
@@ -125,7 +125,8 @@ impl App {
             pass.draw(0..vertices.len() as u32, 0..1);
         }
 
-        let output = frame.render(encoder)?;
+        target.render(encoder)?;
+        let output = target.read_to_cpu()?;
 
         // Display in window using softbuffer
         let surface = self.surface.as_mut().unwrap();

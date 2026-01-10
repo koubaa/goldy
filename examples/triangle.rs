@@ -3,7 +3,7 @@
 //! Run with: cargo run --example triangle
 
 use rag::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, FrameOutput,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, RenderTarget,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat, Vertex2D,
     shader::builtins,
 };
@@ -98,8 +98,8 @@ impl App {
             a: 1.0,
         };
 
-        // Create frame output and render
-        let frame = FrameOutput::new(device, width, height, TextureFormat::Rgba8Unorm);
+        // Create render target and render
+        let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)?;
         
         let mut encoder = CommandEncoder::new();
         {
@@ -110,7 +110,8 @@ impl App {
             pass.draw(0..3, 0..1);
         }
 
-        let output = frame.render(encoder)?;
+        target.render(encoder)?;
+        let output = target.read_to_cpu()?;
 
         // Display in window using softbuffer
         let surface = self.surface.as_mut().unwrap();

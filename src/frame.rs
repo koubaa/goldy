@@ -1,4 +1,8 @@
 //! Frame output for rendering results.
+//!
+//! **Deprecated**: Use [`RenderTarget`](crate::RenderTarget) instead.
+//! `FrameOutput` always copies to CPU after rendering, while `RenderTarget`
+//! keeps the data on GPU until explicitly requested.
 
 use crate::backend::{GpuBackend, RenderCommand};
 use crate::device::Device;
@@ -9,7 +13,31 @@ use std::sync::{Arc, Mutex};
 
 /// Frame output for offscreen rendering.
 ///
-/// Use this to render to a CPU-accessible buffer.
+/// **Deprecated**: Use [`RenderTarget`](crate::RenderTarget) instead.
+///
+/// `FrameOutput` always copies rendered pixels to CPU memory, which can be
+/// inefficient when you don't need the data on CPU (e.g., for video encoding
+/// or window display).
+///
+/// # Migration
+///
+/// ```rust,no_run
+/// # use rag::{Device, TextureFormat, CommandEncoder, Color};
+/// # fn example(device: &Device) -> anyhow::Result<()> {
+/// // Old way (deprecated):
+/// // let frame = FrameOutput::new(device, 800, 600, TextureFormat::Rgba8Unorm);
+/// // let output = frame.render(encoder)?; // Always copies to CPU
+///
+/// // New way:
+/// use rag::RenderTarget;
+/// let target = RenderTarget::new(device, 800, 600, TextureFormat::Rgba8Unorm)?;
+/// # let encoder = CommandEncoder::new();
+/// target.render(encoder)?;              // Stays on GPU
+/// let output = target.read_to_cpu()?;   // Explicit readback only when needed
+/// # Ok(())
+/// # }
+/// ```
+#[deprecated(since = "0.2.0", note = "Use RenderTarget instead - it keeps data on GPU until explicitly requested")]
 pub struct FrameOutput {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     device_handle: u64,

@@ -108,6 +108,21 @@ impl Device {
     pub fn is_valid(&self) -> bool {
         self.backend.lock().unwrap().is_device_valid(self.handle)
     }
+
+    /// Create a device from a backend for testing purposes.
+    #[cfg(test)]
+    pub(crate) fn from_backend(backend: Box<dyn GpuBackend>) -> anyhow::Result<Self> {
+        let backend = Arc::new(Mutex::new(backend));
+        let handle = {
+            let mut b = backend.lock().unwrap();
+            b.create_device(0)?
+        };
+        Ok(Self {
+            backend,
+            handle,
+            adapter_id: 0,
+        })
+    }
 }
 
 impl Drop for Device {

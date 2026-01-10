@@ -5,7 +5,7 @@
 //! Run with: cargo run --example spinning_cube
 
 use rag::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, FrameOutput,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, RenderTarget,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     Vertex2D, PrimitiveTopology,
 };
@@ -129,7 +129,7 @@ impl App {
         let pipeline = self.pipeline.as_ref().unwrap();
         let vertex_buffer = Buffer::with_data(device, &vertices, BufferUsage::VERTEX)?;
 
-        let frame = FrameOutput::new(device, width, height, TextureFormat::Rgba8Unorm);
+        let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)?;
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -139,7 +139,8 @@ impl App {
             pass.draw(0..vertices.len() as u32, 0..1);
         }
 
-        let output = frame.render(encoder)?;
+        target.render(encoder)?;
+        let output = target.read_to_cpu()?;
         let surface = self.surface.as_mut().unwrap();
         surface.resize(NonZeroU32::new(width).unwrap(), NonZeroU32::new(height).unwrap())
             .map_err(|e| anyhow::anyhow!("{}", e))?;

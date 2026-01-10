@@ -1,8 +1,8 @@
-# RAG: Rust Abstract GPU
+# RAG: Rust Abstract Graphics
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A modern Rust GPU library that deliberately sheds legacy baggage. RAG targets only modern GPU APIs (Vulkan 1.4+, Metal 2+, DX12) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
+A modern Rust Graphics library that deliberately sheds legacy baggage. RAG targets only modern GPU APIs (Vulkan 1.4+, Metal 2+, DX12) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
 
 ## Quick Example
 
@@ -76,6 +76,17 @@ RAG is inspired by Sebastian Aaltonen's ["No Graphics API"](https://www.sebastia
 - Use bindless descriptors (no descriptor sets)
 - Assume coherent caches (simpler synchronization)
 - Provide a dramatically simpler API
+
+RAG is also inspired by Wayland
+
+RAG is also inspired by Ralph Levien's ["Requiem for piet-gpu-hal"](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html)
+
+RAG is also inspired by slang vision
+
+RAG is also inspired by WGPU https://gfx-rs.github.io/2019/03/06/wgpu.html
+
+RAG is also inspired by this paper: https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf
+
 
 Read more in [Design Philosophy](https://koubaa.github.io/rag/design/motivation.html).
 

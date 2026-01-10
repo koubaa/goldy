@@ -20,6 +20,7 @@ pub mod shaders;
 pub mod pipeline;
 pub mod encoder;
 pub mod frame;
+pub mod render_target;
 pub mod examples;
 
 // Slang compiler is only available on native targets (not WASM)
@@ -34,5 +35,7 @@ pub use buffer::Buffer;
 pub use shader::ShaderModule;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use encoder::{CommandEncoder, RenderPass};
+pub use render_target::RenderTarget;
+#[allow(deprecated)]
 pub use frame::FrameOutput;
 

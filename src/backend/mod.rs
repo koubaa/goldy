@@ -6,6 +6,9 @@
 #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
 pub mod vulkan;
 
+// Mock backend for testing (always available)
+pub mod mock;
+
 // WebGPU backend is currently native-only (uses native Slang compiler)
 // For browser WASM builds, use rag-web which uses wgpu directly with slang-wasm
 // #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
@@ -36,6 +39,7 @@ pub type ShaderHandle = u64;
 pub type PipelineHandle = u64;
 pub type BindGroupHandle = u64;
 pub type BindGroupLayoutHandle = u64;
+pub type RenderTargetHandle = u64;
 
 /// Render command for command buffer recording.
 #[derive(Debug, Clone)]
@@ -107,10 +111,27 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<PipelineHandle>;
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
-    // Rendering
+    // Rendering (legacy - use RenderTarget API instead)
     fn begin_frame(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<()>;
     fn execute_commands(&mut self, device: DeviceHandle, commands: &[RenderCommand]) -> Result<()>;
     fn end_frame(&mut self, device: DeviceHandle, output: &mut [u8]) -> Result<()>;
+
+    // RenderTarget API - GPU buffer stays on GPU, readback is optional
+    fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle>;
+    fn destroy_render_target(&mut self, target: RenderTargetHandle);
+    fn render_to_target(&mut self, device: DeviceHandle, target: RenderTargetHandle, commands: &[RenderCommand]) -> Result<()>;
+    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()>;
+}
+
+/// Trait for consuming render output.
+/// 
+/// Implementations can consume render targets in different ways:
+/// - CPU readback for encoding/streaming
+/// - Present to window surface
+/// - Pass to video encoder
+pub trait RenderConsumer {
+    /// Consume a render target.
+    fn consume(&mut self, backend: &mut dyn GpuBackend, target: RenderTargetHandle) -> Result<()>;
 }
 
 /// Bind group layout entry.
