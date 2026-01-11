@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 
 - **Not a Vulkan wrapper**: Each backend is native (Metal uses Metal idioms, not translated Vulkan)
 - **Not a WebGPU implementation**: Not bound by WebGPU spec committee
-- **Not targeting web browsers**: Interactive demos in this documentation use separate WebGPU tooling
+- **Not targeting web browsers**: Native GPU APIs only
 - **Not a compatibility layer**: Won't emulate missing features
 - **Not a standard**: Can break things, move fast, be opinionated
 

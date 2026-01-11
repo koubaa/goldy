@@ -1,12 +1,6 @@
 # Mandelbrot Explorer
 
-Interactive Mandelbrot fractal viewer with pan and zoom.
-
-<div class="rag-demo" data-canvas="mandelbrot-canvas" data-demo="MandelbrotDemo">
-    <canvas id="mandelbrot-canvas"></canvas>
-</div>
-
-*Interactive demo running via WebGPU. Use the native app for pan/zoom controls.*
+Mandelbrot fractal viewer with pan and zoom.
 
 ## Run It
 
@@ -27,7 +21,7 @@ cargo run --example mandelbrot --release
 ## What It Demonstrates
 
 - Complex math in fragment shader
-- Interactive parameter updates
+- User input-driven parameter updates
 - Per-pixel computation
 - Iteration-based coloring
 

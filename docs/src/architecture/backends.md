@@ -37,17 +37,6 @@ Each backend uses **native idioms**, not translation:
 
 **Key point**: MoltenVK must translate Vulkan → Metal, adding complexity. RAG's Metal backend would use Metal directly.
 
-## Interactive Documentation Demos
-
-The interactive demos embedded in this documentation use WebGPU via wgpu.
-This is **NOT a RAG backend** - it's separate tooling that:
-
-- Imports shared code from RAG (shaders, vertex types)
-- Compiles Slang shaders to WGSL via slang-wasm in the browser
-- Validates shader portability across native and web platforms
-
-RAG does not target web browsers as a platform. The demos exist purely to make the documentation interactive and to validate that the same Slang shader source works across platforms.
-
 ## Vulkan Backend
 
 The Vulkan backend uses modern Vulkan 1.3+ features:

@@ -13,8 +13,6 @@ default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/koubaa/rag"
 edit-url-template = "https://github.com/koubaa/rag/edit/main/docs/{path}"
-additional-css = ["theme/rag-demos.css"]
-additional-js = ["theme/rag-demos.js"]
 
 [output.html.fold]
 enable = true

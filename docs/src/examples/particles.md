@@ -2,12 +2,6 @@
 
 Rain and snow simulation using CPU-driven particles.
 
-<div class="rag-demo" data-canvas="particles-canvas" data-demo="ParticlesDemo">
-    <canvas id="particles-canvas"></canvas>
-</div>
-
-*Interactive demo running via WebGPU - particle rain effect.*
-
 ## Run It
 
 ```bash

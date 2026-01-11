@@ -1,7 +1,0 @@
-# WASM build output directory
-#
-# Build rag-web WASM:
-#   cd rag-web && wasm-pack build --target web --out-dir ../docs/src/wasm
-#
-# Copy slang-wasm (download from slang-wasm releases):
-#   cp slang-wasm.js slang-wasm.wasm docs/src/wasm/

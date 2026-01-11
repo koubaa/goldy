@@ -2,12 +2,6 @@
 
 Classic demoscene plasma effect using fragment shaders.
 
-<div class="rag-demo" data-canvas="plasma-canvas" data-demo="PlasmaDemo">
-    <canvas id="plasma-canvas"></canvas>
-</div>
-
-*Interactive demo running in your browser via WebGPU. Requires Chrome 113+, Edge 113+, or Firefox with WebGPU enabled.*
-
 ## Run It
 
 ```bash

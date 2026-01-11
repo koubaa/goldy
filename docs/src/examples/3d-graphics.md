@@ -8,10 +8,6 @@ RAG includes several examples demonstrating 3D rendering concepts.
 
 A wireframe cube rotating in 3D space.
 
-<div class="rag-demo" data-canvas="cube-canvas" data-demo="SpinningCubeDemo">
-    <canvas id="cube-canvas"></canvas>
-</div>
-
 ```bash
 cargo run --example spinning_cube --release
 ```
@@ -43,10 +39,6 @@ fn rotate_y(p: [f32; 3], angle: f32) -> [f32; 3] {
 
 Classic 3D starfield - flying forward through space.
 
-<div class="rag-demo" data-canvas="starfield-canvas" data-demo="StarfieldDemo">
-    <canvas id="starfield-canvas"></canvas>
-</div>
-
 ```bash
 cargo run --example starfield --release
 ```
@@ -69,10 +61,6 @@ let size = 0.005 + (1.0 - z) * 0.015;
 ## Tunnel
 
 Classic demoscene tunnel effect with checkerboard texture.
-
-<div class="rag-demo" data-canvas="tunnel-canvas" data-demo="TunnelDemo">
-    <canvas id="tunnel-canvas"></canvas>
-</div>
 
 ```bash
 cargo run --example tunnel --release

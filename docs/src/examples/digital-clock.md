@@ -1,12 +1,6 @@
 # Digital Clock Example
 
-A real-time 7-segment display clock with interactive controls.
-
-<div class="rag-demo" data-canvas="clock-canvas" data-demo="DigitalClockDemo">
-    <canvas id="clock-canvas"></canvas>
-</div>
-
-*Interactive demo running via WebGPU. Shows your current local time.*
+A real-time 7-segment display clock.
 
 ## Run It
 

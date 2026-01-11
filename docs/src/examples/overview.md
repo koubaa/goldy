@@ -1,12 +1,6 @@
 # Examples Overview
 
-RAG includes 20 interactive examples demonstrating various GPU rendering techniques. Many are available as interactive WebGPU demos embedded in these docs!
-
-<div class="rag-demo" data-canvas="gradient-canvas" data-demo="GradientDemo">
-    <canvas id="gradient-canvas"></canvas>
-</div>
-
-*Animated gradient demo running via WebGPU.*
+RAG includes 20 examples demonstrating various GPU rendering techniques.
 
 ## Running Examples
 
@@ -38,7 +32,7 @@ All examples support:
 | `metaballs` | Organic blob simulation | Distance fields, thresholding |
 | `starfield` | 3D starfield flythrough | Particle rendering, depth simulation |
 
-### Interactive
+### User Input
 
 | Example | Description | Controls |
 |---------|-------------|----------|
@@ -186,4 +180,4 @@ Pick an example that interests you:
 - [Triangle](./triangle.md) - Start here
 - [Digital Clock](./digital-clock.md) - More complex vertex generation
 - [Plasma](./plasma.md) - Fragment shader effects
-- [Mandelbrot](./mandelbrot.md) - Interactive exploration
+- [Mandelbrot](./mandelbrot.md) - Fractal exploration

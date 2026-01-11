@@ -2,12 +2,6 @@
 
 The simplest RAG example - a colored triangle.
 
-<div class="rag-demo" data-canvas="triangle-canvas" data-demo="TriangleDemo">
-    <canvas id="triangle-canvas"></canvas>
-</div>
-
-*Interactive demo running via WebGPU. Requires Chrome 113+, Edge 113+, or Firefox with WebGPU enabled.*
-
 ## Run It
 
 ```bash
