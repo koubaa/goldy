@@ -95,6 +95,17 @@ Read more in [Design Philosophy](https://koubaa.github.io/goldy/design/motivatio
 | Intel | Xe / Alchemist (2022+) |
 | Apple | M1 / A14 (2020+) |
 
+## Development
+
+Before submitting a PR, run the CI checks locally:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --no-default-features -- -D warnings
+cargo clippy --features vulkan -- -D warnings
+cargo test
+```
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.

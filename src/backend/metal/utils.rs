@@ -10,7 +10,10 @@ use crate::types::{
 };
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
-use mtl::{MTLCompareFunction, MTLIndexType, MTLPixelFormat, MTLPrimitiveType, MTLSamplerAddressMode, MTLSamplerMinMagFilter, MTLVertexFormat};
+use mtl::{
+    MTLCompareFunction, MTLIndexType, MTLPixelFormat, MTLPrimitiveType, MTLSamplerAddressMode,
+    MTLSamplerMinMagFilter, MTLVertexFormat,
+};
 
 /// Convert goldy TextureFormat to Metal MTLPixelFormat.
 pub fn format_to_mtl(format: TextureFormat) -> MTLPixelFormat {
@@ -119,4 +122,3 @@ pub fn mipmap_mode_to_mtl(mode: FilterMode) -> mtl::MTLSamplerMipFilter {
         FilterMode::Linear => mtl::MTLSamplerMipFilter::Linear,
     }
 }
-

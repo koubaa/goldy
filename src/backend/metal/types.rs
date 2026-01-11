@@ -4,11 +4,15 @@
 
 #![allow(dead_code)] // Some fields are for future use
 
+use super::super::{BindGroupLayoutEntry, BufferHandle, DeviceHandle};
 use crate::types::{DepthFormat, TextureFormat};
-use super::super::{DeviceHandle, BufferHandle, BindGroupLayoutEntry};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
-use mtl::{Buffer as MTLBuffer, CommandQueue, Device as MTLDevice, Library, Texture as MTLTexture, SamplerState, RenderPipelineState, ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState};
+use mtl::{
+    Buffer as MTLBuffer, CommandQueue, ComputePipelineState as MTLComputePipelineState,
+    DepthStencilState as MTLDepthStencilState, Device as MTLDevice, Library, RenderPipelineState,
+    SamplerState, Texture as MTLTexture,
+};
 
 /// A logical Metal device with associated resources.
 pub(crate) struct LogicalDevice {
@@ -69,7 +73,11 @@ pub(crate) struct BindGroupState {
 /// Individual binding within a bind group.
 #[derive(Clone)]
 pub(crate) enum BindingState {
-    Buffer { buffer: BufferHandle, offset: u64, size: u64 },
+    Buffer {
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    },
     Texture(super::super::TextureHandle),
     Sampler(super::super::SamplerHandle),
 }
@@ -122,4 +130,3 @@ pub(crate) struct SurfaceState {
 // Safety: Metal objects are thread-safe when properly synchronized
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
-

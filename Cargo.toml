@@ -8,6 +8,10 @@ repository = "https://github.com/koubaa/goldy"
 keywords = ["gpu", "graphics", "vulkan", "rendering"]
 categories = ["graphics", "rendering"]
 
+# Allow unexpected_cfgs for objc crate's deprecated cargo-clippy cfg checks
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }
+
 [dependencies]
 # Vulkan bindings (native only)
 ash = { version = "0.38", optional = true }

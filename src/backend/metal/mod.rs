@@ -8,6 +8,10 @@
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
 //! - `utils`: Format conversion and helpers
 
+// Allow deprecated cocoa crate items - we use them intentionally
+// The newer objc2 crate has API compatibility issues with CAMetalLayer
+#![allow(deprecated)]
+
 mod types;
 mod utils;
 
@@ -18,7 +22,7 @@ use types::{
 };
 use utils::{
     address_mode_to_mtl, compare_to_mtl, depth_format_to_mtl, filter_to_mtl, format_to_mtl,
-    index_format_to_mtl, mipmap_mode_to_mtl, topology_to_mtl, vertex_format_to_mtl,
+    index_format_to_mtl, mipmap_mode_to_mtl, vertex_format_to_mtl,
 };
 
 use super::*;
@@ -35,7 +39,7 @@ use std::collections::HashMap;
 use ::metal as mtl;
 use mtl::{
     Device as MTLDevice, Library, MTLClearColor, MTLLoadAction, MTLOrigin, MTLPixelFormat,
-    MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLSize, MTLStoreAction, MTLStorageMode,
+    MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLSize, MTLStorageMode, MTLStoreAction,
     MTLTextureUsage, RenderPassDescriptor, TextureDescriptor,
 };
 
@@ -142,7 +146,9 @@ impl MetalBackend {
         // Create Metal library from MSL
         let library = device
             .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
-            .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", entry_point, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to create Metal library for {}: {}", entry_point, e)
+            })?;
 
         Ok(library)
     }
@@ -366,10 +372,8 @@ impl GpuBackend for MetalBackend {
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
         if self.devices.remove(&device_handle).is_some() {
             // Clean up resources owned by this device
-            self.buffers
-                .retain(|_, b| b.device_handle != device_handle);
-            self.shaders
-                .retain(|_, s| s.device_handle != device_handle);
+            self.buffers.retain(|_, b| b.device_handle != device_handle);
+            self.shaders.retain(|_, s| s.device_handle != device_handle);
             self.pipelines
                 .retain(|_, p| p.device_handle != device_handle);
             self.compute_pipelines
@@ -431,7 +435,12 @@ impl GpuBackend for MetalBackend {
         self.buffers.remove(&buffer_handle);
     }
 
-    fn write_buffer(&mut self, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+    fn write_buffer(
+        &mut self,
+        buffer_handle: BufferHandle,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
         let buffer = self
             .buffers
             .get(&buffer_handle)
@@ -461,7 +470,11 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
-    fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
+    fn create_shader(
+        &mut self,
+        device_handle: DeviceHandle,
+        slang_source: &str,
+    ) -> Result<ShaderHandle> {
         self.create_shader_with_paths(device_handle, slang_source, &[])
     }
 
@@ -538,7 +551,11 @@ impl GpuBackend for MetalBackend {
         let bindings: Vec<BindingState> = entries
             .iter()
             .map(|e| match &e.resource {
-                BindingResource::Buffer { buffer, offset, size } => BindingState::Buffer {
+                BindingResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                } => BindingState::Buffer {
                     buffer: *buffer,
                     offset: *offset,
                     size: *size,
@@ -676,7 +693,7 @@ impl GpuBackend for MetalBackend {
             attr_desc.set_buffer_index(0);
         }
 
-        descriptor.set_vertex_descriptor(Some(&vertex_descriptor));
+        descriptor.set_vertex_descriptor(Some(vertex_descriptor));
 
         // Set depth format if depth stencil is enabled
         let depth_stencil_state = if let Some(ds) = depth_stencil {
@@ -687,7 +704,11 @@ impl GpuBackend for MetalBackend {
             ds_descriptor.set_depth_compare_function(compare_to_mtl(ds.depth_compare));
             ds_descriptor.set_depth_write_enabled(ds.depth_write_enabled);
 
-            Some(logical_device.device.new_depth_stencil_state(&ds_descriptor))
+            Some(
+                logical_device
+                    .device
+                    .new_depth_stencil_state(&ds_descriptor),
+            )
         } else {
             None
         };
@@ -830,7 +851,7 @@ impl GpuBackend for MetalBackend {
 
         // Create command buffer and encoder
         let command_buffer = logical_device.command_queue.new_command_buffer();
-        let encoder = command_buffer.new_render_command_encoder(&render_pass);
+        let encoder = command_buffer.new_render_command_encoder(render_pass);
 
         // Set viewport and scissor
         encoder.set_viewport(mtl::MTLViewport {
@@ -864,12 +885,20 @@ impl GpuBackend for MetalBackend {
                         }
                     }
                 }
-                RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
+                RenderCommand::SetVertexBuffer {
+                    slot,
+                    buffer,
+                    offset,
+                } => {
                     if let Some(buf) = self.buffers.get(buffer) {
                         encoder.set_vertex_buffer(*slot as u64, Some(&buf.buffer), *offset);
                     }
                 }
-                RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                RenderCommand::SetIndexBuffer {
+                    buffer,
+                    offset,
+                    format,
+                } => {
                     current_index_buffer = Some((*buffer, *offset, *format));
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
@@ -933,12 +962,15 @@ impl GpuBackend for MetalBackend {
                     first_instance,
                 } => {
                     if *first_instance != 0 || *base_vertex != 0 {
-                        tracing::warn!("Metal backend: first_instance/base_vertex != 0 not supported");
+                        tracing::warn!(
+                            "Metal backend: first_instance/base_vertex != 0 not supported"
+                        );
                     }
                     if let Some((buffer_handle, offset, format)) = current_index_buffer {
                         if let Some(buf) = self.buffers.get(&buffer_handle) {
                             let index_type = index_format_to_mtl(format);
-                            let index_offset = offset + (*first_index as u64 * format.size() as u64);
+                            let index_offset =
+                                offset + (*first_index as u64 * format.size() as u64);
                             encoder.draw_indexed_primitives_instanced(
                                 MTLPrimitiveType::Triangle,
                                 *index_count as u64,
@@ -1114,12 +1146,9 @@ impl GpuBackend for MetalBackend {
             },
         };
 
-        texture.texture.replace_region(
-            region,
-            0,
-            data.as_ptr() as *const _,
-            bytes_per_row as u64,
-        );
+        texture
+            .texture
+            .replace_region(region, 0, data.as_ptr() as *const _, bytes_per_row as u64);
 
         tracing::debug!(
             "Wrote {}x{} texture data ({} bytes)",
@@ -1303,7 +1332,7 @@ impl GpuBackend for MetalBackend {
 
         // Create command buffer and encoder
         let command_buffer = logical_device.command_queue.new_command_buffer();
-        let encoder = command_buffer.new_render_command_encoder(&render_pass);
+        let encoder = command_buffer.new_render_command_encoder(render_pass);
 
         // Set viewport and scissor
         encoder.set_viewport(mtl::MTLViewport {
@@ -1335,12 +1364,20 @@ impl GpuBackend for MetalBackend {
                         }
                     }
                 }
-                RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
+                RenderCommand::SetVertexBuffer {
+                    slot,
+                    buffer,
+                    offset,
+                } => {
                     if let Some(buf) = self.buffers.get(buffer) {
                         encoder.set_vertex_buffer(*slot as u64, Some(&buf.buffer), *offset);
                     }
                 }
-                RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                RenderCommand::SetIndexBuffer {
+                    buffer,
+                    offset,
+                    format,
+                } => {
                     current_index_buffer = Some((*buffer, *offset, *format));
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
@@ -1404,12 +1441,15 @@ impl GpuBackend for MetalBackend {
                     first_instance,
                 } => {
                     if *first_instance != 0 || *base_vertex != 0 {
-                        tracing::warn!("Metal backend: first_instance/base_vertex != 0 not supported");
+                        tracing::warn!(
+                            "Metal backend: first_instance/base_vertex != 0 not supported"
+                        );
                     }
                     if let Some((buffer_handle, offset, format)) = current_index_buffer {
                         if let Some(buf) = self.buffers.get(&buffer_handle) {
                             let index_type = index_format_to_mtl(format);
-                            let index_offset = offset + (*first_index as u64 * format.size() as u64);
+                            let index_offset =
+                                offset + (*first_index as u64 * format.size() as u64);
                             encoder.draw_indexed_primitives_instanced(
                                 MTLPrimitiveType::Triangle,
                                 *index_count as u64,
@@ -1427,7 +1467,8 @@ impl GpuBackend for MetalBackend {
         encoder.end_encoding();
 
         // Present drawable
-        command_buffer.present_drawable(unsafe { &mtl::MetalDrawable::from_ptr(drawable as *mut _) });
+        command_buffer
+            .present_drawable(unsafe { &mtl::MetalDrawable::from_ptr(drawable as *mut _) });
         command_buffer.commit();
 
         Ok(())
@@ -1556,7 +1597,11 @@ impl GpuBackend for MetalBackend {
                             match binding {
                                 BindingState::Buffer { buffer, offset, .. } => {
                                     if let Some(buf) = self.buffers.get(buffer) {
-                                        encoder.set_buffer(buffer_index, Some(&buf.buffer), *offset);
+                                        encoder.set_buffer(
+                                            buffer_index,
+                                            Some(&buf.buffer),
+                                            *offset,
+                                        );
                                     }
                                 }
                                 BindingState::Texture(tex_handle) => {

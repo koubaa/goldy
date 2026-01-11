@@ -378,7 +378,11 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     }
 
     // On Windows with dx12 feature, prefer DX12
-    #[cfg(all(feature = "dx12", target_os = "windows", not(all(feature = "metal", target_os = "macos"))))]
+    #[cfg(all(
+        feature = "dx12",
+        target_os = "windows",
+        not(all(feature = "metal", target_os = "macos"))
+    ))]
     {
         tracing::info!("Creating DX12 backend");
         Ok(Box::new(dx12::Dx12Backend::new()?))
