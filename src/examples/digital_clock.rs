@@ -9,11 +9,11 @@
 //! Both native (Vulkan) and web (WebGPU) examples import this shared code,
 //! ensuring identical rendering across platforms.
 
-use crate::types::{Color, VertexBufferLayout, VertexAttribute, VertexFormat};
+use crate::types::{Color, VertexAttribute, VertexBufferLayout, VertexFormat};
 use bytemuck::{Pod, Zeroable};
 
 /// Slang shader for the digital clock.
-/// 
+///
 /// Uses standard vertex coloring with position and color attributes.
 pub const SHADER_SOURCE: &str = r#"
 struct VertexInput {
@@ -79,29 +79,69 @@ impl ClockVertex {
 /// Seven-segment display patterns.
 /// Order: top, top-left, top-right, middle, bottom-left, bottom-right, bottom
 pub const SEGMENT_PATTERNS: [[bool; 7]; 11] = [
-    [true, true, true, false, true, true, true],     // 0
-    [false, false, true, false, false, true, false], // 1
-    [true, false, true, true, true, false, true],    // 2
-    [true, false, true, true, false, true, true],    // 3
-    [false, true, true, true, false, true, false],   // 4
-    [true, true, false, true, false, true, true],    // 5
-    [true, true, false, true, true, true, true],     // 6
-    [true, false, true, false, false, true, false],  // 7
-    [true, true, true, true, true, true, true],      // 8
-    [true, true, true, true, false, true, true],     // 9
+    [true, true, true, false, true, true, true],       // 0
+    [false, false, true, false, false, true, false],   // 1
+    [true, false, true, true, true, false, true],      // 2
+    [true, false, true, true, false, true, true],      // 3
+    [false, true, true, true, false, true, false],     // 4
+    [true, true, false, true, false, true, true],      // 5
+    [true, true, false, true, true, true, true],       // 6
+    [true, false, true, false, false, true, false],    // 7
+    [true, true, true, true, true, true, true],        // 8
+    [true, true, true, true, false, true, true],       // 9
     [false, false, false, false, false, false, false], // 10 = blank (for colon position)
 ];
 
 /// Color palette for the clock.
 pub const COLORS: [Color; 8] = [
-    Color { r: 0.2, g: 1.0, b: 0.3, a: 1.0 },    // Green (default)
-    Color { r: 1.0, g: 0.3, b: 0.2, a: 1.0 },    // Red
-    Color { r: 1.0, g: 0.6, b: 0.0, a: 1.0 },    // Orange
-    Color { r: 1.0, g: 1.0, b: 0.2, a: 1.0 },    // Yellow
-    Color { r: 0.2, g: 1.0, b: 1.0, a: 1.0 },    // Cyan
-    Color { r: 0.4, g: 0.6, b: 1.0, a: 1.0 },    // Blue
-    Color { r: 0.8, g: 0.3, b: 1.0, a: 1.0 },    // Purple
-    Color { r: 1.0, g: 0.4, b: 0.8, a: 1.0 },    // Pink
+    Color {
+        r: 0.2,
+        g: 1.0,
+        b: 0.3,
+        a: 1.0,
+    }, // Green (default)
+    Color {
+        r: 1.0,
+        g: 0.3,
+        b: 0.2,
+        a: 1.0,
+    }, // Red
+    Color {
+        r: 1.0,
+        g: 0.6,
+        b: 0.0,
+        a: 1.0,
+    }, // Orange
+    Color {
+        r: 1.0,
+        g: 1.0,
+        b: 0.2,
+        a: 1.0,
+    }, // Yellow
+    Color {
+        r: 0.2,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    }, // Cyan
+    Color {
+        r: 0.4,
+        g: 0.6,
+        b: 1.0,
+        a: 1.0,
+    }, // Blue
+    Color {
+        r: 0.8,
+        g: 0.3,
+        b: 1.0,
+        a: 1.0,
+    }, // Purple
+    Color {
+        r: 1.0,
+        g: 0.4,
+        b: 0.8,
+        a: 1.0,
+    }, // Pink
 ];
 
 /// Generate vertices for a filled quad.
@@ -145,11 +185,21 @@ pub fn digit_vertices(
         let dot_size = seg_h * 1.5;
         let dot_spacing = dig_h * 0.5;
 
-        let (x, y) = pixel_to_ndc(cx - dot_size / 2.0, cy - dot_spacing - dot_size / 2.0, width, height);
+        let (x, y) = pixel_to_ndc(
+            cx - dot_size / 2.0,
+            cy - dot_spacing - dot_size / 2.0,
+            width,
+            height,
+        );
         let (w, h) = (dot_size / width * 2.0, dot_size / height * 2.0);
         vertices.extend_from_slice(&quad_vertices(x, y, w, -h, color));
 
-        let (x, y) = pixel_to_ndc(cx - dot_size / 2.0, cy + dot_spacing - dot_size / 2.0, width, height);
+        let (x, y) = pixel_to_ndc(
+            cx - dot_size / 2.0,
+            cy + dot_spacing - dot_size / 2.0,
+            width,
+            height,
+        );
         vertices.extend_from_slice(&quad_vertices(x, y, w, -h, color));
 
         return vertices;
@@ -164,13 +214,42 @@ pub fn digit_vertices(
     };
 
     // Segment indices: 0=top, 1=top-left, 2=top-right, 3=middle, 4=bottom-left, 5=bottom-right, 6=bottom
-    if pattern[0] { add_segment(cx - seg_w / 2.0, cy - dig_h, seg_w, seg_h); }
-    if pattern[1] { add_segment(cx - seg_w / 2.0 - seg_h, cy - dig_h + seg_h + gap, seg_h, dig_h - seg_h - gap * 2.0); }
-    if pattern[2] { add_segment(cx + seg_w / 2.0, cy - dig_h + seg_h + gap, seg_h, dig_h - seg_h - gap * 2.0); }
-    if pattern[3] { add_segment(cx - seg_w / 2.0, cy - seg_h / 2.0, seg_w, seg_h); }
-    if pattern[4] { add_segment(cx - seg_w / 2.0 - seg_h, cy + gap, seg_h, dig_h - seg_h - gap * 2.0); }
-    if pattern[5] { add_segment(cx + seg_w / 2.0, cy + gap, seg_h, dig_h - seg_h - gap * 2.0); }
-    if pattern[6] { add_segment(cx - seg_w / 2.0, cy + dig_h - seg_h, seg_w, seg_h); }
+    if pattern[0] {
+        add_segment(cx - seg_w / 2.0, cy - dig_h, seg_w, seg_h);
+    }
+    if pattern[1] {
+        add_segment(
+            cx - seg_w / 2.0 - seg_h,
+            cy - dig_h + seg_h + gap,
+            seg_h,
+            dig_h - seg_h - gap * 2.0,
+        );
+    }
+    if pattern[2] {
+        add_segment(
+            cx + seg_w / 2.0,
+            cy - dig_h + seg_h + gap,
+            seg_h,
+            dig_h - seg_h - gap * 2.0,
+        );
+    }
+    if pattern[3] {
+        add_segment(cx - seg_w / 2.0, cy - seg_h / 2.0, seg_w, seg_h);
+    }
+    if pattern[4] {
+        add_segment(
+            cx - seg_w / 2.0 - seg_h,
+            cy + gap,
+            seg_h,
+            dig_h - seg_h - gap * 2.0,
+        );
+    }
+    if pattern[5] {
+        add_segment(cx + seg_w / 2.0, cy + gap, seg_h, dig_h - seg_h - gap * 2.0);
+    }
+    if pattern[6] {
+        add_segment(cx - seg_w / 2.0, cy + dig_h - seg_h, seg_w, seg_h);
+    }
 
     vertices
 }
@@ -196,11 +275,14 @@ impl TimeData {
     /// Convert to digit array: [h1, h2, colon, m1, m2, colon, s1, s2]
     pub fn to_digits(&self) -> [u8; 8] {
         [
-            self.hours / 10, self.hours % 10,
+            self.hours / 10,
+            self.hours % 10,
             10, // colon
-            self.minutes / 10, self.minutes % 10,
+            self.minutes / 10,
+            self.minutes % 10,
             10, // colon
-            self.seconds / 10, self.seconds % 10,
+            self.seconds / 10,
+            self.seconds % 10,
         ]
     }
 }
@@ -227,7 +309,11 @@ pub fn generate_clock_vertices(
     let mut all_vertices = Vec::new();
 
     for &digit in digits.iter() {
-        let w = if digit == 10 { colon_width } else { digit_width };
+        let w = if digit == 10 {
+            colon_width
+        } else {
+            digit_width
+        };
         let verts = digit_vertices(digit, cx, cy, scale, color, width as f32, height as f32);
         all_vertices.extend_from_slice(&verts);
         cx += w + spacing;
@@ -237,21 +323,11 @@ pub fn generate_clock_vertices(
 }
 
 /// Clock state for pause/resume functionality.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClockState {
     pub color_index: usize,
     pub paused: bool,
     pub accumulated_secs: u64,
-}
-
-impl Default for ClockState {
-    fn default() -> Self {
-        Self {
-            color_index: 0,
-            paused: false,
-            accumulated_secs: 0,
-        }
-    }
 }
 
 impl ClockState {
@@ -270,7 +346,12 @@ impl ClockState {
     /// Get background color.
     pub fn background_color(&self) -> Color {
         let bg = if self.paused { 0.06 } else { 0.02 };
-        Color { r: bg, g: bg, b: bg, a: 1.0 }
+        Color {
+            r: bg,
+            g: bg,
+            b: bg,
+            a: 1.0,
+        }
     }
 
     /// Cycle to next color.
@@ -306,7 +387,11 @@ mod tests {
 
     #[test]
     fn test_time_data_to_digits() {
-        let time = TimeData { hours: 12, minutes: 34, seconds: 56 };
+        let time = TimeData {
+            hours: 12,
+            minutes: 34,
+            seconds: 56,
+        };
         let digits = time.to_digits();
         assert_eq!(digits, [1, 2, 10, 3, 4, 10, 5, 6]);
     }
@@ -318,4 +403,3 @@ mod tests {
         assert!(!vertices.is_empty());
     }
 }
-

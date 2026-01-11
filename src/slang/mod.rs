@@ -35,14 +35,13 @@
 //! ```
 
 #[cfg(not(target_arch = "wasm32"))]
+pub mod compiler;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loader;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod compiler;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use compiler::{CompiledShader, ShaderTarget, SlangCompiler};
 #[cfg(not(target_arch = "wasm32"))]
 pub use ffi::SlangStage;
-

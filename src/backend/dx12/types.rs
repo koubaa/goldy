@@ -2,8 +2,8 @@
 //!
 //! This module contains all the state structs used by the DX12 backend.
 
-use crate::types::{DepthFormat, TextureFormat, SamplerDesc};
-use super::super::{DeviceHandle, BufferHandle};
+use super::super::{BufferHandle, DeviceHandle};
+use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
 
 /// Information about a physical DXGI adapter.
@@ -150,4 +150,3 @@ pub(crate) struct SurfaceState {
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
 }
-

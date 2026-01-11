@@ -42,11 +42,11 @@ impl SlangLibrary {
     pub fn load() -> Result<Self> {
         let lib_path = Self::find_library()?;
         tracing::info!("Loading Slang library from: {}", lib_path.display());
-        
+
         // Safety: We're loading a known library with a stable C ABI
         let library = unsafe { Library::new(&lib_path) }
             .with_context(|| format!("Failed to load Slang library from {}", lib_path.display()))?;
-        
+
         // Load function pointers
         // Safety: These are all C functions with stable ABI from the Slang library
         unsafe {
@@ -62,9 +62,10 @@ impl SlangLibrary {
             let destroy_compile_request: FnSpDestroyCompileRequest = *library
                 .get(b"spDestroyCompileRequest\0")
                 .context("Failed to load spDestroyCompileRequest")?;
-            let add_code_gen_target: FnSpAddCodeGenTarget = *library
-                .get(b"spAddCodeGenTarget\0")
-                .context("Failed to load spAddCodeGenTarget")?;
+            let add_code_gen_target: FnSpAddCodeGenTarget =
+                *library
+                    .get(b"spAddCodeGenTarget\0")
+                    .context("Failed to load spAddCodeGenTarget")?;
             let add_translation_unit: FnSpAddTranslationUnit = *library
                 .get(b"spAddTranslationUnit\0")
                 .context("Failed to load spAddTranslationUnit")?;
@@ -89,7 +90,7 @@ impl SlangLibrary {
             let get_target_code_blob: FnSpGetTargetCodeBlob = *library
                 .get(b"spGetTargetCodeBlob\0")
                 .context("Failed to load spGetTargetCodeBlob")?;
-            
+
             Ok(Self {
                 _library: library,
                 create_session,
@@ -108,7 +109,7 @@ impl SlangLibrary {
             })
         }
     }
-    
+
     /// Find the Slang library path.
     fn find_library() -> Result<PathBuf> {
         // 1. Check GOLDY_SLANG_PATH or RAG_SLANG_PATH environment variable
@@ -121,23 +122,23 @@ impl SlangLibrary {
                 tracing::warn!("{} set but file not found: {}", env_var, path.display());
             }
         }
-        
+
         // 2. Check build.rs downloaded binaries (via GOLDY_SLANG_DIR compile-time env)
         if let Some(path) = Self::find_build_script_library() {
             return Ok(path);
         }
-        
+
         // 3. Check vendored binaries (for development)
         if let Some(path) = Self::find_vendored_library() {
             return Ok(path);
         }
-        
+
         // 4. Check Vulkan SDK (Windows development fallback)
         #[cfg(target_os = "windows")]
         if let Some(path) = Self::find_vulkan_sdk_library() {
             return Ok(path);
         }
-        
+
         anyhow::bail!(
             "Could not find Slang library. Options:\n\
              1. Set GOLDY_SLANG_PATH environment variable\n\
@@ -145,7 +146,7 @@ impl SlangLibrary {
              3. For development: run slang/download.sh"
         )
     }
-    
+
     /// Find library downloaded by build.rs.
     fn find_build_script_library() -> Option<PathBuf> {
         // GOLDY_SLANG_DIR is set at compile time by build.rs
@@ -157,38 +158,51 @@ impl SlangLibrary {
         }
         None
     }
-    
+
     /// Find vendored library based on platform.
     fn find_vendored_library() -> Option<PathBuf> {
         let lib_name = Self::library_name();
         let platform_dir = Self::platform_dir();
-        
+
         // Try relative to executable
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 // Check in slang/bin/{platform}/ relative to exe
-                let path = exe_dir.join("slang").join("bin").join(&platform_dir).join(&lib_name);
+                let path = exe_dir
+                    .join("slang")
+                    .join("bin")
+                    .join(platform_dir)
+                    .join(lib_name);
                 if path.exists() {
                     return Some(path);
                 }
-                
+
                 // Check in ../slang/bin/{platform}/ (for running from target/debug)
-                let path = exe_dir.join("..").join("..").join("slang").join("bin").join(&platform_dir).join(&lib_name);
+                let path = exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("slang")
+                    .join("bin")
+                    .join(platform_dir)
+                    .join(lib_name);
                 if path.exists() {
                     return Some(path);
                 }
             }
         }
-        
+
         // Try relative to current directory
-        let path = PathBuf::from("slang").join("bin").join(&platform_dir).join(&lib_name);
+        let path = PathBuf::from("slang")
+            .join("bin")
+            .join(platform_dir)
+            .join(lib_name);
         if path.exists() {
             return Some(path);
         }
-        
+
         None
     }
-    
+
     /// Find Slang in Vulkan SDK (Windows only).
     #[cfg(target_os = "windows")]
     fn find_vulkan_sdk_library() -> Option<PathBuf> {
@@ -199,12 +213,14 @@ impl SlangLibrary {
             if path.exists() {
                 return Some(path);
             }
-            let path = PathBuf::from(&sdk_path).join("Bin").join("slang-compiler.dll");
+            let path = PathBuf::from(&sdk_path)
+                .join("Bin")
+                .join("slang-compiler.dll");
             if path.exists() {
                 return Some(path);
             }
         }
-        
+
         // Try common Vulkan SDK locations
         for version in ["1.3.296.0", "1.3.290.0", "1.3.283.0"] {
             let path = PathBuf::from(format!("C:\\VulkanSDK\\{}\\Bin\\slang.dll", version));
@@ -212,10 +228,10 @@ impl SlangLibrary {
                 return Some(path);
             }
         }
-        
+
         None
     }
-    
+
     /// Get the library filename for the current platform.
     fn library_name() -> &'static str {
         #[cfg(target_os = "windows")]
@@ -235,7 +251,7 @@ impl SlangLibrary {
             compile_error!("Unsupported platform for Slang library")
         }
     }
-    
+
     /// Get the platform directory name.
     fn platform_dir() -> &'static str {
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -275,4 +291,3 @@ impl SlangLibrary {
         }
     }
 }
-

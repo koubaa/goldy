@@ -14,7 +14,7 @@ pub mod dx12;
 pub mod mock;
 
 // Metal backend for macOS (native Metal, not MoltenVK)
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 
 // WebGPU backend is currently native-only (uses native Slang compiler)
@@ -70,11 +70,22 @@ pub enum RenderCommand {
     /// Set the active pipeline.
     SetPipeline(PipelineHandle),
     /// Set a vertex buffer.
-    SetVertexBuffer { slot: u32, buffer: BufferHandle, offset: u64 },
+    SetVertexBuffer {
+        slot: u32,
+        buffer: BufferHandle,
+        offset: u64,
+    },
     /// Set an index buffer.
-    SetIndexBuffer { buffer: BufferHandle, offset: u64, format: IndexFormat },
+    SetIndexBuffer {
+        buffer: BufferHandle,
+        offset: u64,
+        format: IndexFormat,
+    },
     /// Set a bind group.
-    SetBindGroup { index: u32, bind_group: BindGroupHandle },
+    SetBindGroup {
+        index: u32,
+        bind_group: BindGroupHandle,
+    },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -99,7 +110,10 @@ pub enum ComputeCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
     /// Set a bind group.
-    SetBindGroup { index: u32, bind_group: BindGroupHandle },
+    SetBindGroup {
+        index: u32,
+        bind_group: BindGroupHandle,
+    },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,
@@ -122,19 +136,38 @@ pub trait GpuBackend: Send + Sync {
     fn is_device_valid(&self, device: DeviceHandle) -> bool;
 
     // Buffer management
-    fn create_buffer(&mut self, device: DeviceHandle, size: u64, usage: BufferUsage) -> Result<BufferHandle>;
+    fn create_buffer(
+        &mut self,
+        device: DeviceHandle,
+        size: u64,
+        usage: BufferUsage,
+    ) -> Result<BufferHandle>;
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
 
     // Shader management
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
-    fn create_shader_with_paths(&mut self, device: DeviceHandle, slang_source: &str, search_paths: &[&str]) -> Result<ShaderHandle>;
+    fn create_shader_with_paths(
+        &mut self,
+        device: DeviceHandle,
+        slang_source: &str,
+        search_paths: &[&str],
+    ) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
     // Bind group management
-    fn create_bind_group_layout(&mut self, device: DeviceHandle, entries: &[BindGroupLayoutEntry]) -> Result<BindGroupLayoutHandle>;
-    fn create_bind_group(&mut self, device: DeviceHandle, layout: BindGroupLayoutHandle, entries: &[BindGroupEntry]) -> Result<BindGroupHandle>;
+    fn create_bind_group_layout(
+        &mut self,
+        device: DeviceHandle,
+        entries: &[BindGroupLayoutEntry],
+    ) -> Result<BindGroupLayoutHandle>;
+    fn create_bind_group(
+        &mut self,
+        device: DeviceHandle,
+        layout: BindGroupLayoutHandle,
+        entries: &[BindGroupEntry],
+    ) -> Result<BindGroupHandle>;
     fn destroy_bind_group(&mut self, bind_group: BindGroupHandle);
 
     // Pipeline management
@@ -147,6 +180,7 @@ pub trait GpuBackend: Send + Sync {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle>;
+    #[allow(clippy::too_many_arguments)]
     fn create_pipeline_with_layout(
         &mut self,
         device: DeviceHandle,
@@ -160,6 +194,7 @@ pub trait GpuBackend: Send + Sync {
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
     // Pipeline with depth stencil state
+    #[allow(clippy::too_many_arguments)]
     fn create_pipeline_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -173,7 +208,13 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<PipelineHandle>;
 
     // RenderTarget API - GPU buffer stays on GPU, readback is optional
-    fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle>;
+    fn create_render_target(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Result<RenderTargetHandle>;
     /// Create a render target with an optional depth buffer.
     fn create_render_target_with_depth(
         &mut self,
@@ -184,7 +225,12 @@ pub trait GpuBackend: Send + Sync {
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
     fn destroy_render_target(&mut self, target: RenderTargetHandle);
-    fn render_to_target(&mut self, device: DeviceHandle, target: RenderTargetHandle, commands: &[RenderCommand]) -> Result<()>;
+    fn render_to_target(
+        &mut self,
+        device: DeviceHandle,
+        target: RenderTargetHandle,
+        commands: &[RenderCommand],
+    ) -> Result<()>;
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()>;
 
     // Texture management
@@ -196,36 +242,57 @@ pub trait GpuBackend: Send + Sync {
         format: TextureFormat,
         usage: TextureUsage,
     ) -> Result<TextureHandle>;
-    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()>;
+    fn write_texture(
+        &mut self,
+        texture: TextureHandle,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<()>;
     fn destroy_texture(&mut self, texture: TextureHandle);
 
     // Sampler management
-    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle>;
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc)
+        -> Result<SamplerHandle>;
     fn destroy_sampler(&mut self, sampler: SamplerHandle);
 
     // Surface API - zero-copy presentation to window
     /// Create a surface for presenting to a window.
     /// The window handle is platform-specific (HWND on Windows, wl_surface on Wayland, NSView on macOS).
-    fn create_surface(&mut self, device: DeviceHandle, window: &dyn raw_window_handle::HasWindowHandle, display: &dyn raw_window_handle::HasDisplayHandle) -> Result<SurfaceHandle>;
-    
+    fn create_surface(
+        &mut self,
+        device: DeviceHandle,
+        window: &dyn raw_window_handle::HasWindowHandle,
+        display: &dyn raw_window_handle::HasDisplayHandle,
+    ) -> Result<SurfaceHandle>;
+
     /// Destroy a surface.
     fn destroy_surface(&mut self, surface: SurfaceHandle);
-    
+
     /// Acquire the next swapchain image to render to.
     fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle>;
-    
+
     /// Render commands to a swapchain image.
-    fn surface_render(&mut self, surface: SurfaceHandle, image: SwapchainImageHandle, commands: &[RenderCommand]) -> Result<()>;
-    
+    fn surface_render(
+        &mut self,
+        surface: SurfaceHandle,
+        image: SwapchainImageHandle,
+        commands: &[RenderCommand],
+    ) -> Result<()>;
+
     /// Present a swapchain image to the screen.
-    fn surface_present(&mut self, surface: SurfaceHandle, image: SwapchainImageHandle) -> Result<()>;
-    
+    fn surface_present(
+        &mut self,
+        surface: SurfaceHandle,
+        image: SwapchainImageHandle,
+    ) -> Result<()>;
+
     /// Resize the surface (recreates swapchain).
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()>;
-    
+
     /// Get the current surface dimensions.
     fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32);
-    
+
     /// Get the texture format used by a surface's swapchain.
     /// Use this to ensure your render pipeline matches the surface format.
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat;
@@ -244,7 +311,8 @@ pub trait GpuBackend: Send + Sync {
 
     /// Execute compute commands.
     /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand]) -> Result<()>;
+    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand])
+        -> Result<()>;
 }
 
 /// Bind group layout entry.
@@ -270,7 +338,9 @@ impl ShaderStages {
 #[derive(Debug, Clone)]
 pub enum BindingType {
     UniformBuffer,
-    StorageBuffer { read_only: bool },
+    StorageBuffer {
+        read_only: bool,
+    },
     /// Sampled texture (read-only in shader).
     Texture,
     /// Sampler for texture sampling.
@@ -289,25 +359,41 @@ pub struct BindGroupEntry {
 /// Resource for a bind group entry.
 #[derive(Debug, Clone)]
 pub enum BindingResource {
-    Buffer { buffer: BufferHandle, offset: u64, size: u64 },
+    Buffer {
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    },
     Texture(TextureHandle),
     Sampler(SamplerHandle),
 }
 
 /// Create the default backend for the current platform.
 pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
+    // On macOS with metal feature, prefer Metal
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    {
+        tracing::info!("Creating Metal backend");
+        Ok(Box::new(metal::MetalBackend::new()?))
+    }
+
     // On Windows with dx12 feature, prefer DX12
-    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    #[cfg(all(
+        feature = "dx12",
+        target_os = "windows",
+        not(all(feature = "metal", target_os = "macos"))
+    ))]
     {
         tracing::info!("Creating DX12 backend");
         Ok(Box::new(dx12::Dx12Backend::new()?))
     }
 
-    // Vulkan fallback on non-DX12 platforms
+    // Vulkan fallback on non-DX12/non-Metal platforms
     #[cfg(all(
         feature = "vulkan",
         not(target_arch = "wasm32"),
-        not(all(feature = "dx12", target_os = "windows"))
+        not(all(feature = "dx12", target_os = "windows")),
+        not(all(feature = "metal", target_os = "macos"))
     ))]
     {
         tracing::info!("Creating Vulkan backend");
@@ -316,11 +402,12 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 
     // No backend available
     #[cfg(not(any(
+        all(feature = "metal", target_os = "macos"),
         all(feature = "dx12", target_os = "windows"),
         all(feature = "vulkan", not(target_arch = "wasm32"))
     )))]
     {
-        anyhow::bail!("No GPU backend available - enable 'vulkan' or 'dx12' feature")
+        anyhow::bail!("No GPU backend available - enable 'vulkan', 'dx12', or 'metal' feature")
     }
 }
 
@@ -337,7 +424,11 @@ pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> 
             tracing::info!("Creating DX12 backend");
             Ok(Box::new(dx12::Dx12Backend::new()?))
         }
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        BackendType::Metal => {
+            tracing::info!("Creating Metal backend");
+            Ok(Box::new(metal::MetalBackend::new()?))
+        }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
     }
 }
-

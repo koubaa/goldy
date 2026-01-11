@@ -5,9 +5,9 @@
 //! Run with: cargo run --example mandelbrot
 
 use goldy::{
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding, BufferUsage,
-    Color, CommandEncoder, DeviceType, Surface, Instance, RenderPipeline, RenderPipelineDesc,
-    ShaderModule, Vertex2DUv, FULLSCREEN_QUAD, shaders,
+    shaders, BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding,
+    BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline, RenderPipelineDesc,
+    ShaderModule, Surface, Vertex2DUv, FULLSCREEN_QUAD,
 };
 use std::sync::Arc;
 use winit::{
@@ -24,7 +24,7 @@ use winit::{
 struct Uniforms {
     center: [f32; 2],
     zoom: f32,
-    _padding: f32,  // Align to 16 bytes
+    _padding: f32, // Align to 16 bytes
 }
 
 struct App {
@@ -62,45 +62,48 @@ impl App {
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
-        
+
         // Create surface first to get the correct format
         let surface = Surface::new(&device, window.as_ref())?;
-        
+
         // Create shader - goldy library is automatically available for import
         let shader = ShaderModule::from_slang(&device, shaders::MANDELBROT)?;
-        
+
         // Create bind group layout for uniforms (binding 0)
-        let bind_group_layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform_fragment(0),
-        ])?;
-        
+        let bind_group_layout =
+            BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform_fragment(0)])?;
+
         // Create pipeline with bind group layout
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2DUv::layout(),
-            target_format: surface.format(),
-            bind_group_layouts: &[&bind_group_layout],
-            ..Default::default()
-        })?;
-        
-        // Create static vertex buffer (fullscreen quad)
-        let vertex_buffer = Buffer::with_data(
-            device.as_ref(),
-            &FULLSCREEN_QUAD,
-            BufferUsage::VERTEX,
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2DUv::layout(),
+                target_format: surface.format(),
+                bind_group_layouts: &[&bind_group_layout],
+                ..Default::default()
+            },
         )?;
-        
+
+        // Create static vertex buffer (fullscreen quad)
+        let vertex_buffer =
+            Buffer::with_data(device.as_ref(), &FULLSCREEN_QUAD, BufferUsage::VERTEX)?;
+
         // Create uniform buffer
         let uniform_buffer = Buffer::new(
             device.as_ref(),
             std::mem::size_of::<Uniforms>() as u64,
             BufferUsage::UNIFORM | BufferUsage::COPY_DST,
         )?;
-        
+
         // Create bind group
-        let bind_group = BindGroup::new(&device, &bind_group_layout, &[
-            BufferBinding::new(0, &uniform_buffer),
-        ])?;
-        
+        let bind_group = BindGroup::new(
+            &device,
+            &bind_group_layout,
+            &[BufferBinding::new(0, &uniform_buffer)],
+        )?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.bind_group_layout = Some(bind_group_layout);
@@ -109,7 +112,7 @@ impl App {
         self.uniform_buffer = Some(uniform_buffer);
         self.bind_group = Some(bind_group);
         self.surface = Some(surface);
-        
+
         Ok(())
     }
 
@@ -125,7 +128,7 @@ impl App {
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
         let bind_group = self.bind_group.as_ref().unwrap();
-        
+
         // Update uniform buffer with current view parameters
         let uniforms = Uniforms {
             center: self.center,
@@ -136,7 +139,7 @@ impl App {
 
         // Acquire frame
         let frame = surface.acquire()?;
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -149,7 +152,7 @@ impl App {
 
         frame.render(encoder)?;
         surface.present(frame)?;
-        
+
         Ok(())
     }
 

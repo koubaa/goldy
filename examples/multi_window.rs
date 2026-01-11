@@ -8,10 +8,8 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    VertexBufferLayout, VertexAttribute, VertexFormat,
-    shaders,
+    shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,9 +40,21 @@ impl QuadVertex {
         VertexBufferLayout {
             stride: std::mem::size_of::<Self>() as u32,
             attributes: vec![
-                VertexAttribute { location: 0, format: VertexFormat::Float32x2, offset: 0 },
-                VertexAttribute { location: 1, format: VertexFormat::Float32x2, offset: 8 },
-                VertexAttribute { location: 2, format: VertexFormat::Float32, offset: 16 },
+                VertexAttribute {
+                    location: 0,
+                    format: VertexFormat::Float32x2,
+                    offset: 0,
+                },
+                VertexAttribute {
+                    location: 1,
+                    format: VertexFormat::Float32x2,
+                    offset: 8,
+                },
+                VertexAttribute {
+                    location: 2,
+                    format: VertexFormat::Float32,
+                    offset: 16,
+                },
             ],
         }
     }
@@ -52,12 +62,36 @@ impl QuadVertex {
 
 fn create_quad(time: f32) -> [QuadVertex; 6] {
     [
-        QuadVertex { position: [-1.0, -1.0], uv: [0.0, 1.0], time },
-        QuadVertex { position: [1.0, -1.0], uv: [1.0, 1.0], time },
-        QuadVertex { position: [1.0, 1.0], uv: [1.0, 0.0], time },
-        QuadVertex { position: [-1.0, -1.0], uv: [0.0, 1.0], time },
-        QuadVertex { position: [1.0, 1.0], uv: [1.0, 0.0], time },
-        QuadVertex { position: [-1.0, 1.0], uv: [0.0, 0.0], time },
+        QuadVertex {
+            position: [-1.0, -1.0],
+            uv: [0.0, 1.0],
+            time,
+        },
+        QuadVertex {
+            position: [1.0, -1.0],
+            uv: [1.0, 1.0],
+            time,
+        },
+        QuadVertex {
+            position: [1.0, 1.0],
+            uv: [1.0, 0.0],
+            time,
+        },
+        QuadVertex {
+            position: [-1.0, -1.0],
+            uv: [0.0, 1.0],
+            time,
+        },
+        QuadVertex {
+            position: [1.0, 1.0],
+            uv: [1.0, 0.0],
+            time,
+        },
+        QuadVertex {
+            position: [-1.0, 1.0],
+            uv: [0.0, 0.0],
+            time,
+        },
     ]
 }
 
@@ -99,16 +133,16 @@ struct WindowState {
     surface: Surface,
     pipeline: RenderPipeline,
     effect_type: EffectType,
-    
+
     // Per-window animation state
     start_time: Instant,
     paused: bool,
     paused_at: f32,
     time_multiplier: f32,
-    
+
     // Frame pipelining
     vertex_buffers: Vec<Buffer>,
-    
+
     // For status display
     has_focus: bool,
 }
@@ -123,12 +157,17 @@ impl WindowState {
     ) -> anyhow::Result<Self> {
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
-        let pipeline = RenderPipeline::new(device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: QuadVertex::layout(),
-            target_format: surface.format(),
-            ..Default::default()
-        })?;
-        
+        let pipeline = RenderPipeline::new(
+            device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: QuadVertex::layout(),
+                target_format: surface.format(),
+                ..Default::default()
+            },
+        )?;
+
         Ok(Self {
             window,
             surface,
@@ -142,7 +181,7 @@ impl WindowState {
             has_focus: false,
         })
     }
-    
+
     fn current_time(&self) -> f32 {
         if self.paused {
             self.paused_at
@@ -150,7 +189,7 @@ impl WindowState {
             self.paused_at + self.start_time.elapsed().as_secs_f32() * self.time_multiplier
         }
     }
-    
+
     fn toggle_pause(&mut self) {
         if self.paused {
             // Resuming - reset start time
@@ -162,7 +201,7 @@ impl WindowState {
             self.paused = true;
         }
     }
-    
+
     fn toggle_effect_modifier(&mut self) {
         match self.effect_type {
             EffectType::Plasma => self.toggle_pause(),
@@ -180,32 +219,32 @@ impl WindowState {
             }
         }
     }
-    
+
     fn reset(&mut self) {
         self.start_time = Instant::now();
         self.paused = false;
         self.paused_at = 0.0;
         self.time_multiplier = 1.0;
     }
-    
+
     fn render(&mut self, device: &goldy::Device) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
-        
+
         let time = self.current_time();
         let vertices = create_quad(time);
         let vertex_buffer = Buffer::with_data(device, &vertices, BufferUsage::VERTEX)?;
-        
+
         // Acquire frame - this waits for oldest in-flight frame
         let frame = self.surface.acquire()?;
-        
+
         // Safe to drop oldest buffer now
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -214,14 +253,14 @@ impl WindowState {
             pass.set_vertex_buffer(0, &vertex_buffer);
             pass.draw(0..6, 0..1);
         }
-        
+
         frame.render(encoder)?;
         self.surface.present(frame)?;
-        
+
         self.vertex_buffers.push(vertex_buffer);
         Ok(())
     }
-    
+
     fn handle_resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             let _ = self.surface.resize(width, height);
@@ -246,10 +285,14 @@ impl App {
             instance: Instance::new()?,
             device: None,
             windows: HashMap::new(),
-            effects_to_create: vec![EffectType::Plasma, EffectType::Tunnel, EffectType::Starfield],
+            effects_to_create: vec![
+                EffectType::Plasma,
+                EffectType::Tunnel,
+                EffectType::Starfield,
+            ],
         })
     }
-    
+
     fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -257,26 +300,25 @@ impl App {
         position: (i32, i32),
     ) -> anyhow::Result<()> {
         let device = self.device.as_ref().unwrap().clone();
-        
+
         let attrs = WindowAttributes::default()
             .with_title(format!("Goldy - {}", effect_type.title()))
             .with_inner_size(LogicalSize::new(500, 500))
             .with_position(winit::dpi::LogicalPosition::new(position.0, position.1));
-        
+
         let window = Arc::new(event_loop.create_window(attrs)?);
         let window_id = window.id();
-        
+
         let mut state = WindowState::new(window.clone(), &device, effect_type)?;
-        
+
         // Render first frame immediately to avoid white/undefined swapchain content
         state.render(&device)?;
         window.request_redraw(); // Start animation loop
-        
+
         self.windows.insert(window_id, state);
-        
+
         Ok(())
     }
-    
 }
 
 impl ApplicationHandler for App {
@@ -292,46 +334,54 @@ impl ApplicationHandler for App {
                 }
             }
         }
-        
+
         // Create windows for each effect (each window renders first frame immediately)
         let effects: Vec<_> = self.effects_to_create.drain(..).collect();
         for (i, effect) in effects.into_iter().enumerate() {
             // Position windows side by side
             let x = 50 + (i as i32) * 520;
             let y = 100;
-            
+
             if let Err(e) = self.create_window(event_loop, effect, (x, y)) {
                 eprintln!("Failed to create window for {:?}: {}", effect.title(), e);
             }
         }
     }
-    
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         // Get the specific window state
         let state = match self.windows.get_mut(&window_id) {
             Some(s) => s,
             None => return,
         };
-        
+
         match event {
             WindowEvent::CloseRequested => {
                 // Remove this window
                 self.windows.remove(&window_id);
-                
+
                 // If all windows closed, exit
                 if self.windows.is_empty() {
                     event_loop.exit();
                 }
             }
-            
+
             WindowEvent::Focused(focused) => {
                 state.has_focus = focused;
                 if focused {
-                    println!("Focus: {} ({})", state.effect_type.title(), 
-                        if state.paused { "paused" } else { "running" });
+                    println!(
+                        "Focus: {} ({})",
+                        state.effect_type.title(),
+                        if state.paused { "paused" } else { "running" }
+                    );
                 }
             }
-            
+
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 match event.logical_key {
                     Key::Named(NamedKey::Escape) => {
@@ -356,28 +406,32 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-            
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if let Some(s) = self.windows.get_mut(&window_id) {
                     s.reset();
                     println!("[{}] Reset (click)", s.effect_type.title());
                 }
             }
-            
+
             WindowEvent::RedrawRequested => {
                 // Rendering is handled in about_to_wait for all windows
             }
-            
+
             WindowEvent::Resized(new_size) => {
                 if let Some(s) = self.windows.get_mut(&window_id) {
                     s.handle_resize(new_size.width, new_size.height);
                 }
             }
-            
+
             _ => {}
         }
     }
-    
+
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // Request redraw for ALL windows every frame, regardless of focus
         // This ensures unfocused windows continue animating
@@ -385,7 +439,7 @@ impl ApplicationHandler for App {
             Some(d) => d.clone(),
             None => return,
         };
-        
+
         for state in self.windows.values_mut() {
             if let Err(e) = state.render(&device) {
                 eprintln!("[{}] Render error: {}", state.effect_type.title(), e);
@@ -396,7 +450,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    
+
     println!("Goldy Multi-Window Example");
     println!("========================");
     println!("Three windows, three effects, independent controls:");
@@ -407,11 +461,10 @@ fn main() -> anyhow::Result<()> {
     println!();
     println!("Escape closes the focused window. Close all to exit.");
     println!();
-    
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;
-    
+
     Ok(())
 }
-

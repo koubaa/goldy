@@ -16,14 +16,14 @@
 //!
 //! // In your render loop:
 //! let frame = surface.acquire()?;
-//! 
+//!
 //! let mut encoder = CommandEncoder::new();
 //! {
 //!     let mut pass = encoder.begin_render_pass();
 //!     pass.clear(Color::CORNFLOWER_BLUE);
 //!     // ... draw commands ...
 //! }
-//! 
+//!
 //! frame.render(encoder)?;
 //! surface.present(frame)?;
 //! # Ok(())
@@ -35,7 +35,7 @@ use crate::device::Device;
 use crate::encoder::CommandEncoder;
 use crate::types::TextureFormat;
 use anyhow::Result;
-use raw_window_handle::{HasWindowHandle, HasDisplayHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::{Arc, Mutex};
 
 /// A GPU surface for zero-copy presentation to a window.
@@ -222,7 +222,7 @@ impl SurfaceFrame {
     /// This executes the commands recorded in the encoder to the swapchain image.
     pub fn render(&self, encoder: CommandEncoder) -> Result<()> {
         let commands = encoder.finish();
-        
+
         let mut backend = self.backend.lock().unwrap();
         backend.surface_render(self.surface_handle, self.image_handle, &commands)
     }
@@ -249,26 +249,38 @@ mod tests {
         width: u32,
         height: u32,
     }
-    
+
     impl MockWindow {
         fn new(width: u32, height: u32) -> Self {
             Self { width, height }
         }
     }
-    
+
     impl raw_window_handle::HasWindowHandle for MockWindow {
-        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(
-                raw_window_handle::RawWindowHandle::Web(raw_window_handle::WebWindowHandle::new(0))
-            )})
+        fn window_handle(
+            &self,
+        ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            Ok(unsafe {
+                raw_window_handle::WindowHandle::borrow_raw(
+                    raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ),
+                )
+            })
         }
     }
-    
+
     impl raw_window_handle::HasDisplayHandle for MockWindow {
-        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(
-                raw_window_handle::RawDisplayHandle::Web(raw_window_handle::WebDisplayHandle::new())
-            )})
+        fn display_handle(
+            &self,
+        ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            Ok(unsafe {
+                raw_window_handle::DisplayHandle::borrow_raw(
+                    raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ),
+                )
+            })
         }
     }
 
@@ -287,7 +299,7 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
         assert_eq!(surface.size(), (800, 600));
@@ -298,7 +310,7 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         // Default mock format is Bgra8UnormSrgb
         assert_eq!(surface.format(), TextureFormat::Bgra8UnormSrgb);
     }
@@ -308,7 +320,7 @@ mod tests {
         let device = create_test_device_with_format(TextureFormat::Rgba8Unorm);
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         assert_eq!(surface.format(), TextureFormat::Rgba8Unorm);
     }
 
@@ -317,10 +329,10 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let mut surface = Surface::new(&device, &window).unwrap();
-        
+
         // Resize to new dimensions
         surface.resize(1920, 1080).unwrap();
-        
+
         assert_eq!(surface.width(), 1920);
         assert_eq!(surface.height(), 1080);
         assert_eq!(surface.size(), (1920, 1080));
@@ -331,10 +343,10 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let mut surface = Surface::new(&device, &window).unwrap();
-        
+
         // Resize to zero (minimized window) should be ignored
         surface.resize(0, 0).unwrap();
-        
+
         // Dimensions should remain unchanged
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -345,9 +357,9 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let mut surface = Surface::new(&device, &window).unwrap();
-        
+
         surface.resize(0, 600).unwrap();
-        
+
         // Dimensions should remain unchanged
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -358,9 +370,9 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let mut surface = Surface::new(&device, &window).unwrap();
-        
+
         surface.resize(800, 0).unwrap();
-        
+
         // Dimensions should remain unchanged
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -371,13 +383,13 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         // Acquire a frame
         let frame = surface.acquire().unwrap();
-        
+
         assert_eq!(frame.width(), 800);
         assert_eq!(frame.height(), 600);
-        
+
         // Present the frame
         surface.present(frame).unwrap();
     }
@@ -387,7 +399,7 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(640, 480);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         // Simulate multiple frames
         for _ in 0..5 {
             let frame = surface.acquire().unwrap();
@@ -400,16 +412,16 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         let frame = surface.acquire().unwrap();
-        
+
         // Create a command encoder and render
         let mut encoder = crate::encoder::CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(crate::types::Color::RED);
         }
-        
+
         frame.render(encoder).unwrap();
         surface.present(frame).unwrap();
     }
@@ -419,7 +431,7 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         // This should succeed - format matches
         let result = surface.validate_pipeline_format(TextureFormat::Bgra8UnormSrgb);
         assert!(result.is_ok());
@@ -430,11 +442,11 @@ mod tests {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         // This should fail - format doesn't match
         let result = surface.validate_pipeline_format(TextureFormat::Rgba8Unorm);
         assert!(result.is_err());
-        
+
         // Error message should be helpful
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -448,11 +460,15 @@ mod tests {
         let device = create_test_device_with_format(TextureFormat::Rgba8Unorm);
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
-        
+
         // Should succeed with matching format
-        assert!(surface.validate_pipeline_format(TextureFormat::Rgba8Unorm).is_ok());
-        
+        assert!(surface
+            .validate_pipeline_format(TextureFormat::Rgba8Unorm)
+            .is_ok());
+
         // Should fail with non-matching format
-        assert!(surface.validate_pipeline_format(TextureFormat::Bgra8UnormSrgb).is_err());
+        assert!(surface
+            .validate_pipeline_format(TextureFormat::Bgra8UnormSrgb)
+            .is_err());
     }
 }

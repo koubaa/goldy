@@ -5,9 +5,8 @@
 //! Run with: cargo run --example starfield
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D, PrimitiveTopology,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -97,8 +96,11 @@ impl App {
         let stars: Vec<Star> = (0..NUM_STARS).map(|_| Star::new()).collect();
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             stars,
             speed: 0.01,
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
@@ -109,12 +111,17 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            topology: PrimitiveTopology::TriangleList,
-            ..Default::default()
-        })?;
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: surface.format(),
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+        )?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -125,7 +132,9 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         // Update stars
         for star in &mut self.stars {
@@ -147,7 +156,7 @@ impl App {
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -175,11 +184,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Starfield (Surface API, Up/Down to change speed)")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1024, 768))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Starfield (Surface API, Up/Down to change speed)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(1024, 768)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
