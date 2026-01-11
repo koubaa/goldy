@@ -7,7 +7,7 @@
 use rag::{
     BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding, BufferUsage,
     Color, CommandEncoder, DeviceType, Surface, Instance, RenderPipeline, RenderPipelineDesc,
-    ShaderModule, TextureFormat, Vertex2DUv, FULLSCREEN_QUAD, shaders,
+    ShaderModule, Vertex2DUv, FULLSCREEN_QUAD, shaders,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -60,6 +60,9 @@ impl App {
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         
+        // Create surface first to get the correct format
+        let surface = Surface::new(device.clone(), window.as_ref())?;
+        
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::TUNNEL)?;
         
@@ -71,7 +74,7 @@ impl App {
         // Create pipeline with bind group layout
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: Vertex2DUv::layout(),
-            target_format: TextureFormat::Bgra8UnormSrgb,
+            target_format: surface.format(),
             bind_group_layouts: &[&bind_group_layout],
             ..Default::default()
         })?;
@@ -94,8 +97,6 @@ impl App {
         let bind_group = BindGroup::new(&device, &bind_group_layout, &[
             BufferBinding::new(0, &uniform_buffer),
         ])?;
-        
-        let surface = Surface::new(device.clone(), window.as_ref())?;
         
         self.device = Some(device);
         self.shader = Some(shader);

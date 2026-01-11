@@ -38,6 +38,8 @@ pub struct MockBackend {
     pub cpu_readback_count: usize,
     /// Count of surface presents performed
     pub surface_present_count: usize,
+    /// Default format for new surfaces (simulates GPU/display preference)
+    pub default_surface_format: TextureFormat,
 }
 
 struct MockDevice {
@@ -81,6 +83,7 @@ struct MockSurface {
     device_handle: DeviceHandle,
     width: u32,
     height: u32,
+    format: TextureFormat,
     next_image: SwapchainImageHandle,
 }
 
@@ -117,7 +120,16 @@ impl MockBackend {
             targets_created: Vec::new(),
             cpu_readback_count: 0,
             surface_present_count: 0,
+            default_surface_format: TextureFormat::Bgra8UnormSrgb,
         }
+    }
+
+    /// Set the default surface format for testing different GPU preferences.
+    /// 
+    /// Use this to verify that your code correctly uses `Surface::format()`
+    /// rather than assuming a hardcoded format.
+    pub fn set_default_surface_format(&mut self, format: TextureFormat) {
+        self.default_surface_format = format;
     }
 
     /// Reset recorded state for a new test.
@@ -418,6 +430,7 @@ impl GpuBackend for MockBackend {
             device_handle: device,
             width: 800,  // Default size
             height: 600,
+            format: self.default_surface_format, // Use configured format
             next_image: 1,
         });
 
@@ -468,6 +481,12 @@ impl GpuBackend for MockBackend {
         self.surfaces.get(&surface)
             .map(|s| (s.width, s.height))
             .unwrap_or((0, 0))
+    }
+
+    fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat {
+        self.surfaces.get(&surface)
+            .map(|s| s.format)
+            .unwrap_or(TextureFormat::Bgra8UnormSrgb)
     }
 }
 
@@ -678,6 +697,91 @@ mod tests {
             }
             _ => panic!("Expected DrawIndexed command"),
         }
+    }
+
+    #[test]
+    fn test_surface_format_default() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        
+        // Create a mock window handle for surface creation
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+                // Return a null handle - mock backend doesn't use it
+                Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(raw_window_handle::WebWindowHandle::new(0))) })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+                Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(raw_window_handle::WebDisplayHandle::new())) })
+            }
+        }
+        
+        let surface = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
+        
+        // Default format should be Bgra8UnormSrgb
+        assert_eq!(backend.surface_format(surface), TextureFormat::Bgra8UnormSrgb);
+    }
+
+    #[test]
+    fn test_surface_format_configurable() {
+        let mut backend = MockBackend::new();
+        
+        // Configure a different format (simulating a GPU that prefers RGBA)
+        backend.set_default_surface_format(TextureFormat::Rgba8Unorm);
+        
+        let device = backend.create_device(0).unwrap();
+        
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+                Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(raw_window_handle::WebWindowHandle::new(0))) })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+                Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(raw_window_handle::WebDisplayHandle::new())) })
+            }
+        }
+        
+        let surface = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
+        
+        // Should return the configured format, not the default
+        assert_eq!(backend.surface_format(surface), TextureFormat::Rgba8Unorm);
+    }
+
+    #[test]
+    fn test_surface_format_multiple_formats() {
+        // Test that different surfaces can have different formats
+        // (when configured between creations)
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+                Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(raw_window_handle::WebWindowHandle::new(0))) })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+                Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(raw_window_handle::WebDisplayHandle::new())) })
+            }
+        }
+        
+        // Create first surface with default format
+        let surface1 = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
+        assert_eq!(backend.surface_format(surface1), TextureFormat::Bgra8UnormSrgb);
+        
+        // Change default and create second surface
+        backend.set_default_surface_format(TextureFormat::Rgba8UnormSrgb);
+        let surface2 = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
+        
+        // First surface should retain its original format
+        assert_eq!(backend.surface_format(surface1), TextureFormat::Bgra8UnormSrgb);
+        // Second surface should have the new format
+        assert_eq!(backend.surface_format(surface2), TextureFormat::Rgba8UnormSrgb);
     }
 }
 

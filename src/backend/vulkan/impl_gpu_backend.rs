@@ -1981,5 +1981,11 @@ impl GpuBackend for VulkanBackend {
             .map(|s| (s.width, s.height))
             .unwrap_or((0, 0))
     }
+
+    fn surface_format(&self, surface_handle: SurfaceHandle) -> TextureFormat {
+        self.surfaces.get(&surface_handle)
+            .and_then(|s| utils::vk_to_format(s.format))
+            .unwrap_or(TextureFormat::Bgra8UnormSrgb) // Safe fallback
+    }
 }
 

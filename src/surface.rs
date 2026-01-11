@@ -34,6 +34,7 @@
 use crate::backend::{SurfaceHandle, SwapchainImageHandle};
 use crate::device::Device;
 use crate::encoder::CommandEncoder;
+use crate::types::TextureFormat;
 use anyhow::Result;
 use raw_window_handle::{HasWindowHandle, HasDisplayHandle};
 use std::sync::Arc;
@@ -157,6 +158,16 @@ impl Surface {
     /// Get the surface height.
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Get the swapchain texture format.
+    ///
+    /// Use this to set `RenderPipelineDesc::target_format` when rendering
+    /// to this surface. The format is determined by the GPU and display
+    /// during surface creation.
+    pub fn format(&self) -> TextureFormat {
+        let backend = self.device.backend().lock().unwrap();
+        backend.surface_format(self.handle)
     }
 }
 

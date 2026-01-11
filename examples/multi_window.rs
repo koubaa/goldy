@@ -9,7 +9,7 @@
 
 use rag::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
+    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     VertexBufferLayout, VertexAttribute, VertexFormat,
     shaders,
 };
@@ -121,13 +121,13 @@ impl WindowState {
         device: &Arc<rag::Device>,
         effect_type: EffectType,
     ) -> anyhow::Result<Self> {
+        let surface = Surface::new(device.clone(), window.as_ref())?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
         let pipeline = RenderPipeline::new(device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: QuadVertex::layout(),
-            target_format: TextureFormat::Bgra8UnormSrgb,
+            target_format: surface.format(),
             ..Default::default()
         })?;
-        let surface = Surface::new(device.clone(), window.as_ref())?;
         
         Ok(Self {
             window,

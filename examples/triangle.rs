@@ -6,7 +6,7 @@
 
 use rag::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat, Vertex2D,
+    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, Vertex2D,
     Surface,
     shader::builtins,
 };
@@ -60,17 +60,17 @@ impl App {
         ];
         let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
         
-        // Create shader and pipeline with swapchain format (BGRA for better compatibility)
+        // Create Surface for zero-copy presentation
+        let surface = Surface::new(device.clone(), window.as_ref())?;
+        
+        // Create shader and pipeline using surface's actual format
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
         let pipeline_desc = RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
-            target_format: TextureFormat::Bgra8UnormSrgb, // Swapchain format
+            target_format: surface.format(),
             ..Default::default()
         };
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
-        
-        // Create Surface for zero-copy presentation
-        let surface = Surface::new(device.clone(), window.as_ref())?;
         
         self.device = Some(device);
         self.vertex_buffer = Some(vertex_buffer);

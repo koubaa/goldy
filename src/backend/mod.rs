@@ -162,6 +162,10 @@ pub trait GpuBackend: Send + Sync {
     
     /// Get the current surface dimensions.
     fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32);
+    
+    /// Get the texture format used by a surface's swapchain.
+    /// Use this to ensure your render pipeline matches the surface format.
+    fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat;
 }
 
 /// Trait for consuming render output.

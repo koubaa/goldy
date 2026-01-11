@@ -8,7 +8,7 @@
 
 use rag::{
     Buffer, BufferUsage, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
+    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     examples::digital_clock::{
         ClockVertex, ClockState, TimeData, SHADER_SOURCE,
         generate_clock_vertices,
@@ -55,15 +55,17 @@ impl App {
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         
+        // Create surface first to get the correct format
+        let surface = Surface::new(device.clone(), window.as_ref())?;
+        
         // Use the SHARED shader source from the examples module
         let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;
         let pipeline_desc = RenderPipelineDesc {
             vertex_layout: ClockVertex::layout(), // Use shared vertex type
-            target_format: TextureFormat::Bgra8UnormSrgb,
+            target_format: surface.format(),
             ..Default::default()
         };
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
-        let surface = Surface::new(device.clone(), window.as_ref())?;
         
         self.device = Some(device);
         self.shader = Some(shader);

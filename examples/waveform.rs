@@ -6,7 +6,7 @@
 
 use rag::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
+    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     Vertex2D, PrimitiveTopology,
 };
 use std::sync::Arc;
@@ -86,14 +86,14 @@ impl App {
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let surface = Surface::new(device.clone(), window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, rag::shader::builtins::VERTEX_COLOR_2D)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
-            target_format: TextureFormat::Bgra8UnormSrgb,
+            target_format: surface.format(),
             topology: PrimitiveTopology::LineStrip,
             ..Default::default()
         })?;
-        let surface = Surface::new(device.clone(), window.as_ref())?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);

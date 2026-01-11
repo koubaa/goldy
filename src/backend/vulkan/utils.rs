@@ -50,6 +50,20 @@ pub fn index_format_to_vk(format: IndexFormat) -> vk::IndexType {
     }
 }
 
+/// Convert Vulkan format to RAG TextureFormat.
+/// Returns None for unsupported formats.
+pub fn vk_to_format(format: vk::Format) -> Option<TextureFormat> {
+    match format {
+        vk::Format::R8G8B8A8_SRGB => Some(TextureFormat::Rgba8UnormSrgb),
+        vk::Format::R8G8B8A8_UNORM => Some(TextureFormat::Rgba8Unorm),
+        vk::Format::B8G8R8A8_SRGB => Some(TextureFormat::Bgra8UnormSrgb),
+        vk::Format::B8G8R8A8_UNORM => Some(TextureFormat::Bgra8Unorm),
+        vk::Format::R16G16B16A16_SFLOAT => Some(TextureFormat::Rgba16Float),
+        vk::Format::R32G32B32A32_SFLOAT => Some(TextureFormat::Rgba32Float),
+        _ => None,
+    }
+}
+
 /// Find a suitable memory type for allocation.
 pub fn find_memory_type(
     instance: &ash::Instance,

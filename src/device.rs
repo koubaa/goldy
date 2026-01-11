@@ -115,6 +115,47 @@ impl Adapter {
     }
 }
 
+/// Device capabilities and format preferences.
+///
+/// Use this to query the optimal formats and limits for your use case.
+#[derive(Debug, Clone)]
+pub struct DeviceCapabilities {
+    /// Preferred format for window surfaces (swapchains).
+    /// For windowed apps, use this for `RenderPipelineDesc::target_format`.
+    pub preferred_surface_format: TextureFormat,
+    
+    /// Preferred format for off-screen render targets.
+    /// For headless rendering (video encoding, CPU readback), use this format.
+    pub preferred_render_target_format: TextureFormat,
+    
+    /// Formats supported for window surfaces.
+    pub supported_surface_formats: Vec<TextureFormat>,
+    
+    /// Formats supported for render targets.
+    pub supported_render_target_formats: Vec<TextureFormat>,
+}
+
+impl Default for DeviceCapabilities {
+    fn default() -> Self {
+        Self {
+            preferred_surface_format: TextureFormat::Bgra8UnormSrgb,
+            preferred_render_target_format: TextureFormat::Rgba8Unorm,
+            supported_surface_formats: vec![
+                TextureFormat::Bgra8UnormSrgb,
+                TextureFormat::Bgra8Unorm,
+            ],
+            supported_render_target_formats: vec![
+                TextureFormat::Rgba8Unorm,
+                TextureFormat::Rgba8UnormSrgb,
+                TextureFormat::Bgra8Unorm,
+                TextureFormat::Bgra8UnormSrgb,
+                TextureFormat::Rgba16Float,
+                TextureFormat::Rgba32Float,
+            ],
+        }
+    }
+}
+
 /// A GPU device - used to create resources and render.
 ///
 /// The `Device` is the primary interface for GPU operations. It is `Send + Sync`,
@@ -155,6 +196,30 @@ impl Device {
         &self.backend
     }
 
+    /// Get device capabilities and format preferences.
+    ///
+    /// Use this to query optimal formats for your use case:
+    /// - Windowed apps: use `preferred_surface_format` for pipelines
+    /// - Headless/streaming: use `preferred_render_target_format` for RenderTarget
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use rag::{Instance, DeviceType};
+    ///
+    /// let instance = Instance::new()?;
+    /// let device = instance.create_device(DeviceType::DiscreteGpu)?;
+    /// let caps = device.capabilities();
+    /// 
+    /// println!("Surface format: {:?}", caps.preferred_surface_format);
+    /// println!("RenderTarget format: {:?}", caps.preferred_render_target_format);
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn capabilities(&self) -> DeviceCapabilities {
+        // For now, return sensible defaults
+        // Future: query actual device limits and capabilities
+        DeviceCapabilities::default()
+    }
 
     /// Create a device from a backend for testing purposes.
     #[cfg(test)]

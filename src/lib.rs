@@ -31,7 +31,7 @@ pub mod slang;
 
 // Re-export main types
 pub use types::*;
-pub use device::{Instance, Device, Adapter};
+pub use device::{Instance, Device, Adapter, DeviceCapabilities};
 pub use buffer::Buffer;
 pub use bind_group::{BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, BindingType, ShaderStages};
 pub use shader::ShaderModule;
