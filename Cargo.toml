@@ -13,7 +13,7 @@ categories = ["graphics", "rendering"]
 ash = { version = "0.38", optional = true }
 
 # Dynamic library loading for Slang compiler
-libloading = "0.8"
+libloading = "0.9"
 
 # Error handling
 anyhow = "1.0"
