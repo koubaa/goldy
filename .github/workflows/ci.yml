@@ -105,6 +105,11 @@ jobs:
           cd slang
           chmod +x download.sh
           ./download.sh
+          # Set environment variable for Slang library path
+          SLANG_PATH="$(pwd)/bin/linux-x86_64"
+          echo "GOLDY_SLANG_PATH=$SLANG_PATH" >> $GITHUB_ENV
+          echo "Slang libraries:"
+          ls -la "$SLANG_PATH" || echo "Directory not found"
 
       - name: Verify lavapipe installation
         run: |
@@ -148,12 +153,17 @@ jobs:
           VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
           # Disable GPU validation layers for CI
           VK_LAYER_PATH: ""
+          # Point to downloaded Slang libraries
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          LD_LIBRARY_PATH: ${{ env.GOLDY_SLANG_PATH }}
         run: cargo test --features vulkan
 
       - name: Run integration tests
         env:
           VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
           VK_LAYER_PATH: ""
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          LD_LIBRARY_PATH: ${{ env.GOLDY_SLANG_PATH }}
         run: cargo test --features vulkan --test '*'
 
   # Build documentation
