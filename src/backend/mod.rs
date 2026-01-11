@@ -23,8 +23,8 @@ pub mod metal;
 // pub mod webgpu;
 
 use crate::types::{
-    BackendType, BufferUsage, Color, DeviceType, IndexFormat, PrimitiveTopology, TextureFormat,
-    VertexBufferLayout,
+    BackendType, BufferUsage, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat,
+    PrimitiveTopology, SamplerDesc, TextureFormat, TextureUsage, VertexBufferLayout,
 };
 use anyhow::Result;
 
@@ -56,12 +56,16 @@ pub type BindGroupLayoutHandle = u64;
 pub type RenderTargetHandle = u64;
 pub type SurfaceHandle = u64;
 pub type SwapchainImageHandle = u64;
+pub type TextureHandle = u64;
+pub type SamplerHandle = u64;
 
 /// Render command for command buffer recording.
 #[derive(Debug, Clone)]
 pub enum RenderCommand {
-    /// Clear the render target.
+    /// Clear the color render target.
     Clear(Color),
+    /// Clear the depth buffer.
+    ClearDepth(f32),
     /// Set the active pipeline.
     SetPipeline(PipelineHandle),
     /// Set a vertex buffer.
@@ -138,11 +142,49 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<PipelineHandle>;
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
+    // Pipeline with depth stencil state
+    fn create_pipeline_with_depth(
+        &mut self,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+        depth_stencil: Option<&DepthStencilState>,
+    ) -> Result<PipelineHandle>;
+
     // RenderTarget API - GPU buffer stays on GPU, readback is optional
     fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle>;
+    /// Create a render target with an optional depth buffer.
+    fn create_render_target_with_depth(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<RenderTargetHandle>;
     fn destroy_render_target(&mut self, target: RenderTargetHandle);
     fn render_to_target(&mut self, device: DeviceHandle, target: RenderTargetHandle, commands: &[RenderCommand]) -> Result<()>;
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()>;
+
+    // Texture management
+    fn create_texture(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        usage: TextureUsage,
+    ) -> Result<TextureHandle>;
+    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()>;
+    fn destroy_texture(&mut self, texture: TextureHandle);
+
+    // Sampler management
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle>;
+    fn destroy_sampler(&mut self, sampler: SamplerHandle);
 
     // Surface API - zero-copy presentation to window
     /// Create a surface for presenting to a window.
@@ -206,6 +248,12 @@ impl ShaderStages {
 pub enum BindingType {
     UniformBuffer,
     StorageBuffer { read_only: bool },
+    /// Sampled texture (read-only in shader).
+    Texture,
+    /// Sampler for texture sampling.
+    Sampler,
+    /// Storage texture (read-write in shader).
+    StorageTexture,
 }
 
 /// Bind group entry.
@@ -219,6 +267,8 @@ pub struct BindGroupEntry {
 #[derive(Debug, Clone)]
 pub enum BindingResource {
     Buffer { buffer: BufferHandle, offset: u64, size: u64 },
+    Texture(TextureHandle),
+    Sampler(SamplerHandle),
 }
 
 /// Create the default backend for the current platform.

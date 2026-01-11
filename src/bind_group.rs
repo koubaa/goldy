@@ -1,7 +1,7 @@
 //! Bind group management for uniform buffers and other shader resources.
 //!
 //! Bind groups are the mechanism to pass data to shaders beyond vertex data.
-//! They contain references to buffers (uniform, storage) and other resources.
+//! They contain references to buffers (uniform, storage), textures, and samplers.
 
 use crate::backend::{
     BindGroupHandle, BindGroupLayoutHandle, BindGroupLayoutEntry, BindGroupEntry,
@@ -9,6 +9,8 @@ use crate::backend::{
 };
 use crate::buffer::Buffer;
 use crate::device::Device;
+use crate::sampler::Sampler;
+use crate::texture::Texture;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -62,6 +64,51 @@ impl BindGroupLayoutBinding {
             ty: BindingType::StorageBuffer { read_only },
         }
     }
+
+    /// Create a sampled texture binding visible to the fragment stage.
+    pub fn texture(binding: u32) -> Self {
+        Self {
+            binding,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture,
+        }
+    }
+
+    /// Create a sampled texture binding visible to all graphics stages.
+    pub fn texture_all(binding: u32) -> Self {
+        Self {
+            binding,
+            visibility: ShaderStages::ALL,
+            ty: BindingType::Texture,
+        }
+    }
+
+    /// Create a sampler binding visible to the fragment stage.
+    pub fn sampler(binding: u32) -> Self {
+        Self {
+            binding,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Sampler,
+        }
+    }
+
+    /// Create a sampler binding visible to all graphics stages.
+    pub fn sampler_all(binding: u32) -> Self {
+        Self {
+            binding,
+            visibility: ShaderStages::ALL,
+            ty: BindingType::Sampler,
+        }
+    }
+
+    /// Create a storage texture binding (read-write in shader).
+    pub fn storage_texture(binding: u32) -> Self {
+        Self {
+            binding,
+            visibility: ShaderStages::ALL,
+            ty: BindingType::StorageTexture,
+        }
+    }
 }
 
 /// A bind group layout defines the structure of a bind group.
@@ -101,6 +148,13 @@ impl BindGroupLayout {
             backend: Arc::clone(&device.backend),
             handle,
         })
+    }
+
+    /// Get the backend handle for this layout.
+    ///
+    /// This is used when creating pipelines that use this layout.
+    pub fn handle(&self) -> BindGroupLayoutHandle {
+        self.handle
     }
 }
 
@@ -156,6 +210,54 @@ impl<'a> BufferBinding<'a> {
     }
 }
 
+/// Description of a texture binding in a bind group.
+#[derive(Clone)]
+pub struct TextureBinding<'a> {
+    /// Binding index (must match the layout).
+    pub binding: u32,
+    /// The texture to bind.
+    pub texture: &'a Texture,
+}
+
+impl<'a> std::fmt::Debug for TextureBinding<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextureBinding")
+            .field("binding", &self.binding)
+            .finish()
+    }
+}
+
+impl<'a> TextureBinding<'a> {
+    /// Create a texture binding.
+    pub fn new(binding: u32, texture: &'a Texture) -> Self {
+        Self { binding, texture }
+    }
+}
+
+/// Description of a sampler binding in a bind group.
+#[derive(Clone)]
+pub struct SamplerBinding<'a> {
+    /// Binding index (must match the layout).
+    pub binding: u32,
+    /// The sampler to bind.
+    pub sampler: &'a Sampler,
+}
+
+impl<'a> std::fmt::Debug for SamplerBinding<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamplerBinding")
+            .field("binding", &self.binding)
+            .finish()
+    }
+}
+
+impl<'a> SamplerBinding<'a> {
+    /// Create a sampler binding.
+    pub fn new(binding: u32, sampler: &'a Sampler) -> Self {
+        Self { binding, sampler }
+    }
+}
+
 /// A bind group contains actual resource bindings matching a layout.
 ///
 /// Bind groups are created from a layout and contain references to buffers
@@ -167,22 +269,76 @@ pub struct BindGroup {
 
 impl BindGroup {
     /// Create a new bind group from a layout and buffer bindings.
+    ///
+    /// Use this when your bind group only contains buffer bindings (uniform, storage).
+    /// For bind groups with textures and samplers, use `with_resources()`.
     pub fn new(
         device: &Device,
         layout: &BindGroupLayout,
         bindings: &[BufferBinding],
     ) -> Result<Self> {
-        let entries: Vec<BindGroupEntry> = bindings
-            .iter()
-            .map(|b| BindGroupEntry {
+        Self::with_resources(device, layout, bindings, &[], &[])
+    }
+
+    /// Create a new bind group with buffers, textures, and samplers.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use rag::{Device, BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, TextureBinding, SamplerBinding};
+    ///
+    /// fn create_textured_bind_group(
+    ///     device: &Device,
+    ///     layout: &BindGroupLayout,
+    ///     uniform_buffer: &rag::Buffer,
+    ///     texture: &rag::Texture,
+    ///     sampler: &rag::Sampler,
+    /// ) -> anyhow::Result<BindGroup> {
+    ///     BindGroup::with_resources(
+    ///         device,
+    ///         layout,
+    ///         &[BufferBinding::new(0, uniform_buffer)],
+    ///         &[TextureBinding::new(1, texture)],
+    ///         &[SamplerBinding::new(2, sampler)],
+    ///     )
+    /// }
+    /// ```
+    pub fn with_resources(
+        device: &Device,
+        layout: &BindGroupLayout,
+        buffer_bindings: &[BufferBinding],
+        texture_bindings: &[TextureBinding],
+        sampler_bindings: &[SamplerBinding],
+    ) -> Result<Self> {
+        let mut entries: Vec<BindGroupEntry> = Vec::new();
+
+        // Add buffer bindings
+        for b in buffer_bindings {
+            entries.push(BindGroupEntry {
                 binding: b.binding,
                 resource: BindingResource::Buffer {
                     buffer: b.buffer.handle,
                     offset: b.offset,
                     size: b.size.unwrap_or(b.buffer.size()),
                 },
-            })
-            .collect();
+            });
+        }
+
+        // Add texture bindings
+        for t in texture_bindings {
+            entries.push(BindGroupEntry {
+                binding: t.binding,
+                resource: BindingResource::Texture(t.texture.handle),
+            });
+        }
+
+        // Add sampler bindings
+        for s in sampler_bindings {
+            entries.push(BindGroupEntry {
+                binding: s.binding,
+                resource: BindingResource::Sampler(s.sampler.handle),
+            });
+        }
 
         let mut backend = device.backend.lock().unwrap();
         let handle = backend.create_bind_group(device.handle, layout.handle, &entries)?;

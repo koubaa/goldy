@@ -2,7 +2,7 @@
 //!
 //! This module contains all the state structs used by the Vulkan backend.
 
-use crate::types::TextureFormat;
+use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use super::super::{DeviceHandle, BufferHandle};
 
@@ -71,6 +71,11 @@ pub(crate) struct RenderTargetState {
     pub image: vk::Image,
     pub image_memory: vk::DeviceMemory,
     pub image_view: vk::ImageView,
+    /// Depth buffer (optional)
+    pub depth_format: Option<DepthFormat>,
+    pub depth_image: Option<vk::Image>,
+    pub depth_memory: Option<vk::DeviceMemory>,
+    pub depth_view: Option<vk::ImageView>,
     /// Staging buffer for CPU readback (lazy-created on first read)
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
@@ -78,6 +83,26 @@ pub(crate) struct RenderTargetState {
     pub command_buffer: vk::CommandBuffer,
     /// Track if we've rendered (for readback validation)
     pub has_rendered: bool,
+}
+
+/// GPU texture state.
+pub(crate) struct TextureState {
+    pub device_handle: DeviceHandle,
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub image: vk::Image,
+    pub memory: vk::DeviceMemory,
+    pub view: vk::ImageView,
+    /// Staging buffer for texture uploads
+    pub staging_buffer: Option<vk::Buffer>,
+    pub staging_memory: Option<vk::DeviceMemory>,
+}
+
+/// GPU sampler state.
+pub(crate) struct SamplerState {
+    pub device_handle: DeviceHandle,
+    pub sampler: vk::Sampler,
 }
 
 /// Maximum number of frames that can be in-flight at once.

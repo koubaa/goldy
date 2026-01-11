@@ -48,6 +48,10 @@ pub struct VulkanBackend {
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
     next_surface_handle: SurfaceHandle,
+    textures: HashMap<TextureHandle, TextureState>,
+    next_texture_handle: TextureHandle,
+    samplers: HashMap<SamplerHandle, SamplerState>,
+    next_sampler_handle: SamplerHandle,
     /// Per-backend Slang compiler instance (avoids global state issues in tests)
     slang_compiler: crate::slang::SlangCompiler,
 }
@@ -166,6 +170,10 @@ impl VulkanBackend {
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
             next_surface_handle: 1,
+            textures: HashMap::new(),
+            next_texture_handle: 1,
+            samplers: HashMap::new(),
+            next_sampler_handle: 1,
             slang_compiler,
         })
     }

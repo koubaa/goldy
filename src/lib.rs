@@ -22,6 +22,8 @@ pub mod pipeline;
 pub mod encoder;
 pub mod render_target;
 pub mod surface;
+pub mod texture;
+pub mod sampler;
 pub mod examples;
 
 // Slang compiler is only available on native targets (not WASM)
@@ -33,10 +35,12 @@ pub mod slang;
 pub use types::*;
 pub use device::{Instance, Device, Adapter, DeviceCapabilities};
 pub use buffer::Buffer;
-pub use bind_group::{BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, BindingType, ShaderStages};
+pub use bind_group::{BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, TextureBinding, SamplerBinding, BindingType, ShaderStages};
 pub use shader::ShaderModule;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use render_target::RenderTarget;
 pub use surface::{Surface, SurfaceFrame};
+pub use texture::Texture;
+pub use sampler::Sampler;
 

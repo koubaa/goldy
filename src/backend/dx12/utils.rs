@@ -2,7 +2,7 @@
 //!
 //! Format conversions and helpers.
 
-use crate::types::{IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
+use crate::types::{AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
 use windows::Win32::Graphics::{Direct3D, Direct3D12, Dxgi};
 
 /// Convert RAG TextureFormat to DXGI format.
@@ -98,6 +98,54 @@ pub fn device_type_from_flags(flags: Dxgi::DXGI_ADAPTER_FLAG) -> crate::types::D
         // Can't easily distinguish discrete vs integrated from DXGI alone
         // Default to discrete for hardware adapters
         crate::types::DeviceType::DiscreteGpu
+    }
+}
+
+/// Convert RAG DepthFormat to DXGI format.
+pub fn depth_format_to_dxgi(format: DepthFormat) -> Dxgi::Common::DXGI_FORMAT {
+    match format {
+        DepthFormat::Depth16Unorm => Dxgi::Common::DXGI_FORMAT_D16_UNORM,
+        DepthFormat::Depth24Plus => Dxgi::Common::DXGI_FORMAT_D32_FLOAT,
+        DepthFormat::Depth24PlusStencil8 => Dxgi::Common::DXGI_FORMAT_D24_UNORM_S8_UINT,
+        DepthFormat::Depth32Float => Dxgi::Common::DXGI_FORMAT_D32_FLOAT,
+        DepthFormat::Depth32FloatStencil8 => Dxgi::Common::DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+    }
+}
+
+/// Convert RAG CompareFunction to D3D12 comparison func.
+pub fn compare_to_d3d12(compare: CompareFunction) -> Direct3D12::D3D12_COMPARISON_FUNC {
+    match compare {
+        CompareFunction::Never => Direct3D12::D3D12_COMPARISON_FUNC_NEVER,
+        CompareFunction::Less => Direct3D12::D3D12_COMPARISON_FUNC_LESS,
+        CompareFunction::Equal => Direct3D12::D3D12_COMPARISON_FUNC_EQUAL,
+        CompareFunction::LessEqual => Direct3D12::D3D12_COMPARISON_FUNC_LESS_EQUAL,
+        CompareFunction::Greater => Direct3D12::D3D12_COMPARISON_FUNC_GREATER,
+        CompareFunction::NotEqual => Direct3D12::D3D12_COMPARISON_FUNC_NOT_EQUAL,
+        CompareFunction::GreaterEqual => Direct3D12::D3D12_COMPARISON_FUNC_GREATER_EQUAL,
+        CompareFunction::Always => Direct3D12::D3D12_COMPARISON_FUNC_ALWAYS,
+    }
+}
+
+/// Convert RAG FilterMode to D3D12 filter.
+pub fn filter_to_d3d12(min: FilterMode, mag: FilterMode, mip: FilterMode) -> Direct3D12::D3D12_FILTER {
+    match (min, mag, mip) {
+        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_MAG_MIP_POINT,
+        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR,
+        (FilterMode::Nearest, FilterMode::Linear, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT,
+        (FilterMode::Nearest, FilterMode::Linear, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR,
+        (FilterMode::Linear, FilterMode::Nearest, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT,
+        (FilterMode::Linear, FilterMode::Nearest, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR,
+        (FilterMode::Linear, FilterMode::Linear, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+        (FilterMode::Linear, FilterMode::Linear, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+    }
+}
+
+/// Convert RAG AddressMode to D3D12 texture address mode.
+pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADDRESS_MODE {
+    match mode {
+        AddressMode::ClampToEdge => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        AddressMode::Repeat => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        AddressMode::MirrorRepeat => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
     }
 }
 

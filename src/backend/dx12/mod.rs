@@ -14,9 +14,9 @@ mod utils;
 use types::{
     DxgiAdapterInfo, LogicalDevice, BufferState, ShaderState, PipelineState,
     BindGroupLayoutState, BindGroupState, RenderTargetState, SurfaceState, FrameSync,
-    MAX_FRAMES_IN_FLIGHT,
+    TextureState, SamplerState, MAX_FRAMES_IN_FLIGHT,
 };
-use utils::{format_to_dxgi, dxgi_to_format, vertex_format_to_dxgi, topology_type_to_d3d12, index_format_to_dxgi};
+use utils::{format_to_dxgi, dxgi_to_format, vertex_format_to_dxgi, topology_type_to_d3d12, index_format_to_dxgi, depth_format_to_dxgi};
 
 use super::*;
 use crate::types::Color;
@@ -60,8 +60,18 @@ pub struct Dx12Backend {
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
     next_surface_handle: SurfaceHandle,
+    textures: HashMap<TextureHandle, TextureState>,
+    next_texture_handle: TextureHandle,
+    samplers: HashMap<SamplerHandle, SamplerState>,
+    next_sampler_handle: SamplerHandle,
     /// Next RTV descriptor offset
     next_rtv_offset: u32,
+    /// Next DSV descriptor offset
+    next_dsv_offset: u32,
+    /// Next SRV descriptor offset in CBV/SRV/UAV heap
+    next_srv_offset: u32,
+    /// Next sampler descriptor offset
+    next_sampler_offset: u32,
     /// Per-backend Slang compiler instance
     slang_compiler: crate::slang::SlangCompiler,
 }
@@ -151,7 +161,14 @@ impl Dx12Backend {
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
             next_surface_handle: 1,
+            textures: HashMap::new(),
+            next_texture_handle: 1,
+            samplers: HashMap::new(),
+            next_sampler_handle: 1,
             next_rtv_offset: 0,
+            next_dsv_offset: 0,
+            next_srv_offset: 0,
+            next_sampler_offset: 0,
             slang_compiler,
         })
     }
@@ -370,6 +387,19 @@ impl GpuBackend for Dx12Backend {
         
         let rtv_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
 
+        // Create DSV descriptor heap
+        let dsv_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+            NumDescriptors: 256,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            NodeMask: 0,
+        };
+        
+        let dsv_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&dsv_heap_desc) }
+            .context("Failed to create DSV heap")?;
+        
+        let dsv_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV) };
+
         // Create CBV/SRV/UAV descriptor heap
         let cbv_srv_uav_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
             Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
@@ -382,6 +412,19 @@ impl GpuBackend for Dx12Backend {
             .context("Failed to create CBV/SRV/UAV heap")?;
         
         let cbv_srv_uav_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
+
+        // Create sampler descriptor heap
+        let sampler_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+            NumDescriptors: 256,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask: 0,
+        };
+        
+        let sampler_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&sampler_heap_desc) }
+            .context("Failed to create sampler heap")?;
+        
+        let sampler_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) };
 
         // Create fence
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
@@ -399,8 +442,12 @@ impl GpuBackend for Dx12Backend {
                 command_allocator,
                 rtv_heap,
                 rtv_descriptor_size,
+                dsv_heap,
+                dsv_descriptor_size,
                 cbv_srv_uav_heap,
                 cbv_srv_uav_descriptor_size,
+                sampler_heap,
+                sampler_descriptor_size,
                 fence,
                 fence_value: 1,
             },
@@ -463,6 +510,26 @@ impl GpuBackend for Dx12Backend {
                 .collect();
             for handle in surface_handles {
                 self.surfaces.remove(&handle);
+            }
+
+            // Destroy textures owned by this device
+            let texture_handles: Vec<_> = self.textures
+                .iter()
+                .filter(|(_, t)| t.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in texture_handles {
+                self.textures.remove(&handle);
+            }
+
+            // Destroy samplers owned by this device
+            let sampler_handles: Vec<_> = self.samplers
+                .iter()
+                .filter(|(_, s)| s.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in sampler_handles {
+                self.samplers.remove(&handle);
             }
 
             tracing::info!("Destroyed DX12 device {}", device_handle);
@@ -653,6 +720,10 @@ impl GpuBackend for Dx12Backend {
             match &entry.resource {
                 BindingResource::Buffer { buffer, offset, size } => {
                     buffer_bindings.push((entry.binding, *buffer, *offset, *size));
+                }
+                BindingResource::Texture(_) | BindingResource::Sampler(_) => {
+                    // TODO: Handle texture and sampler bindings
+                    tracing::warn!("DX12 texture/sampler bindings not fully implemented");
                 }
             }
         }
@@ -1035,6 +1106,9 @@ impl GpuBackend for Dx12Backend {
                 format,
                 texture,
                 rtv_offset,
+                depth_format: None,
+                depth_texture: None,
+                dsv_offset: None,
                 staging_buffer: None,
                 command_list,
                 has_rendered: false,
@@ -1128,6 +1202,9 @@ impl GpuBackend for Dx12Backend {
             match command {
                 RenderCommand::Clear(_) => {
                     // Already handled
+                }
+                RenderCommand::ClearDepth(_) => {
+                    // TODO: Implement depth clear
                 }
                 RenderCommand::SetPipeline(pipeline_handle) => {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
@@ -1651,6 +1728,7 @@ impl GpuBackend for Dx12Backend {
         for command in commands {
             match command {
                 RenderCommand::Clear(_) => { /* Already handled */ }
+                RenderCommand::ClearDepth(_) => { /* TODO: Implement depth clear */ }
                 RenderCommand::SetPipeline(pipeline_handle) => {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         current_vertex_stride = pipeline.vertex_stride;
@@ -1880,6 +1958,439 @@ impl GpuBackend for Dx12Backend {
         self.surfaces.get(&surface_handle)
             .and_then(|s| dxgi_to_format(s.format))
             .unwrap_or(TextureFormat::Bgra8Unorm)
+    }
+
+    fn create_pipeline_with_depth(
+        &mut self,
+        device_handle: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+        _depth_stencil: Option<&crate::types::DepthStencilState>,
+    ) -> Result<PipelineHandle> {
+        // TODO: Implement proper depth stencil state in PSO
+        // For now, delegate to the existing method (ignoring depth stencil)
+        self.create_pipeline_with_layout(
+            device_handle,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+            bind_group_layouts,
+        )
+    }
+
+    fn create_render_target_with_depth(
+        &mut self,
+        device_handle: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<crate::types::DepthFormat>,
+    ) -> Result<RenderTargetHandle> {
+        let logical_device = self
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Create color render target texture
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+
+        let resource_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: width as u64,
+            Height: height,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: format_to_dxgi(color_format),
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        };
+
+        let clear_value = D3D12_CLEAR_VALUE {
+            Format: format_to_dxgi(color_format),
+            Anonymous: D3D12_CLEAR_VALUE_0 { Color: [0.0, 0.0, 0.0, 1.0] },
+        };
+
+        let mut texture: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, Some(&clear_value), &mut texture,
+            )
+        }.context("Failed to create render target texture")?;
+        let texture = texture.context("CreateCommittedResource returned null")?;
+
+        // Create RTV
+        let rtv_offset = self.next_rtv_offset;
+        self.next_rtv_offset += 1;
+
+        let rtv_handle = unsafe {
+            let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (rtv_offset * logical_device.rtv_descriptor_size) as usize;
+            handle
+        };
+        unsafe { logical_device.device.CreateRenderTargetView(&texture, None, rtv_handle); }
+
+        // Create depth buffer if requested
+        let (depth_texture, dsv_offset) = if let Some(df) = depth_format {
+            let depth_desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                Alignment: 0,
+                Width: width as u64,
+                Height: height,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: depth_format_to_dxgi(df),
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+                Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+            };
+
+            let depth_clear = D3D12_CLEAR_VALUE {
+                Format: depth_format_to_dxgi(df),
+                Anonymous: D3D12_CLEAR_VALUE_0 {
+                    DepthStencil: D3D12_DEPTH_STENCIL_VALUE { Depth: 1.0, Stencil: 0 },
+                },
+            };
+
+            let mut depth_tex: Option<ID3D12Resource> = None;
+            unsafe {
+                logical_device.device.CreateCommittedResource(
+                    &heap_properties, D3D12_HEAP_FLAG_NONE, &depth_desc,
+                    D3D12_RESOURCE_STATE_DEPTH_WRITE, Some(&depth_clear), &mut depth_tex,
+                )
+            }.context("Failed to create depth buffer")?;
+            let depth_tex = depth_tex.context("CreateCommittedResource returned null for depth")?;
+
+            let dsv_off = self.next_dsv_offset;
+            self.next_dsv_offset += 1;
+
+            let dsv_handle = unsafe {
+                let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
+                handle.ptr += (dsv_off * logical_device.dsv_descriptor_size) as usize;
+                handle
+            };
+            unsafe { logical_device.device.CreateDepthStencilView(&depth_tex, None, dsv_handle); }
+
+            (Some(depth_tex), Some(dsv_off))
+        } else {
+            (None, None)
+        };
+
+        // Create command list
+        let command_list: ID3D12GraphicsCommandList = unsafe {
+            logical_device.device.CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_DIRECT, &logical_device.command_allocator, None,
+            )
+        }.context("Failed to create command list")?;
+        unsafe { command_list.Close() }.ok();
+
+        let handle = self.next_render_target_handle;
+        self.next_render_target_handle += 1;
+
+        self.render_targets.insert(
+            handle,
+            RenderTargetState {
+                device_handle,
+                width,
+                height,
+                format: color_format,
+                texture,
+                rtv_offset,
+                depth_format,
+                depth_texture,
+                dsv_offset,
+                staging_buffer: None,
+                command_list,
+                has_rendered: false,
+            },
+        );
+
+        tracing::debug!("Created render target {}x{} with depth={:?} (handle={})", width, height, depth_format.is_some(), handle);
+        Ok(handle)
+    }
+
+    fn create_texture(
+        &mut self,
+        device_handle: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        _usage: crate::types::TextureUsage,
+    ) -> Result<TextureHandle> {
+        let logical_device = self.devices.get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+
+        let resource_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: width as u64,
+            Height: height,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: format_to_dxgi(format),
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_NONE,
+        };
+
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, None, &mut resource,
+            )
+        }.context("Failed to create texture")?;
+        let resource = resource.context("CreateCommittedResource returned null")?;
+
+        // Create SRV
+        let srv_offset = self.next_srv_offset;
+        self.next_srv_offset += 1;
+
+        let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format_to_dxgi(format),
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_SRV {
+                    MostDetailedMip: 0,
+                    MipLevels: 1,
+                    PlaneSlice: 0,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        };
+
+        let srv_handle = unsafe {
+            let mut handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+            handle
+        };
+        unsafe { logical_device.device.CreateShaderResourceView(&resource, Some(&srv_desc), srv_handle); }
+
+        let handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
+
+        self.textures.insert(
+            handle,
+            TextureState {
+                device_handle,
+                width,
+                height,
+                format,
+                resource,
+                srv_offset,
+            },
+        );
+
+        tracing::debug!("Created texture {}x{} (handle={})", width, height, handle);
+        Ok(handle)
+    }
+
+    fn write_texture(&mut self, texture_handle: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
+        let texture = self.textures.get(&texture_handle)
+            .context("Invalid texture handle")?;
+
+        if texture.width != width || texture.height != height {
+            anyhow::bail!("Texture dimensions mismatch");
+        }
+
+        let device_handle = texture.device_handle;
+        let logical_device = self.devices.get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Calculate row pitch (must be 256-byte aligned for D3D12)
+        let row_pitch = ((width * texture.format.bytes_per_pixel() + 255) & !255) as u64;
+        let staging_size = row_pitch * height as u64;
+
+        // Create staging buffer
+        let upload_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_UPLOAD,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+
+        let buffer_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Alignment: 0,
+            Width: staging_size,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_UNKNOWN,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_NONE,
+        };
+
+        let mut staging: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, None, &mut staging,
+            )
+        }.context("Failed to create staging buffer")?;
+        let staging = staging.context("CreateCommittedResource returned null")?;
+
+        // Map and copy data
+        let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let read_range = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
+            .context("Failed to map staging buffer")?;
+
+        let bytes_per_row = (width * texture.format.bytes_per_pixel()) as usize;
+        for row in 0..height {
+            let src_offset = (row as usize) * bytes_per_row;
+            let dst_offset = (row as u64 * row_pitch) as usize;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(src_offset),
+                    (mapped_ptr as *mut u8).add(dst_offset),
+                    bytes_per_row,
+                );
+            }
+        }
+
+        let written_range = D3D12_RANGE { Begin: 0, End: staging_size as usize };
+        unsafe { staging.Unmap(0, Some(&written_range)) };
+
+        // Execute copy command
+        unsafe { logical_device.command_allocator.Reset() }
+            .context("Failed to reset command allocator")?;
+
+        let command_list: ID3D12GraphicsCommandList = unsafe {
+            logical_device.device.CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_DIRECT, &logical_device.command_allocator, None,
+            )
+        }.context("Failed to create command list")?;
+
+        let texture = self.textures.get(&texture_handle).unwrap();
+
+        let src_location = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: unsafe { std::mem::transmute_copy(&staging) },
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                    Offset: 0,
+                    Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                        Format: format_to_dxgi(texture.format),
+                        Width: width,
+                        Height: height,
+                        Depth: 1,
+                        RowPitch: row_pitch as u32,
+                    },
+                },
+            },
+        };
+
+        let dst_location = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+        };
+
+        unsafe {
+            command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None);
+
+            // Transition to shader resource
+            let barrier = D3D12_RESOURCE_BARRIER {
+                Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                    Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                        pResource: std::mem::transmute_copy(&texture.resource),
+                        Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
+                        StateAfter: D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    }),
+                },
+            };
+            command_list.ResourceBarrier(&[barrier]);
+            command_list.Close()
+        }.context("Failed to close command list")?;
+
+        let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
+        unsafe { logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]); }
+
+        // Wait for completion
+        let _ = self.wait_for_gpu(logical_device);
+
+        tracing::debug!("Wrote {}x{} texture data", width, height);
+        Ok(())
+    }
+
+    fn destroy_texture(&mut self, texture_handle: TextureHandle) {
+        self.textures.remove(&texture_handle);
+    }
+
+    fn create_sampler(&mut self, device_handle: DeviceHandle, desc: &crate::types::SamplerDesc) -> Result<SamplerHandle> {
+        let logical_device = self.devices.get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let sampler_offset = self.next_sampler_offset;
+        self.next_sampler_offset += 1;
+
+        let sampler_desc = D3D12_SAMPLER_DESC {
+            Filter: utils::filter_to_d3d12(desc.min_filter, desc.mag_filter, desc.mipmap_filter),
+            AddressU: utils::address_mode_to_d3d12(desc.address_mode_u),
+            AddressV: utils::address_mode_to_d3d12(desc.address_mode_v),
+            AddressW: utils::address_mode_to_d3d12(desc.address_mode_w),
+            MipLODBias: 0.0,
+            MaxAnisotropy: desc.max_anisotropy as u32,
+            ComparisonFunc: desc.compare.map(utils::compare_to_d3d12).unwrap_or(D3D12_COMPARISON_FUNC_ALWAYS),
+            BorderColor: [0.0, 0.0, 0.0, 0.0],
+            MinLOD: desc.lod_min_clamp,
+            MaxLOD: desc.lod_max_clamp,
+        };
+
+        let sampler_handle = unsafe {
+            let mut handle = logical_device.sampler_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (sampler_offset * logical_device.sampler_descriptor_size) as usize;
+            handle
+        };
+        unsafe { logical_device.device.CreateSampler(&sampler_desc, sampler_handle); }
+
+        let handle = self.next_sampler_handle;
+        self.next_sampler_handle += 1;
+
+        self.samplers.insert(
+            handle,
+            SamplerState {
+                device_handle,
+                sampler_offset,
+                desc: desc.clone(),
+            },
+        );
+
+        tracing::debug!("Created sampler (handle={})", handle);
+        Ok(handle)
+    }
+
+    fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
+        self.samplers.remove(&sampler_handle);
     }
 }
 

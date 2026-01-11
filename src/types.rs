@@ -288,6 +288,160 @@ pub const FULLSCREEN_QUAD: [Vertex2DUv; 6] = [
     Vertex2DUv { position: [-1.0, 1.0], uv: [0.0, 0.0] },
 ];
 
+// ============================================================================
+// Depth Buffer Types
+// ============================================================================
+
+/// Depth/stencil texture format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DepthFormat {
+    /// 16-bit depth, no stencil
+    Depth16Unorm,
+    /// 24-bit depth, no stencil (platform may use 32-bit internally)
+    Depth24Plus,
+    /// 24-bit depth + 8-bit stencil
+    Depth24PlusStencil8,
+    /// 32-bit floating point depth, no stencil
+    Depth32Float,
+    /// 32-bit floating point depth + 8-bit stencil
+    Depth32FloatStencil8,
+}
+
+impl DepthFormat {
+    /// Returns true if this format includes a stencil component.
+    pub fn has_stencil(&self) -> bool {
+        matches!(self, DepthFormat::Depth24PlusStencil8 | DepthFormat::Depth32FloatStencil8)
+    }
+}
+
+/// Depth comparison function for depth testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CompareFunction {
+    /// Never passes.
+    Never,
+    /// Passes if new < current.
+    #[default]
+    Less,
+    /// Passes if new == current.
+    Equal,
+    /// Passes if new <= current.
+    LessEqual,
+    /// Passes if new > current.
+    Greater,
+    /// Passes if new != current.
+    NotEqual,
+    /// Passes if new >= current.
+    GreaterEqual,
+    /// Always passes.
+    Always,
+}
+
+/// Depth/stencil state for render pipelines.
+#[derive(Debug, Clone)]
+pub struct DepthStencilState {
+    /// Depth format to use. Must match the render target's depth format.
+    pub format: DepthFormat,
+    /// Whether to write depth values.
+    pub depth_write_enabled: bool,
+    /// Comparison function for depth test.
+    pub depth_compare: CompareFunction,
+}
+
+impl Default for DepthStencilState {
+    fn default() -> Self {
+        Self {
+            format: DepthFormat::Depth24Plus,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::Less,
+        }
+    }
+}
+
+// ============================================================================
+// Texture Types
+// ============================================================================
+
+bitflags! {
+    /// Texture usage flags.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct TextureUsage: u32 {
+        /// Can be used as a copy source.
+        const COPY_SRC = 1 << 0;
+        /// Can be used as a copy destination.
+        const COPY_DST = 1 << 1;
+        /// Can be sampled in a shader (e.g., texture2D).
+        const SAMPLED = 1 << 2;
+        /// Can be used as a storage texture.
+        const STORAGE = 1 << 3;
+        /// Can be used as a render attachment.
+        const RENDER_TARGET = 1 << 4;
+    }
+}
+
+/// Texture addressing mode for coordinates outside [0, 1].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AddressMode {
+    /// Clamp to edge color.
+    #[default]
+    ClampToEdge,
+    /// Repeat the texture.
+    Repeat,
+    /// Mirror and repeat the texture.
+    MirrorRepeat,
+}
+
+/// Texture filtering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FilterMode {
+    /// Nearest-neighbor sampling (blocky).
+    #[default]
+    Nearest,
+    /// Linear interpolation (smooth).
+    Linear,
+}
+
+/// Sampler descriptor for texture sampling.
+#[derive(Debug, Clone)]
+pub struct SamplerDesc {
+    /// Addressing mode for U (horizontal) coordinate.
+    pub address_mode_u: AddressMode,
+    /// Addressing mode for V (vertical) coordinate.
+    pub address_mode_v: AddressMode,
+    /// Addressing mode for W (depth) coordinate.
+    pub address_mode_w: AddressMode,
+    /// Magnification filter (when texture is enlarged).
+    pub mag_filter: FilterMode,
+    /// Minification filter (when texture is shrunk).
+    pub min_filter: FilterMode,
+    /// Mipmap filter mode.
+    pub mipmap_filter: FilterMode,
+    /// Maximum anisotropic filtering level (1.0 = disabled).
+    pub max_anisotropy: f32,
+    /// Compare function for depth textures (None = no comparison).
+    pub compare: Option<CompareFunction>,
+    /// Minimum LOD clamp.
+    pub lod_min_clamp: f32,
+    /// Maximum LOD clamp.
+    pub lod_max_clamp: f32,
+}
+
+impl Default for SamplerDesc {
+    fn default() -> Self {
+        Self {
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Nearest,
+            mipmap_filter: FilterMode::Nearest,
+            max_anisotropy: 1.0,
+            compare: None,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 32.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +539,63 @@ mod tests {
     #[test]
     fn test_index_format_default() {
         assert_eq!(IndexFormat::default(), IndexFormat::Uint16);
+    }
+
+    // Depth buffer tests
+    #[test]
+    fn test_depth_format_has_stencil() {
+        assert!(!DepthFormat::Depth16Unorm.has_stencil());
+        assert!(!DepthFormat::Depth24Plus.has_stencil());
+        assert!(DepthFormat::Depth24PlusStencil8.has_stencil());
+        assert!(!DepthFormat::Depth32Float.has_stencil());
+        assert!(DepthFormat::Depth32FloatStencil8.has_stencil());
+    }
+
+    #[test]
+    fn test_compare_function_default() {
+        assert_eq!(CompareFunction::default(), CompareFunction::Less);
+    }
+
+    #[test]
+    fn test_depth_stencil_state_default() {
+        let state = DepthStencilState::default();
+        assert_eq!(state.format, DepthFormat::Depth24Plus);
+        assert!(state.depth_write_enabled);
+        assert_eq!(state.depth_compare, CompareFunction::Less);
+    }
+
+    // Texture types tests
+    #[test]
+    fn test_texture_usage_flags() {
+        let usage = TextureUsage::SAMPLED | TextureUsage::COPY_DST;
+        assert!(usage.contains(TextureUsage::SAMPLED));
+        assert!(usage.contains(TextureUsage::COPY_DST));
+        assert!(!usage.contains(TextureUsage::STORAGE));
+    }
+
+    #[test]
+    fn test_address_mode_default() {
+        assert_eq!(AddressMode::default(), AddressMode::ClampToEdge);
+    }
+
+    #[test]
+    fn test_filter_mode_default() {
+        assert_eq!(FilterMode::default(), FilterMode::Nearest);
+    }
+
+    #[test]
+    fn test_sampler_desc_default() {
+        let desc = SamplerDesc::default();
+        assert_eq!(desc.address_mode_u, AddressMode::ClampToEdge);
+        assert_eq!(desc.address_mode_v, AddressMode::ClampToEdge);
+        assert_eq!(desc.address_mode_w, AddressMode::ClampToEdge);
+        assert_eq!(desc.mag_filter, FilterMode::Nearest);
+        assert_eq!(desc.min_filter, FilterMode::Nearest);
+        assert_eq!(desc.mipmap_filter, FilterMode::Nearest);
+        assert_eq!(desc.max_anisotropy, 1.0);
+        assert!(desc.compare.is_none());
+        assert_eq!(desc.lod_min_clamp, 0.0);
+        assert_eq!(desc.lod_max_clamp, 32.0);
     }
 }
 

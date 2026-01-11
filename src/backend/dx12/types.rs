@@ -2,7 +2,7 @@
 //!
 //! This module contains all the state structs used by the DX12 backend.
 
-use crate::types::TextureFormat;
+use crate::types::{DepthFormat, TextureFormat, SamplerDesc};
 use super::super::{DeviceHandle, BufferHandle};
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
 
@@ -22,8 +22,12 @@ pub(crate) struct LogicalDevice {
     pub command_allocator: Direct3D12::ID3D12CommandAllocator,
     pub rtv_heap: Direct3D12::ID3D12DescriptorHeap,
     pub rtv_descriptor_size: u32,
+    pub dsv_heap: Direct3D12::ID3D12DescriptorHeap,
+    pub dsv_descriptor_size: u32,
     pub cbv_srv_uav_heap: Direct3D12::ID3D12DescriptorHeap,
     pub cbv_srv_uav_descriptor_size: u32,
+    pub sampler_heap: Direct3D12::ID3D12DescriptorHeap,
+    pub sampler_descriptor_size: u32,
     pub fence: Direct3D12::ID3D12Fence,
     pub fence_value: u64,
 }
@@ -77,12 +81,36 @@ pub(crate) struct RenderTargetState {
     pub texture: Direct3D12::ID3D12Resource,
     /// RTV descriptor handle offset
     pub rtv_offset: u32,
+    /// Depth buffer (optional)
+    pub depth_format: Option<DepthFormat>,
+    pub depth_texture: Option<Direct3D12::ID3D12Resource>,
+    pub dsv_offset: Option<u32>,
     /// Staging buffer for CPU readback (lazy-created on first read)
     pub staging_buffer: Option<Direct3D12::ID3D12Resource>,
     /// Command list for rendering
     pub command_list: Direct3D12::ID3D12GraphicsCommandList,
     /// Track if we've rendered (for readback validation)
     pub has_rendered: bool,
+}
+
+/// GPU texture state.
+pub(crate) struct TextureState {
+    pub device_handle: DeviceHandle,
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub resource: Direct3D12::ID3D12Resource,
+    /// SRV descriptor offset in CBV/SRV/UAV heap
+    pub srv_offset: u32,
+}
+
+/// GPU sampler state.
+pub(crate) struct SamplerState {
+    pub device_handle: DeviceHandle,
+    /// Sampler descriptor offset in sampler heap
+    pub sampler_offset: u32,
+    #[allow(dead_code)]
+    pub desc: SamplerDesc,
 }
 
 /// Maximum number of frames that can be in-flight at once.

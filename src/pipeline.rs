@@ -20,6 +20,8 @@ pub struct RenderPipelineDesc<'a> {
     /// Bind group layouts used by this pipeline (optional).
     /// The order determines the set index (first = set 0, second = set 1, etc.)
     pub bind_group_layouts: &'a [&'a BindGroupLayout],
+    /// Depth/stencil state (optional, None = no depth testing).
+    pub depth_stencil: Option<DepthStencilState>,
 }
 
 impl<'a> std::fmt::Debug for RenderPipelineDesc<'a> {
@@ -29,6 +31,7 @@ impl<'a> std::fmt::Debug for RenderPipelineDesc<'a> {
             .field("topology", &self.topology)
             .field("target_format", &self.target_format)
             .field("bind_group_layouts_count", &self.bind_group_layouts.len())
+            .field("depth_stencil", &self.depth_stencil)
             .finish()
     }
 }
@@ -61,25 +64,16 @@ impl RenderPipeline {
     ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
         
-        let handle = if desc.bind_group_layouts.is_empty() {
-            // No bind group layouts - use simple pipeline creation
-            backend.create_pipeline(
-                device.handle,
-                vertex_shader.handle,
-                fragment_shader.handle,
-                &desc.vertex_layout,
-                desc.topology,
-                desc.target_format,
-            )?
-        } else {
-            // Has bind group layouts - use extended pipeline creation
-            let layout_handles: Vec<BindGroupLayoutHandle> = desc
-                .bind_group_layouts
-                .iter()
-                .map(|l| l.handle)
-                .collect();
-            
-            backend.create_pipeline_with_layout(
+        // Collect bind group layout handles
+        let layout_handles: Vec<BindGroupLayoutHandle> = desc
+            .bind_group_layouts
+            .iter()
+            .map(|l| l.handle)
+            .collect();
+        
+        let handle = if desc.depth_stencil.is_some() || !desc.bind_group_layouts.is_empty() {
+            // Use extended pipeline creation with depth/stencil support
+            backend.create_pipeline_with_depth(
                 device.handle,
                 vertex_shader.handle,
                 fragment_shader.handle,
@@ -87,6 +81,17 @@ impl RenderPipeline {
                 desc.topology,
                 desc.target_format,
                 &layout_handles,
+                desc.depth_stencil.as_ref(),
+            )?
+        } else {
+            // Simple pipeline creation (no bind groups, no depth)
+            backend.create_pipeline(
+                device.handle,
+                vertex_shader.handle,
+                fragment_shader.handle,
+                &desc.vertex_layout,
+                desc.topology,
+                desc.target_format,
             )?
         };
 

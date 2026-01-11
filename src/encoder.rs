@@ -62,9 +62,17 @@ pub struct RenderPass<'a> {
 }
 
 impl<'a> RenderPass<'a> {
-    /// Clear the render target to a color.
+    /// Clear the color render target to a color.
     pub fn clear(&mut self, color: Color) {
         self.encoder.commands.push(RenderCommand::Clear(color));
+    }
+
+    /// Clear the depth buffer to a value.
+    ///
+    /// The default depth clear value is 1.0 (far plane).
+    /// Use 0.0 for reverse-Z depth buffers.
+    pub fn clear_depth(&mut self, depth: f32) {
+        self.encoder.commands.push(RenderCommand::ClearDepth(depth));
     }
 
     /// Set the active render pipeline.

@@ -2,7 +2,7 @@
 //!
 //! Format conversions and memory helpers.
 
-use crate::types::{IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
+use crate::types::{AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
 use ash::vk;
 
 /// Convert RAG TextureFormat to Vulkan format.
@@ -103,6 +103,65 @@ pub fn device_type_from_vk(vk_type: vk::PhysicalDeviceType) -> crate::types::Dev
         vk::PhysicalDeviceType::INTEGRATED_GPU => crate::types::DeviceType::IntegratedGpu,
         vk::PhysicalDeviceType::CPU => crate::types::DeviceType::Cpu,
         _ => crate::types::DeviceType::Other,
+    }
+}
+
+/// Convert RAG DepthFormat to Vulkan format.
+pub fn depth_format_to_vk(format: DepthFormat) -> vk::Format {
+    match format {
+        DepthFormat::Depth16Unorm => vk::Format::D16_UNORM,
+        DepthFormat::Depth24Plus => vk::Format::D32_SFLOAT, // Use D32 for better precision
+        DepthFormat::Depth24PlusStencil8 => vk::Format::D24_UNORM_S8_UINT,
+        DepthFormat::Depth32Float => vk::Format::D32_SFLOAT,
+        DepthFormat::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
+    }
+}
+
+/// Get the aspect mask for a depth format.
+pub fn depth_aspect_mask(format: DepthFormat) -> vk::ImageAspectFlags {
+    if format.has_stencil() {
+        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+    } else {
+        vk::ImageAspectFlags::DEPTH
+    }
+}
+
+/// Convert RAG CompareFunction to Vulkan compare op.
+pub fn compare_to_vk(compare: CompareFunction) -> vk::CompareOp {
+    match compare {
+        CompareFunction::Never => vk::CompareOp::NEVER,
+        CompareFunction::Less => vk::CompareOp::LESS,
+        CompareFunction::Equal => vk::CompareOp::EQUAL,
+        CompareFunction::LessEqual => vk::CompareOp::LESS_OR_EQUAL,
+        CompareFunction::Greater => vk::CompareOp::GREATER,
+        CompareFunction::NotEqual => vk::CompareOp::NOT_EQUAL,
+        CompareFunction::GreaterEqual => vk::CompareOp::GREATER_OR_EQUAL,
+        CompareFunction::Always => vk::CompareOp::ALWAYS,
+    }
+}
+
+/// Convert RAG AddressMode to Vulkan sampler address mode.
+pub fn address_mode_to_vk(mode: AddressMode) -> vk::SamplerAddressMode {
+    match mode {
+        AddressMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        AddressMode::Repeat => vk::SamplerAddressMode::REPEAT,
+        AddressMode::MirrorRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
+    }
+}
+
+/// Convert RAG FilterMode to Vulkan filter.
+pub fn filter_to_vk(mode: FilterMode) -> vk::Filter {
+    match mode {
+        FilterMode::Nearest => vk::Filter::NEAREST,
+        FilterMode::Linear => vk::Filter::LINEAR,
+    }
+}
+
+/// Convert RAG FilterMode to Vulkan sampler mipmap mode.
+pub fn mipmap_mode_to_vk(mode: FilterMode) -> vk::SamplerMipmapMode {
+    match mode {
+        FilterMode::Nearest => vk::SamplerMipmapMode::NEAREST,
+        FilterMode::Linear => vk::SamplerMipmapMode::LINEAR,
     }
 }
 

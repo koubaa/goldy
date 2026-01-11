@@ -178,12 +178,54 @@ impl GpuBackend for VulkanBackend {
                         logical_device.device.destroy_image_view(target.image_view, None);
                         logical_device.device.destroy_image(target.image, None);
                         logical_device.device.free_memory(target.image_memory, None);
+                        // Clean up depth buffer if present
+                        if let Some(depth_view) = target.depth_view {
+                            logical_device.device.destroy_image_view(depth_view, None);
+                        }
+                        if let Some(depth_image) = target.depth_image {
+                            logical_device.device.destroy_image(depth_image, None);
+                        }
+                        if let Some(depth_memory) = target.depth_memory {
+                            logical_device.device.free_memory(depth_memory, None);
+                        }
                         if let Some(staging_buffer) = target.staging_buffer {
                             logical_device.device.destroy_buffer(staging_buffer, None);
                         }
                         if let Some(staging_memory) = target.staging_memory {
                             logical_device.device.free_memory(staging_memory, None);
                         }
+                    }
+                }
+
+                // Destroy textures owned by this device
+                let texture_handles: Vec<_> = self.textures
+                    .iter()
+                    .filter(|(_, t)| t.device_handle == device_handle)
+                    .map(|(h, _)| *h)
+                    .collect();
+                for handle in texture_handles {
+                    if let Some(texture) = self.textures.remove(&handle) {
+                        logical_device.device.destroy_image_view(texture.view, None);
+                        logical_device.device.destroy_image(texture.image, None);
+                        logical_device.device.free_memory(texture.memory, None);
+                        if let Some(staging_buffer) = texture.staging_buffer {
+                            logical_device.device.destroy_buffer(staging_buffer, None);
+                        }
+                        if let Some(staging_memory) = texture.staging_memory {
+                            logical_device.device.free_memory(staging_memory, None);
+                        }
+                    }
+                }
+
+                // Destroy samplers owned by this device
+                let sampler_handles: Vec<_> = self.samplers
+                    .iter()
+                    .filter(|(_, s)| s.device_handle == device_handle)
+                    .map(|(h, _)| *h)
+                    .collect();
+                for handle in sampler_handles {
+                    if let Some(sampler) = self.samplers.remove(&handle) {
+                        logical_device.device.destroy_sampler(sampler.sampler, None);
                     }
                 }
 
@@ -601,6 +643,10 @@ impl GpuBackend for VulkanBackend {
             image,
             image_memory,
             image_view,
+            depth_format: None,
+            depth_image: None,
+            depth_memory: None,
+            depth_view: None,
             staging_buffer: None,
             staging_memory: None,
             command_buffer: command_buffers[0],
@@ -650,6 +696,8 @@ impl GpuBackend for VulkanBackend {
         let height = render_target.height;
         let image = render_target.image;
         let image_view = render_target.image_view;
+        let depth_view = render_target.depth_view;
+        let depth_format = render_target.depth_format;
 
         // Find the first Clear command to use as the initial clear color
         let clear_color = commands
@@ -659,6 +707,15 @@ impl GpuBackend for VulkanBackend {
                 _ => None,
             })
             .unwrap_or(Color::BLACK);
+        
+        // Find the first ClearDepth command
+        let clear_depth = commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::ClearDepth(depth) => Some(*depth),
+                _ => None,
+            })
+            .unwrap_or(1.0);
 
         // Begin command buffer
         let begin_info = vk::CommandBufferBeginInfo::default()
@@ -668,7 +725,7 @@ impl GpuBackend for VulkanBackend {
             .context("Failed to begin command buffer")?;
 
         // Transition image to color attachment
-        let barrier = vk::ImageMemoryBarrier2::default()
+        let color_barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
             .src_access_mask(vk::AccessFlags2::NONE)
             .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
@@ -684,8 +741,31 @@ impl GpuBackend for VulkanBackend {
                 layer_count: 1,
             });
 
+        // Prepare image barriers - color always, depth if present
+        let mut barriers = vec![color_barrier];
+        
+        // Add depth barrier if depth buffer exists
+        if let (Some(depth_img), Some(df)) = (render_target.depth_image, depth_format) {
+            let depth_barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::NONE)
+                .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .image(depth_img)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: utils::depth_aspect_mask(df),
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            barriers.push(depth_barrier);
+        }
+
         let dep_info = vk::DependencyInfo::default()
-            .image_memory_barriers(std::slice::from_ref(&barrier));
+            .image_memory_barriers(&barriers);
 
         unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
@@ -701,13 +781,33 @@ impl GpuBackend for VulkanBackend {
                 },
             });
 
-        let rendering_info = vk::RenderingInfo::default()
+        // Create depth attachment if present
+        let depth_attachment = depth_view.map(|dv| {
+            vk::RenderingAttachmentInfo::default()
+                .image_view(dv)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: clear_depth,
+                        stencil: 0,
+                    },
+                })
+        });
+
+        let mut rendering_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: vk::Extent2D { width, height },
             })
             .layer_count(1)
             .color_attachments(std::slice::from_ref(&color_attachment));
+        
+        // Add depth attachment if present
+        if let Some(ref depth_att) = depth_attachment {
+            rendering_info = rendering_info.depth_attachment(depth_att);
+        }
 
         unsafe { logical_device.device.cmd_begin_rendering(cmd, &rendering_info) };
 
@@ -733,6 +833,9 @@ impl GpuBackend for VulkanBackend {
             match command {
                 RenderCommand::Clear(_) => {
                     // Already handled via load op
+                }
+                RenderCommand::ClearDepth(_) => {
+                    // TODO: Implement depth clear when depth buffer is supported
                 }
                 RenderCommand::SetPipeline(pipeline_handle) => {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
@@ -1076,6 +1179,9 @@ impl GpuBackend for VulkanBackend {
                 let descriptor_type = match &e.ty {
                     BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
                     BindingType::StorageBuffer { .. } => vk::DescriptorType::STORAGE_BUFFER,
+                    BindingType::Texture => vk::DescriptorType::SAMPLED_IMAGE,
+                    BindingType::Sampler => vk::DescriptorType::SAMPLER,
+                    BindingType::StorageTexture => vk::DescriptorType::STORAGE_IMAGE,
                 };
 
                 vk::DescriptorSetLayoutBinding::default()
@@ -1122,6 +1228,15 @@ impl GpuBackend for VulkanBackend {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(entries.len() as u32),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(entries.len() as u32),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(entries.len() as u32),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(entries.len() as u32),
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -1141,13 +1256,14 @@ impl GpuBackend for VulkanBackend {
 
         let descriptor_set = descriptor_sets[0];
 
-        // Write descriptors
+        // Write buffer descriptors
         let buffer_infos: Vec<_> = entries
             .iter()
             .filter_map(|e| match &e.resource {
                 BindingResource::Buffer { buffer, offset, size } => {
                     self.buffers.get(buffer).map(|b| (e.binding, b.buffer, *offset, *size))
                 }
+                _ => None,
             })
             .collect();
 
@@ -1173,6 +1289,9 @@ impl GpuBackend for VulkanBackend {
                     .buffer_info(std::slice::from_ref(&vk_buffer_infos[idx]))
             })
             .collect();
+
+        // TODO: Handle texture and sampler bindings
+        // For now, only buffer bindings are supported
 
         unsafe { logical_device.device.update_descriptor_sets(&writes, &[]) };
 
@@ -1691,6 +1810,7 @@ impl GpuBackend for VulkanBackend {
         for command in commands {
             match command {
                 RenderCommand::Clear(_) => { /* Already handled */ }
+                RenderCommand::ClearDepth(_) => { /* TODO: Implement depth clear */ }
                 RenderCommand::SetPipeline(pipeline_handle) => {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         unsafe {
@@ -1986,6 +2106,694 @@ impl GpuBackend for VulkanBackend {
         self.surfaces.get(&surface_handle)
             .and_then(|s| utils::vk_to_format(s.format))
             .unwrap_or(TextureFormat::Bgra8UnormSrgb) // Safe fallback
+    }
+
+    fn create_pipeline_with_depth(
+        &mut self,
+        device_handle: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+    ) -> Result<PipelineHandle> {
+        // Compile shaders on-demand
+        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Collect descriptor set layouts
+        let vk_layouts: Vec<_> = bind_group_layouts
+            .iter()
+            .filter_map(|h| self.bind_group_layouts.get(h).map(|s| s.layout))
+            .collect();
+
+        // Shader stages
+        let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs_module)
+            .name(c"main");
+
+        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs_module)
+            .name(c"main");
+
+        let shader_stages = [vs_stage, fs_stage];
+
+        // Vertex input
+        let binding_desc = vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(vertex_layout.stride)
+            .input_rate(vk::VertexInputRate::VERTEX);
+
+        let attribute_descs: Vec<_> = vertex_layout
+            .attributes
+            .iter()
+            .map(|attr| {
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(attr.location)
+                    .format(vertex_format_to_vk(attr.format))
+                    .offset(attr.offset)
+            })
+            .collect();
+
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
+            .vertex_attribute_descriptions(&attribute_descs);
+
+        // Input assembly
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(topology_to_vk(topology))
+            .primitive_restart_enable(false);
+
+        // Viewport/scissor (dynamic)
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+
+        // Rasterization
+        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(false);
+
+        // Multisampling
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        // Depth stencil state
+        let depth_stencil_state = if let Some(ds) = depth_stencil {
+            vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(ds.depth_write_enabled || ds.depth_compare != crate::types::CompareFunction::Always)
+                .depth_write_enable(ds.depth_write_enabled)
+                .depth_compare_op(utils::compare_to_vk(ds.depth_compare))
+                .depth_bounds_test_enable(false)
+                .stencil_test_enable(false)
+        } else {
+            vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(false)
+                .depth_write_enable(false)
+                .depth_compare_op(vk::CompareOp::ALWAYS)
+        };
+
+        // Color blending
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(false);
+
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .attachments(std::slice::from_ref(&color_blend_attachment));
+
+        // Dynamic state
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&dynamic_states);
+
+        // Pipeline layout with descriptor set layouts
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&vk_layouts);
+        let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+            .context("Failed to create pipeline layout")?;
+
+        // Dynamic rendering info (Vulkan 1.3)
+        let color_format = format_to_vk(target_format);
+        let depth_format_vk = depth_stencil
+            .map(|ds| utils::depth_format_to_vk(ds.format))
+            .unwrap_or(vk::Format::UNDEFINED);
+        
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(std::slice::from_ref(&color_format))
+            .depth_attachment_format(depth_format_vk);
+
+        // Create pipeline with depth stencil state
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization)
+            .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil_state)
+            .color_blend_state(&color_blending)
+            .dynamic_state(&dynamic_state)
+            .layout(layout)
+            .push_next(&mut rendering_info);
+
+        let pipelines = unsafe {
+            logical_device.device.create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                std::slice::from_ref(&pipeline_info),
+                None,
+            )
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to create pipeline: {:?}", e.1))?;
+
+        let handle = self.next_pipeline_handle;
+        self.next_pipeline_handle += 1;
+
+        self.pipelines.insert(
+            handle,
+            PipelineState {
+                device_handle,
+                pipeline: pipelines[0],
+                layout,
+            },
+        );
+
+        tracing::debug!("Created pipeline with depth stencil (handle={})", handle);
+        Ok(handle)
+    }
+
+    fn create_render_target_with_depth(
+        &mut self,
+        device_handle: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<crate::types::DepthFormat>,
+    ) -> Result<RenderTargetHandle> {
+        // Get physical device for memory type lookup
+        let physical_device = {
+            let logical_device = self
+                .devices
+                .get(&device_handle)
+                .context("Invalid device handle")?;
+            logical_device.physical_device
+        };
+
+        let mem_props = unsafe { self.instance.get_physical_device_memory_properties(physical_device) };
+        
+        let find_mem_type = |type_filter: u32, properties: vk::MemoryPropertyFlags| -> Option<u32> {
+            for i in 0..mem_props.memory_type_count {
+                if (type_filter & (1 << i)) != 0
+                    && (mem_props.memory_types[i as usize].property_flags & properties) == properties
+                {
+                    return Some(i);
+                }
+            }
+            None
+        };
+
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Create color render target image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format_to_vk(color_format))
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image = unsafe { logical_device.device.create_image(&image_info, None) }
+            .context("Failed to create render target image")?;
+
+        let mem_reqs = unsafe { logical_device.device.get_image_memory_requirements(image) };
+        let memory_type = find_mem_type(mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .context("Failed to find memory type for render target")?;
+
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type);
+
+        let image_memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
+            .context("Failed to allocate render target memory")?;
+
+        unsafe { logical_device.device.bind_image_memory(image, image_memory, 0) }
+            .context("Failed to bind render target memory")?;
+
+        // Create color image view
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format_to_vk(color_format))
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let image_view = unsafe { logical_device.device.create_image_view(&view_info, None) }
+            .context("Failed to create render target view")?;
+
+        // Create depth buffer if requested
+        let (depth_image, depth_memory, depth_view) = if let Some(df) = depth_format {
+            let vk_depth_format = utils::depth_format_to_vk(df);
+            
+            let depth_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk_depth_format)
+                .extent(vk::Extent3D { width, height, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+
+            let d_image = unsafe { logical_device.device.create_image(&depth_info, None) }
+                .context("Failed to create depth buffer image")?;
+
+            let d_mem_reqs = unsafe { logical_device.device.get_image_memory_requirements(d_image) };
+            let d_memory_type = find_mem_type(d_mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .context("Failed to find memory type for depth buffer")?;
+
+            let d_alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(d_mem_reqs.size)
+                .memory_type_index(d_memory_type);
+
+            let d_memory = unsafe { logical_device.device.allocate_memory(&d_alloc_info, None) }
+                .context("Failed to allocate depth buffer memory")?;
+
+            unsafe { logical_device.device.bind_image_memory(d_image, d_memory, 0) }
+                .context("Failed to bind depth buffer memory")?;
+
+            let d_view_info = vk::ImageViewCreateInfo::default()
+                .image(d_image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk_depth_format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: utils::depth_aspect_mask(df),
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let d_view = unsafe { logical_device.device.create_image_view(&d_view_info, None) }
+                .context("Failed to create depth buffer view")?;
+
+            (Some(d_image), Some(d_memory), Some(d_view))
+        } else {
+            (None, None, None)
+        };
+
+        // Allocate command buffer
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(logical_device.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        let command_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+            .context("Failed to allocate command buffer")?;
+
+        let handle = self.next_render_target_handle;
+        self.next_render_target_handle += 1;
+
+        self.render_targets.insert(handle, RenderTargetState {
+            device_handle,
+            width,
+            height,
+            format: color_format,
+            image,
+            image_memory,
+            image_view,
+            depth_format,
+            depth_image,
+            depth_memory,
+            depth_view,
+            staging_buffer: None,
+            staging_memory: None,
+            command_buffer: command_buffers[0],
+            has_rendered: false,
+        });
+
+        tracing::debug!("Created render target {}x{} with depth={:?} (handle={})", width, height, depth_format.is_some(), handle);
+        Ok(handle)
+    }
+
+    fn create_texture(
+        &mut self,
+        device_handle: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        usage: crate::types::TextureUsage,
+    ) -> Result<TextureHandle> {
+        // Get physical device for memory type lookup
+        let physical_device = {
+            let logical_device = self.devices.get(&device_handle)
+                .context("Invalid device handle")?;
+            logical_device.physical_device
+        };
+
+        let mem_props = unsafe { self.instance.get_physical_device_memory_properties(physical_device) };
+        
+        let find_mem_type = |type_filter: u32, properties: vk::MemoryPropertyFlags| -> Option<u32> {
+            for i in 0..mem_props.memory_type_count {
+                if (type_filter & (1 << i)) != 0
+                    && (mem_props.memory_types[i as usize].property_flags & properties) == properties
+                {
+                    return Some(i);
+                }
+            }
+            None
+        };
+
+        let logical_device = self.devices.get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Convert usage flags
+        let mut vk_usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
+        if usage.contains(crate::types::TextureUsage::RENDER_TARGET) {
+            vk_usage |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        }
+        if usage.contains(crate::types::TextureUsage::COPY_SRC) {
+            vk_usage |= vk::ImageUsageFlags::TRANSFER_SRC;
+        }
+        if usage.contains(crate::types::TextureUsage::STORAGE) {
+            vk_usage |= vk::ImageUsageFlags::STORAGE;
+        }
+
+        // Create texture image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format_to_vk(format))
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk_usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image = unsafe { logical_device.device.create_image(&image_info, None) }
+            .context("Failed to create texture image")?;
+
+        let mem_reqs = unsafe { logical_device.device.get_image_memory_requirements(image) };
+        let memory_type = find_mem_type(mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .context("Failed to find memory type for texture")?;
+
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type);
+
+        let memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
+            .context("Failed to allocate texture memory")?;
+
+        unsafe { logical_device.device.bind_image_memory(image, memory, 0) }
+            .context("Failed to bind texture memory")?;
+
+        // Create image view
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format_to_vk(format))
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let view = unsafe { logical_device.device.create_image_view(&view_info, None) }
+            .context("Failed to create texture view")?;
+
+        let handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
+
+        self.textures.insert(handle, TextureState {
+            device_handle,
+            width,
+            height,
+            format,
+            image,
+            memory,
+            view,
+            staging_buffer: None,
+            staging_memory: None,
+        });
+
+        tracing::debug!("Created texture {}x{} (handle={})", width, height, handle);
+        Ok(handle)
+    }
+
+    fn write_texture(&mut self, texture_handle: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
+        let texture = self.textures.get(&texture_handle)
+            .context("Invalid texture handle")?;
+        
+        let device_handle = texture.device_handle;
+        let image = texture.image;
+        let tex_width = texture.width;
+        let tex_height = texture.height;
+        
+        // Validate dimensions
+        if width != tex_width || height != tex_height {
+            anyhow::bail!("Texture dimensions mismatch: expected {}x{}, got {}x{}", tex_width, tex_height, width, height);
+        }
+
+        // Get physical device for memory type lookup
+        let physical_device = {
+            let logical_device = self.devices.get(&device_handle)
+                .context("Invalid device handle")?;
+            logical_device.physical_device
+        };
+
+        let mem_props = unsafe { self.instance.get_physical_device_memory_properties(physical_device) };
+        
+        let find_mem_type = |type_filter: u32, properties: vk::MemoryPropertyFlags| -> Option<u32> {
+            for i in 0..mem_props.memory_type_count {
+                if (type_filter & (1 << i)) != 0
+                    && (mem_props.memory_types[i as usize].property_flags & properties) == properties
+                {
+                    return Some(i);
+                }
+            }
+            None
+        };
+
+        let logical_device = self.devices.get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Create staging buffer
+        let buffer_size = data.len() as u64;
+        let staging_buffer_info = vk::BufferCreateInfo::default()
+            .size(buffer_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_buffer_info, None) }
+            .context("Failed to create staging buffer")?;
+
+        let staging_mem_reqs = unsafe { logical_device.device.get_buffer_memory_requirements(staging_buffer) };
+        let staging_memory_type = find_mem_type(
+            staging_mem_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+        ).context("Failed to find memory type for staging buffer")?;
+
+        let staging_alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(staging_mem_reqs.size)
+            .memory_type_index(staging_memory_type);
+
+        let staging_memory = unsafe { logical_device.device.allocate_memory(&staging_alloc_info, None) }
+            .context("Failed to allocate staging memory")?;
+
+        unsafe { logical_device.device.bind_buffer_memory(staging_buffer, staging_memory, 0) }
+            .context("Failed to bind staging memory")?;
+
+        // Copy data to staging buffer
+        unsafe {
+            let ptr = logical_device.device.map_memory(staging_memory, 0, buffer_size, vk::MemoryMapFlags::empty())
+                .context("Failed to map staging memory")?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            logical_device.device.unmap_memory(staging_memory);
+        }
+
+        // Allocate command buffer
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(logical_device.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+            .context("Failed to allocate command buffer")?;
+        let cmd_buffer = cmd_buffers[0];
+
+        // Record commands
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        unsafe {
+            logical_device.device.begin_command_buffer(cmd_buffer, &begin_info)
+                .context("Failed to begin command buffer")?;
+
+            // Transition image to transfer dst
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let dep_info = vk::DependencyInfo::default()
+                .image_memory_barriers(std::slice::from_ref(&barrier));
+            logical_device.device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+
+            // Copy buffer to image
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D { width, height, depth: 1 });
+
+            logical_device.device.cmd_copy_buffer_to_image(
+                cmd_buffer,
+                staging_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+
+            // Transition image to shader read
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let dep_info = vk::DependencyInfo::default()
+                .image_memory_barriers(std::slice::from_ref(&barrier));
+            logical_device.device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+
+            logical_device.device.end_command_buffer(cmd_buffer)
+                .context("Failed to end command buffer")?;
+
+            // Submit and wait
+            let cmd_buffers = [cmd_buffer];
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(&cmd_buffers);
+
+            logical_device.device.queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+                .context("Failed to submit command buffer")?;
+            logical_device.device.queue_wait_idle(logical_device.queue)
+                .context("Failed to wait for queue")?;
+
+            // Cleanup
+            logical_device.device.free_command_buffers(logical_device.command_pool, &[cmd_buffer]);
+            logical_device.device.destroy_buffer(staging_buffer, None);
+            logical_device.device.free_memory(staging_memory, None);
+        }
+
+        tracing::debug!("Wrote {}x{} texture data ({} bytes)", width, height, data.len());
+        Ok(())
+    }
+
+    fn destroy_texture(&mut self, texture_handle: TextureHandle) {
+        if let Some(texture) = self.textures.remove(&texture_handle) {
+            if let Some(logical_device) = self.devices.get(&texture.device_handle) {
+                unsafe {
+                    logical_device.device.device_wait_idle().ok();
+                    logical_device.device.destroy_image_view(texture.view, None);
+                    logical_device.device.destroy_image(texture.image, None);
+                    logical_device.device.free_memory(texture.memory, None);
+                    if let Some(staging_buffer) = texture.staging_buffer {
+                        logical_device.device.destroy_buffer(staging_buffer, None);
+                    }
+                    if let Some(staging_memory) = texture.staging_memory {
+                        logical_device.device.free_memory(staging_memory, None);
+                    }
+                }
+            }
+        }
+    }
+
+    fn create_sampler(&mut self, device_handle: DeviceHandle, desc: &crate::types::SamplerDesc) -> Result<SamplerHandle> {
+        let logical_device = self.devices.get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(utils::filter_to_vk(desc.mag_filter))
+            .min_filter(utils::filter_to_vk(desc.min_filter))
+            .mipmap_mode(utils::mipmap_mode_to_vk(desc.mipmap_filter))
+            .address_mode_u(utils::address_mode_to_vk(desc.address_mode_u))
+            .address_mode_v(utils::address_mode_to_vk(desc.address_mode_v))
+            .address_mode_w(utils::address_mode_to_vk(desc.address_mode_w))
+            .mip_lod_bias(0.0)
+            .anisotropy_enable(desc.max_anisotropy > 1.0)
+            .max_anisotropy(desc.max_anisotropy)
+            .compare_enable(desc.compare.is_some())
+            .compare_op(desc.compare.map(utils::compare_to_vk).unwrap_or(vk::CompareOp::ALWAYS))
+            .min_lod(desc.lod_min_clamp)
+            .max_lod(desc.lod_max_clamp)
+            .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK)
+            .unnormalized_coordinates(false);
+
+        let sampler = unsafe { logical_device.device.create_sampler(&sampler_info, None) }
+            .context("Failed to create sampler")?;
+
+        let handle = self.next_sampler_handle;
+        self.next_sampler_handle += 1;
+
+        self.samplers.insert(handle, SamplerState {
+            device_handle,
+            sampler,
+        });
+
+        tracing::debug!("Created sampler (handle={})", handle);
+        Ok(handle)
+    }
+
+    fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
+        if let Some(sampler) = self.samplers.remove(&sampler_handle) {
+            if let Some(logical_device) = self.devices.get(&sampler.device_handle) {
+                unsafe {
+                    logical_device.device.device_wait_idle().ok();
+                    logical_device.device.destroy_sampler(sampler.sampler, None);
+                }
+            }
+        }
     }
 }
 

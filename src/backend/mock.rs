@@ -30,14 +30,24 @@ pub struct MockBackend {
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, MockSurface>,
     next_surface_handle: SurfaceHandle,
+    textures: HashMap<TextureHandle, MockTexture>,
+    next_texture_handle: TextureHandle,
+    samplers: HashMap<SamplerHandle, MockSampler>,
+    next_sampler_handle: SamplerHandle,
     /// Commands recorded during the last render operation
     pub recorded_commands: Vec<Vec<RenderCommand>>,
     /// Targets that were created (for verification)
     pub targets_created: Vec<(u32, u32, TextureFormat)>,
+    /// Targets with depth buffer that were created (for verification)
+    pub targets_with_depth_created: Vec<(u32, u32, TextureFormat, Option<DepthFormat>)>,
     /// Count of CPU readbacks performed
     pub cpu_readback_count: usize,
     /// Count of surface presents performed
     pub surface_present_count: usize,
+    /// Count of textures created
+    pub textures_created: usize,
+    /// Count of samplers created
+    pub samplers_created: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
 }
@@ -74,9 +84,24 @@ struct MockRenderTarget {
     width: u32,
     height: u32,
     format: TextureFormat,
+    depth_format: Option<DepthFormat>,
     has_rendered: bool,
     /// Simulated pixel data (all zeros by default)
     data: Vec<u8>,
+}
+
+struct MockTexture {
+    device_handle: DeviceHandle,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    data: Vec<u8>,
+}
+
+struct MockSampler {
+    device_handle: DeviceHandle,
+    #[allow(dead_code)]
+    desc: SamplerDesc,
 }
 
 struct MockSurface {
@@ -116,10 +141,17 @@ impl MockBackend {
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
             next_surface_handle: 1,
+            textures: HashMap::new(),
+            next_texture_handle: 1,
+            samplers: HashMap::new(),
+            next_sampler_handle: 1,
             recorded_commands: Vec::new(),
             targets_created: Vec::new(),
+            targets_with_depth_created: Vec::new(),
             cpu_readback_count: 0,
             surface_present_count: 0,
+            textures_created: 0,
+            samplers_created: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
         }
     }
@@ -136,8 +168,11 @@ impl MockBackend {
     pub fn reset_tracking(&mut self) {
         self.recorded_commands.clear();
         self.targets_created.clear();
+        self.targets_with_depth_created.clear();
         self.cpu_readback_count = 0;
         self.surface_present_count = 0;
+        self.textures_created = 0;
+        self.samplers_created = 0;
     }
 }
 
@@ -178,6 +213,8 @@ impl GpuBackend for MockBackend {
         self.bind_group_layouts.retain(|_, l| l.device_handle != device);
         self.bind_groups.retain(|_, g| g.device_handle != device);
         self.render_targets.retain(|_, t| t.device_handle != device);
+        self.textures.retain(|_, t| t.device_handle != device);
+        self.samplers.retain(|_, s| s.device_handle != device);
     }
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {
@@ -317,8 +354,33 @@ impl GpuBackend for MockBackend {
         self.pipelines.remove(&pipeline);
     }
 
+    fn create_pipeline_with_depth(
+        &mut self,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        _bind_group_layouts: &[BindGroupLayoutHandle],
+        _depth_stencil: Option<&DepthStencilState>,
+    ) -> Result<PipelineHandle> {
+        self.create_pipeline(device, vertex_shader, fragment_shader, vertex_layout, topology, target_format)
+    }
+
     // RenderTarget API
     fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle> {
+        self.create_render_target_with_depth(device, width, height, format, None)
+    }
+
+    fn create_render_target_with_depth(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<RenderTargetHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -326,17 +388,19 @@ impl GpuBackend for MockBackend {
         let handle = self.next_render_target_handle;
         self.next_render_target_handle += 1;
 
-        let size = (width * height * format.bytes_per_pixel()) as usize;
+        let size = (width * height * color_format.bytes_per_pixel()) as usize;
         self.render_targets.insert(handle, MockRenderTarget {
             device_handle: device,
             width,
             height,
-            format,
+            format: color_format,
+            depth_format,
             has_rendered: false,
             data: vec![0u8; size],
         });
 
-        self.targets_created.push((width, height, format));
+        self.targets_created.push((width, height, color_format));
+        self.targets_with_depth_created.push((width, height, color_format, depth_format));
 
         Ok(handle)
     }
@@ -487,6 +551,79 @@ impl GpuBackend for MockBackend {
         self.surfaces.get(&surface)
             .map(|s| s.format)
             .unwrap_or(TextureFormat::Bgra8UnormSrgb)
+    }
+
+    // Texture management
+    fn create_texture(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        _usage: TextureUsage,
+    ) -> Result<TextureHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
+
+        let size = (width * height * format.bytes_per_pixel()) as usize;
+        self.textures.insert(handle, MockTexture {
+            device_handle: device,
+            width,
+            height,
+            format,
+            data: vec![0u8; size],
+        });
+
+        self.textures_created += 1;
+        Ok(handle)
+    }
+
+    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
+        let tex = self.textures.get_mut(&texture)
+            .ok_or_else(|| anyhow::anyhow!("Invalid texture handle"))?;
+
+        if tex.width != width || tex.height != height {
+            anyhow::bail!("Texture dimensions mismatch: expected {}x{}, got {}x{}", 
+                tex.width, tex.height, width, height);
+        }
+
+        let expected_size = (width * height * tex.format.bytes_per_pixel()) as usize;
+        if data.len() != expected_size {
+            anyhow::bail!("Data size mismatch: expected {}, got {}", expected_size, data.len());
+        }
+
+        tex.data.copy_from_slice(data);
+        Ok(())
+    }
+
+    fn destroy_texture(&mut self, texture: TextureHandle) {
+        self.textures.remove(&texture);
+    }
+
+    // Sampler management
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let handle = self.next_sampler_handle;
+        self.next_sampler_handle += 1;
+
+        self.samplers.insert(handle, MockSampler {
+            device_handle: device,
+            desc: desc.clone(),
+        });
+
+        self.samplers_created += 1;
+        Ok(handle)
+    }
+
+    fn destroy_sampler(&mut self, sampler: SamplerHandle) {
+        self.samplers.remove(&sampler);
     }
 }
 

@@ -48,6 +48,8 @@ use std::sync::{Arc, Mutex};
 /// - **Streaming**: GPU encode directly from texture
 /// - **Windowing**: Compositor samples texture directly
 /// - **CPU processing**: Explicit `read_to_cpu()` when needed
+///
+/// Optionally includes a depth buffer for 3D rendering with depth testing.
 pub struct RenderTarget {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     device_handle: u64,
@@ -55,10 +57,11 @@ pub struct RenderTarget {
     width: u32,
     height: u32,
     format: TextureFormat,
+    depth_format: Option<DepthFormat>,
 }
 
 impl RenderTarget {
-    /// Create a new render target.
+    /// Create a new render target without a depth buffer.
     ///
     /// This allocates GPU resources for the render target but does not
     /// allocate any CPU-side staging buffers until `read_to_cpu()` is called.
@@ -74,9 +77,49 @@ impl RenderTarget {
     ///
     /// Returns an error if GPU resource allocation fails.
     pub fn new(device: &Device, width: u32, height: u32, format: TextureFormat) -> Result<Self> {
+        Self::new_with_depth(device, width, height, format, None)
+    }
+
+    /// Create a new render target with an optional depth buffer.
+    ///
+    /// This allocates GPU resources for the color buffer and optionally a depth buffer.
+    /// Use this for 3D rendering that requires depth testing.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The GPU device to create the render target on
+    /// * `width` - Width in pixels
+    /// * `height` - Height in pixels  
+    /// * `color_format` - Pixel format for the color buffer
+    /// * `depth_format` - Optional depth buffer format (None = no depth buffer)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if GPU resource allocation fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use rag::{Device, RenderTarget, TextureFormat, DepthFormat};
+    ///
+    /// fn create_3d_target(device: &Device) -> anyhow::Result<RenderTarget> {
+    ///     RenderTarget::new_with_depth(
+    ///         device, 1920, 1080,
+    ///         TextureFormat::Rgba8Unorm,
+    ///         Some(DepthFormat::Depth24Plus),
+    ///     )
+    /// }
+    /// ```
+    pub fn new_with_depth(
+        device: &Device,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<Self> {
         let handle = {
             let mut backend = device.backend.lock().unwrap();
-            backend.create_render_target(device.handle, width, height, format)?
+            backend.create_render_target_with_depth(device.handle, width, height, color_format, depth_format)?
         };
 
         Ok(Self {
@@ -85,7 +128,8 @@ impl RenderTarget {
             handle,
             width,
             height,
-            format,
+            format: color_format,
+            depth_format,
         })
     }
 
@@ -99,9 +143,19 @@ impl RenderTarget {
         self.height
     }
 
-    /// Get the texture format.
+    /// Get the color texture format.
     pub fn format(&self) -> TextureFormat {
         self.format
+    }
+
+    /// Get the depth buffer format, if any.
+    pub fn depth_format(&self) -> Option<DepthFormat> {
+        self.depth_format
+    }
+
+    /// Returns true if this render target has a depth buffer.
+    pub fn has_depth(&self) -> bool {
+        self.depth_format.is_some()
     }
 
     /// Get the size of the pixel data in bytes.
@@ -278,6 +332,57 @@ mod tests {
         assert_eq!(pixels[1], 0);   // G  
         assert_eq!(pixels[2], 255); // B
         assert_eq!(pixels[3], 255); // A
+    }
+
+    // Depth buffer tests
+    #[test]
+    fn test_render_target_with_depth() {
+        let device = create_test_device();
+        let target = RenderTarget::new_with_depth(
+            &device,
+            800,
+            600,
+            TextureFormat::Rgba8Unorm,
+            Some(DepthFormat::Depth24Plus),
+        ).unwrap();
+        
+        assert_eq!(target.width(), 800);
+        assert_eq!(target.height(), 600);
+        assert_eq!(target.format(), TextureFormat::Rgba8Unorm);
+        assert_eq!(target.depth_format(), Some(DepthFormat::Depth24Plus));
+        assert!(target.has_depth());
+    }
+
+    #[test]
+    fn test_render_target_without_depth() {
+        let device = create_test_device();
+        let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
+        
+        assert_eq!(target.depth_format(), None);
+        assert!(!target.has_depth());
+    }
+
+    #[test]
+    fn test_render_with_depth_clear() {
+        let device = create_test_device();
+        let target = RenderTarget::new_with_depth(
+            &device,
+            100,
+            100,
+            TextureFormat::Rgba8Unorm,
+            Some(DepthFormat::Depth32Float),
+        ).unwrap();
+        
+        let mut encoder = CommandEncoder::new();
+        {
+            let mut pass = encoder.begin_render_pass();
+            pass.clear(Color::CORNFLOWER_BLUE);
+            pass.clear_depth(1.0); // Clear depth to far plane
+        }
+        
+        target.render(encoder).unwrap();
+        
+        // Should succeed without errors
     }
 }
 
