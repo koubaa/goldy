@@ -214,17 +214,6 @@ pub trait GpuBackend: Send + Sync {
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat;
 }
 
-/// Trait for consuming render output.
-/// 
-/// Implementations can consume render targets in different ways:
-/// - CPU readback for encoding/streaming
-/// - Present to window surface
-/// - Pass to video encoder
-pub trait RenderConsumer {
-    /// Consume a render target.
-    fn consume(&mut self, backend: &mut dyn GpuBackend, target: RenderTargetHandle) -> Result<()>;
-}
-
 /// Bind group layout entry.
 #[derive(Debug, Clone)]
 pub struct BindGroupLayoutEntry {
