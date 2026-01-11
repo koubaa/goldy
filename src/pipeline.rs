@@ -65,12 +65,6 @@ impl Default for VertexBufferLayout {
     }
 }
 
-impl Default for TextureFormat {
-    fn default() -> Self {
-        TextureFormat::Rgba8Unorm
-    }
-}
-
 /// A render pipeline.
 pub struct RenderPipeline {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,

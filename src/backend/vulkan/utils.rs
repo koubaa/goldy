@@ -2,6 +2,9 @@
 //!
 //! Format conversions and memory helpers.
 
+// Allow manual find loops for Vulkan memory type selection (common pattern)
+#![allow(clippy::manual_find)]
+
 use crate::types::{
     AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
     TextureFormat, VertexFormat,

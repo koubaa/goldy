@@ -5,7 +5,7 @@
 use std::env;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SLANG_VERSION: &str = "2025.24.3";
 
@@ -42,13 +42,13 @@ fn main() {
     let slang_dir = out_dir.join("slang");
 
     let (platform_dir, lib_name) = get_platform_info();
-    let lib_path = slang_dir.join(&platform_dir).join(&lib_name);
+    let lib_path = slang_dir.join(platform_dir).join(lib_name);
 
     // Check if already downloaded
     if lib_path.exists() {
         println!(
             "cargo:rustc-env=GOLDY_SLANG_DIR={}",
-            slang_dir.join(&platform_dir).display()
+            slang_dir.join(platform_dir).display()
         );
         return;
     }
@@ -59,7 +59,7 @@ fn main() {
         SLANG_VERSION, platform_dir
     );
 
-    if let Err(e) = download_slang(&slang_dir, &platform_dir, &lib_name) {
+    if let Err(e) = download_slang(&slang_dir, platform_dir, lib_name) {
         println!("cargo:warning=Failed to download Slang: {}", e);
         println!("cargo:warning=Slang compiler will need to be provided at runtime.");
         println!("cargo:warning=Options: Set GOLDY_SLANG_PATH, install Vulkan SDK, or run slang/download.sh");
@@ -68,7 +68,7 @@ fn main() {
 
     println!(
         "cargo:rustc-env=GOLDY_SLANG_DIR={}",
-        slang_dir.join(&platform_dir).display()
+        slang_dir.join(platform_dir).display()
     );
 }
 
@@ -114,7 +114,7 @@ fn get_platform_info() -> (&'static str, &'static str) {
     compile_error!("Unsupported platform for Slang")
 }
 
-fn download_slang(slang_dir: &PathBuf, platform_dir: &str, lib_name: &str) -> io::Result<()> {
+fn download_slang(slang_dir: &Path, platform_dir: &str, lib_name: &str) -> io::Result<()> {
     let target_dir = slang_dir.join(platform_dir);
     fs::create_dir_all(&target_dir)?;
 
@@ -134,7 +134,7 @@ fn download_slang(slang_dir: &PathBuf, platform_dir: &str, lib_name: &str) -> io
         .status()?;
 
     if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "curl download failed"));
+        return Err(io::Error::other("curl download failed"));
     }
 
     // Extract using platform tools
@@ -154,10 +154,7 @@ fn download_slang(slang_dir: &PathBuf, platform_dir: &str, lib_name: &str) -> io
             .status()?;
 
         if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "PowerShell extract failed",
-            ));
+            return Err(io::Error::other("PowerShell extract failed"));
         }
     }
 
@@ -171,7 +168,7 @@ fn download_slang(slang_dir: &PathBuf, platform_dir: &str, lib_name: &str) -> io
             .status()?;
 
         if !status.success() {
-            return Err(io::Error::new(io::ErrorKind::Other, "unzip failed"));
+            return Err(io::Error::other("unzip failed"));
         }
     }
 
@@ -185,13 +182,9 @@ fn download_slang(slang_dir: &PathBuf, platform_dir: &str, lib_name: &str) -> io
     Ok(())
 }
 
-fn find_and_copy_library(
-    search_dir: &PathBuf,
-    target_dir: &PathBuf,
-    lib_name: &str,
-) -> io::Result<()> {
+fn find_and_copy_library(search_dir: &Path, target_dir: &Path, lib_name: &str) -> io::Result<()> {
     // Search recursively for the library file
-    fn find_file(dir: &PathBuf, name: &str) -> Option<PathBuf> {
+    fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();

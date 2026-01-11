@@ -59,7 +59,7 @@ impl CompiledShader {
 
     /// Get the data as SPIR-V words (for Vulkan).
     pub fn as_spirv(&self) -> Option<&[u32]> {
-        if self.target == ShaderTarget::Spirv && self.data.len() % 4 == 0 {
+        if self.target == ShaderTarget::Spirv && self.data.len().is_multiple_of(4) {
             Some(bytemuck::cast_slice(&self.data))
         } else {
             None

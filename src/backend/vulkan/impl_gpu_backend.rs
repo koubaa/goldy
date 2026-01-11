@@ -1,3 +1,5 @@
+// Allow manual find loops for Vulkan memory type selection (common pattern)
+#[allow(clippy::manual_find)]
 impl GpuBackend for VulkanBackend {
     fn backend_type(&self) -> BackendType {
         BackendType::Vulkan

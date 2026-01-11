@@ -8,6 +8,9 @@
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
 //! - `utils`: Format conversion and memory type helpers
 
+// Allow isize casts needed for FFI with raw-window-handle and ash
+#![allow(clippy::unnecessary_cast)]
+
 mod types;
 mod utils;
 

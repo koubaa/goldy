@@ -171,7 +171,7 @@ impl ShaderLibrary {
             let entry = entry?;
             let path = entry.path();
 
-            if path.is_file() && path.extension().map_or(false, |e| e == "slang") {
+            if path.is_file() && path.extension().is_some_and(|e| e == "slang") {
                 let stem = path.file_stem().unwrap().to_string_lossy();
                 let module_name = format!("{}/{}", prefix, stem);
                 let source = std::fs::read_to_string(&path)

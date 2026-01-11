@@ -180,6 +180,7 @@ pub trait GpuBackend: Send + Sync {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle>;
+    #[allow(clippy::too_many_arguments)]
     fn create_pipeline_with_layout(
         &mut self,
         device: DeviceHandle,
@@ -193,6 +194,7 @@ pub trait GpuBackend: Send + Sync {
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
     // Pipeline with depth stencil state
+    #[allow(clippy::too_many_arguments)]
     fn create_pipeline_with_depth(
         &mut self,
         device: DeviceHandle,

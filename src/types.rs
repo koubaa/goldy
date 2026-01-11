@@ -83,11 +83,12 @@ impl Color {
 }
 
 /// Texture format for render targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextureFormat {
     /// 8-bit RGBA, sRGB color space
     Rgba8UnormSrgb,
     /// 8-bit RGBA, linear color space
+    #[default]
     Rgba8Unorm,
     /// 8-bit BGRA, sRGB color space
     Bgra8UnormSrgb,

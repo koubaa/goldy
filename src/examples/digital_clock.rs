@@ -323,21 +323,11 @@ pub fn generate_clock_vertices(
 }
 
 /// Clock state for pause/resume functionality.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClockState {
     pub color_index: usize,
     pub paused: bool,
     pub accumulated_secs: u64,
-}
-
-impl Default for ClockState {
-    fn default() -> Self {
-        Self {
-            color_index: 0,
-            paused: false,
-            accumulated_secs: 0,
-        }
-    }
 }
 
 impl ClockState {

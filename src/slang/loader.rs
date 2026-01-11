@@ -171,8 +171,8 @@ impl SlangLibrary {
                 let path = exe_dir
                     .join("slang")
                     .join("bin")
-                    .join(&platform_dir)
-                    .join(&lib_name);
+                    .join(platform_dir)
+                    .join(lib_name);
                 if path.exists() {
                     return Some(path);
                 }
@@ -183,8 +183,8 @@ impl SlangLibrary {
                     .join("..")
                     .join("slang")
                     .join("bin")
-                    .join(&platform_dir)
-                    .join(&lib_name);
+                    .join(platform_dir)
+                    .join(lib_name);
                 if path.exists() {
                     return Some(path);
                 }
@@ -194,8 +194,8 @@ impl SlangLibrary {
         // Try relative to current directory
         let path = PathBuf::from("slang")
             .join("bin")
-            .join(&platform_dir)
-            .join(&lib_name);
+            .join(platform_dir)
+            .join(lib_name);
         if path.exists() {
             return Some(path);
         }
