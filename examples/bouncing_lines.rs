@@ -5,9 +5,8 @@
 //! Run with: cargo run --example bouncing_lines
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D, PrimitiveTopology,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -21,20 +20,43 @@ use winit::{
 const NUM_LINES: usize = 20;
 
 struct Line {
-    x1: f32, y1: f32,
-    x2: f32, y2: f32,
-    vx1: f32, vy1: f32,
-    vx2: f32, vy2: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    vx1: f32,
+    vy1: f32,
+    vx2: f32,
+    vy2: f32,
     color: Color,
 }
 
 impl Line {
     fn new(idx: usize) -> Self {
         let angle = (idx as f32 / NUM_LINES as f32) * std::f32::consts::PI * 2.0;
-        let colors = [Color::RED, Color::GREEN, Color::BLUE, 
-                      Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 },
-                      Color { r: 1.0, g: 0.0, b: 1.0, a: 1.0 },
-                      Color { r: 0.0, g: 1.0, b: 1.0, a: 1.0 }];
+        let colors = [
+            Color::RED,
+            Color::GREEN,
+            Color::BLUE,
+            Color {
+                r: 1.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            Color {
+                r: 0.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        ];
         Self {
             x1: angle.cos() * 0.3,
             y1: angle.sin() * 0.3,
@@ -54,10 +76,18 @@ impl Line {
         self.x2 += self.vx2;
         self.y2 += self.vy2;
 
-        if self.x1 < -1.0 || self.x1 > 1.0 { self.vx1 = -self.vx1; }
-        if self.y1 < -1.0 || self.y1 > 1.0 { self.vy1 = -self.vy1; }
-        if self.x2 < -1.0 || self.x2 > 1.0 { self.vx2 = -self.vx2; }
-        if self.y2 < -1.0 || self.y2 > 1.0 { self.vy2 = -self.vy2; }
+        if self.x1 < -1.0 || self.x1 > 1.0 {
+            self.vx1 = -self.vx1;
+        }
+        if self.y1 < -1.0 || self.y1 > 1.0 {
+            self.vy1 = -self.vy1;
+        }
+        if self.x2 < -1.0 || self.x2 > 1.0 {
+            self.vx2 = -self.vx2;
+        }
+        if self.y2 < -1.0 || self.y2 > 1.0 {
+            self.vy2 = -self.vy2;
+        }
 
         self.x1 = self.x1.clamp(-1.0, 1.0);
         self.y1 = self.y1.clamp(-1.0, 1.0);
@@ -91,8 +121,11 @@ impl App {
         let lines: Vec<Line> = (0..NUM_LINES).map(Line::new).collect();
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             lines,
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
@@ -102,12 +135,17 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            topology: PrimitiveTopology::LineList,
-            ..Default::default()
-        })?;
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: surface.format(),
+                topology: PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+        )?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -118,7 +156,9 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         // Update lines
         for line in &mut self.lines {
@@ -140,11 +180,16 @@ impl App {
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 });
+            pass.clear(Color {
+                r: 0.05,
+                g: 0.05,
+                b: 0.1,
+                a: 1.0,
+            });
             pass.set_pipeline(pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
             pass.draw(0..vertices.len() as u32, 0..1);
@@ -168,11 +213,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Bouncing Lines (Surface API)")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Bouncing Lines (Surface API)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -183,7 +232,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { event_loop.exit(); }
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {

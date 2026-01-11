@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 /// Mock GPU backend for testing.
-/// 
+///
 /// Tracks resource creation/destruction and command recording
 /// without actually performing GPU operations.
 pub struct MockBackend {
@@ -137,15 +137,13 @@ impl MockBackend {
     /// Create a new mock backend with one simulated adapter.
     pub fn new() -> Self {
         Self {
-            adapters: vec![
-                AdapterInfo {
-                    id: 0,
-                    name: "Mock GPU".to_string(),
-                    vendor: "Goldy Test".to_string(),
-                    backend: BackendType::Vulkan, // Pretend to be Vulkan
-                    device_type: DeviceType::DiscreteGpu,
-                }
-            ],
+            adapters: vec![AdapterInfo {
+                id: 0,
+                name: "Mock GPU".to_string(),
+                vendor: "Goldy Test".to_string(),
+                backend: BackendType::Vulkan, // Pretend to be Vulkan
+                device_type: DeviceType::DiscreteGpu,
+            }],
             devices: HashMap::new(),
             next_device_handle: 1,
             buffers: HashMap::new(),
@@ -182,7 +180,7 @@ impl MockBackend {
     }
 
     /// Set the default surface format for testing different GPU preferences.
-    /// 
+    ///
     /// Use this to verify that your code correctly uses `Surface::format()`
     /// rather than assuming a hardcoded format.
     pub fn set_default_surface_format(&mut self, format: TextureFormat) {
@@ -232,13 +230,15 @@ impl GpuBackend for MockBackend {
 
     fn destroy_device(&mut self, device: DeviceHandle) {
         self.devices.remove(&device);
-        
+
         // Clean up resources owned by this device
         self.buffers.retain(|_, b| b.device_handle != device);
         self.shaders.retain(|_, s| s.device_handle != device);
         self.pipelines.retain(|_, p| p.device_handle != device);
-        self.compute_pipelines.retain(|_, p| p.device_handle != device);
-        self.bind_group_layouts.retain(|_, l| l.device_handle != device);
+        self.compute_pipelines
+            .retain(|_, p| p.device_handle != device);
+        self.bind_group_layouts
+            .retain(|_, l| l.device_handle != device);
         self.bind_groups.retain(|_, g| g.device_handle != device);
         self.render_targets.retain(|_, t| t.device_handle != device);
         self.textures.retain(|_, t| t.device_handle != device);
@@ -249,7 +249,12 @@ impl GpuBackend for MockBackend {
         self.devices.contains_key(&device)
     }
 
-    fn create_buffer(&mut self, device: DeviceHandle, size: u64, _usage: BufferUsage) -> Result<BufferHandle> {
+    fn create_buffer(
+        &mut self,
+        device: DeviceHandle,
+        size: u64,
+        _usage: BufferUsage,
+    ) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -257,11 +262,14 @@ impl GpuBackend for MockBackend {
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
 
-        self.buffers.insert(handle, MockBuffer {
-            device_handle: device,
-            size,
-            data: vec![0u8; size as usize],
-        });
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle: device,
+                size,
+                data: vec![0u8; size as usize],
+            },
+        );
 
         Ok(handle)
     }
@@ -271,7 +279,9 @@ impl GpuBackend for MockBackend {
     }
 
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
-        let buf = self.buffers.get_mut(&buffer)
+        let buf = self
+            .buffers
+            .get_mut(&buffer)
             .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
 
         let start = offset as usize;
@@ -292,7 +302,12 @@ impl GpuBackend for MockBackend {
         self.create_shader_with_paths(device, slang_source, &[])
     }
 
-    fn create_shader_with_paths(&mut self, device: DeviceHandle, slang_source: &str, _search_paths: &[&str]) -> Result<ShaderHandle> {
+    fn create_shader_with_paths(
+        &mut self,
+        device: DeviceHandle,
+        slang_source: &str,
+        _search_paths: &[&str],
+    ) -> Result<ShaderHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -300,10 +315,13 @@ impl GpuBackend for MockBackend {
         let handle = self.next_shader_handle;
         self.next_shader_handle += 1;
 
-        self.shaders.insert(handle, MockShader {
-            device_handle: device,
-            source: slang_source.to_string(),
-        });
+        self.shaders.insert(
+            handle,
+            MockShader {
+                device_handle: device,
+                source: slang_source.to_string(),
+            },
+        );
 
         Ok(handle)
     }
@@ -312,7 +330,11 @@ impl GpuBackend for MockBackend {
         self.shaders.remove(&shader);
     }
 
-    fn create_bind_group_layout(&mut self, device: DeviceHandle, _entries: &[BindGroupLayoutEntry]) -> Result<BindGroupLayoutHandle> {
+    fn create_bind_group_layout(
+        &mut self,
+        device: DeviceHandle,
+        _entries: &[BindGroupLayoutEntry],
+    ) -> Result<BindGroupLayoutHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -320,14 +342,22 @@ impl GpuBackend for MockBackend {
         let handle = self.next_bind_group_layout_handle;
         self.next_bind_group_layout_handle += 1;
 
-        self.bind_group_layouts.insert(handle, MockBindGroupLayout {
-            device_handle: device,
-        });
+        self.bind_group_layouts.insert(
+            handle,
+            MockBindGroupLayout {
+                device_handle: device,
+            },
+        );
 
         Ok(handle)
     }
 
-    fn create_bind_group(&mut self, device: DeviceHandle, _layout: BindGroupLayoutHandle, _entries: &[BindGroupEntry]) -> Result<BindGroupHandle> {
+    fn create_bind_group(
+        &mut self,
+        device: DeviceHandle,
+        _layout: BindGroupLayoutHandle,
+        _entries: &[BindGroupEntry],
+    ) -> Result<BindGroupHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -335,9 +365,12 @@ impl GpuBackend for MockBackend {
         let handle = self.next_bind_group_handle;
         self.next_bind_group_handle += 1;
 
-        self.bind_groups.insert(handle, MockBindGroup {
-            device_handle: device,
-        });
+        self.bind_groups.insert(
+            handle,
+            MockBindGroup {
+                device_handle: device,
+            },
+        );
 
         Ok(handle)
     }
@@ -362,9 +395,12 @@ impl GpuBackend for MockBackend {
         let handle = self.next_pipeline_handle;
         self.next_pipeline_handle += 1;
 
-        self.pipelines.insert(handle, MockPipeline {
-            device_handle: device,
-        });
+        self.pipelines.insert(
+            handle,
+            MockPipeline {
+                device_handle: device,
+            },
+        );
 
         Ok(handle)
     }
@@ -379,7 +415,14 @@ impl GpuBackend for MockBackend {
         target_format: TextureFormat,
         _bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<PipelineHandle> {
-        self.create_pipeline(device, vertex_shader, fragment_shader, vertex_layout, topology, target_format)
+        self.create_pipeline(
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+        )
     }
 
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
@@ -397,11 +440,24 @@ impl GpuBackend for MockBackend {
         _bind_group_layouts: &[BindGroupLayoutHandle],
         _depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        self.create_pipeline(device, vertex_shader, fragment_shader, vertex_layout, topology, target_format)
+        self.create_pipeline(
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+        )
     }
 
     // RenderTarget API
-    fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle> {
+    fn create_render_target(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Result<RenderTargetHandle> {
         self.create_render_target_with_depth(device, width, height, format, None)
     }
 
@@ -421,18 +477,22 @@ impl GpuBackend for MockBackend {
         self.next_render_target_handle += 1;
 
         let size = (width * height * color_format.bytes_per_pixel()) as usize;
-        self.render_targets.insert(handle, MockRenderTarget {
-            device_handle: device,
-            width,
-            height,
-            format: color_format,
-            depth_format,
-            has_rendered: false,
-            data: vec![0u8; size],
-        });
+        self.render_targets.insert(
+            handle,
+            MockRenderTarget {
+                device_handle: device,
+                width,
+                height,
+                format: color_format,
+                depth_format,
+                has_rendered: false,
+                data: vec![0u8; size],
+            },
+        );
 
         self.targets_created.push((width, height, color_format));
-        self.targets_with_depth_created.push((width, height, color_format, depth_format));
+        self.targets_with_depth_created
+            .push((width, height, color_format, depth_format));
 
         Ok(handle)
     }
@@ -441,12 +501,19 @@ impl GpuBackend for MockBackend {
         self.render_targets.remove(&target);
     }
 
-    fn render_to_target(&mut self, device: DeviceHandle, target: RenderTargetHandle, commands: &[RenderCommand]) -> Result<()> {
+    fn render_to_target(
+        &mut self,
+        device: DeviceHandle,
+        target: RenderTargetHandle,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
 
-        let render_target = self.render_targets.get_mut(&target)
+        let render_target = self
+            .render_targets
+            .get_mut(&target)
             .ok_or_else(|| anyhow::anyhow!("Invalid render target handle"))?;
 
         if render_target.device_handle != device {
@@ -486,7 +553,9 @@ impl GpuBackend for MockBackend {
     }
 
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        let render_target = self.render_targets.get(&target)
+        let render_target = self
+            .render_targets
+            .get(&target)
             .ok_or_else(|| anyhow::anyhow!("Invalid render target handle"))?;
 
         if !render_target.has_rendered {
@@ -522,13 +591,16 @@ impl GpuBackend for MockBackend {
         let handle = self.next_surface_handle;
         self.next_surface_handle += 1;
 
-        self.surfaces.insert(handle, MockSurface {
-            device_handle: device,
-            width: 800,  // Default size
-            height: 600,
-            format: self.default_surface_format, // Use configured format
-            next_image: 1,
-        });
+        self.surfaces.insert(
+            handle,
+            MockSurface {
+                device_handle: device,
+                width: 800, // Default size
+                height: 600,
+                format: self.default_surface_format, // Use configured format
+                next_image: 1,
+            },
+        );
 
         Ok(handle)
     }
@@ -538,7 +610,9 @@ impl GpuBackend for MockBackend {
     }
 
     fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle> {
-        let surf = self.surfaces.get_mut(&surface)
+        let surf = self
+            .surfaces
+            .get_mut(&surface)
             .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
 
         let image = surf.next_image;
@@ -546,7 +620,12 @@ impl GpuBackend for MockBackend {
         Ok(image)
     }
 
-    fn surface_render(&mut self, surface: SurfaceHandle, _image: SwapchainImageHandle, commands: &[RenderCommand]) -> Result<()> {
+    fn surface_render(
+        &mut self,
+        surface: SurfaceHandle,
+        _image: SwapchainImageHandle,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
         if !self.surfaces.contains_key(&surface) {
             anyhow::bail!("Invalid surface handle");
         }
@@ -555,7 +634,11 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn surface_present(&mut self, surface: SurfaceHandle, _image: SwapchainImageHandle) -> Result<()> {
+    fn surface_present(
+        &mut self,
+        surface: SurfaceHandle,
+        _image: SwapchainImageHandle,
+    ) -> Result<()> {
         if !self.surfaces.contains_key(&surface) {
             anyhow::bail!("Invalid surface handle");
         }
@@ -565,7 +648,9 @@ impl GpuBackend for MockBackend {
     }
 
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
-        let surf = self.surfaces.get_mut(&surface)
+        let surf = self
+            .surfaces
+            .get_mut(&surface)
             .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
 
         surf.width = width;
@@ -574,13 +659,15 @@ impl GpuBackend for MockBackend {
     }
 
     fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32) {
-        self.surfaces.get(&surface)
+        self.surfaces
+            .get(&surface)
             .map(|s| (s.width, s.height))
             .unwrap_or((0, 0))
     }
 
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat {
-        self.surfaces.get(&surface)
+        self.surfaces
+            .get(&surface)
             .map(|s| s.format)
             .unwrap_or(TextureFormat::Bgra8UnormSrgb)
     }
@@ -602,30 +689,50 @@ impl GpuBackend for MockBackend {
         self.next_texture_handle += 1;
 
         let size = (width * height * format.bytes_per_pixel()) as usize;
-        self.textures.insert(handle, MockTexture {
-            device_handle: device,
-            width,
-            height,
-            format,
-            data: vec![0u8; size],
-        });
+        self.textures.insert(
+            handle,
+            MockTexture {
+                device_handle: device,
+                width,
+                height,
+                format,
+                data: vec![0u8; size],
+            },
+        );
 
         self.textures_created += 1;
         Ok(handle)
     }
 
-    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
-        let tex = self.textures.get_mut(&texture)
+    fn write_texture(
+        &mut self,
+        texture: TextureHandle,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let tex = self
+            .textures
+            .get_mut(&texture)
             .ok_or_else(|| anyhow::anyhow!("Invalid texture handle"))?;
 
         if tex.width != width || tex.height != height {
-            anyhow::bail!("Texture dimensions mismatch: expected {}x{}, got {}x{}", 
-                tex.width, tex.height, width, height);
+            anyhow::bail!(
+                "Texture dimensions mismatch: expected {}x{}, got {}x{}",
+                tex.width,
+                tex.height,
+                width,
+                height
+            );
         }
 
         let expected_size = (width * height * tex.format.bytes_per_pixel()) as usize;
         if data.len() != expected_size {
-            anyhow::bail!("Data size mismatch: expected {}, got {}", expected_size, data.len());
+            anyhow::bail!(
+                "Data size mismatch: expected {}, got {}",
+                expected_size,
+                data.len()
+            );
         }
 
         tex.data.copy_from_slice(data);
@@ -637,7 +744,11 @@ impl GpuBackend for MockBackend {
     }
 
     // Sampler management
-    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
+    fn create_sampler(
+        &mut self,
+        device: DeviceHandle,
+        desc: &SamplerDesc,
+    ) -> Result<SamplerHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -645,10 +756,13 @@ impl GpuBackend for MockBackend {
         let handle = self.next_sampler_handle;
         self.next_sampler_handle += 1;
 
-        self.samplers.insert(handle, MockSampler {
-            device_handle: device,
-            desc: desc.clone(),
-        });
+        self.samplers.insert(
+            handle,
+            MockSampler {
+                device_handle: device,
+                desc: desc.clone(),
+            },
+        );
 
         self.samplers_created += 1;
         Ok(handle)
@@ -672,9 +786,12 @@ impl GpuBackend for MockBackend {
         let handle = self.next_compute_pipeline_handle;
         self.next_compute_pipeline_handle += 1;
 
-        self.compute_pipelines.insert(handle, MockComputePipeline {
-            device_handle: device,
-        });
+        self.compute_pipelines.insert(
+            handle,
+            MockComputePipeline {
+                device_handle: device,
+            },
+        );
 
         Ok(handle)
     }
@@ -683,7 +800,11 @@ impl GpuBackend for MockBackend {
         self.compute_pipelines.remove(&pipeline);
     }
 
-    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand]) -> Result<()> {
+    fn dispatch_compute(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[ComputeCommand],
+    ) -> Result<()> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -712,7 +833,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         assert!(backend.is_device_valid(device));
-        
+
         backend.destroy_device(device);
         assert!(!backend.is_device_valid(device));
     }
@@ -721,12 +842,17 @@ mod tests {
     fn test_render_target_creation() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        
-        let target = backend.create_render_target(device, 800, 600, TextureFormat::Rgba8Unorm).unwrap();
-        
+
+        let target = backend
+            .create_render_target(device, 800, 600, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
         assert_eq!(backend.targets_created.len(), 1);
-        assert_eq!(backend.targets_created[0], (800, 600, TextureFormat::Rgba8Unorm));
-        
+        assert_eq!(
+            backend.targets_created[0],
+            (800, 600, TextureFormat::Rgba8Unorm)
+        );
+
         backend.destroy_render_target(target);
     }
 
@@ -734,14 +860,16 @@ mod tests {
     fn test_render_without_readback() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        let target = backend.create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
-        
+        let target = backend
+            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
         let commands = vec![RenderCommand::Clear(Color::RED)];
         backend.render_to_target(device, target, &commands).unwrap();
-        
+
         // No CPU readback should have occurred
         assert_eq!(backend.cpu_readback_count, 0);
-        
+
         // Commands should be recorded
         assert_eq!(backend.recorded_commands.len(), 1);
     }
@@ -750,21 +878,23 @@ mod tests {
     fn test_explicit_readback() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        let target = backend.create_render_target(device, 2, 2, TextureFormat::Rgba8Unorm).unwrap();
-        
+        let target = backend
+            .create_render_target(device, 2, 2, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
         let commands = vec![RenderCommand::Clear(Color::RED)];
         backend.render_to_target(device, target, &commands).unwrap();
-        
+
         // Now explicitly read back
         let mut output = vec![0u8; 2 * 2 * 4];
         backend.read_target_to_cpu(target, &mut output).unwrap();
-        
+
         assert_eq!(backend.cpu_readback_count, 1);
-        
+
         // Check the clear color was applied (RED = 255, 0, 0, 255)
         assert_eq!(output[0], 255); // R
-        assert_eq!(output[1], 0);   // G
-        assert_eq!(output[2], 0);   // B
+        assert_eq!(output[1], 0); // G
+        assert_eq!(output[2], 0); // B
         assert_eq!(output[3], 255); // A
     }
 
@@ -772,12 +902,14 @@ mod tests {
     fn test_readback_requires_render() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        let target = backend.create_render_target(device, 10, 10, TextureFormat::Rgba8Unorm).unwrap();
-        
+        let target = backend
+            .create_render_target(device, 10, 10, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
         // Try to read without rendering first
         let mut output = vec![0u8; 10 * 10 * 4];
         let result = backend.read_target_to_cpu(target, &mut output);
-        
+
         assert!(result.is_err());
     }
 
@@ -785,15 +917,23 @@ mod tests {
     fn test_multiple_renders_same_target() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        let target = backend.create_render_target(device, 10, 10, TextureFormat::Rgba8Unorm).unwrap();
-        
+        let target = backend
+            .create_render_target(device, 10, 10, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
         // Render multiple times to the same target
-        backend.render_to_target(device, target, &[RenderCommand::Clear(Color::RED)]).unwrap();
-        backend.render_to_target(device, target, &[RenderCommand::Clear(Color::GREEN)]).unwrap();
-        backend.render_to_target(device, target, &[RenderCommand::Clear(Color::BLUE)]).unwrap();
-        
+        backend
+            .render_to_target(device, target, &[RenderCommand::Clear(Color::RED)])
+            .unwrap();
+        backend
+            .render_to_target(device, target, &[RenderCommand::Clear(Color::GREEN)])
+            .unwrap();
+        backend
+            .render_to_target(device, target, &[RenderCommand::Clear(Color::BLUE)])
+            .unwrap();
+
         assert_eq!(backend.recorded_commands.len(), 3);
-        
+
         // Only one target was created
         assert_eq!(backend.targets_created.len(), 1);
     }
@@ -801,18 +941,24 @@ mod tests {
     #[test]
     fn test_indexed_drawing_commands() {
         use crate::types::IndexFormat;
-        
+
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        let target = backend.create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
-        
+        let target = backend
+            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
         // Create an index buffer
-        let index_buffer = backend.create_buffer(device, 12, BufferUsage::INDEX).unwrap();
-        
+        let index_buffer = backend
+            .create_buffer(device, 12, BufferUsage::INDEX)
+            .unwrap();
+
         // Write some indices (6 u16 indices for 2 triangles)
         let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
-        backend.write_buffer(index_buffer, 0, bytemuck::cast_slice(&indices)).unwrap();
-        
+        backend
+            .write_buffer(index_buffer, 0, bytemuck::cast_slice(&indices))
+            .unwrap();
+
         // Record indexed drawing commands
         let commands = vec![
             RenderCommand::Clear(Color::BLACK),
@@ -829,26 +975,36 @@ mod tests {
                 first_instance: 0,
             },
         ];
-        
+
         backend.render_to_target(device, target, &commands).unwrap();
-        
+
         // Verify commands were recorded
         assert_eq!(backend.recorded_commands.len(), 1);
         assert_eq!(backend.recorded_commands[0].len(), 3);
-        
+
         // Check SetIndexBuffer was recorded correctly
         match &backend.recorded_commands[0][1] {
-            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+            RenderCommand::SetIndexBuffer {
+                buffer,
+                offset,
+                format,
+            } => {
                 assert_eq!(*buffer, index_buffer);
                 assert_eq!(*offset, 0);
                 assert_eq!(*format, IndexFormat::Uint16);
             }
             _ => panic!("Expected SetIndexBuffer command"),
         }
-        
+
         // Check DrawIndexed was recorded correctly
         match &backend.recorded_commands[0][2] {
-            RenderCommand::DrawIndexed { index_count, instance_count, first_index, base_vertex, first_instance } => {
+            RenderCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => {
                 assert_eq!(*index_count, 6);
                 assert_eq!(*instance_count, 1);
                 assert_eq!(*first_index, 0);
@@ -862,12 +1018,16 @@ mod tests {
     #[test]
     fn test_indexed_drawing_with_offset() {
         use crate::types::IndexFormat;
-        
+
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        let target = backend.create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
-        let index_buffer = backend.create_buffer(device, 24, BufferUsage::INDEX).unwrap();
-        
+        let target = backend
+            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .unwrap();
+        let index_buffer = backend
+            .create_buffer(device, 24, BufferUsage::INDEX)
+            .unwrap();
+
         // Test with offset and base_vertex
         let commands = vec![
             RenderCommand::SetIndexBuffer {
@@ -883,9 +1043,9 @@ mod tests {
                 first_instance: 5,
             },
         ];
-        
+
         backend.render_to_target(device, target, &commands).unwrap();
-        
+
         // Verify the offset and base_vertex were preserved
         match &backend.recorded_commands[0][0] {
             RenderCommand::SetIndexBuffer { offset, format, .. } => {
@@ -894,9 +1054,14 @@ mod tests {
             }
             _ => panic!("Expected SetIndexBuffer command"),
         }
-        
+
         match &backend.recorded_commands[0][1] {
-            RenderCommand::DrawIndexed { base_vertex, first_instance, instance_count, .. } => {
+            RenderCommand::DrawIndexed {
+                base_vertex,
+                first_instance,
+                instance_count,
+                ..
+            } => {
                 assert_eq!(*base_vertex, 100);
                 assert_eq!(*first_instance, 5);
                 assert_eq!(*instance_count, 10);
@@ -909,50 +1074,93 @@ mod tests {
     fn test_surface_format_default() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        
+
         // Create a mock window handle for surface creation
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
                 // Return a null handle - mock backend doesn't use it
-                Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(raw_window_handle::WebWindowHandle::new(0))) })
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-                Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(raw_window_handle::WebDisplayHandle::new())) })
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
             }
         }
-        
-        let surface = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
-        
+
+        let surface = backend
+            .create_surface(device, &MockWindow, &MockWindow)
+            .unwrap();
+
         // Default format should be Bgra8UnormSrgb
-        assert_eq!(backend.surface_format(surface), TextureFormat::Bgra8UnormSrgb);
+        assert_eq!(
+            backend.surface_format(surface),
+            TextureFormat::Bgra8UnormSrgb
+        );
     }
 
     #[test]
     fn test_surface_format_configurable() {
         let mut backend = MockBackend::new();
-        
+
         // Configure a different format (simulating a GPU that prefers RGBA)
         backend.set_default_surface_format(TextureFormat::Rgba8Unorm);
-        
+
         let device = backend.create_device(0).unwrap();
-        
+
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-                Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(raw_window_handle::WebWindowHandle::new(0))) })
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-                Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(raw_window_handle::WebDisplayHandle::new())) })
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
             }
         }
-        
-        let surface = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
-        
+
+        let surface = backend
+            .create_surface(device, &MockWindow, &MockWindow)
+            .unwrap();
+
         // Should return the configured format, not the default
         assert_eq!(backend.surface_format(surface), TextureFormat::Rgba8Unorm);
     }
@@ -963,31 +1171,61 @@ mod tests {
         // (when configured between creations)
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
-        
+
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-                Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(raw_window_handle::WebWindowHandle::new(0))) })
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-                Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(raw_window_handle::WebDisplayHandle::new())) })
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
             }
         }
-        
+
         // Create first surface with default format
-        let surface1 = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
-        assert_eq!(backend.surface_format(surface1), TextureFormat::Bgra8UnormSrgb);
-        
+        let surface1 = backend
+            .create_surface(device, &MockWindow, &MockWindow)
+            .unwrap();
+        assert_eq!(
+            backend.surface_format(surface1),
+            TextureFormat::Bgra8UnormSrgb
+        );
+
         // Change default and create second surface
         backend.set_default_surface_format(TextureFormat::Rgba8UnormSrgb);
-        let surface2 = backend.create_surface(device, &MockWindow, &MockWindow).unwrap();
-        
+        let surface2 = backend
+            .create_surface(device, &MockWindow, &MockWindow)
+            .unwrap();
+
         // First surface should retain its original format
-        assert_eq!(backend.surface_format(surface1), TextureFormat::Bgra8UnormSrgb);
+        assert_eq!(
+            backend.surface_format(surface1),
+            TextureFormat::Bgra8UnormSrgb
+        );
         // Second surface should have the new format
-        assert_eq!(backend.surface_format(surface2), TextureFormat::Rgba8UnormSrgb);
+        assert_eq!(
+            backend.surface_format(surface2),
+            TextureFormat::Rgba8UnormSrgb
+        );
     }
 }
-

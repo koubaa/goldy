@@ -11,22 +11,22 @@
 //! let device = instance.create_device(DeviceType::DiscreteGpu).unwrap();
 //! ```
 
-pub mod types;
 pub mod backend;
-pub mod device;
-pub mod buffer;
 pub mod bind_group;
+pub mod buffer;
+pub mod compute;
+pub mod device;
+pub mod encoder;
+pub mod examples;
+pub mod pipeline;
+pub mod render_target;
+pub mod sampler;
 pub mod shader;
 pub mod shader_library;
 pub mod shaders;
-pub mod pipeline;
-pub mod compute;
-pub mod encoder;
-pub mod render_target;
 pub mod surface;
 pub mod texture;
-pub mod sampler;
-pub mod examples;
+pub mod types;
 
 // Slang compiler is only available on native targets (not WASM)
 // For web builds, use slang-wasm in JavaScript
@@ -34,17 +34,19 @@ pub mod examples;
 pub mod slang;
 
 // Re-export main types
-pub use types::*;
-pub use device::{Instance, Device, Adapter, DeviceCapabilities};
+pub use bind_group::{
+    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, BufferBinding, SamplerBinding,
+    ShaderStages, TextureBinding,
+};
 pub use buffer::Buffer;
-pub use bind_group::{BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, TextureBinding, SamplerBinding, BindingType, ShaderStages};
-pub use shader::{ShaderModule, builtins};
-pub use shader_library::ShaderLibrary;
-pub use pipeline::{RenderPipeline, RenderPipelineDesc};
-pub use compute::{ComputePipeline, ComputePipelineDesc, ComputeEncoder, ComputePass};
+pub use compute::{ComputeEncoder, ComputePass, ComputePipeline, ComputePipelineDesc};
+pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
+pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use render_target::RenderTarget;
+pub use sampler::Sampler;
+pub use shader::{builtins, ShaderModule};
+pub use shader_library::ShaderLibrary;
 pub use surface::{Surface, SurfaceFrame};
 pub use texture::Texture;
-pub use sampler::Sampler;
-
+pub use types::*;

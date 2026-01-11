@@ -2,7 +2,10 @@
 //!
 //! Format conversions and helpers.
 
-use crate::types::{AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
+use crate::types::{
+    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
+    TextureFormat, VertexFormat,
+};
 use windows::Win32::Graphics::{Direct3D, Direct3D12, Dxgi};
 
 /// Convert Goldy TextureFormat to DXGI format.
@@ -56,7 +59,9 @@ pub fn topology_to_d3d12(topology: PrimitiveTopology) -> Direct3D::D3D_PRIMITIVE
 }
 
 /// Convert Goldy PrimitiveTopology to D3D12 topology type for PSO.
-pub fn topology_type_to_d3d12(topology: PrimitiveTopology) -> Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE {
+pub fn topology_type_to_d3d12(
+    topology: PrimitiveTopology,
+) -> Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE {
     match topology {
         PrimitiveTopology::PointList => Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT,
         PrimitiveTopology::LineList | PrimitiveTopology::LineStrip => {
@@ -127,16 +132,36 @@ pub fn compare_to_d3d12(compare: CompareFunction) -> Direct3D12::D3D12_COMPARISO
 }
 
 /// Convert Goldy FilterMode to D3D12 filter.
-pub fn filter_to_d3d12(min: FilterMode, mag: FilterMode, mip: FilterMode) -> Direct3D12::D3D12_FILTER {
+pub fn filter_to_d3d12(
+    min: FilterMode,
+    mag: FilterMode,
+    mip: FilterMode,
+) -> Direct3D12::D3D12_FILTER {
     match (min, mag, mip) {
-        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_MAG_MIP_POINT,
-        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR,
-        (FilterMode::Nearest, FilterMode::Linear, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT,
-        (FilterMode::Nearest, FilterMode::Linear, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR,
-        (FilterMode::Linear, FilterMode::Nearest, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT,
-        (FilterMode::Linear, FilterMode::Nearest, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR,
-        (FilterMode::Linear, FilterMode::Linear, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
-        (FilterMode::Linear, FilterMode::Linear, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Nearest) => {
+            Direct3D12::D3D12_FILTER_MIN_MAG_MIP_POINT
+        }
+        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Linear) => {
+            Direct3D12::D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR
+        }
+        (FilterMode::Nearest, FilterMode::Linear, FilterMode::Nearest) => {
+            Direct3D12::D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT
+        }
+        (FilterMode::Nearest, FilterMode::Linear, FilterMode::Linear) => {
+            Direct3D12::D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR
+        }
+        (FilterMode::Linear, FilterMode::Nearest, FilterMode::Nearest) => {
+            Direct3D12::D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT
+        }
+        (FilterMode::Linear, FilterMode::Nearest, FilterMode::Linear) => {
+            Direct3D12::D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR
+        }
+        (FilterMode::Linear, FilterMode::Linear, FilterMode::Nearest) => {
+            Direct3D12::D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT
+        }
+        (FilterMode::Linear, FilterMode::Linear, FilterMode::Linear) => {
+            Direct3D12::D3D12_FILTER_MIN_MAG_MIP_LINEAR
+        }
     }
 }
 
@@ -148,4 +173,3 @@ pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADD
         AddressMode::MirrorRepeat => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
     }
 }
-

@@ -2,9 +2,9 @@
 //!
 //! This module contains all the state structs used by the Vulkan backend.
 
+use super::super::{BufferHandle, DeviceHandle};
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
-use super::super::{DeviceHandle, BufferHandle};
 
 /// Information about a physical Vulkan device.
 pub(crate) struct PhysicalDeviceInfo {
@@ -159,4 +159,3 @@ pub(crate) struct PendingBuffer {
     pub slot: u32,
     pub offset: u64,
 }
-

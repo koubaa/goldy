@@ -19,7 +19,7 @@ impl Buffer {
     pub fn new(device: &Device, size: u64, usage: BufferUsage) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
         let handle = backend.create_buffer(device.handle, size, usage)?;
-        
+
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,
@@ -29,7 +29,11 @@ impl Buffer {
     }
 
     /// Create a buffer initialized with data.
-    pub fn with_data<T: bytemuck::Pod>(device: &Device, data: &[T], usage: BufferUsage) -> Result<Self> {
+    pub fn with_data<T: bytemuck::Pod>(
+        device: &Device,
+        data: &[T],
+        usage: BufferUsage,
+    ) -> Result<Self> {
         let bytes = bytemuck::cast_slice(data);
         let buffer = Self::new(device, bytes.len() as u64, usage)?;
         buffer.write(0, bytes)?;
@@ -71,4 +75,3 @@ impl Drop for Buffer {
         backend.destroy_buffer(self.handle);
     }
 }
-

@@ -5,11 +5,10 @@
 //! Run with: cargo run --example textured_quad
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2DUv, Texture, Sampler, BindGroup, BindGroupLayout,
-    BindGroupLayoutBinding, TextureBinding, SamplerBinding,
-    types::{TextureFormat, FilterMode, AddressMode, SamplerDesc, TextureUsage},
+    types::{AddressMode, FilterMode, SamplerDesc, TextureFormat, TextureUsage},
+    BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferUsage, Color, CommandEncoder,
+    DeviceType, Instance, RenderPipeline, RenderPipelineDesc, Sampler, SamplerBinding,
+    ShaderModule, Surface, Texture, TextureBinding, Vertex2DUv,
 };
 use std::sync::Arc;
 use winit::{
@@ -52,13 +51,13 @@ float4 fs_main(VertexOutput input) : SV_Target {
 /// Generate a checkerboard texture in RGBA8 format
 fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> {
     let mut data = Vec::with_capacity((width * height * 4) as usize);
-    
+
     for y in 0..height {
         for x in 0..width {
             let checker_x = (x / checker_size) % 2;
             let checker_y = (y / checker_size) % 2;
             let is_white = (checker_x + checker_y) % 2 == 0;
-            
+
             if is_white {
                 data.extend_from_slice(&[255, 255, 255, 255]); // White
             } else {
@@ -66,18 +65,36 @@ fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> 
             }
         }
     }
-    
+
     data
 }
 
 // Fullscreen quad vertices (already defined in goldy::types but we define here for clarity)
 const QUAD_VERTICES: [Vertex2DUv; 6] = [
-    Vertex2DUv { position: [-0.8, -0.8], uv: [0.0, 1.0] },
-    Vertex2DUv { position: [0.8, -0.8], uv: [1.0, 1.0] },
-    Vertex2DUv { position: [0.8, 0.8], uv: [1.0, 0.0] },
-    Vertex2DUv { position: [-0.8, -0.8], uv: [0.0, 1.0] },
-    Vertex2DUv { position: [0.8, 0.8], uv: [1.0, 0.0] },
-    Vertex2DUv { position: [-0.8, 0.8], uv: [0.0, 0.0] },
+    Vertex2DUv {
+        position: [-0.8, -0.8],
+        uv: [0.0, 1.0],
+    },
+    Vertex2DUv {
+        position: [0.8, -0.8],
+        uv: [1.0, 1.0],
+    },
+    Vertex2DUv {
+        position: [0.8, 0.8],
+        uv: [1.0, 0.0],
+    },
+    Vertex2DUv {
+        position: [-0.8, -0.8],
+        uv: [0.0, 1.0],
+    },
+    Vertex2DUv {
+        position: [0.8, 0.8],
+        uv: [1.0, 0.0],
+    },
+    Vertex2DUv {
+        position: [-0.8, 0.8],
+        uv: [0.0, 0.0],
+    },
 ];
 
 struct App {
@@ -98,21 +115,26 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             vertex_buffer: None,
-            texture: None, sampler: None,
-            bind_group: None, bind_group_layout: None,
+            texture: None,
+            sampler: None,
+            bind_group: None,
+            bind_group_layout: None,
         })
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        
+
         // Create shader
         let shader = ShaderModule::from_slang(&device, TEXTURED_SHADER)?;
-        
+
         // Create texture
         let tex_width = 256u32;
         let tex_height = 256u32;
@@ -125,27 +147,33 @@ impl App {
             TextureFormat::Rgba8Unorm,
             TextureUsage::SAMPLED | TextureUsage::COPY_DST,
         )?;
-        
+
         // Create sampler with linear filtering and repeat addressing
-        let sampler = Sampler::new(&device, &SamplerDesc {
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Nearest,
-            address_mode_u: AddressMode::Repeat,
-            address_mode_v: AddressMode::Repeat,
-            address_mode_w: AddressMode::Repeat,
-            max_anisotropy: 1.0,
-            compare: None,
-            lod_min_clamp: 0.0,
-            lod_max_clamp: 32.0,
-        })?;
-        
+        let sampler = Sampler::new(
+            &device,
+            &SamplerDesc {
+                mag_filter: FilterMode::Linear,
+                min_filter: FilterMode::Linear,
+                mipmap_filter: FilterMode::Nearest,
+                address_mode_u: AddressMode::Repeat,
+                address_mode_v: AddressMode::Repeat,
+                address_mode_w: AddressMode::Repeat,
+                max_anisotropy: 1.0,
+                compare: None,
+                lod_min_clamp: 0.0,
+                lod_max_clamp: 32.0,
+            },
+        )?;
+
         // Create bind group layout and bind group
-        let bind_group_layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::texture(0),
-            BindGroupLayoutBinding::sampler(1),
-        ])?;
-        
+        let bind_group_layout = BindGroupLayout::new(
+            &device,
+            &[
+                BindGroupLayoutBinding::texture(0),
+                BindGroupLayoutBinding::sampler(1),
+            ],
+        )?;
+
         let bind_group = BindGroup::with_resources(
             &device,
             &bind_group_layout,
@@ -153,18 +181,23 @@ impl App {
             &[TextureBinding::new(0, &texture)],
             &[SamplerBinding::new(1, &sampler)],
         )?;
-        
+
         // Create pipeline
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2DUv::layout(),
-            target_format: surface.format(),
-            bind_group_layouts: &[&bind_group_layout],
-            ..Default::default()
-        })?;
-        
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2DUv::layout(),
+                target_format: surface.format(),
+                bind_group_layouts: &[&bind_group_layout],
+                ..Default::default()
+            },
+        )?;
+
         // Create vertex buffer
         let vertex_buffer = Buffer::with_data(&device, &QUAD_VERTICES, BufferUsage::VERTEX)?;
-        
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -174,14 +207,16 @@ impl App {
         self.sampler = Some(sampler);
         self.bind_group = Some(bind_group);
         self.bind_group_layout = Some(bind_group_layout);
-        
+
         Ok(())
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
@@ -189,11 +224,16 @@ impl App {
         let bind_group = self.bind_group.as_ref().unwrap();
 
         let frame = surface.acquire()?;
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color { r: 0.1, g: 0.1, b: 0.15, a: 1.0 });
+            pass.clear(Color {
+                r: 0.1,
+                g: 0.1,
+                b: 0.15,
+                a: 1.0,
+            });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group);
             pass.set_vertex_buffer(0, vertex_buffer);
@@ -217,11 +257,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Textured Quad Example")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 800))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Textured Quad Example")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -232,7 +276,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { event_loop.exit(); }
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
@@ -260,4 +306,3 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }
-

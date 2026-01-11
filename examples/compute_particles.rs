@@ -8,11 +8,10 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder,
-    ComputePipeline, ComputePipelineDesc, DeviceType, Instance,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Surface, VertexBufferLayout,
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, BufferBinding, ShaderStages,
+    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
+    BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
+    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
+    ShaderStages, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -71,16 +70,12 @@ impl RenderState {
         let surface = Surface::new(&device, window.as_ref())?;
 
         // Compute shader for particle simulation
-        let compute_shader = ShaderModule::from_slang(
-            &device,
-            include_str!("../shaders/particle_update.slang"),
-        )?;
+        let compute_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/particle_update.slang"))?;
 
         // Render shader for visualization
-        let render_shader = ShaderModule::from_slang(
-            &device,
-            include_str!("../shaders/particle_render.slang"),
-        )?;
+        let render_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/particle_render.slang"))?;
 
         // Create particle buffer with initial scattered positions
         let mut particles = Vec::with_capacity(NUM_PARTICLES as usize);
@@ -165,7 +160,10 @@ impl RenderState {
             },
         )?;
 
-        println!("Created compute particles example with {} particles", NUM_PARTICLES);
+        println!(
+            "Created compute particles example with {} particles",
+            NUM_PARTICLES
+        );
 
         Ok(Self {
             window,

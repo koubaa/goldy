@@ -5,9 +5,8 @@
 //! Run with: cargo run --example particles
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -65,7 +64,7 @@ impl Particle {
     fn update(&mut self, is_snow: bool) {
         self.x += self.vx;
         self.y += self.vy;
-        
+
         if is_snow {
             self.vx += (random() - 0.5) * 0.001;
             self.vx = self.vx.clamp(-0.01, 0.01);
@@ -121,8 +120,11 @@ impl App {
         let particles: Vec<Particle> = (0..NUM_PARTICLES).map(|_| Particle::new_rain()).collect();
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             particles,
             is_snow: false,
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
@@ -139,7 +141,10 @@ impl App {
             }
         }
         if let Some(w) = &self.window {
-            w.set_title(&format!("Goldy - {} (Surface API, Space to toggle)", if self.is_snow { "Snow" } else { "Rain" }));
+            w.set_title(&format!(
+                "Goldy - {} (Surface API, Space to toggle)",
+                if self.is_snow { "Snow" } else { "Rain" }
+            ));
         }
     }
 
@@ -147,11 +152,16 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            ..Default::default()
-        })?;
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: surface.format(),
+                ..Default::default()
+            },
+        )?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -162,7 +172,9 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         for p in &mut self.particles {
             p.update(self.is_snow);
@@ -179,16 +191,26 @@ impl App {
         let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
 
         let bg = if self.is_snow {
-            Color { r: 0.05, g: 0.05, b: 0.15, a: 1.0 }
+            Color {
+                r: 0.05,
+                g: 0.05,
+                b: 0.15,
+                a: 1.0,
+            }
         } else {
-            Color { r: 0.02, g: 0.02, b: 0.05, a: 1.0 }
+            Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.05,
+                a: 1.0,
+            }
         };
 
         let frame = surface.acquire()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -216,11 +238,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Rain (Surface API, Space to toggle)")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Rain (Surface API, Space to toggle)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();

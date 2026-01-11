@@ -64,8 +64,7 @@ fn test_vulkan_render_and_readback() {
         }
     "#;
 
-    let shader = ShaderModule::from_slang(&device, shader_source)
-        .expect("Failed to create shader");
+    let shader = ShaderModule::from_slang(&device, shader_source).expect("Failed to create shader");
 
     let pipeline = RenderPipeline::new(
         &device,
@@ -108,7 +107,10 @@ fn test_vulkan_render_and_readback() {
     // The center of the image should have some non-black pixels (the triangle)
     // Check that not all pixels are black
     let has_non_black = pixels.chunks(4).any(|p| p[0] > 0 || p[1] > 0 || p[2] > 0);
-    assert!(has_non_black, "Expected rendered triangle to have non-black pixels");
+    assert!(
+        has_non_black,
+        "Expected rendered triangle to have non-black pixels"
+    );
 }
 
 #[test]
@@ -161,14 +163,18 @@ fn test_multiple_render_targets() {
         let mut pass = encoder1.begin_render_pass();
         pass.clear(Color::RED);
     }
-    target1.render(encoder1).expect("Failed to render to target 1");
+    target1
+        .render(encoder1)
+        .expect("Failed to render to target 1");
 
     let mut encoder2 = CommandEncoder::new();
     {
         let mut pass = encoder2.begin_render_pass();
         pass.clear(Color::BLUE);
     }
-    target2.render(encoder2).expect("Failed to render to target 2");
+    target2
+        .render(encoder2)
+        .expect("Failed to render to target 2");
 
     // Read back and verify
     let pixels1 = target1.read_to_cpu().expect("Failed to read target 1");
@@ -176,12 +182,12 @@ fn test_multiple_render_targets() {
 
     // Target 1 should be red
     assert_eq!(pixels1[0], 255); // R
-    assert_eq!(pixels1[1], 0);   // G
-    assert_eq!(pixels1[2], 0);   // B
+    assert_eq!(pixels1[1], 0); // G
+    assert_eq!(pixels1[2], 0); // B
 
     // Target 2 should be blue
-    assert_eq!(pixels2[0], 0);   // R
-    assert_eq!(pixels2[1], 0);   // G
+    assert_eq!(pixels2[0], 0); // R
+    assert_eq!(pixels2[1], 0); // G
     assert_eq!(pixels2[2], 255); // B
 }
 
@@ -221,8 +227,7 @@ fn test_indexed_drawing() {
         }
     "#;
 
-    let shader = ShaderModule::from_slang(&device, shader_source)
-        .expect("Failed to create shader");
+    let shader = ShaderModule::from_slang(&device, shader_source).expect("Failed to create shader");
 
     let pipeline = RenderPipeline::new(
         &device,
@@ -238,10 +243,10 @@ fn test_indexed_drawing() {
 
     // Create a quad using 4 vertices and 6 indices (2 triangles)
     let vertices = [
-        Vertex2D::new(-0.5, -0.5, Color::RED),   // 0: bottom-left
-        Vertex2D::new(0.5, -0.5, Color::GREEN),  // 1: bottom-right
-        Vertex2D::new(0.5, 0.5, Color::BLUE),    // 2: top-right
-        Vertex2D::new(-0.5, 0.5, Color::WHITE),  // 3: top-left
+        Vertex2D::new(-0.5, -0.5, Color::RED),  // 0: bottom-left
+        Vertex2D::new(0.5, -0.5, Color::GREEN), // 1: bottom-right
+        Vertex2D::new(0.5, 0.5, Color::BLUE),   // 2: top-right
+        Vertex2D::new(-0.5, 0.5, Color::WHITE), // 3: top-left
     ];
     let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)
         .expect("Failed to create vertex buffer");
@@ -274,8 +279,15 @@ fn test_indexed_drawing() {
 
     // The quad should cover a significant portion of the image
     // Check that we have non-black pixels (the quad was drawn)
-    let non_black_count = pixels.chunks(4).filter(|p| p[0] > 0 || p[1] > 0 || p[2] > 0).count();
-    assert!(non_black_count > 1000, "Expected quad to cover at least 1000 pixels, got {}", non_black_count);
+    let non_black_count = pixels
+        .chunks(4)
+        .filter(|p| p[0] > 0 || p[1] > 0 || p[2] > 0)
+        .count();
+    assert!(
+        non_black_count > 1000,
+        "Expected quad to cover at least 1000 pixels, got {}",
+        non_black_count
+    );
 }
 
 #[test]
@@ -313,8 +325,7 @@ fn test_indexed_drawing_uint32() {
         }
     "#;
 
-    let shader = ShaderModule::from_slang(&device, shader_source)
-        .expect("Failed to create shader");
+    let shader = ShaderModule::from_slang(&device, shader_source).expect("Failed to create shader");
 
     let pipeline = RenderPipeline::new(
         &device,
@@ -357,6 +368,13 @@ fn test_indexed_drawing_uint32() {
     let pixels = target.read_to_cpu().expect("Failed to read pixels");
 
     // Should have red pixels from the triangle
-    let red_pixel_count = pixels.chunks(4).filter(|p| p[0] > 200 && p[1] < 50 && p[2] < 50).count();
-    assert!(red_pixel_count > 100, "Expected red triangle pixels, got {}", red_pixel_count);
+    let red_pixel_count = pixels
+        .chunks(4)
+        .filter(|p| p[0] > 200 && p[1] < 50 && p[2] < 50)
+        .count();
+    assert!(
+        red_pixel_count > 100,
+        "Expected red triangle pixels, got {}",
+        red_pixel_count
+    );
 }
