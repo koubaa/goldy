@@ -35,6 +35,8 @@ pub(crate) struct BufferState {
 pub(crate) struct ShaderState {
     pub device_handle: DeviceHandle,
     pub slang_source: String,
+    /// Search paths for Slang module resolution
+    pub search_paths: Vec<String>,
     /// Cached compiled vertex shader module
     pub vertex_module: Option<vk::ShaderModule>,
     /// Cached compiled fragment shader module

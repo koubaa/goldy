@@ -355,6 +355,10 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
+        self.create_shader_with_paths(device_handle, slang_source, &[])
+    }
+
+    fn create_shader_with_paths(&mut self, device_handle: DeviceHandle, slang_source: &str, search_paths: &[&str]) -> Result<ShaderHandle> {
         // Just validate the device exists - actual compilation happens at pipeline creation
         let _ = self
             .devices
@@ -369,6 +373,7 @@ impl GpuBackend for VulkanBackend {
             ShaderState {
                 device_handle,
                 slang_source: slang_source.to_string(),
+                search_paths: search_paths.iter().map(|s| s.to_string()).collect(),
                 vertex_module: None,
                 fragment_module: None,
                 compute_module: None,

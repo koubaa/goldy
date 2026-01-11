@@ -275,15 +275,17 @@ impl VulkanBackend {
             _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
         };
         
-        // Clone source to avoid borrow issues
+        // Clone source and search paths to avoid borrow issues
         let slang_source = shader.slang_source.clone();
+        let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
         let device_handle = shader.device_handle;
         
         // Compile with per-backend Slang compiler (avoids global state issues)
-        let compiled = self.slang_compiler.compile_entry_point(
+        let compiled = self.slang_compiler.compile_with_options(
             &slang_source,
             crate::slang::ShaderTarget::Spirv,
-            Some((entry_point_name, stage)),
+            &[(entry_point_name, stage)],
+            &search_paths,
         ).with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
         
         let spirv = compiled.as_spirv()

@@ -666,6 +666,10 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
+        self.create_shader_with_paths(device_handle, slang_source, &[])
+    }
+
+    fn create_shader_with_paths(&mut self, device_handle: DeviceHandle, slang_source: &str, _search_paths: &[&str]) -> Result<ShaderHandle> {
         let _ = self
             .devices
             .get(&device_handle)

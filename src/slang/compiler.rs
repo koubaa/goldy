@@ -127,6 +127,20 @@ impl SlangCompiler {
         target: ShaderTarget,
         entry_points: &[(&str, SlangStage)],
     ) -> Result<CompiledShader> {
+        self.compile_with_options(source, target, entry_points, &[])
+    }
+    
+    /// Compile with explicit entry points and search paths.
+    ///
+    /// Search paths are used to resolve `import` statements in Slang modules.
+    /// If `entry_points` is empty, entry points are detected from shader attributes.
+    pub fn compile_with_options(
+        &self,
+        source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+    ) -> Result<CompiledShader> {
         // Create compile request
         let request = unsafe { (self.library.create_compile_request)(self.session) };
         if request.is_null() {
@@ -137,6 +151,14 @@ impl SlangCompiler {
         let _guard = scopeguard::guard(request, |req| {
             unsafe { (self.library.destroy_compile_request)(req) };
         });
+        
+        // Add search paths for module resolution
+        for path in search_paths {
+            let path_cstr = CString::new(*path).context("Search path contains null bytes")?;
+            unsafe {
+                (self.library.add_search_path)(request, path_cstr.as_ptr());
+            }
+        }
         
         // Add target
         let target_index = unsafe {

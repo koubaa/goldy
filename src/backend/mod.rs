@@ -129,6 +129,7 @@ pub trait GpuBackend: Send + Sync {
 
     // Shader management
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
+    fn create_shader_with_paths(&mut self, device: DeviceHandle, slang_source: &str, search_paths: &[&str]) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
     // Bind group management

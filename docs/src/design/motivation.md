@@ -161,6 +161,10 @@ TU Darmstadt        →  "Rigorous minimal feature analysis"
 
 No single source defines Goldy. The value is in the synthesis.
 
+### Name
+
+Goldy aspires to exist in the golden mean between wgpu emphasis on compatibility and the vision of no-graphics-api.
+
 ## Further Reading
 
 - [Sebastian Aaltonen: No Graphics API](https://www.sebastianaaltonen.com/blog/no-graphics-api) - Essential reading on modern GPU architecture

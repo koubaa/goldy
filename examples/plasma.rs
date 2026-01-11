@@ -63,7 +63,7 @@ impl App {
         // Create surface first to get the correct format
         let surface = Surface::new(&device, window.as_ref())?;
         
-        // Create shader
+        // Create shader - goldy library is automatically available for import
         let shader = ShaderModule::from_slang(&device, shaders::PLASMA)?;
         
         // Create bind group layout for uniforms (binding 0)

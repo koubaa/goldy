@@ -1,8 +1,49 @@
 //! Shader module management.
+//!
+//! Goldy provides two ways to work with shaders:
+//!
+//! 1. **Built-in shaders** (`shader::builtins`) - Complete, self-contained shaders
+//!    for common use cases. No imports, no file system access needed.
+//!
+//! 2. **Shader libraries** - Reusable Slang modules that your shaders can import.
+//!    The `goldy` library is registered by default on every device.
+//!
+//! # Using Shader Libraries
+//!
+//! Shaders can import registered libraries:
+//!
+//! ```slang
+//! import goldy;  // Uses the built-in goldy library
+//!
+//! [shader("vertex")]
+//! FullscreenVarying vs_main(FullscreenVertex input) {
+//!     return vs_fullscreen(input);
+//! }
+//!
+//! [shader("fragment")]
+//! float4 fs_main(FullscreenVarying input) : SV_Target {
+//!     return float4(rainbow(input.uv.x), 1.0);
+//! }
+//! ```
+//!
+//! # Custom Libraries
+//!
+//! Register your own libraries with [`Device::register_library`](crate::Device::register_library):
+//!
+//! ```rust,no_run
+//! use goldy::ShaderLibrary;
+//!
+//! device.register_library(ShaderLibrary::from_source("myutils", r#"
+//!     module myutils;
+//!     public float3 my_effect() { return float3(1, 0, 0); }
+//! "#))?;
+//!
+//! // Now your shaders can use: import myutils;
+//! ```
 
 use crate::backend::{GpuBackend, ShaderHandle};
 use crate::device::Device;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 
 /// A compiled shader module.
@@ -14,32 +55,75 @@ pub struct ShaderModule {
 impl ShaderModule {
     /// Create a shader module from Slang source.
     ///
-    /// The Slang source should contain entry points marked with `[shader("vertex")]`,
-    /// `[shader("fragment")]`, etc.
+    /// The source is compiled using Slang and can import any registered
+    /// shader libraries (including the built-in `goldy` library).
     ///
     /// # Example
     ///
-    /// ```slang
-    /// [shader("vertex")]
-    /// float4 vs_main(float2 pos : POSITION) : SV_Position {
-    ///     return float4(pos, 0, 1);
-    /// }
+    /// ```rust,no_run
+    /// use goldy::ShaderModule;
     ///
-    /// [shader("fragment")]
-    /// float4 fs_main() : SV_Target {
-    ///     return float4(1, 0, 0, 1);
-    /// }
+    /// let shader = ShaderModule::from_slang(&device, r#"
+    ///     import goldy;
+    ///
+    ///     [shader("vertex")]
+    ///     FullscreenVarying vs_main(FullscreenVertex input) {
+    ///         return vs_fullscreen(input);
+    ///     }
+    ///
+    ///     [shader("fragment")]
+    ///     float4 fs_main(FullscreenVarying input) : SV_Target {
+    ///         return float4(rainbow(input.uv.x), 1.0);
+    ///     }
+    /// "#)?;
+    /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn from_slang(device: &Device, source: &str) -> Result<Self> {
+        Self::from_slang_with_paths(device, source, &[])
+    }
+    
+    /// Create a shader module with additional search paths.
+    ///
+    /// This is useful when your shaders also need to access modules from
+    /// additional filesystem directories, beyond the registered libraries.
+    ///
+    /// Registered libraries are always included automatically.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use goldy::ShaderModule;
+    ///
+    /// // Shader can import from both registered libraries AND the "my_project" directory
+    /// let shader = ShaderModule::from_slang_with_paths(
+    ///     &device,
+    ///     source,
+    ///     &["my_project/shaders"],
+    /// )?;
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn from_slang_with_paths(device: &Device, source: &str, extra_paths: &[&str]) -> Result<Self> {
+        // Get search paths from registered libraries
+        let library_paths = device.get_shader_search_paths()
+            .context("Failed to prepare shader library paths")?;
+        
+        // Combine library paths with extra paths
+        let all_paths: Vec<String> = library_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .chain(extra_paths.iter().map(|s| s.to_string()))
+            .collect();
+        
+        let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
+        
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_shader(device.handle, source)?;
+        let handle = backend.create_shader_with_paths(device.handle, source, &path_refs)?;
         
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,
         })
     }
-    
 }
 
 impl Drop for ShaderModule {

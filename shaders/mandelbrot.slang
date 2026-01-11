@@ -1,15 +1,7 @@
 // Interactive Mandelbrot fractal explorer
-// Uses uniform buffer for center and zoom
+// Uses goldy_exp module for vertex format and color utilities
 
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
+import goldy_exp;
 
 // Uniform buffer for view parameters (updated on input)
 [[vk::binding(0, 0)]]
@@ -20,15 +12,12 @@ cbuffer Uniforms {
 };
 
 [shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
+FullscreenVarying vs_main(FullscreenVertex input) {
+    return vs_fullscreen(input);
 }
 
 [shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
+float4 fs_main(FullscreenVarying input) : SV_Target {
     // Map UV to complex plane around center with zoom
     float2 c = center + (input.uv - 0.5) * 4.0 / zoom;
     float2 z = float2(0.0, 0.0);
@@ -45,11 +34,9 @@ float4 fs_main(VertexOutput input) : SV_Target {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
     
-    // Smooth coloring
+    // Use palette from goldy module for smooth coloring
     float t = float(i) / float(max_iter);
-    float r = sin(t * 5.0) * 0.5 + 0.5;
-    float g = sin(t * 7.0 + 1.0) * 0.5 + 0.5;
-    float b = sin(t * 11.0 + 2.0) * 0.5 + 0.5;
+    float3 color = palette(t, float3(5.0, 7.0, 11.0), float3(0.0, 1.0, 2.0));
     
-    return float4(r, g, b, 1.0);
+    return float4(color, 1.0);
 }
