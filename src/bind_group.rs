@@ -4,8 +4,8 @@
 //! They contain references to buffers (uniform, storage), textures, and samplers.
 
 use crate::backend::{
-    BindGroupHandle, BindGroupLayoutHandle, BindGroupLayoutEntry, BindGroupEntry,
-    BindingResource, GpuBackend,
+    BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BindingResource,
+    GpuBackend,
 };
 use crate::buffer::Buffer;
 use crate::device::Device;
@@ -367,7 +367,7 @@ mod tests {
     }
 
     // BindGroupLayoutBinding tests
-    
+
     #[test]
     fn test_uniform_binding() {
         let binding = BindGroupLayoutBinding::uniform(0);
@@ -458,11 +458,9 @@ mod tests {
     #[test]
     fn test_bind_group_layout_creation() {
         let device = create_test_device();
-        
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-        ]).unwrap();
-        
+
+        let layout = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
+
         // Layout handle should be non-zero
         assert!(layout.handle() > 0);
     }
@@ -470,21 +468,25 @@ mod tests {
     #[test]
     fn test_bind_group_layout_multiple_bindings() {
         let device = create_test_device();
-        
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-            BindGroupLayoutBinding::storage(1, false),
-            BindGroupLayoutBinding::texture(2),
-            BindGroupLayoutBinding::sampler(3),
-        ]).unwrap();
-        
+
+        let layout = BindGroupLayout::new(
+            &device,
+            &[
+                BindGroupLayoutBinding::uniform(0),
+                BindGroupLayoutBinding::storage(1, false),
+                BindGroupLayoutBinding::texture(2),
+                BindGroupLayoutBinding::sampler(3),
+            ],
+        )
+        .unwrap();
+
         assert!(layout.handle() > 0);
     }
 
     #[test]
     fn test_bind_group_layout_empty() {
         let device = create_test_device();
-        
+
         // Empty layout should work
         let layout = BindGroupLayout::new(&device, &[]).unwrap();
         assert!(layout.handle() > 0);
@@ -496,7 +498,7 @@ mod tests {
     fn test_buffer_binding_new() {
         let device = create_test_device();
         let buffer = Buffer::new(&device, 256, crate::types::BufferUsage::UNIFORM).unwrap();
-        
+
         let binding = BufferBinding::new(0, &buffer);
         assert_eq!(binding.binding, 0);
         assert_eq!(binding.offset, 0);
@@ -507,7 +509,7 @@ mod tests {
     fn test_buffer_binding_with_range() {
         let device = create_test_device();
         let buffer = Buffer::new(&device, 1024, crate::types::BufferUsage::UNIFORM).unwrap();
-        
+
         let binding = BufferBinding::with_range(0, &buffer, 256, 512);
         assert_eq!(binding.binding, 0);
         assert_eq!(binding.offset, 256);
@@ -519,17 +521,14 @@ mod tests {
     #[test]
     fn test_bind_group_creation() {
         let device = create_test_device();
-        
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-        ]).unwrap();
-        
+
+        let layout = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
+
         let buffer = Buffer::new(&device, 256, crate::types::BufferUsage::UNIFORM).unwrap();
-        
-        let bind_group = BindGroup::new(&device, &layout, &[
-            BufferBinding::new(0, &buffer),
-        ]).unwrap();
-        
+
+        let bind_group =
+            BindGroup::new(&device, &layout, &[BufferBinding::new(0, &buffer)]).unwrap();
+
         // Just verify creation succeeded
         assert!(bind_group.handle > 0);
     }
@@ -537,63 +536,80 @@ mod tests {
     #[test]
     fn test_bind_group_multiple_buffers() {
         let device = create_test_device();
-        
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-            BindGroupLayoutBinding::uniform(1),
-            BindGroupLayoutBinding::storage(2, false),
-        ]).unwrap();
-        
+
+        let layout = BindGroupLayout::new(
+            &device,
+            &[
+                BindGroupLayoutBinding::uniform(0),
+                BindGroupLayoutBinding::uniform(1),
+                BindGroupLayoutBinding::storage(2, false),
+            ],
+        )
+        .unwrap();
+
         let uniform1 = Buffer::new(&device, 256, crate::types::BufferUsage::UNIFORM).unwrap();
         let uniform2 = Buffer::new(&device, 128, crate::types::BufferUsage::UNIFORM).unwrap();
         let storage = Buffer::new(&device, 1024, crate::types::BufferUsage::STORAGE).unwrap();
-        
-        let bind_group = BindGroup::new(&device, &layout, &[
-            BufferBinding::new(0, &uniform1),
-            BufferBinding::new(1, &uniform2),
-            BufferBinding::new(2, &storage),
-        ]).unwrap();
-        
+
+        let bind_group = BindGroup::new(
+            &device,
+            &layout,
+            &[
+                BufferBinding::new(0, &uniform1),
+                BufferBinding::new(1, &uniform2),
+                BufferBinding::new(2, &storage),
+            ],
+        )
+        .unwrap();
+
         assert!(bind_group.handle > 0);
     }
 
     #[test]
     fn test_bind_group_with_resources() {
         let device = create_test_device();
-        
+
         // Layout with buffer, texture, and sampler
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-            BindGroupLayoutBinding::texture(1),
-            BindGroupLayoutBinding::sampler(2),
-        ]).unwrap();
-        
+        let layout = BindGroupLayout::new(
+            &device,
+            &[
+                BindGroupLayoutBinding::uniform(0),
+                BindGroupLayoutBinding::texture(1),
+                BindGroupLayoutBinding::sampler(2),
+            ],
+        )
+        .unwrap();
+
         let buffer = Buffer::new(&device, 256, crate::types::BufferUsage::UNIFORM).unwrap();
         let texture = crate::texture::Texture::new(
-            &device, 
-            64, 64, 
+            &device,
+            64,
+            64,
             crate::types::TextureFormat::Rgba8Unorm,
             crate::types::TextureUsage::SAMPLED,
-        ).unwrap();
-        let sampler = crate::sampler::Sampler::new(&device, &crate::types::SamplerDesc::default()).unwrap();
-        
+        )
+        .unwrap();
+        let sampler =
+            crate::sampler::Sampler::new(&device, &crate::types::SamplerDesc::default()).unwrap();
+
         let bind_group = BindGroup::with_resources(
             &device,
             &layout,
             &[BufferBinding::new(0, &buffer)],
             &[TextureBinding::new(1, &texture)],
             &[SamplerBinding::new(2, &sampler)],
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(bind_group.handle > 0);
     }
 
     #[test]
     fn test_bind_group_empty_bindings() {
         let device = create_test_device();
-        
+
         let layout = BindGroupLayout::new(&device, &[]).unwrap();
-        
+
         // Empty bind group should work
         let bind_group = BindGroup::new(&device, &layout, &[]).unwrap();
         assert!(bind_group.handle > 0);
@@ -603,12 +619,14 @@ mod tests {
     fn test_texture_binding_struct() {
         let device = create_test_device();
         let texture = crate::texture::Texture::new(
-            &device, 
-            64, 64, 
+            &device,
+            64,
+            64,
             crate::types::TextureFormat::Rgba8Unorm,
             crate::types::TextureUsage::SAMPLED,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let binding = TextureBinding::new(0, &texture);
         assert_eq!(binding.binding, 0);
     }
@@ -616,8 +634,9 @@ mod tests {
     #[test]
     fn test_sampler_binding_struct() {
         let device = create_test_device();
-        let sampler = crate::sampler::Sampler::new(&device, &crate::types::SamplerDesc::default()).unwrap();
-        
+        let sampler =
+            crate::sampler::Sampler::new(&device, &crate::types::SamplerDesc::default()).unwrap();
+
         let binding = SamplerBinding::new(0, &sampler);
         assert_eq!(binding.binding, 0);
     }
@@ -627,10 +646,8 @@ mod tests {
     #[test]
     fn test_bind_group_layout_debug() {
         let device = create_test_device();
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-        ]).unwrap();
-        
+        let layout = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
+
         let debug_str = format!("{:?}", layout);
         assert!(debug_str.contains("BindGroupLayout"));
     }
@@ -640,7 +657,7 @@ mod tests {
         let device = create_test_device();
         let buffer = Buffer::new(&device, 256, crate::types::BufferUsage::UNIFORM).unwrap();
         let binding = BufferBinding::new(0, &buffer);
-        
+
         let debug_str = format!("{:?}", binding);
         assert!(debug_str.contains("BufferBinding"));
         assert!(debug_str.contains("binding"));
@@ -650,13 +667,15 @@ mod tests {
     fn test_texture_binding_debug() {
         let device = create_test_device();
         let texture = crate::texture::Texture::new(
-            &device, 
-            64, 64, 
+            &device,
+            64,
+            64,
             crate::types::TextureFormat::Rgba8Unorm,
             crate::types::TextureUsage::SAMPLED,
-        ).unwrap();
+        )
+        .unwrap();
         let binding = TextureBinding::new(0, &texture);
-        
+
         let debug_str = format!("{:?}", binding);
         assert!(debug_str.contains("TextureBinding"));
     }
@@ -664,9 +683,10 @@ mod tests {
     #[test]
     fn test_sampler_binding_debug() {
         let device = create_test_device();
-        let sampler = crate::sampler::Sampler::new(&device, &crate::types::SamplerDesc::default()).unwrap();
+        let sampler =
+            crate::sampler::Sampler::new(&device, &crate::types::SamplerDesc::default()).unwrap();
         let binding = SamplerBinding::new(0, &sampler);
-        
+
         let debug_str = format!("{:?}", binding);
         assert!(debug_str.contains("SamplerBinding"));
     }
@@ -675,9 +695,8 @@ mod tests {
     fn test_bind_group_layout_binding_clone() {
         let binding = BindGroupLayoutBinding::uniform(5);
         let cloned = binding.clone();
-        
+
         assert_eq!(cloned.binding, 5);
         assert_eq!(cloned.visibility, ShaderStages::ALL);
     }
 }
-

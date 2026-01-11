@@ -14,12 +14,42 @@ pub struct Color {
 }
 
 impl Color {
-    pub const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    pub const RED: Color = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const GREEN: Color = Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 };
-    pub const BLUE: Color = Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
-    pub const CORNFLOWER_BLUE: Color = Color { r: 0.392, g: 0.584, b: 0.929, a: 1.0 };
+    pub const BLACK: Color = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const WHITE: Color = Color {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    pub const RED: Color = Color {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const GREEN: Color = Color {
+        r: 0.0,
+        g: 1.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const BLUE: Color = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    pub const CORNFLOWER_BLUE: Color = Color {
+        r: 0.392,
+        g: 0.584,
+        b: 0.929,
+        a: 1.0,
+    };
 
     /// Create a color from RGB values (0-255).
     pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
@@ -53,11 +83,12 @@ impl Color {
 }
 
 /// Texture format for render targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextureFormat {
     /// 8-bit RGBA, sRGB color space
     Rgba8UnormSrgb,
     /// 8-bit RGBA, linear color space
+    #[default]
     Rgba8Unorm,
     /// 8-bit BGRA, sRGB color space
     Bgra8UnormSrgb,
@@ -280,12 +311,30 @@ impl Vertex2DUv {
 
 /// Fullscreen quad vertices using Vertex2DUv (position + UV)
 pub const FULLSCREEN_QUAD: [Vertex2DUv; 6] = [
-    Vertex2DUv { position: [-1.0, -1.0], uv: [0.0, 1.0] },
-    Vertex2DUv { position: [1.0, -1.0], uv: [1.0, 1.0] },
-    Vertex2DUv { position: [1.0, 1.0], uv: [1.0, 0.0] },
-    Vertex2DUv { position: [-1.0, -1.0], uv: [0.0, 1.0] },
-    Vertex2DUv { position: [1.0, 1.0], uv: [1.0, 0.0] },
-    Vertex2DUv { position: [-1.0, 1.0], uv: [0.0, 0.0] },
+    Vertex2DUv {
+        position: [-1.0, -1.0],
+        uv: [0.0, 1.0],
+    },
+    Vertex2DUv {
+        position: [1.0, -1.0],
+        uv: [1.0, 1.0],
+    },
+    Vertex2DUv {
+        position: [1.0, 1.0],
+        uv: [1.0, 0.0],
+    },
+    Vertex2DUv {
+        position: [-1.0, -1.0],
+        uv: [0.0, 1.0],
+    },
+    Vertex2DUv {
+        position: [1.0, 1.0],
+        uv: [1.0, 0.0],
+    },
+    Vertex2DUv {
+        position: [-1.0, 1.0],
+        uv: [0.0, 0.0],
+    },
 ];
 
 // ============================================================================
@@ -310,7 +359,10 @@ pub enum DepthFormat {
 impl DepthFormat {
     /// Returns true if this format includes a stencil component.
     pub fn has_stencil(&self) -> bool {
-        matches!(self, DepthFormat::Depth24PlusStencil8 | DepthFormat::Depth32FloatStencil8)
+        matches!(
+            self,
+            DepthFormat::Depth24PlusStencil8 | DepthFormat::Depth32FloatStencil8
+        )
     }
 }
 
@@ -457,7 +509,12 @@ mod tests {
 
     #[test]
     fn test_color_to_rgba8() {
-        let color = Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 };
+        let color = Color {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+            a: 1.0,
+        };
         let rgba = color.to_rgba8();
         assert_eq!(rgba[0], 255);
         assert_eq!(rgba[1], 127);
@@ -508,13 +565,13 @@ mod tests {
     fn test_fullscreen_quad_vertices() {
         // Check we have 6 vertices (2 triangles)
         assert_eq!(FULLSCREEN_QUAD.len(), 6);
-        
+
         // Check positions span -1 to 1
         for v in &FULLSCREEN_QUAD {
             assert!(v.position[0] >= -1.0 && v.position[0] <= 1.0);
             assert!(v.position[1] >= -1.0 && v.position[1] <= 1.0);
         }
-        
+
         // Check UVs span 0 to 1
         for v in &FULLSCREEN_QUAD {
             assert!(v.uv[0] >= 0.0 && v.uv[0] <= 1.0);
@@ -598,4 +655,3 @@ mod tests {
         assert_eq!(desc.lod_max_clamp, 32.0);
     }
 }
-

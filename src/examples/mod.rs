@@ -7,4 +7,3 @@ pub mod common;
 pub mod digital_clock;
 
 pub use common::*;
-

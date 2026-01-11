@@ -13,13 +13,13 @@ use std::collections::HashMap;
 // use raw_window_handle::{RawWindowHandle, HasWindowHandle, HasDisplayHandle};
 
 /// Metal backend for macOS.
-/// 
+///
 /// Provides native Metal API access without MoltenVK translation layer.
 pub struct MetalBackend {
     // Metal device and command queue
     // device: MTLDevice,
     // command_queue: CommandQueue,
-    
+
     // Resource tracking
     devices: HashMap<DeviceHandle, MetalDevice>,
     next_device_handle: DeviceHandle,
@@ -90,18 +90,18 @@ struct MetalSurface {
 
 impl MetalBackend {
     /// Create a new Metal backend.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if Metal is not available on this system.
     pub fn new() -> Result<Self> {
         // In actual implementation:
         // let device = MTLDevice::system_default()
         //     .context("No Metal device available")?;
         // let command_queue = device.new_command_queue();
-        
+
         tracing::info!("Initializing Metal backend");
-        
+
         Ok(Self {
             devices: HashMap::new(),
             next_device_handle: 1,
@@ -130,15 +130,13 @@ impl GpuBackend for MetalBackend {
 
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
         // In actual implementation, use MTLCopyAllDevices()
-        vec![
-            AdapterInfo {
-                id: 0,
-                name: "Metal GPU".to_string(),
-                vendor: "Apple".to_string(),
-                backend: BackendType::Metal,
-                device_type: DeviceType::IntegratedGpu,
-            }
-        ]
+        vec![AdapterInfo {
+            id: 0,
+            name: "Metal GPU".to_string(),
+            vendor: "Apple".to_string(),
+            backend: BackendType::Metal,
+            device_type: DeviceType::IntegratedGpu,
+        }]
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
@@ -162,7 +160,12 @@ impl GpuBackend for MetalBackend {
         self.devices.contains_key(&device)
     }
 
-    fn create_buffer(&mut self, device: DeviceHandle, size: u64, _usage: BufferUsage) -> Result<BufferHandle> {
+    fn create_buffer(
+        &mut self,
+        device: DeviceHandle,
+        size: u64,
+        _usage: BufferUsage,
+    ) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -170,10 +173,13 @@ impl GpuBackend for MetalBackend {
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
 
-        self.buffers.insert(handle, MetalBuffer {
-            device_handle: device,
-            size,
-        });
+        self.buffers.insert(
+            handle,
+            MetalBuffer {
+                device_handle: device,
+                size,
+            },
+        );
 
         Ok(handle)
     }
@@ -198,7 +204,12 @@ impl GpuBackend for MetalBackend {
         self.create_shader_with_paths(device, slang_source, &[])
     }
 
-    fn create_shader_with_paths(&mut self, device: DeviceHandle, slang_source: &str, _search_paths: &[&str]) -> Result<ShaderHandle> {
+    fn create_shader_with_paths(
+        &mut self,
+        device: DeviceHandle,
+        slang_source: &str,
+        _search_paths: &[&str],
+    ) -> Result<ShaderHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -210,10 +221,13 @@ impl GpuBackend for MetalBackend {
         let handle = self.next_shader_handle;
         self.next_shader_handle += 1;
 
-        self.shaders.insert(handle, MetalShader {
-            device_handle: device,
-            source: slang_source.to_string(),
-        });
+        self.shaders.insert(
+            handle,
+            MetalShader {
+                device_handle: device,
+                source: slang_source.to_string(),
+            },
+        );
 
         Ok(handle)
     }
@@ -222,7 +236,11 @@ impl GpuBackend for MetalBackend {
         self.shaders.remove(&shader);
     }
 
-    fn create_bind_group_layout(&mut self, device: DeviceHandle, _entries: &[BindGroupLayoutEntry]) -> Result<BindGroupLayoutHandle> {
+    fn create_bind_group_layout(
+        &mut self,
+        device: DeviceHandle,
+        _entries: &[BindGroupLayoutEntry],
+    ) -> Result<BindGroupLayoutHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -230,14 +248,22 @@ impl GpuBackend for MetalBackend {
         let handle = self.next_bind_group_layout_handle;
         self.next_bind_group_layout_handle += 1;
 
-        self.bind_group_layouts.insert(handle, MetalBindGroupLayout {
-            device_handle: device,
-        });
+        self.bind_group_layouts.insert(
+            handle,
+            MetalBindGroupLayout {
+                device_handle: device,
+            },
+        );
 
         Ok(handle)
     }
 
-    fn create_bind_group(&mut self, device: DeviceHandle, _layout: BindGroupLayoutHandle, _entries: &[BindGroupEntry]) -> Result<BindGroupHandle> {
+    fn create_bind_group(
+        &mut self,
+        device: DeviceHandle,
+        _layout: BindGroupLayoutHandle,
+        _entries: &[BindGroupEntry],
+    ) -> Result<BindGroupHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -245,9 +271,12 @@ impl GpuBackend for MetalBackend {
         let handle = self.next_bind_group_handle;
         self.next_bind_group_handle += 1;
 
-        self.bind_groups.insert(handle, MetalBindGroup {
-            device_handle: device,
-        });
+        self.bind_groups.insert(
+            handle,
+            MetalBindGroup {
+                device_handle: device,
+            },
+        );
 
         Ok(handle)
     }
@@ -277,9 +306,12 @@ impl GpuBackend for MetalBackend {
         let handle = self.next_pipeline_handle;
         self.next_pipeline_handle += 1;
 
-        self.pipelines.insert(handle, MetalPipeline {
-            device_handle: device,
-        });
+        self.pipelines.insert(
+            handle,
+            MetalPipeline {
+                device_handle: device,
+            },
+        );
 
         Ok(handle)
     }
@@ -294,14 +326,27 @@ impl GpuBackend for MetalBackend {
         target_format: TextureFormat,
         _bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<PipelineHandle> {
-        self.create_pipeline(device, vertex_shader, fragment_shader, vertex_layout, topology, target_format)
+        self.create_pipeline(
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+        )
     }
 
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
         self.pipelines.remove(&pipeline);
     }
 
-    fn create_render_target(&mut self, device: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle> {
+    fn create_render_target(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Result<RenderTargetHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -311,13 +356,16 @@ impl GpuBackend for MetalBackend {
         let handle = self.next_render_target_handle;
         self.next_render_target_handle += 1;
 
-        self.render_targets.insert(handle, MetalRenderTarget {
-            device_handle: device,
-            width,
-            height,
-            format,
-            has_rendered: false,
-        });
+        self.render_targets.insert(
+            handle,
+            MetalRenderTarget {
+                device_handle: device,
+                width,
+                height,
+                format,
+                has_rendered: false,
+            },
+        );
 
         Ok(handle)
     }
@@ -326,12 +374,19 @@ impl GpuBackend for MetalBackend {
         self.render_targets.remove(&target);
     }
 
-    fn render_to_target(&mut self, device: DeviceHandle, target: RenderTargetHandle, _commands: &[RenderCommand]) -> Result<()> {
+    fn render_to_target(
+        &mut self,
+        device: DeviceHandle,
+        target: RenderTargetHandle,
+        _commands: &[RenderCommand],
+    ) -> Result<()> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
 
-        let render_target = self.render_targets.get_mut(&target)
+        let render_target = self
+            .render_targets
+            .get_mut(&target)
             .context("Invalid render target handle")?;
 
         // In actual implementation:
@@ -345,7 +400,9 @@ impl GpuBackend for MetalBackend {
     }
 
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        let render_target = self.render_targets.get(&target)
+        let render_target = self
+            .render_targets
+            .get(&target)
             .context("Invalid render target handle")?;
 
         if !render_target.has_rendered {
@@ -384,11 +441,14 @@ impl GpuBackend for MetalBackend {
         let handle = self.next_surface_handle;
         self.next_surface_handle += 1;
 
-        self.surfaces.insert(handle, MetalSurface {
-            device_handle: device,
-            width: 800,
-            height: 600,
-        });
+        self.surfaces.insert(
+            handle,
+            MetalSurface {
+                device_handle: device,
+                width: 800,
+                height: 600,
+            },
+        );
 
         tracing::info!("Created Metal surface {}", handle);
         Ok(handle)
@@ -410,7 +470,12 @@ impl GpuBackend for MetalBackend {
         Ok(1) // Return dummy image handle
     }
 
-    fn surface_render(&mut self, surface: SurfaceHandle, _image: SwapchainImageHandle, _commands: &[RenderCommand]) -> Result<()> {
+    fn surface_render(
+        &mut self,
+        surface: SurfaceHandle,
+        _image: SwapchainImageHandle,
+        _commands: &[RenderCommand],
+    ) -> Result<()> {
         if !self.surfaces.contains_key(&surface) {
             anyhow::bail!("Invalid surface handle");
         }
@@ -424,7 +489,11 @@ impl GpuBackend for MetalBackend {
         Ok(())
     }
 
-    fn surface_present(&mut self, surface: SurfaceHandle, _image: SwapchainImageHandle) -> Result<()> {
+    fn surface_present(
+        &mut self,
+        surface: SurfaceHandle,
+        _image: SwapchainImageHandle,
+    ) -> Result<()> {
         if !self.surfaces.contains_key(&surface) {
             anyhow::bail!("Invalid surface handle");
         }
@@ -437,7 +506,9 @@ impl GpuBackend for MetalBackend {
     }
 
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
-        let surf = self.surfaces.get_mut(&surface)
+        let surf = self
+            .surfaces
+            .get_mut(&surface)
             .context("Invalid surface handle")?;
 
         // In actual implementation:
@@ -449,7 +520,8 @@ impl GpuBackend for MetalBackend {
     }
 
     fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32) {
-        self.surfaces.get(&surface)
+        self.surfaces
+            .get(&surface)
             .map(|s| (s.width, s.height))
             .unwrap_or((0, 0))
     }
@@ -472,4 +544,3 @@ mod tests {
         assert!(!adapters.is_empty());
     }
 }
-

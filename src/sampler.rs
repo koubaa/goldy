@@ -187,4 +187,3 @@ mod tests {
         let _sampler = Sampler::new(&device, &desc).unwrap();
     }
 }
-
