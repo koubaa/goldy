@@ -77,7 +77,9 @@ impl<'a> RenderPass<'a> {
 
     /// Set the active render pipeline.
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) {
-        self.encoder.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        self.encoder
+            .commands
+            .push(RenderCommand::SetPipeline(pipeline.handle));
     }
 
     /// Set a vertex buffer.
@@ -187,7 +189,7 @@ mod tests {
             pass.clear(Color::RED);
         }
         let commands = encoder.finish();
-        
+
         assert_eq!(commands.len(), 1);
         match &commands[0] {
             RenderCommand::Clear(color) => {
@@ -207,10 +209,15 @@ mod tests {
             pass.draw(0..6, 0..1);
         }
         let commands = encoder.finish();
-        
+
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            RenderCommand::Draw { vertex_count, instance_count, first_vertex, first_instance } => {
+            RenderCommand::Draw {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => {
                 assert_eq!(*vertex_count, 6);
                 assert_eq!(*instance_count, 1);
                 assert_eq!(*first_vertex, 0);
@@ -228,9 +235,14 @@ mod tests {
             pass.draw(10..16, 5..15);
         }
         let commands = encoder.finish();
-        
+
         match &commands[0] {
-            RenderCommand::Draw { vertex_count, instance_count, first_vertex, first_instance } => {
+            RenderCommand::Draw {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => {
                 assert_eq!(*vertex_count, 6);
                 assert_eq!(*instance_count, 10);
                 assert_eq!(*first_vertex, 10);
@@ -248,10 +260,16 @@ mod tests {
             pass.draw_indexed(0..6, 0, 0..1);
         }
         let commands = encoder.finish();
-        
+
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            RenderCommand::DrawIndexed { index_count, instance_count, first_index, base_vertex, first_instance } => {
+            RenderCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => {
                 assert_eq!(*index_count, 6);
                 assert_eq!(*instance_count, 1);
                 assert_eq!(*first_index, 0);
@@ -271,9 +289,15 @@ mod tests {
             pass.draw_indexed(100..106, 1000, 0..5);
         }
         let commands = encoder.finish();
-        
+
         match &commands[0] {
-            RenderCommand::DrawIndexed { index_count, instance_count, first_index, base_vertex, first_instance } => {
+            RenderCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => {
                 assert_eq!(*index_count, 6);
                 assert_eq!(*instance_count, 5);
                 assert_eq!(*first_index, 100);
@@ -292,7 +316,7 @@ mod tests {
             pass.draw_indexed(0..3, -50, 0..1);
         }
         let commands = encoder.finish();
-        
+
         match &commands[0] {
             RenderCommand::DrawIndexed { base_vertex, .. } => {
                 assert_eq!(*base_vertex, -50);
@@ -311,11 +335,10 @@ mod tests {
             pass.draw_indexed(0..6, 0, 0..1);
         }
         let commands = encoder.finish();
-        
+
         assert_eq!(commands.len(), 3);
         assert!(matches!(&commands[0], RenderCommand::Clear(_)));
         assert!(matches!(&commands[1], RenderCommand::Draw { .. }));
         assert!(matches!(&commands[2], RenderCommand::DrawIndexed { .. }));
     }
 }
-

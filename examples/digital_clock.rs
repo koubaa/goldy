@@ -7,12 +7,11 @@
 //! Run with: cargo run --example digital_clock
 
 use goldy::{
-    Buffer, BufferUsage, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     examples::digital_clock::{
-        ClockVertex, ClockState, TimeData, SHADER_SOURCE,
-        generate_clock_vertices,
+        generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE,
     },
+    Buffer, BufferUsage, CommandEncoder, DeviceType, Instance, RenderPipeline, RenderPipelineDesc,
+    ShaderModule, Surface,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -29,10 +28,10 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    
+
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
-    
+
     start_time: Instant,
     clock_state: ClockState,
 }
@@ -54,10 +53,10 @@ impl App {
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
-        
+
         // Create surface first to get the correct format
         let surface = Surface::new(&device, window.as_ref())?;
-        
+
         // Use the SHARED shader source from the examples module
         let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;
         let pipeline_desc = RenderPipelineDesc {
@@ -66,12 +65,12 @@ impl App {
             ..Default::default()
         };
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
-        
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
-        
+
         Ok(())
     }
 
@@ -113,14 +112,14 @@ impl App {
 
         // Generate clock vertices using SHARED function
         let vertices = generate_clock_vertices(time, color, width, height);
-        
+
         // Convert ClockVertex to bytes for the buffer
         let vertex_data: &[u8] = bytemuck::cast_slice(&vertices);
         let vertex_buffer = Buffer::with_bytes(device.as_ref(), vertex_data, BufferUsage::VERTEX)?;
 
         // Render directly to surface
         let frame = surface.acquire()?;
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -151,10 +150,10 @@ impl ApplicationHandler for App {
             let attrs = Window::default_attributes()
                 .with_title("Goldy - Clock (Surface API, Space: pause, Click: color)")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
-            
+
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
             self.window = Some(window.clone());
-            
+
             if let Err(e) = self.init_gpu(&window) {
                 eprintln!("Failed to initialize GPU: {}", e);
             }
@@ -172,7 +171,9 @@ impl ApplicationHandler for App {
                     match event.logical_key {
                         Key::Named(NamedKey::Escape) => event_loop.exit(),
                         Key::Named(NamedKey::Space) => self.toggle_pause(),
-                        Key::Character(ref c) if c == "c" || c == "C" => self.clock_state.next_color(),
+                        Key::Character(ref c) if c == "c" || c == "C" => {
+                            self.clock_state.next_color()
+                        }
                         _ => {}
                     }
                 }
@@ -213,7 +214,7 @@ fn main() -> anyhow::Result<()> {
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    
+
     let mut app = App::new()?;
     event_loop.run_app(&mut app)?;
 

@@ -1,6 +1,6 @@
 //! Render pipeline management.
 
-use crate::backend::{GpuBackend, PipelineHandle, BindGroupLayoutHandle};
+use crate::backend::{BindGroupLayoutHandle, GpuBackend, PipelineHandle};
 use crate::bind_group::BindGroupLayout;
 use crate::device::Device;
 use crate::shader::ShaderModule;
@@ -65,12 +65,6 @@ impl Default for VertexBufferLayout {
     }
 }
 
-impl Default for TextureFormat {
-    fn default() -> Self {
-        TextureFormat::Rgba8Unorm
-    }
-}
-
 /// A render pipeline.
 pub struct RenderPipeline {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
@@ -86,14 +80,11 @@ impl RenderPipeline {
         desc: &RenderPipelineDesc,
     ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
-        
+
         // Collect bind group layout handles
-        let layout_handles: Vec<BindGroupLayoutHandle> = desc
-            .bind_group_layouts
-            .iter()
-            .map(|l| l.handle)
-            .collect();
-        
+        let layout_handles: Vec<BindGroupLayoutHandle> =
+            desc.bind_group_layouts.iter().map(|l| l.handle).collect();
+
         let handle = if desc.depth_stencil.is_some() || !desc.bind_group_layouts.is_empty() {
             // Use extended pipeline creation with depth/stencil support
             backend.create_pipeline_with_depth(
@@ -150,7 +141,7 @@ mod tests {
     #[test]
     fn test_render_pipeline_desc_default() {
         let desc = RenderPipelineDesc::default();
-        
+
         assert_eq!(desc.target_format, TextureFormat::Rgba8Unorm);
         assert!(desc.bind_group_layouts.is_empty());
         assert!(desc.depth_stencil.is_none());
@@ -162,7 +153,7 @@ mod tests {
             target_format: TextureFormat::Rgba8Unorm,
             ..Default::default()
         };
-        
+
         let debug_str = format!("{:?}", desc);
         assert!(debug_str.contains("RenderPipelineDesc"));
         assert!(debug_str.contains("Rgba8Unorm"));
@@ -172,14 +163,10 @@ mod tests {
     fn test_simple_pipeline_creation() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc::default(),
-        ).unwrap();
-        
+
+        let pipeline =
+            RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc::default()).unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
@@ -187,7 +174,7 @@ mod tests {
     fn test_pipeline_with_custom_format() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
+
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -196,8 +183,9 @@ mod tests {
                 target_format: TextureFormat::Bgra8UnormSrgb,
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
@@ -205,7 +193,7 @@ mod tests {
     fn test_pipeline_with_topology() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
+
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -214,8 +202,9 @@ mod tests {
                 topology: PrimitiveTopology::LineList,
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
@@ -223,12 +212,10 @@ mod tests {
     fn test_pipeline_with_bind_group_layout() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
+
         // Create a bind group layout
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-        ]).unwrap();
-        
+        let layout = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
+
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -237,8 +224,9 @@ mod tests {
                 bind_group_layouts: &[&layout],
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
@@ -246,22 +234,28 @@ mod tests {
     fn test_pipeline_with_multiple_bind_group_layouts() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
+
         // Create multiple bind group layouts
-        let layout0 = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-        ]).unwrap();
-        
-        let layout1 = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::storage(0, true),
-            BindGroupLayoutBinding::storage(1, false),
-        ]).unwrap();
-        
-        let layout2 = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::texture(0),
-            BindGroupLayoutBinding::sampler(1),
-        ]).unwrap();
-        
+        let layout0 = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
+
+        let layout1 = BindGroupLayout::new(
+            &device,
+            &[
+                BindGroupLayoutBinding::storage(0, true),
+                BindGroupLayoutBinding::storage(1, false),
+            ],
+        )
+        .unwrap();
+
+        let layout2 = BindGroupLayout::new(
+            &device,
+            &[
+                BindGroupLayoutBinding::texture(0),
+                BindGroupLayoutBinding::sampler(1),
+            ],
+        )
+        .unwrap();
+
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -270,8 +264,9 @@ mod tests {
                 bind_group_layouts: &[&layout0, &layout1, &layout2],
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
@@ -279,7 +274,7 @@ mod tests {
     fn test_pipeline_with_depth_stencil() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
+
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -292,8 +287,9 @@ mod tests {
                 }),
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
@@ -301,11 +297,9 @@ mod tests {
     fn test_pipeline_with_bind_group_layouts_and_depth() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
-        let layout = BindGroupLayout::new(&device, &[
-            BindGroupLayoutBinding::uniform(0),
-        ]).unwrap();
-        
+
+        let layout = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
+
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -319,18 +313,19 @@ mod tests {
                 }),
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
     #[test]
     fn test_pipeline_with_vertex_layout() {
         use crate::types::Vertex2D;
-        
+
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
+
         // Test with Vertex2D layout
         let pipeline_2d = RenderPipeline::new(
             &device,
@@ -340,25 +335,27 @@ mod tests {
                 vertex_layout: Vertex2D::layout(),
                 ..Default::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(pipeline_2d.handle > 0);
     }
 
     #[test]
     fn test_pipeline_different_vertex_fragment_shaders() {
         let device = create_test_device();
-        
+
         // In real use, these would be different shaders
         let vertex_shader = create_test_shader(&device);
         let fragment_shader = create_test_shader(&device);
-        
+
         let pipeline = RenderPipeline::new(
             &device,
             &vertex_shader,
             &fragment_shader,
             &RenderPipelineDesc::default(),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert!(pipeline.handle > 0);
     }
 
@@ -366,7 +363,7 @@ mod tests {
     fn test_multiple_pipelines() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
-        
+
         // Create multiple pipelines with different configurations
         let pipeline1 = RenderPipeline::new(
             &device,
@@ -376,8 +373,9 @@ mod tests {
                 target_format: TextureFormat::Rgba8Unorm,
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let pipeline2 = RenderPipeline::new(
             &device,
             &shader,
@@ -386,10 +384,10 @@ mod tests {
                 target_format: TextureFormat::Bgra8UnormSrgb,
                 ..Default::default()
             },
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         // Pipelines should have different handles
         assert_ne!(pipeline1.handle, pipeline2.handle);
     }
 }
-

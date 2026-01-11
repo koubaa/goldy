@@ -5,10 +5,8 @@
 //! Run with: cargo run --example gradient
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    VertexBufferLayout, VertexAttribute, VertexFormat,
-    shaders,
+    shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,8 +30,16 @@ impl GradientVertex {
         VertexBufferLayout {
             stride: std::mem::size_of::<Self>() as u32,
             attributes: vec![
-                VertexAttribute { location: 0, format: VertexFormat::Float32x2, offset: 0 },
-                VertexAttribute { location: 1, format: VertexFormat::Float32x2, offset: 8 },
+                VertexAttribute {
+                    location: 0,
+                    format: VertexFormat::Float32x2,
+                    offset: 0,
+                },
+                VertexAttribute {
+                    location: 1,
+                    format: VertexFormat::Float32x2,
+                    offset: 8,
+                },
             ],
         }
     }
@@ -43,12 +49,30 @@ fn create_fullscreen_quad(time: f32) -> [GradientVertex; 6] {
     // Animate UV offset based on time
     let offset = time * 0.1;
     [
-        GradientVertex { position: [-1.0, -1.0], uv: [0.0 + offset, 1.0] },
-        GradientVertex { position: [1.0, -1.0], uv: [1.0 + offset, 1.0] },
-        GradientVertex { position: [1.0, 1.0], uv: [1.0 + offset, 0.0] },
-        GradientVertex { position: [-1.0, -1.0], uv: [0.0 + offset, 1.0] },
-        GradientVertex { position: [1.0, 1.0], uv: [1.0 + offset, 0.0] },
-        GradientVertex { position: [-1.0, 1.0], uv: [0.0 + offset, 0.0] },
+        GradientVertex {
+            position: [-1.0, -1.0],
+            uv: [0.0 + offset, 1.0],
+        },
+        GradientVertex {
+            position: [1.0, -1.0],
+            uv: [1.0 + offset, 1.0],
+        },
+        GradientVertex {
+            position: [1.0, 1.0],
+            uv: [1.0 + offset, 0.0],
+        },
+        GradientVertex {
+            position: [-1.0, -1.0],
+            uv: [0.0 + offset, 1.0],
+        },
+        GradientVertex {
+            position: [1.0, 1.0],
+            uv: [1.0 + offset, 0.0],
+        },
+        GradientVertex {
+            position: [-1.0, 1.0],
+            uv: [0.0 + offset, 0.0],
+        },
     ]
 }
 
@@ -83,12 +107,17 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, shaders::GRADIENT)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: GradientVertex::layout(),
-            target_format: surface.format(),
-            ..Default::default()
-        })?;
-        
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: GradientVertex::layout(),
+                target_format: surface.format(),
+                ..Default::default()
+            },
+        )?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -99,7 +128,9 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
@@ -110,12 +141,12 @@ impl App {
         let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
 
         let frame = surface.acquire()?;
-        
+
         // Drop oldest buffer now that GPU is done with it
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -127,10 +158,10 @@ impl App {
 
         frame.render(encoder)?;
         surface.present(frame)?;
-        
+
         // Keep buffer alive for in-flight frames
         self.vertex_buffers.push(vertex_buffer);
-        
+
         Ok(())
     }
 
@@ -146,11 +177,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Animated Gradient (Surface API)")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Animated Gradient (Surface API)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -190,4 +225,3 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }
-

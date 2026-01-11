@@ -5,9 +5,8 @@
 //! Run with: cargo run --example instancing
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -37,7 +36,7 @@ fn create_rotating_quad(cx: f32, cy: f32, size: f32, angle: f32, color: Color) -
         rotate_point(cx + half, cy + half, angle, cx, cy),
         rotate_point(cx - half, cy + half, angle, cx, cy),
     ];
-    
+
     [
         Vertex2D::new(corners[0].0, corners[0].1, color),
         Vertex2D::new(corners[1].0, corners[1].1, color),
@@ -65,8 +64,11 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             start_time: Instant::now(),
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
@@ -76,11 +78,16 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            ..Default::default()
-        })?;
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: surface.format(),
+                ..Default::default()
+            },
+        )?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -91,32 +98,34 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         let time = self.start_time.elapsed().as_secs_f32();
 
         // Generate all quads
         let mut vertices: Vec<Vertex2D> = Vec::new();
         let total = GRID_SIZE * GRID_SIZE;
-        
+
         for i in 0..GRID_SIZE {
             for j in 0..GRID_SIZE {
                 let idx = i * GRID_SIZE + j;
-                
+
                 // Position in grid
                 let nx = (i as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
                 let ny = (j as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
                 let cx = nx * 0.85;
                 let cy = ny * 0.85;
-                
+
                 // Individual rotation based on position and time
                 let phase = (idx as f32 / total as f32) * std::f32::consts::PI * 2.0;
                 let angle = time * 2.0 + phase;
-                
+
                 // Color based on position
                 let hue = (idx as f32 / total as f32 + time * 0.1) % 1.0;
                 let color = hsv_to_rgb(hue, 0.8, 0.9);
-                
+
                 vertices.extend_from_slice(&create_rotating_quad(cx, cy, QUAD_SIZE, angle, color));
             }
         }
@@ -130,11 +139,16 @@ impl App {
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 });
+            pass.clear(Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.04,
+                a: 1.0,
+            });
             pass.set_pipeline(pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
             pass.draw(0..vertices.len() as u32, 0..1);
@@ -159,7 +173,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     let c = v * s;
     let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
     let m = v - c;
-    
+
     let (r, g, b) = match (h * 6.0) as i32 {
         0 => (c, x, 0.0),
         1 => (x, c, 0.0),
@@ -168,18 +182,30 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         4 => (x, 0.0, c),
         _ => (c, 0.0, x),
     };
-    
-    Color { r: r + m, g: g + m, b: b + m, a: 1.0 }
+
+    Color {
+        r: r + m,
+        g: g + m,
+        b: b + m,
+        a: 1.0,
+    }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title(&format!("Goldy - Instancing ({} quads, Surface API)", GRID_SIZE * GRID_SIZE))
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 800))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title(&format!(
+                                "Goldy - Instancing ({} quads, Surface API)",
+                                GRID_SIZE * GRID_SIZE
+                            ))
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -190,7 +216,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { event_loop.exit(); }
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {

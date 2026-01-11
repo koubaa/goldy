@@ -100,11 +100,15 @@ pub enum SlangSourceLanguage {
 /// Function pointer types for dynamic loading
 pub type FnSpCreateSession = unsafe extern "C" fn(deprecated: *const c_char) -> *mut SlangSession;
 pub type FnSpDestroySession = unsafe extern "C" fn(session: *mut SlangSession);
-pub type FnSpCreateCompileRequest = unsafe extern "C" fn(session: *mut SlangSession) -> *mut SlangCompileRequest;
+pub type FnSpCreateCompileRequest =
+    unsafe extern "C" fn(session: *mut SlangSession) -> *mut SlangCompileRequest;
 pub type FnSpDestroyCompileRequest = unsafe extern "C" fn(request: *mut SlangCompileRequest);
-pub type FnSpSetCodeGenTarget = unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int);
-pub type FnSpAddCodeGenTarget = unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int) -> c_int;
-pub type FnSpSetTargetProfile = unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, profile: c_int);
+pub type FnSpSetCodeGenTarget =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int);
+pub type FnSpAddCodeGenTarget =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int) -> c_int;
+pub type FnSpSetTargetProfile =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, profile: c_int);
 pub type FnSpAddTranslationUnit = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     language: c_int,
@@ -116,10 +120,8 @@ pub type FnSpAddTranslationUnitSourceString = unsafe extern "C" fn(
     path: *const c_char,
     source: *const c_char,
 );
-pub type FnSpAddSearchPath = unsafe extern "C" fn(
-    request: *mut SlangCompileRequest,
-    path: *const c_char,
-);
+pub type FnSpAddSearchPath =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, path: *const c_char);
 pub type FnSpAddEntryPoint = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     translation_unit_index: c_int,
@@ -127,7 +129,8 @@ pub type FnSpAddEntryPoint = unsafe extern "C" fn(
     stage: c_int,
 ) -> c_int;
 pub type FnSpCompile = unsafe extern "C" fn(request: *mut SlangCompileRequest) -> SlangResult;
-pub type FnSpGetDiagnosticOutput = unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *const c_char;
+pub type FnSpGetDiagnosticOutput =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *const c_char;
 pub type FnSpGetEntryPointCodeBlob = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     entry_point_index: c_int,
@@ -158,22 +161,22 @@ pub struct ISlangBlobVtable {
 }
 
 /// Helper to get blob data
-/// 
+///
 /// # Safety
 /// The blob pointer must be valid and point to a valid ISlangBlob COM object.
 pub unsafe fn blob_get_data(blob: *mut ISlangBlob) -> (*const u8, usize) {
     // ISlangBlob is a COM object, first pointer is vtable
     let vtable_ptr = *(blob as *const *const ISlangBlobVtable);
     let vtable = &*vtable_ptr;
-    
+
     let ptr = (vtable.get_buffer_pointer)(blob) as *const u8;
     let size = (vtable.get_buffer_size)(blob);
-    
+
     (ptr, size)
 }
 
 /// Helper to release blob
-/// 
+///
 /// # Safety
 /// The blob pointer must be valid and point to a valid ISlangBlob COM object.
 pub unsafe fn blob_release(blob: *mut ISlangBlob) {
@@ -181,4 +184,3 @@ pub unsafe fn blob_release(blob: *mut ISlangBlob) {
     let vtable = &*vtable_ptr;
     (vtable.release)(blob);
 }
-
