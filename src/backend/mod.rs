@@ -6,6 +6,10 @@
 #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
 pub mod vulkan;
 
+// DX12 backend for Windows
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+pub mod dx12;
+
 // Mock backend for testing (always available)
 pub mod mock;
 
@@ -219,18 +223,48 @@ pub enum BindingResource {
 
 /// Create the default backend for the current platform.
 pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
-    #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
+    // On Windows with dx12 feature, prefer DX12
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    {
+        tracing::info!("Creating DX12 backend");
+        Ok(Box::new(dx12::Dx12Backend::new()?))
+    }
+
+    // Vulkan fallback on non-DX12 platforms
+    #[cfg(all(
+        feature = "vulkan",
+        not(target_arch = "wasm32"),
+        not(all(feature = "dx12", target_os = "windows"))
+    ))]
     {
         tracing::info!("Creating Vulkan backend");
         Ok(Box::new(vulkan::VulkanBackend::new()?))
     }
 
-    // WebGPU backend is disabled - for browser WASM builds, use rag-web
-    // which uses wgpu directly with slang-wasm for shader compilation
-
-    #[cfg(not(all(feature = "vulkan", not(target_arch = "wasm32"))))]
+    // No backend available
+    #[cfg(not(any(
+        all(feature = "dx12", target_os = "windows"),
+        all(feature = "vulkan", not(target_arch = "wasm32"))
+    )))]
     {
-        anyhow::bail!("No GPU backend available - enable 'vulkan' feature (native only)")
+        anyhow::bail!("No GPU backend available - enable 'vulkan' or 'dx12' feature")
+    }
+}
+
+/// Create a specific backend by type.
+pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> {
+    match backend_type {
+        #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
+        BackendType::Vulkan => {
+            tracing::info!("Creating Vulkan backend");
+            Ok(Box::new(vulkan::VulkanBackend::new()?))
+        }
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        BackendType::Dx12 => {
+            tracing::info!("Creating DX12 backend");
+            Ok(Box::new(dx12::Dx12Backend::new()?))
+        }
+        _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
     }
 }
 

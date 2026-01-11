@@ -41,6 +41,23 @@ web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElemen
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
+# DX12 dependencies (Windows only)
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", optional = true, features = [
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Dxc",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Dxgi",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+gpu-allocator = { version = "0.27", optional = true, features = ["d3d12"] }
+windows-core = { version = "0.61", optional = true }
+
 [dev-dependencies]
 # PNG output for examples
 image = "0.25"
@@ -54,6 +71,7 @@ winit = "0.30"
 [features]
 default = ["vulkan"]
 vulkan = ["dep:ash"]
+dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core"]
 webgpu = ["dep:wgpu", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:console_error_panic_hook"]
 
 [[example]]
