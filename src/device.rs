@@ -65,7 +65,7 @@ impl Instance {
     /// Create a device on the first adapter matching the given type.
     pub fn create_device(&self, preferred_type: DeviceType) -> Result<Device> {
         let adapters = self.enumerate_adapters();
-        
+
         // Find preferred adapter
         let adapter = adapters
             .iter()
@@ -84,11 +84,11 @@ impl Instance {
     pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
         let mut backend = self.backend.lock().unwrap();
         let handle = backend.create_device(adapter_id)?;
-        
+
         // Create registry with built-in goldy_exp library
         let mut registry = ShaderLibraryRegistry::new();
         registry.register(ShaderLibrary::goldy_experimental())?;
-        
+
         Ok(Device {
             backend: Arc::clone(&self.backend),
             handle,
@@ -139,14 +139,14 @@ pub struct DeviceCapabilities {
     /// Preferred format for window surfaces (swapchains).
     /// For windowed apps, use this for `RenderPipelineDesc::target_format`.
     pub preferred_surface_format: TextureFormat,
-    
+
     /// Preferred format for off-screen render targets.
     /// For headless rendering (video encoding, CPU readback), use this format.
     pub preferred_render_target_format: TextureFormat,
-    
+
     /// Formats supported for window surfaces.
     pub supported_surface_formats: Vec<TextureFormat>,
-    
+
     /// Formats supported for render targets.
     pub supported_render_target_formats: Vec<TextureFormat>,
 }
@@ -226,7 +226,7 @@ impl ShaderLibraryRegistry {
             dirty: true,
         }
     }
-    
+
     fn register(&mut self, library: ShaderLibrary) -> Result<()> {
         let name = library.name().to_string();
         if self.libraries.contains_key(&name) {
@@ -236,7 +236,7 @@ impl ShaderLibraryRegistry {
         self.dirty = true;
         Ok(())
     }
-    
+
     fn unregister(&mut self, name: &str) -> bool {
         if self.libraries.remove(name).is_some() {
             self.dirty = true;
@@ -245,26 +245,26 @@ impl ShaderLibraryRegistry {
             false
         }
     }
-    
+
     fn has(&self, name: &str) -> bool {
         self.libraries.contains_key(name)
     }
-    
+
     fn list(&self) -> Vec<&str> {
         self.libraries.keys().map(|s| s.as_str()).collect()
     }
-    
+
     /// Ensure temp files are written and return search paths.
     fn get_search_paths(&mut self) -> Result<Vec<PathBuf>> {
         if self.libraries.is_empty() {
             return Ok(vec![]);
         }
-        
+
         // Create temp directory if needed
         if self.temp_dir.is_none() {
             let unique_id = REGISTRY_COUNTER.fetch_add(1, Ordering::Relaxed);
             let temp_dir = std::env::temp_dir().join(format!(
-                "goldy-shaders-{}-{}", 
+                "goldy-shaders-{}-{}",
                 std::process::id(),
                 unique_id
             ));
@@ -272,11 +272,11 @@ impl ShaderLibraryRegistry {
                 .context("Failed to create shader library temp directory")?;
             self.temp_dir = Some(temp_dir);
         }
-        
+
         // Write library files if dirty
         if self.dirty {
             let temp_dir = self.temp_dir.as_ref().unwrap();
-            
+
             for library in self.libraries.values() {
                 for (module_path, source) in library.modules() {
                     // Convert module path (with forward slashes) to OS-appropriate file path
@@ -285,21 +285,21 @@ impl ShaderLibraryRegistry {
                         file_path = file_path.join(component);
                     }
                     file_path.set_extension("slang");
-                    
+
                     // Ensure parent directories exist
                     if let Some(parent) = file_path.parent() {
                         std::fs::create_dir_all(parent)
                             .context("Failed to create module directory")?;
                     }
-                    
+
                     std::fs::write(&file_path, source)
                         .with_context(|| format!("Failed to write module: {}", module_path))?;
                 }
             }
-            
+
             self.dirty = false;
         }
-        
+
         Ok(vec![self.temp_dir.clone().unwrap()])
     }
 }
@@ -338,7 +338,7 @@ impl Device {
     /// let instance = Instance::new()?;
     /// let device = instance.create_device(DeviceType::DiscreteGpu)?;
     /// let caps = device.capabilities();
-    /// 
+    ///
     /// println!("Surface format: {:?}", caps.preferred_surface_format);
     /// println!("RenderTarget format: {:?}", caps.preferred_render_target_format);
     /// # Ok::<(), anyhow::Error>(())
@@ -348,9 +348,9 @@ impl Device {
         // Future: query actual device limits and capabilities
         DeviceCapabilities::default()
     }
-    
+
     // --- Shader Library Management ---
-    
+
     /// Register a shader library for use in shader imports.
     ///
     /// After registration, shaders can use `import <library_name>;` to access
@@ -377,7 +377,7 @@ impl Device {
     pub fn register_library(&self, library: ShaderLibrary) -> Result<()> {
         self.library_registry.lock().unwrap().register(library)
     }
-    
+
     /// Unregister a shader library.
     ///
     /// Returns `true` if the library was found and removed, `false` if it
@@ -390,7 +390,7 @@ impl Device {
     pub fn unregister_library(&self, name: &str) -> bool {
         self.library_registry.lock().unwrap().unregister(name)
     }
-    
+
     /// Check if a shader library is registered.
     ///
     /// # Example
@@ -402,7 +402,7 @@ impl Device {
     pub fn has_library(&self, name: &str) -> bool {
         self.library_registry.lock().unwrap().has(name)
     }
-    
+
     /// List all registered shader libraries.
     ///
     /// Returns the names of all currently registered libraries.
@@ -415,7 +415,7 @@ impl Device {
             .map(|s| s.to_string())
             .collect()
     }
-    
+
     /// Get search paths for shader compilation (internal use).
     pub(crate) fn get_shader_search_paths(&self) -> Result<Vec<PathBuf>> {
         self.library_registry.lock().unwrap().get_search_paths()
@@ -429,11 +429,11 @@ impl Device {
             let mut b = backend.lock().unwrap();
             b.create_device(0)?
         };
-        
+
         // Create registry with built-in goldy_exp library
         let mut registry = ShaderLibraryRegistry::new();
         registry.register(ShaderLibrary::goldy_experimental())?;
-        
+
         Ok(Self {
             backend,
             handle,
@@ -447,85 +447,98 @@ impl Device {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    
+
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
     }
-    
+
     #[test]
     fn test_goldy_library_registered_by_default() {
         let device = test_device();
         assert!(device.has_library("goldy_exp"));
     }
-    
+
     #[test]
     fn test_register_custom_library() {
         let device = test_device();
-        
+
         let lib = ShaderLibrary::from_source("custom", "module custom;");
         device.register_library(lib).unwrap();
-        
+
         assert!(device.has_library("custom"));
     }
-    
+
     #[test]
     fn test_register_duplicate_fails() {
         let device = test_device();
-        
+
         let lib1 = ShaderLibrary::from_source("mylib", "module mylib;");
         let lib2 = ShaderLibrary::from_source("mylib", "module mylib;");
-        
+
         device.register_library(lib1).unwrap();
         let result = device.register_library(lib2);
-        
+
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already registered"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already registered"));
     }
-    
+
     #[test]
     fn test_unregister_library() {
         let device = test_device();
-        
+
         let lib = ShaderLibrary::from_source("temp", "module temp;");
         device.register_library(lib).unwrap();
         assert!(device.has_library("temp"));
-        
+
         assert!(device.unregister_library("temp"));
         assert!(!device.has_library("temp"));
     }
-    
+
     #[test]
     fn test_unregister_nonexistent_returns_false() {
         let device = test_device();
         assert!(!device.unregister_library("nonexistent"));
     }
-    
+
     #[test]
     fn test_list_libraries() {
         let device = test_device();
-        
+
         let libs = device.list_libraries();
         assert!(libs.contains(&"goldy_exp".to_string()));
-        
-        device.register_library(ShaderLibrary::from_source("extra", "module extra;")).unwrap();
+
+        device
+            .register_library(ShaderLibrary::from_source("extra", "module extra;"))
+            .unwrap();
         let libs = device.list_libraries();
         assert!(libs.contains(&"goldy_exp".to_string()));
         assert!(libs.contains(&"extra".to_string()));
     }
-    
+
     #[test]
     fn test_search_paths_writes_files() {
         let device = test_device();
-        
+
         let paths = device.get_shader_search_paths().unwrap();
         assert_eq!(paths.len(), 1);
-        
+
         // Verify goldy_exp files were written
         let goldy_file = paths[0].join("goldy_exp.slang");
-        assert!(goldy_file.exists(), "goldy_exp.slang should exist at {:?}", goldy_file);
-        
+        assert!(
+            goldy_file.exists(),
+            "goldy_exp.slang should exist at {:?}",
+            goldy_file
+        );
+
         let math_file = paths[0].join("goldy_exp/math.slang");
-        assert!(math_file.exists(), "goldy_exp/math.slang should exist at {:?}", math_file);
+        assert!(
+            math_file.exists(),
+            "goldy_exp/math.slang should exist at {:?}",
+            math_file
+        );
     }
 }
 
@@ -535,4 +548,3 @@ impl Drop for Device {
         backend.destroy_device(self.handle);
     }
 }
-

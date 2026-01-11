@@ -6,9 +6,8 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D, PrimitiveTopology, IndexFormat,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, IndexFormat, Instance,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,34 +29,97 @@ struct Vertex3D {
 // Cube face definitions - 6 faces, 4 vertices each (24 unique vertices for proper face colors)
 fn generate_cube_vertices() -> Vec<Vertex3D> {
     let face_colors = [
-        Color { r: 1.0, g: 0.3, b: 0.3, a: 1.0 }, // Front - red
-        Color { r: 0.3, g: 1.0, b: 0.3, a: 1.0 }, // Back - green
-        Color { r: 0.3, g: 0.3, b: 1.0, a: 1.0 }, // Left - blue
-        Color { r: 1.0, g: 1.0, b: 0.3, a: 1.0 }, // Right - yellow
-        Color { r: 1.0, g: 0.3, b: 1.0, a: 1.0 }, // Top - magenta
-        Color { r: 0.3, g: 1.0, b: 1.0, a: 1.0 }, // Bottom - cyan
+        Color {
+            r: 1.0,
+            g: 0.3,
+            b: 0.3,
+            a: 1.0,
+        }, // Front - red
+        Color {
+            r: 0.3,
+            g: 1.0,
+            b: 0.3,
+            a: 1.0,
+        }, // Back - green
+        Color {
+            r: 0.3,
+            g: 0.3,
+            b: 1.0,
+            a: 1.0,
+        }, // Left - blue
+        Color {
+            r: 1.0,
+            g: 1.0,
+            b: 0.3,
+            a: 1.0,
+        }, // Right - yellow
+        Color {
+            r: 1.0,
+            g: 0.3,
+            b: 1.0,
+            a: 1.0,
+        }, // Top - magenta
+        Color {
+            r: 0.3,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }, // Bottom - cyan
     ];
-    
+
     // Face vertices (counter-clockwise when viewed from outside)
     let faces: [[[f32; 3]; 4]; 6] = [
         // Front (z = -1)
-        [[-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0]],
+        [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+        ],
         // Back (z = 1)
-        [[1.0, -1.0, 1.0], [-1.0, -1.0, 1.0], [-1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
+        [
+            [1.0, -1.0, 1.0],
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
         // Left (x = -1)
-        [[-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0], [-1.0, 1.0, -1.0], [-1.0, 1.0, 1.0]],
+        [
+            [-1.0, -1.0, 1.0],
+            [-1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, 1.0, 1.0],
+        ],
         // Right (x = 1)
-        [[1.0, -1.0, -1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, -1.0]],
+        [
+            [1.0, -1.0, -1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, -1.0],
+        ],
         // Top (y = 1)
-        [[-1.0, 1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]],
+        [
+            [-1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ],
         // Bottom (y = -1)
-        [[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]],
+        [
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0],
+        ],
     ];
-    
+
     let mut vertices = Vec::new();
     for (face_idx, face) in faces.iter().enumerate() {
         for &pos in face {
-            vertices.push(Vertex3D { position: pos, color: face_colors[face_idx] });
+            vertices.push(Vertex3D {
+                position: pos,
+                color: face_colors[face_idx],
+            });
         }
     }
     vertices
@@ -110,11 +172,14 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         let cube_vertices = generate_cube_vertices();
         let cube_indices = generate_cube_indices();
-        
+
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             start_time: Instant::now(),
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
             index_buffer: None,
@@ -126,18 +191,23 @@ impl App {
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        
+
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            topology: PrimitiveTopology::TriangleList,
-            ..Default::default()
-        })?;
-        
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: surface.format(),
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+        )?;
+
         // Create index buffer once
         let index_buffer = Buffer::with_data(&device, &self.cube_indices, BufferUsage::INDEX)?;
-        
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -149,12 +219,15 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         let time = self.start_time.elapsed().as_secs_f32();
 
         // Transform cube vertices and project to 2D
-        let vertices: Vec<Vertex2D> = self.cube_vertices
+        let vertices: Vec<Vertex2D> = self
+            .cube_vertices
             .iter()
             .map(|v| {
                 let rotated = rotate_x(rotate_y(v.position, time), time * 0.7);
@@ -173,11 +246,16 @@ impl App {
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color { r: 0.02, g: 0.02, b: 0.05, a: 1.0 });
+            pass.clear(Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.05,
+                a: 1.0,
+            });
             pass.set_pipeline(pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
             pass.set_index_buffer(index_buffer, IndexFormat::Uint16);
@@ -202,11 +280,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Solid Cube with Depth Buffer")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 800))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Solid Cube with Depth Buffer")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -217,7 +299,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { event_loop.exit(); }
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
@@ -245,4 +329,3 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }
-

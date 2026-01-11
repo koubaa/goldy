@@ -49,7 +49,10 @@ mod tests {
     /// Verify all shaders are non-empty and contain expected Slang syntax
     #[test]
     fn test_all_shaders_non_empty() {
-        assert!(!VERTEX_COLOR_2D.is_empty(), "VERTEX_COLOR_2D shader is empty");
+        assert!(
+            !VERTEX_COLOR_2D.is_empty(),
+            "VERTEX_COLOR_2D shader is empty"
+        );
         assert!(!TRIANGLE.is_empty(), "TRIANGLE shader is empty");
         assert!(!DIGITAL_CLOCK.is_empty(), "DIGITAL_CLOCK shader is empty");
         assert!(!PLASMA.is_empty(), "PLASMA shader is empty");
@@ -84,11 +87,13 @@ mod tests {
         for (name, source) in shaders {
             assert!(
                 source.contains("[shader(\"vertex\")]"),
-                "{} missing vertex shader entry point", name
+                "{} missing vertex shader entry point",
+                name
             );
             assert!(
                 source.contains("[shader(\"fragment\")]"),
-                "{} missing fragment shader entry point", name
+                "{} missing fragment shader entry point",
+                name
             );
         }
     }
@@ -105,13 +110,14 @@ mod tests {
         for (name, source) in shaders {
             assert!(
                 source.contains("vs_main"),
-                "{} missing vs_main function", name
+                "{} missing vs_main function",
+                name
             );
             assert!(
                 source.contains("fs_main"),
-                "{} missing fs_main function", name
+                "{} missing fs_main function",
+                name
             );
         }
     }
 }
-

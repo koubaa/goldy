@@ -39,8 +39,8 @@ fn test_compute_pipeline_creation() {
         .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
         .expect("Failed to create device");
 
-    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER)
-        .expect("Failed to compile shader");
+    let shader =
+        ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
 
     let bind_layout = BindGroupLayout::new(
         &device,
@@ -60,7 +60,11 @@ fn test_compute_pipeline_creation() {
         },
     );
 
-    assert!(pipeline.is_ok(), "Failed to create compute pipeline: {:?}", pipeline.err());
+    assert!(
+        pipeline.is_ok(),
+        "Failed to create compute pipeline: {:?}",
+        pipeline.err()
+    );
 }
 
 #[test]
@@ -80,16 +84,16 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
         .expect("Failed to create device");
 
-    let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER)
-        .expect("Failed to compile shader");
+    let shader =
+        ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
 
-    let pipeline = ComputePipeline::new(
-        &device,
-        &shader,
-        &ComputePipelineDesc::default(),
+    let pipeline = ComputePipeline::new(&device, &shader, &ComputePipelineDesc::default());
+
+    assert!(
+        pipeline.is_ok(),
+        "Failed to create minimal compute pipeline: {:?}",
+        pipeline.err()
     );
-
-    assert!(pipeline.is_ok(), "Failed to create minimal compute pipeline: {:?}", pipeline.err());
 }
 
 #[test]
@@ -108,15 +112,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
         .expect("Failed to create device");
 
-    let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER)
-        .expect("Failed to compile shader");
+    let shader =
+        ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
 
-    let pipeline = ComputePipeline::new(
-        &device,
-        &shader,
-        &ComputePipelineDesc::default(),
-    )
-    .expect("Failed to create compute pipeline");
+    let pipeline = ComputePipeline::new(&device, &shader, &ComputePipelineDesc::default())
+        .expect("Failed to create compute pipeline");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -137,8 +137,8 @@ fn test_compute_with_uav_buffer() {
         .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
         .expect("Failed to create device");
 
-    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER)
-        .expect("Failed to compile shader");
+    let shader =
+        ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
 
     // Create buffer with initial data
     let initial_data: Vec<u32> = (0..64).collect();
@@ -192,8 +192,7 @@ fn test_compute_with_srv_and_uav() {
         .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
         .expect("Failed to create device");
 
-    let shader = ShaderModule::from_slang(&device, COPY_SHADER)
-        .expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("Failed to compile shader");
 
     // Create input buffer (read-only)
     let input_data: Vec<u32> = (0..64).collect();
@@ -252,6 +251,9 @@ fn test_compute_with_srv_and_uav() {
     }
 
     let result = encoder.dispatch(&device);
-    assert!(result.is_ok(), "Failed to dispatch with SRV+UAV: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to dispatch with SRV+UAV: {:?}",
+        result.err()
+    );
 }
-

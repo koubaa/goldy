@@ -5,9 +5,8 @@
 //! Run with: cargo run --example waveform
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D, PrimitiveTopology,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,22 +24,22 @@ const NUM_CHANNELS: usize = 4;
 fn generate_waveform(time: f32, channel: usize) -> Vec<f32> {
     let freq = 1.0 + channel as f32 * 0.5;
     let phase = channel as f32 * 0.7;
-    
+
     (0..NUM_SAMPLES)
         .map(|i| {
             let x = i as f32 / NUM_SAMPLES as f32 * 6.0;
             let mut y = 0.0;
-            
+
             // Superposition of different frequencies
             y += (x * freq + time * 2.0 + phase).sin() * 0.3;
             y += (x * freq * 2.3 + time * 1.7 + phase).sin() * 0.2;
             y += (x * freq * 3.7 + time * 0.9 + phase).cos() * 0.15;
             y += (x * freq * 5.1 + time * 2.3 + phase).sin() * 0.1;
-            
+
             // Add some noise
             let noise = ((i as f32 * 1234.5 + time * 100.0).sin() * 43758.5453).fract() - 0.5;
             y += noise * 0.05;
-            
+
             y.clamp(-1.0, 1.0)
         })
         .collect()
@@ -77,8 +76,11 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             start_time: Instant::now(),
             frame_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
@@ -88,12 +90,17 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            topology: PrimitiveTopology::LineStrip,
-            ..Default::default()
-        })?;
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: surface.format(),
+                topology: PrimitiveTopology::LineStrip,
+                ..Default::default()
+            },
+        )?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -104,7 +111,9 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
@@ -113,10 +122,30 @@ impl App {
 
         // Colors for each channel
         let colors = [
-            Color { r: 1.0, g: 0.3, b: 0.3, a: 1.0 },
-            Color { r: 0.3, g: 1.0, b: 0.3, a: 1.0 },
-            Color { r: 0.3, g: 0.5, b: 1.0, a: 1.0 },
-            Color { r: 1.0, g: 0.8, b: 0.2, a: 1.0 },
+            Color {
+                r: 1.0,
+                g: 0.3,
+                b: 0.3,
+                a: 1.0,
+            },
+            Color {
+                r: 0.3,
+                g: 1.0,
+                b: 0.3,
+                a: 1.0,
+            },
+            Color {
+                r: 0.3,
+                g: 0.5,
+                b: 1.0,
+                a: 1.0,
+            },
+            Color {
+                r: 1.0,
+                g: 0.8,
+                b: 0.2,
+                a: 1.0,
+            },
         ];
 
         // Y offsets for each channel
@@ -129,20 +158,29 @@ impl App {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
             vertex_counts.push(vertices.len() as u32);
-            channel_buffers.push(Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?);
+            channel_buffers.push(Buffer::with_data(
+                device.as_ref(),
+                &vertices,
+                BufferUsage::VERTEX,
+            )?);
         }
 
         let frame = surface.acquire()?;
-        
+
         // Drop oldest frame's buffers now that GPU is done
         if self.frame_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.frame_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color { r: 0.02, g: 0.02, b: 0.08, a: 1.0 });
+            pass.clear(Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.08,
+                a: 1.0,
+            });
             pass.set_pipeline(pipeline);
 
             // Draw each channel
@@ -154,10 +192,10 @@ impl App {
 
         frame.render(encoder)?;
         surface.present(frame)?;
-        
+
         // Keep this frame's buffers alive
         self.frame_buffers.push(channel_buffers);
-        
+
         Ok(())
     }
 
@@ -173,11 +211,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Waveform Visualizer (Surface API)")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1024, 600))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Waveform Visualizer (Surface API)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(1024, 600)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -188,7 +230,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { event_loop.exit(); }
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
@@ -215,4 +259,3 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }
-

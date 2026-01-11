@@ -119,7 +119,13 @@ impl RenderTarget {
     ) -> Result<Self> {
         let handle = {
             let mut backend = device.backend.lock().unwrap();
-            backend.create_render_target_with_depth(device.handle, width, height, color_format, depth_format)?
+            backend.create_render_target_with_depth(
+                device.handle,
+                width,
+                height,
+                color_format,
+                depth_format,
+            )?
         };
 
         Ok(Self {
@@ -240,7 +246,7 @@ mod tests {
     fn test_render_target_creation() {
         let device = create_test_device();
         let target = RenderTarget::new(&device, 800, 600, TextureFormat::Rgba8Unorm).unwrap();
-        
+
         assert_eq!(target.width(), 800);
         assert_eq!(target.height(), 600);
         assert_eq!(target.format(), TextureFormat::Rgba8Unorm);
@@ -251,16 +257,16 @@ mod tests {
     fn test_render_without_readback() {
         let device = create_test_device();
         let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::RED);
         }
-        
+
         // This should succeed without any CPU readback
         target.render(encoder).unwrap();
-        
+
         // The test validates that render() works without requiring read_to_cpu()
     }
 
@@ -268,18 +274,18 @@ mod tests {
     fn test_explicit_readback() {
         let device = create_test_device();
         let target = RenderTarget::new(&device, 2, 2, TextureFormat::Rgba8Unorm).unwrap();
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::RED);
         }
-        
+
         target.render(encoder).unwrap();
-        
+
         // Now explicitly read
         let pixels = target.read_to_cpu().unwrap();
-        
+
         assert_eq!(pixels.len(), 2 * 2 * 4);
         // Red color: R=255, G=0, B=0, A=255
         assert_eq!(pixels[0], 255);
@@ -292,18 +298,18 @@ mod tests {
     fn test_read_to_buffer() {
         let device = create_test_device();
         let target = RenderTarget::new(&device, 2, 2, TextureFormat::Rgba8Unorm).unwrap();
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::GREEN);
         }
-        
+
         target.render(encoder).unwrap();
-        
+
         let mut buffer = vec![0u8; target.buffer_size()];
         target.read_to_buffer(&mut buffer).unwrap();
-        
+
         // Green color: R=0, G=255, B=0, A=255
         assert_eq!(buffer[0], 0);
         assert_eq!(buffer[1], 255);
@@ -315,7 +321,7 @@ mod tests {
     fn test_multiple_renders() {
         let device = create_test_device();
         let target = RenderTarget::new(&device, 10, 10, TextureFormat::Rgba8Unorm).unwrap();
-        
+
         // Render multiple times to the same target
         for color in [Color::RED, Color::GREEN, Color::BLUE] {
             let mut encoder = CommandEncoder::new();
@@ -325,11 +331,11 @@ mod tests {
             }
             target.render(encoder).unwrap();
         }
-        
+
         // Final read should show blue
         let pixels = target.read_to_cpu().unwrap();
-        assert_eq!(pixels[0], 0);   // R
-        assert_eq!(pixels[1], 0);   // G  
+        assert_eq!(pixels[0], 0); // R
+        assert_eq!(pixels[1], 0); // G
         assert_eq!(pixels[2], 255); // B
         assert_eq!(pixels[3], 255); // A
     }
@@ -344,8 +350,9 @@ mod tests {
             600,
             TextureFormat::Rgba8Unorm,
             Some(DepthFormat::Depth24Plus),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert_eq!(target.width(), 800);
         assert_eq!(target.height(), 600);
         assert_eq!(target.format(), TextureFormat::Rgba8Unorm);
@@ -357,7 +364,7 @@ mod tests {
     fn test_render_target_without_depth() {
         let device = create_test_device();
         let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
-        
+
         assert_eq!(target.depth_format(), None);
         assert!(!target.has_depth());
     }
@@ -371,18 +378,18 @@ mod tests {
             100,
             TextureFormat::Rgba8Unorm,
             Some(DepthFormat::Depth32Float),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::CORNFLOWER_BLUE);
             pass.clear_depth(1.0); // Clear depth to far plane
         }
-        
+
         target.render(encoder).unwrap();
-        
+
         // Should succeed without errors
     }
 }
-
