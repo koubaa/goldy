@@ -59,7 +59,7 @@ impl App {
         })?;
         
         // Create Surface for zero-copy presentation
-        let surface = Surface::new(device.clone(), window.as_ref())?;
+        let surface = Surface::new(&device, window.as_ref())?;
         
         self.device = Some(device);
         self.vertex_buffer = Some(vertex_buffer);
@@ -182,7 +182,7 @@ RAG uses Slang shaders compiled at runtime. The pipeline combines vertex and fra
 ### 4. Create Surface
 
 ```rust
-let surface = Surface::new(device.clone(), window.as_ref())?;
+let surface = Surface::new(&device, window.as_ref())?;
 ```
 
 `Surface` manages the swapchain for zero-copy GPU presentation. Unlike CPU-readback approaches, rendering happens directly to the window's framebuffer.

@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
     let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
     
     // Create surface for zero-copy window presentation
-    let surface = Surface::new(device.clone(), &window)?;
+    let surface = Surface::new(&device, &window)?;
     
     // Acquire frame and render
     let frame = surface.acquire()?;

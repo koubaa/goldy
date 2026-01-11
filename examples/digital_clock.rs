@@ -56,7 +56,7 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         
         // Create surface first to get the correct format
-        let surface = Surface::new(device.clone(), window.as_ref())?;
+        let surface = Surface::new(&device, window.as_ref())?;
         
         // Use the SHARED shader source from the examples module
         let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;

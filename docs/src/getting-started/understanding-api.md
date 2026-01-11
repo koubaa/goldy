@@ -82,7 +82,7 @@ let mut encoder = CommandEncoder::new();
 
 ```rust
 // For window display (zero-copy)
-let surface = Surface::new(device.clone(), &window)?;
+let surface = Surface::new(&device, &window)?;
 let frame = surface.acquire()?;
 frame.render(encoder)?;
 surface.present(frame)?;
@@ -156,7 +156,6 @@ RAG uses `anyhow::Result` for most operations:
 fn setup() -> anyhow::Result<()> {
     let instance = Instance::new()?;  // May fail
     let device = instance.create_device(DeviceType::DiscreteGpu)?;  // May fail
-    let shader = ShaderModule::from_wgsl(&device, source)?;  // May fail
     Ok(())
 }
 ```

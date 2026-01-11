@@ -93,7 +93,7 @@ let shader = ShaderModule::from_slang(&device, SHADER)?;
 let pipeline = RenderPipeline::new(&device, &shader, &shader, &desc)?;
 
 // Create surface for zero-copy window presentation
-let surface = Surface::new(device.clone(), &window)?;
+let surface = Surface::new(&device, &window)?;
 
 // Render loop
 let frame = surface.acquire()?;

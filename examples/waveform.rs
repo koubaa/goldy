@@ -86,7 +86,7 @@ impl App {
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
-        let surface = Surface::new(device.clone(), window.as_ref())?;
+        let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, rag::shader::builtins::VERTEX_COLOR_2D)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),

@@ -40,16 +40,6 @@ impl ShaderModule {
         })
     }
     
-    /// Create a shader module from WGSL source.
-    ///
-    /// **Deprecated**: Use `from_slang` instead. This method exists for backward
-    /// compatibility and will compile WGSL through Slang.
-    #[deprecated(since = "0.2.0", note = "Use from_slang() with Slang shader syntax")]
-    pub fn from_wgsl(device: &Device, source: &str) -> Result<Self> {
-        // For now, pass through to Slang - WGSL is not directly supported
-        // Users should migrate to Slang syntax
-        Self::from_slang(device, source)
-    }
 }
 
 impl Drop for ShaderModule {

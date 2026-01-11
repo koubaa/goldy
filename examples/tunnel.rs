@@ -61,7 +61,7 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         
         // Create surface first to get the correct format
-        let surface = Surface::new(device.clone(), window.as_ref())?;
+        let surface = Surface::new(&device, window.as_ref())?;
         
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::TUNNEL)?;

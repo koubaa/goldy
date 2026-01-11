@@ -37,7 +37,7 @@ pub use types::*;
 pub use device::{Instance, Device, Adapter, DeviceCapabilities};
 pub use buffer::Buffer;
 pub use bind_group::{BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, TextureBinding, SamplerBinding, BindingType, ShaderStages};
-pub use shader::ShaderModule;
+pub use shader::{ShaderModule, builtins};
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use compute::{ComputePipeline, ComputePipelineDesc, ComputeEncoder, ComputePass};
 pub use encoder::{CommandEncoder, RenderPass};

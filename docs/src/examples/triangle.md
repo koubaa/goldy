@@ -18,7 +18,7 @@ cargo run --example triangle --release
 
 - GPU device initialization
 - Vertex buffer creation
-- Using built-in shaders
+- Slang shaders (using built-in `VERTEX_COLOR_2D`)
 - Basic render pipeline
 - Command encoding
 
@@ -35,15 +35,17 @@ let vertices = [
 let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
 ```
 
-### Built-in Shader
+### Shader
 
-RAG includes `builtins::VERTEX_COLOR_2D`, a simple shader that:
-- Passes through 2D positions
-- Interpolates vertex colors across the triangle
+RAG provides `builtins::VERTEX_COLOR_2D`, a ready-to-use Slang shader for 2D colored vertices:
 
 ```rust
-let shader = ShaderModule::from_wgsl(&device, builtins::VERTEX_COLOR_2D)?;
+use rag::builtins;
+
+let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
 ```
+
+This shader passes through 2D positions and interpolates vertex colors across the triangle. See [Slang Shaders](../concepts/slang.md) to write your own.
 
 ### Rendering
 

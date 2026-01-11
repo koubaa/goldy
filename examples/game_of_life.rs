@@ -120,7 +120,7 @@ impl RenderState {
         
         // Try to use DX12 backend
         let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
-        let surface = Surface::new(device.clone(), window.as_ref())?;
+        let surface = Surface::new(&device, window.as_ref())?;
 
         // Load shaders
         let compute_shader = ShaderModule::from_slang(

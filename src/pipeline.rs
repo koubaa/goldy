@@ -9,6 +9,26 @@ use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
 /// Description for creating a render pipeline.
+///
+/// # Format Matching
+///
+/// **Important**: `target_format` must match the format of the render target or surface
+/// you will render to. Mismatched formats cause undefined behavior or errors.
+///
+/// - For `Surface`: use `surface.format()`
+/// - For `RenderTarget`: use the format passed to `RenderTarget::new()`
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use rag::{RenderPipelineDesc, Surface, TextureFormat};
+/// # fn example(surface: &Surface) {
+/// let desc = RenderPipelineDesc {
+///     target_format: surface.format(), // Always match the target!
+///     ..Default::default()
+/// };
+/// # }
+/// ```
 #[derive(Clone, Default)]
 pub struct RenderPipelineDesc<'a> {
     /// Vertex buffer layout.
@@ -16,6 +36,9 @@ pub struct RenderPipelineDesc<'a> {
     /// Primitive topology.
     pub topology: PrimitiveTopology,
     /// Target texture format.
+    ///
+    /// **Must match** the format of the Surface or RenderTarget you render to.
+    /// Use `surface.format()` or the format you passed to `RenderTarget::new()`.
     pub target_format: TextureFormat,
     /// Bind group layouts used by this pipeline (optional).
     /// The order determines the set index (first = set 0, second = set 1, etc.)

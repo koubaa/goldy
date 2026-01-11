@@ -16,7 +16,7 @@ let instance = Instance::new()?;
 let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
 
 // Create surface for a winit window
-let surface = Surface::new(device.clone(), &window)?;
+let surface = Surface::new(&device, &window)?;
 ```
 
 ### Render Loop

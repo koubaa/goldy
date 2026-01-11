@@ -186,16 +186,6 @@ impl Device {
         self.backend.lock().unwrap().is_device_valid(self.handle)
     }
 
-    /// Get the device handle (internal use).
-    pub(crate) fn handle(&self) -> DeviceHandle {
-        self.handle
-    }
-
-    /// Get the backend (internal use).
-    pub(crate) fn backend(&self) -> &Arc<Mutex<Box<dyn GpuBackend>>> {
-        &self.backend
-    }
-
     /// Get device capabilities and format preferences.
     ///
     /// Use this to query optimal formats for your use case:
