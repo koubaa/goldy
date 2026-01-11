@@ -91,19 +91,81 @@ Goldy uses [Slang](https://shader-slang.org/) as its sole shading language. This
 
 Rather than supporting multiple shader languages (WGSL, GLSL, HLSL) and maintaining translation layers, Goldy trusts Slang to handle cross-platform compilation. This keeps Goldy's codebase simple while providing maximum portability.
 
-## Inspiration
+## Inspirations
 
-Goldy draws inspiration from:
+Goldy synthesizes ideas from several sources, each contributing distinct principles to its design.
 
-- **Sebastian Aaltonen's "No Graphics API"** - The vision of what's possible with modern hardware
-- **Slang** - A modern shader language with cross-platform compilation
-- **CUDA** - A composable language exposing memory directly with a broad library ecosystem
+### Sebastian Aaltonen: "No Graphics API"
+
+The **primary philosophical foundation** for Goldy. Aaltonen argues that modern GPUs (2018+) have evolved so far beyond what DX12/Vulkan/Metal were designed for that we could dramatically simplify if we dropped legacy support:
+
+| Feature | Old GPUs (2012) | Modern GPUs (2018+) |
+|---------|-----------------|---------------------|
+| Cache model | Incoherent, manual flush | Coherent L2, automatic |
+| Memory | Discrete, explicit copy | PCIe REBAR, unified where possible |
+| Pointers | 32-bit, indirect | 64-bit, direct in shaders |
+| Descriptors | CPU-bound binding | Bindless, GPU-resident |
+| Render passes | Required for tile optimization | Dynamic rendering works fine |
+
+Goldy applies this by requiring 2018+ hardware, using dynamic rendering, bindless descriptors, and assuming coherent caches. This isn't theoretical—it's what game engines already do internally. Goldy just makes it the public API.
+
+### Ralph Levien: "Requiem for piet-gpu-hal"
+
+Ralph Levien's [post-mortem](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html) on building a GPU HAL provides the crucial insight:
+
+> "Classic HAL failed by abstracting behavior AND cost. Modern approaches succeed by abstracting meaning and rules while exposing cost and reality."
+
+Traditional HALs tried to hide everything—creating "magic black boxes" where developers couldn't understand or optimize performance. Goldy applies this by clearly separating what it abstracts (semantics, safety, ownership) from what it exposes (cost, performance characteristics, platform differences).
+
+### Wayland Compositor Architecture
+
+Wayland's shift from X11's distributed protocol model to local computation influences Goldy's design:
+
+```
+X11:     App → draw commands → protocol → server → GPU → display
+Wayland: App → GPU renders buffer → compositor → display
+```
+
+The client renders **complete frames**. Synchronization is **explicit**, not implicit. Goldy applies this with a frame-based model, explicit synchronization, and zero-copy where possible.
+
+### Slang: Unified Shader Language
+
+The shader language landscape is fragmented (GLSL, HLSL, MSL, WGSL). [Slang](https://shader-slang.org/) solves this at the source level—write once, compile to any backend. Goldy accepts only Slang shaders, eliminating shader translation bugs and simplifying the codebase. Slang also provides modern features WGSL lacks: modules, generics, automatic differentiation.
+
+### WGPU: API Patterns
+
+[wgpu](https://wgpu.rs/) provides excellent API ergonomics that Goldy borrows: Instance/Device architecture, CommandEncoder pattern, explicit pass structure. However, wgpu must implement WebGPU exactly and support the web. Goldy is free to diverge—supporting the *union* of modern platform features rather than the lowest common denominator.
+
+### TU Darmstadt: Recursive HAL Analysis
+
+The paper ["Conceptual Approach Towards Recursive Hardware Abstraction Layers"](https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf) by Konrad et al. provides rigorous analysis of what a minimal HAL actually needs, categorizing features as **necessary** vs **emulatable**. This validates Goldy's approach: if you target modern hardware, the abstraction almost writes itself because modern GPUs have converged on similar capabilities.
+
+### Additional Influences
+
+- **CUDA** - Composable language exposing memory directly with a broad library ecosystem
 - **Metal's evolution** - Moving toward 64-bit pointers and simpler binding models
 - **Rust's ownership model** - Explicit resource management without hidden costs
+
+### Synthesis
+
+These inspirations combine:
+
+```
+Sebastian Aaltonen  →  "Target modern hardware, drop legacy complexity"
+Ralph Levien        →  "Abstract meaning, not cost—expose reality"
+Wayland             →  "Frames not commands, explicit sync"
+Slang               →  "One shader language, compiled to all backends"
+wgpu                →  "Good API ergonomics, command encoder pattern"
+TU Darmstadt        →  "Rigorous minimal feature analysis"
+```
+
+No single source defines Goldy. The value is in the synthesis.
 
 ## Further Reading
 
 - [Sebastian Aaltonen: No Graphics API](https://www.sebastianaaltonen.com/blog/no-graphics-api) - Essential reading on modern GPU architecture
+- [Ralph Levien: Requiem for piet-gpu-hal](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html) - Lessons from a failed HAL
+- [TU Darmstadt: Recursive HALs](https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf) - Academic analysis of HAL requirements
 - [What Goldy Sheds](./what-goldy-sheds.md) - Detailed breakdown of removed complexity
 - [Goldy vs wgpu](./comparison.md) - When to use which
 
