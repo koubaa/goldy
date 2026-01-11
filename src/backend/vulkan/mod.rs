@@ -201,9 +201,19 @@ impl VulkanBackend {
         window: &dyn raw_window_handle::HasWindowHandle,
         _display: &dyn raw_window_handle::HasDisplayHandle,
     ) -> Result<vk::SurfaceKHR> {
+        #[cfg(target_os = "windows")]
         let window_handle = window
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
+
+        #[cfg(target_os = "linux")]
+        let window_handle = window
+            .window_handle()
+            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
+
+        // Silence unused warning on platforms where surface creation isn't supported
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let _ = window;
 
         #[cfg(target_os = "windows")]
         {
