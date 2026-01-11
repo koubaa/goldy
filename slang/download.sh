@@ -45,7 +45,7 @@ for platform_pair in "${PLATFORMS[@]}"; do
         # We need: slang, slang-glslang (for SPIR-V generation)
         find "$TMP_DIR" -type f \( \
             -name "libslang.so*" -o \
-            -name "libslang-glslang.so*" \
+            -name "libslang-glslang.so*" -o \
             -name "slang.dll" -o \
             -name "slang-glslang.dll" -o \
             -name "libslang.dylib" -o \
