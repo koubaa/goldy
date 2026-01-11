@@ -1,6 +1,6 @@
 # Triangle Example
 
-The simplest RAG example - a colored triangle.
+The simplest Goldy example - a colored triangle.
 
 ## Run It
 
@@ -31,10 +31,10 @@ let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
 
 ### Shader
 
-RAG provides `builtins::VERTEX_COLOR_2D`, a ready-to-use Slang shader for 2D colored vertices:
+Goldy provides `builtins::VERTEX_COLOR_2D`, a ready-to-use Slang shader for 2D colored vertices:
 
 ```rust
-use rag::builtins;
+use goldy::builtins;
 
 let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
 ```
@@ -98,5 +98,5 @@ pass.draw(0..6, 0..1);  // 6 vertices
 
 ## Full Source
 
-See `rag/examples/triangle.rs` for the complete code.
+See `goldy/examples/triangle.rs` for the complete code.
 

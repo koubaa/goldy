@@ -30,8 +30,8 @@
 # Design & Philosophy
 
 - [Motivation](./design/motivation.md)
-- [What RAG Sheds](./design/what-rag-sheds.md)
-- [RAG vs wgpu](./design/comparison.md)
+- [What Goldy Sheds](./design/what-goldy-sheds.md)
+- [Goldy vs wgpu](./design/comparison.md)
 - [Target Hardware](./design/hardware.md)
 
 # Architecture

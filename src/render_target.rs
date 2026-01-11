@@ -1,13 +1,13 @@
 //! RenderTarget - GPU buffer that stays on GPU with optional CPU readback.
 //!
-//! This module provides the primary rendering abstraction for RAG.
+//! This module provides the primary rendering abstraction for Goldy.
 //! Unlike the legacy `FrameOutput` which always copies to CPU, `RenderTarget`
 //! keeps the rendered image on the GPU until explicitly requested.
 //!
 //! # Example
 //!
 //! ```rust,no_run
-//! use rag::{Device, RenderTarget, CommandEncoder, TextureFormat};
+//! use goldy::{Device, RenderTarget, CommandEncoder, TextureFormat};
 //!
 //! fn render_frame(device: &Device) -> anyhow::Result<()> {
 //!     // Create a render target (GPU-only by default)
@@ -17,7 +17,7 @@
 //!     let mut encoder = CommandEncoder::new();
 //!     {
 //!         let mut pass = encoder.begin_render_pass();
-//!         pass.clear(rag::Color::CORNFLOWER_BLUE);
+//!         pass.clear(goldy::Color::CORNFLOWER_BLUE);
 //!         // ... more rendering ...
 //!     }
 //!     
@@ -100,7 +100,7 @@ impl RenderTarget {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use rag::{Device, RenderTarget, TextureFormat, DepthFormat};
+    /// use goldy::{Device, RenderTarget, TextureFormat, DepthFormat};
     ///
     /// fn create_3d_target(device: &Device) -> anyhow::Result<RenderTarget> {
     ///     RenderTarget::new_with_depth(

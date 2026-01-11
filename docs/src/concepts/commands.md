@@ -5,7 +5,7 @@ Commands are recorded into an encoder, then executed by rendering a frame.
 ## Command Encoder
 
 ```rust
-use rag::CommandEncoder;
+use goldy::CommandEncoder;
 
 let mut encoder = CommandEncoder::new();
 ```

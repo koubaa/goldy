@@ -6,19 +6,19 @@
 - **Vulkan SDK** 1.3+ (for Vulkan backend)
 - A [supported GPU](../design/hardware.md)
 
-## Adding RAG to Your Project
+## Adding Goldy to Your Project
 
-Add RAG to your `Cargo.toml`:
+Add Goldy to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rag = "0.1"
+goldy = "0.1"
 ```
 
 Or with cargo:
 
 ```bash
-cargo add rag
+cargo add goldy
 ```
 
 ## Verifying Installation
@@ -26,7 +26,7 @@ cargo add rag
 Create a simple test program:
 
 ```rust
-use rag::{Instance, DeviceType};
+use goldy::{Instance, DeviceType};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
@@ -83,7 +83,7 @@ sudo pacman -S vulkan-icd-loader vulkan-tools
 
 ### macOS
 
-RAG's Metal backend is planned but not yet implemented. For now, use MoltenVK:
+Goldy's Metal backend is planned but not yet implemented. For now, use MoltenVK:
 
 ```bash
 brew install molten-vk
@@ -91,7 +91,7 @@ brew install molten-vk
 
 ## Windowing (for examples)
 
-The examples use `winit` for windowing and RAG's built-in Surface API for zero-copy GPU presentation:
+The examples use `winit` for windowing and Goldy's built-in Surface API for zero-copy GPU presentation:
 
 ```toml
 [dev-dependencies]

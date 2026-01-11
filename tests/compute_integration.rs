@@ -2,7 +2,7 @@
 //!
 //! These tests verify compute pipeline functionality with actual GPU backends.
 
-use rag::{
+use goldy::{
     BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
     BufferUsage, ComputeEncoder, ComputePipeline, ComputePipelineDesc, DeviceType, Instance,
     ShaderModule, ShaderStages,

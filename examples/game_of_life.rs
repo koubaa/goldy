@@ -9,7 +9,7 @@
 //! Run with: `cargo run --example game_of_life`
 
 use anyhow::Result;
-use rag::{
+use goldy::{
     BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
     BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
     DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
@@ -46,7 +46,7 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    device: Arc<rag::Device>,
+    device: Arc<goldy::Device>,
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,

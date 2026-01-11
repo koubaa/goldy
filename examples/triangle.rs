@@ -4,7 +4,7 @@
 //!
 //! Run with: cargo run --example triangle
 
-use rag::{
+use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, Vertex2D,
     Surface,
@@ -19,9 +19,9 @@ use winit::{
 };
 
 struct App {
-    // RAG resources
+    // Goldy resources
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
@@ -140,7 +140,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let attrs = Window::default_attributes()
-                .with_title("RAG - Animated Triangle (Surface API)")
+                .with_title("Goldy - Animated Triangle (Surface API)")
                 .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
             
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
@@ -185,7 +185,7 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    println!("RAG Surface API Example");
+    println!("Goldy Surface API Example");
     println!("=======================");
     println!("Rendering triangle with zero-copy GPU presentation");
     println!("Press Escape or close window to exit\n");

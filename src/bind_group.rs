@@ -285,14 +285,14 @@ impl BindGroup {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use rag::{Device, BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, TextureBinding, SamplerBinding};
+    /// use goldy::{Device, BindGroup, BindGroupLayout, BindGroupLayoutBinding, BufferBinding, TextureBinding, SamplerBinding};
     ///
     /// fn create_textured_bind_group(
     ///     device: &Device,
     ///     layout: &BindGroupLayout,
-    ///     uniform_buffer: &rag::Buffer,
-    ///     texture: &rag::Texture,
-    ///     sampler: &rag::Sampler,
+    ///     uniform_buffer: &goldy::Buffer,
+    ///     texture: &goldy::Texture,
+    ///     sampler: &goldy::Sampler,
     /// ) -> anyhow::Result<BindGroup> {
     ///     BindGroup::with_resources(
     ///         device,

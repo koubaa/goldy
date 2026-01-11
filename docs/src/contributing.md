@@ -1,14 +1,14 @@
 # Contributing
 
-RAG welcomes contributions! Here's how to get involved.
+Goldy welcomes contributions! Here's how to get involved.
 
 ## Getting Started
 
 1. Fork the repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/rag.git
-   cd rag
+   git clone https://github.com/YOUR_USERNAME/goldy.git
+   cd goldy
    ```
 3. Build and run tests:
    ```bash
@@ -112,7 +112,7 @@ pub fn with_data<T: Pod>(device: &Device, data: &[T], usage: BufferUsage) -> Res
 
 When reporting bugs, include:
 
-1. RAG version
+1. Goldy version
 2. OS and GPU
 3. Minimal reproduction code
 4. Expected vs actual behavior

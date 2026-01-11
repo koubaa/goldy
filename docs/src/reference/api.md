@@ -1,6 +1,6 @@
 # API Reference
 
-Complete API documentation for RAG.
+Complete API documentation for Goldy.
 
 ## Core Types
 
@@ -10,7 +10,7 @@ Complete API documentation for RAG.
 pub struct Instance { /* ... */ }
 
 impl Instance {
-    /// Create a new RAG instance
+    /// Create a new Goldy instance
     pub fn new() -> Result<Self>;
     
     /// List available GPU adapters

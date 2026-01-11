@@ -4,7 +4,7 @@
 //!
 //! Run with: cargo run --example waveform
 
-use rag::{
+use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     Vertex2D, PrimitiveTopology,
@@ -63,7 +63,7 @@ const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 struct App {
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
@@ -87,7 +87,7 @@ impl App {
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        let shader = ShaderModule::from_slang(&device, rag::shader::builtins::VERTEX_COLOR_2D)?;
+        let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
             target_format: surface.format(),
@@ -175,7 +175,7 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("RAG - Waveform Visualizer (Surface API)")
+                    .with_title("Goldy - Waveform Visualizer (Surface API)")
                     .with_inner_size(winit::dpi::LogicalSize::new(1024, 600))
             ).unwrap());
             self.window = Some(window.clone());
@@ -209,7 +209,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("RAG Waveform Example - Press Escape to exit");
+    println!("Goldy Waveform Example - Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;

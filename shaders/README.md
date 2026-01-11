@@ -1,4 +1,4 @@
-# RAG Shader Library
+# Goldy Shader Library
 
 Slang shader sources shared between native (Vulkan) and web (WebGPU) platforms.
 
@@ -6,7 +6,7 @@ Slang shader sources shared between native (Vulkan) and web (WebGPU) platforms.
 
 **Native (Rust):**
 ```rust
-use rag::ShaderModule;
+use goldy::ShaderModule;
 
 let shader = ShaderModule::from_slang(&device, include_str!("../../shaders/plasma.slang"))?;
 ```

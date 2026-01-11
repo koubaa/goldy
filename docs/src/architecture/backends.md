@@ -1,6 +1,6 @@
 # Backend Architecture
 
-RAG uses a backend abstraction that allows different GPU APIs while maintaining a unified interface.
+Goldy uses a backend abstraction that allows different GPU APIs while maintaining a unified interface.
 
 ## Current Backends
 
@@ -16,7 +16,7 @@ Each backend uses **native idioms**, not translation:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    RAG Core API                              │
+│                    Goldy Core API                              │
 │                                                              │
 │   Device, Buffer, Texture, Pipeline, CommandEncoder, ...    │
 └─────────────────────────────────────────────────────────────┘
@@ -35,7 +35,7 @@ Each backend uses **native idioms**, not translation:
 └───────────────┘    └───────────────┘    └───────────────┘
 ```
 
-**Key point**: MoltenVK must translate Vulkan → Metal, adding complexity. RAG's Metal backend would use Metal directly.
+**Key point**: MoltenVK must translate Vulkan → Metal, adding complexity. Goldy's Metal backend would use Metal directly.
 
 ## Vulkan Backend
 
@@ -50,7 +50,7 @@ No render pass objects:
 // 1. VkRenderPass
 // 2. VkFramebuffer
 
-// RAG uses dynamic rendering (VK_KHR_dynamic_rendering):
+// Goldy uses dynamic rendering (VK_KHR_dynamic_rendering):
 // Just specify attachments at draw time
 ```
 
@@ -66,7 +66,7 @@ Bindless resource access:
 // 4. Update descriptor sets
 // 5. Bind descriptor sets
 
-// RAG uses descriptor indexing:
+// Goldy uses descriptor indexing:
 // Access resources by index in shader
 ```
 
@@ -76,7 +76,7 @@ Direct memory access in shaders:
 
 ```rust
 // Traditional: buffer bindings
-// RAG: 64-bit pointers
+// Goldy: 64-bit pointers
 ```
 
 ## DX12 Backend
@@ -156,7 +156,7 @@ To add a backend (e.g., Metal):
 
 1. Implement `GpuBackend` trait
 2. Use native API (metal-rs)
-3. Map RAG concepts to native equivalents
+3. Map Goldy concepts to native equivalents
 
 ```rust
 pub struct MetalBackend {

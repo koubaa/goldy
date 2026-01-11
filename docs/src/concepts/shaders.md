@@ -1,6 +1,6 @@
 # Shaders
 
-RAG uses [Slang](https://shader-slang.org/) as its sole shading language. Slang is compiled to:
+Goldy uses [Slang](https://shader-slang.org/) as its sole shading language. Slang is compiled to:
 
 - **SPIR-V** for Vulkan
 - **DXIL/HLSL** for DirectX 12
@@ -19,7 +19,7 @@ Slang offers:
 ## Creating Shaders
 
 ```rust
-use rag::ShaderModule;
+use goldy::ShaderModule;
 
 const MY_SHADER: &str = r#"
 struct VertexOutput {
@@ -44,10 +44,10 @@ let shader = ShaderModule::from_slang(&device, MY_SHADER)?;
 
 ## Built-in Shaders
 
-RAG includes common shaders:
+Goldy includes common shaders:
 
 ```rust
-use rag::shader::builtins;
+use goldy::shader::builtins;
 
 // 2D colored vertices
 let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;

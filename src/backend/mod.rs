@@ -18,7 +18,7 @@ pub mod mock;
 pub mod metal;
 
 // WebGPU backend is currently native-only (uses native Slang compiler)
-// For browser WASM builds, use rag-web which uses wgpu directly with slang-wasm
+// For browser WASM builds, use goldy-web which uses wgpu directly with slang-wasm
 // #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
 // pub mod webgpu;
 

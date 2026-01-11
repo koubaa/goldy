@@ -4,7 +4,7 @@
 //!
 //! Run with: cargo run --example textured_quad
 
-use rag::{
+use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     Vertex2DUv, Texture, Sampler, BindGroup, BindGroupLayout,
@@ -70,7 +70,7 @@ fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> 
     data
 }
 
-// Fullscreen quad vertices (already defined in rag::types but we define here for clarity)
+// Fullscreen quad vertices (already defined in goldy::types but we define here for clarity)
 const QUAD_VERTICES: [Vertex2DUv; 6] = [
     Vertex2DUv { position: [-0.8, -0.8], uv: [0.0, 1.0] },
     Vertex2DUv { position: [0.8, -0.8], uv: [1.0, 1.0] },
@@ -82,7 +82,7 @@ const QUAD_VERTICES: [Vertex2DUv; 6] = [
 
 struct App {
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
@@ -219,7 +219,7 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("RAG - Textured Quad Example")
+                    .with_title("Goldy - Textured Quad Example")
                     .with_inner_size(winit::dpi::LogicalSize::new(800, 800))
             ).unwrap());
             self.window = Some(window.clone());
@@ -253,7 +253,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("RAG Textured Quad Example - Press Escape to exit");
+    println!("Goldy Textured Quad Example - Press Escape to exit");
     println!("Demonstrates texture sampling with a checkerboard pattern");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

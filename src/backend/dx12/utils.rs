@@ -5,7 +5,7 @@
 use crate::types::{AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
 use windows::Win32::Graphics::{Direct3D, Direct3D12, Dxgi};
 
-/// Convert RAG TextureFormat to DXGI format.
+/// Convert Goldy TextureFormat to DXGI format.
 pub fn format_to_dxgi(format: TextureFormat) -> Dxgi::Common::DXGI_FORMAT {
     match format {
         TextureFormat::Rgba8UnormSrgb => Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
@@ -17,7 +17,7 @@ pub fn format_to_dxgi(format: TextureFormat) -> Dxgi::Common::DXGI_FORMAT {
     }
 }
 
-/// Convert DXGI format to RAG TextureFormat.
+/// Convert DXGI format to Goldy TextureFormat.
 pub fn dxgi_to_format(format: Dxgi::Common::DXGI_FORMAT) -> Option<TextureFormat> {
     match format {
         Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB => Some(TextureFormat::Rgba8UnormSrgb),
@@ -30,7 +30,7 @@ pub fn dxgi_to_format(format: Dxgi::Common::DXGI_FORMAT) -> Option<TextureFormat
     }
 }
 
-/// Convert RAG VertexFormat to DXGI format.
+/// Convert Goldy VertexFormat to DXGI format.
 pub fn vertex_format_to_dxgi(format: VertexFormat) -> Dxgi::Common::DXGI_FORMAT {
     match format {
         VertexFormat::Float32 => Dxgi::Common::DXGI_FORMAT_R32_FLOAT,
@@ -44,7 +44,7 @@ pub fn vertex_format_to_dxgi(format: VertexFormat) -> Dxgi::Common::DXGI_FORMAT 
     }
 }
 
-/// Convert RAG PrimitiveTopology to D3D12 topology.
+/// Convert Goldy PrimitiveTopology to D3D12 topology.
 pub fn topology_to_d3d12(topology: PrimitiveTopology) -> Direct3D::D3D_PRIMITIVE_TOPOLOGY {
     match topology {
         PrimitiveTopology::PointList => Direct3D::D3D_PRIMITIVE_TOPOLOGY_POINTLIST,
@@ -55,7 +55,7 @@ pub fn topology_to_d3d12(topology: PrimitiveTopology) -> Direct3D::D3D_PRIMITIVE
     }
 }
 
-/// Convert RAG PrimitiveTopology to D3D12 topology type for PSO.
+/// Convert Goldy PrimitiveTopology to D3D12 topology type for PSO.
 pub fn topology_type_to_d3d12(topology: PrimitiveTopology) -> Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE {
     match topology {
         PrimitiveTopology::PointList => Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT,
@@ -68,7 +68,7 @@ pub fn topology_type_to_d3d12(topology: PrimitiveTopology) -> Direct3D12::D3D12_
     }
 }
 
-/// Convert RAG IndexFormat to DXGI index format.
+/// Convert Goldy IndexFormat to DXGI index format.
 pub fn index_format_to_dxgi(format: IndexFormat) -> Dxgi::Common::DXGI_FORMAT {
     match format {
         IndexFormat::Uint16 => Dxgi::Common::DXGI_FORMAT_R16_UINT,
@@ -90,7 +90,7 @@ pub fn vendor_name(vendor_id: u32) -> &'static str {
     }
 }
 
-/// Map DXGI adapter flags to RAG DeviceType.
+/// Map DXGI adapter flags to Goldy DeviceType.
 pub fn device_type_from_flags(flags: Dxgi::DXGI_ADAPTER_FLAG) -> crate::types::DeviceType {
     if flags.contains(Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE) {
         crate::types::DeviceType::Cpu
@@ -101,7 +101,7 @@ pub fn device_type_from_flags(flags: Dxgi::DXGI_ADAPTER_FLAG) -> crate::types::D
     }
 }
 
-/// Convert RAG DepthFormat to DXGI format.
+/// Convert Goldy DepthFormat to DXGI format.
 pub fn depth_format_to_dxgi(format: DepthFormat) -> Dxgi::Common::DXGI_FORMAT {
     match format {
         DepthFormat::Depth16Unorm => Dxgi::Common::DXGI_FORMAT_D16_UNORM,
@@ -112,7 +112,7 @@ pub fn depth_format_to_dxgi(format: DepthFormat) -> Dxgi::Common::DXGI_FORMAT {
     }
 }
 
-/// Convert RAG CompareFunction to D3D12 comparison func.
+/// Convert Goldy CompareFunction to D3D12 comparison func.
 pub fn compare_to_d3d12(compare: CompareFunction) -> Direct3D12::D3D12_COMPARISON_FUNC {
     match compare {
         CompareFunction::Never => Direct3D12::D3D12_COMPARISON_FUNC_NEVER,
@@ -126,7 +126,7 @@ pub fn compare_to_d3d12(compare: CompareFunction) -> Direct3D12::D3D12_COMPARISO
     }
 }
 
-/// Convert RAG FilterMode to D3D12 filter.
+/// Convert Goldy FilterMode to D3D12 filter.
 pub fn filter_to_d3d12(min: FilterMode, mag: FilterMode, mip: FilterMode) -> Direct3D12::D3D12_FILTER {
     match (min, mag, mip) {
         (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_MAG_MIP_POINT,
@@ -140,7 +140,7 @@ pub fn filter_to_d3d12(min: FilterMode, mag: FilterMode, mip: FilterMode) -> Dir
     }
 }
 
-/// Convert RAG AddressMode to D3D12 texture address mode.
+/// Convert Goldy AddressMode to D3D12 texture address mode.
 pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADDRESS_MODE {
     match mode {
         AddressMode::ClampToEdge => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_CLAMP,

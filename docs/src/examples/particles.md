@@ -188,5 +188,5 @@ fn new_spark(origin_x: f32, origin_y: f32) -> Self {
 
 ## Full Source
 
-See `rag/examples/particles.rs` for the complete code.
+See `goldy/examples/particles.rs` for the complete code.
 

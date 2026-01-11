@@ -1,11 +1,11 @@
-//! # RAG - Rust Abstract GPU
+//! # Goldy - Modern GPU Library
 //!
-//! A modern GPU abstraction library targeting Vulkan 1.4+, Metal 2+, and DX12.
+//! A modern GPU library targeting Vulkan 1.3+, DX12, and Metal.
 //!
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use rag::{Instance, DeviceType};
+//! use goldy::{Instance, DeviceType};
 //!
 //! let instance = Instance::new().unwrap();
 //! let device = instance.create_device(DeviceType::DiscreteGpu).unwrap();

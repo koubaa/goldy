@@ -1,11 +1,11 @@
 # Your First Triangle
 
-Let's draw a colored triangle in a window using RAG.
+Let's draw a colored triangle in a window using Goldy.
 
 ## Complete Code
 
 ```rust
-use rag::{
+use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     Vertex2D, shader::builtins,
@@ -20,7 +20,7 @@ use winit::{
 
 struct App {
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     window: Option<Arc<Window>>,
@@ -112,7 +112,7 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("RAG - Triangle")
+                    .with_title("Goldy - Triangle")
                     .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
             ).unwrap());
             self.window = Some(window.clone());
@@ -177,7 +177,7 @@ let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
 let pipeline = RenderPipeline::new(&device, &shader, &shader, &desc)?;
 ```
 
-RAG uses Slang shaders compiled at runtime. The pipeline combines vertex and fragment shaders with rendering state.
+Goldy uses Slang shaders compiled at runtime. The pipeline combines vertex and fragment shaders with rendering state.
 
 ### 4. Create Surface
 

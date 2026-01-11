@@ -1,6 +1,6 @@
 # Rendering Outputs
 
-RAG provides two complementary APIs for rendering output: **Surface** for zero-copy window presentation, and **RenderTarget** for headless rendering with optional CPU readback.
+Goldy provides two complementary APIs for rendering output: **Surface** for zero-copy window presentation, and **RenderTarget** for headless rendering with optional CPU readback.
 
 ## Surface (Window Display)
 
@@ -9,7 +9,7 @@ RAG provides two complementary APIs for rendering output: **Surface** for zero-c
 ### Creating a Surface
 
 ```rust
-use rag::{Surface, Device, DeviceType, Instance};
+use goldy::{Surface, Device, DeviceType, Instance};
 use std::sync::Arc;
 
 let instance = Instance::new()?;
@@ -65,7 +65,7 @@ fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
 ### Creating a RenderTarget
 
 ```rust
-use rag::{RenderTarget, TextureFormat};
+use goldy::{RenderTarget, TextureFormat};
 
 let target = RenderTarget::new(&device, 1920, 1080, TextureFormat::Rgba8Unorm)?;
 ```

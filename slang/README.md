@@ -31,7 +31,7 @@ Run the download script to fetch pre-built binaries for all platforms:
 
 ## Development Fallback
 
-For development, RAG will automatically fall back to using Slang from:
+For development, Goldy will automatically fall back to using Slang from:
 
 1. `RAG_SLANG_PATH` environment variable
 2. Vendored binaries in this directory

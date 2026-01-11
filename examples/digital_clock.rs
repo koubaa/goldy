@@ -1,12 +1,12 @@
 //! Digital Clock example - render an animated 7-segment clock in a window.
 //!
-//! This example uses shared rendering code from `rag::examples::digital_clock`,
+//! This example uses shared rendering code from `goldy::examples::digital_clock`,
 //! demonstrating that the same logic can be used on both native and web platforms.
 //! Now uses the Surface API for zero-copy presentation.
 //!
 //! Run with: cargo run --example digital_clock
 
-use rag::{
+use goldy::{
     Buffer, BufferUsage, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     examples::digital_clock::{
@@ -26,7 +26,7 @@ use winit::{
 
 struct App {
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     
@@ -149,7 +149,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let attrs = Window::default_attributes()
-                .with_title("RAG - Clock (Surface API, Space: pause, Click: color)")
+                .with_title("Goldy - Clock (Surface API, Space: pause, Click: color)")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
             
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
@@ -204,7 +204,7 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    println!("RAG Clock Example (using shared rendering code, Surface API)");
+    println!("Goldy Clock Example (using shared rendering code, Surface API)");
     println!("=============================================================");
     println!("Controls:");
     println!("  Space - Toggle pause");

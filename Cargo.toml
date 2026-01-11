@@ -1,10 +1,10 @@
 [package]
-name = "rag"
+name = "goldy"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Rust Abstract GPU - A modern GPU abstraction for Vulkan 1.4+, Metal, and DX12"
-repository = "https://github.com/koubaa/rag"
+description = "Goldy - Modern Graphics Library"
+repository = "https://github.com/koubaa/goldy"
 keywords = ["gpu", "graphics", "vulkan", "rendering"]
 categories = ["graphics", "rendering"]
 

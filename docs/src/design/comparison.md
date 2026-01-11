@@ -1,10 +1,10 @@
-# RAG vs wgpu
+# Goldy vs wgpu
 
-Both RAG and wgpu are Rust GPU libraries, but they serve different purposes and make different tradeoffs.
+Both Goldy and wgpu are Rust GPU libraries, but they serve different purposes and make different tradeoffs.
 
 ## Quick Comparison
 
-| Aspect | wgpu | RAG |
+| Aspect | wgpu | Goldy |
 |--------|------|-----|
 | **Primary Goal** | WebGPU implementation | Modern GPU simplicity |
 | **Governance** | W3C WebGPU spec | Independent |
@@ -23,9 +23,9 @@ Choose wgpu when you need:
 - **Stability** - Spec-driven API won't change unexpectedly
 - **Production-ready** - Battle-tested in real applications
 
-## When to Use RAG
+## When to Use Goldy
 
-Choose RAG when you need:
+Choose Goldy when you need:
 
 - **Simplicity** - Minimal API surface, fewer concepts
 - **Modern features** - Assume bindless, dynamic rendering, etc.
@@ -58,23 +58,23 @@ Vulkan/Metal/DX12/WebGPU
 
 wgpu implements the WebGPU specification, which is designed as a lowest-common-denominator across all platforms including the web.
 
-### RAG
+### Goldy
 
 ```
 Application
     │
     ▼
 ┌─────────────────┐
-│      RAG        │  ◄── Native Rust API
+│     Goldy       │  ◄── Native Rust API
 └────────┬────────┘
          │
     ┌────┼────┐
     ▼    ▼    ▼
   Vk  Metal  DX12
- 1.4+   2+
+ 1.3+   2+
 ```
 
-RAG talks directly to modern backend APIs without a translation layer. Each backend uses native idioms.
+Goldy talks directly to modern backend APIs without a translation layer. Each backend uses native idioms.
 
 ## Code Comparison
 
@@ -91,7 +91,7 @@ let buffer = device.create_buffer(&wgpu::BufferDescriptor {
 queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&data));
 ```
 
-**RAG:**
+**Goldy:**
 ```rust
 let buffer = Buffer::with_data(&device, &data, BufferUsage::VERTEX)?;
 ```
@@ -122,7 +122,7 @@ let mut encoder = device.create_command_encoder(&Default::default());
 queue.submit(std::iter::once(encoder.finish()));
 ```
 
-**RAG:**
+**Goldy:**
 ```rust
 let mut encoder = CommandEncoder::new();
 {
@@ -141,12 +141,12 @@ let output = frame.render(encoder)?;
                     Legacy Support    Speed    Simplicity
                     ──────────────    ─────    ──────────
 wgpu                ████████          ██████   ██████
-RAG                 ██                ████████ ████████
+Goldy               ██                ████████ ████████
 ```
 
 **Use wgpu** for production applications that need wide compatibility.
 
-**Use RAG** for new projects targeting modern hardware where simplicity matters.
+**Use Goldy** for new projects targeting modern hardware where simplicity matters.
 
 Both are valid choices—pick the one that fits your constraints.
 

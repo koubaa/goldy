@@ -1,6 +1,6 @@
 # Target Hardware
 
-RAG targets **modern GPUs only**. This is a deliberate choice that enables significant API simplification.
+Goldy targets **modern GPUs only**. This is a deliberate choice that enables significant API simplification.
 
 ## Minimum Requirements
 
@@ -53,7 +53,7 @@ No need for render pass objects:
 
 ## What This Excludes
 
-RAG does **not** support:
+Goldy does **not** support:
 
 | Excluded | Reason |
 |----------|--------|
@@ -65,7 +65,7 @@ RAG does **not** support:
 
 ## The Tradeoff
 
-By requiring modern hardware, RAG can:
+By requiring modern hardware, Goldy can:
 
 ✅ **Assume modern features** as baseline (bindless, dynamic rendering)  
 ✅ **Skip compatibility layers** that add complexity  
@@ -80,7 +80,7 @@ But it cannot:
 
 ## Checking Compatibility
 
-RAG will report unsupported devices at initialization:
+Goldy will report unsupported devices at initialization:
 
 ```rust
 let instance = Instance::new()?;
@@ -96,11 +96,11 @@ let device = instance.create_device(DeviceType::DiscreteGpu)?;
 
 ## Future Hardware
 
-As GPUs evolve, RAG can adopt new features:
+As GPUs evolve, Goldy can adopt new features:
 
 - **Automatic hazard detection** → Simpler barriers
 - **Hardware descriptor management** → Simpler binding
 - **Universal unified memory** → Simpler allocation
 
-RAG's non-standard status means it can adopt these simplifications as hardware supports them, without waiting for committee consensus.
+Goldy's non-standard status means it can adopt these simplifications as hardware supports them, without waiting for committee consensus.
 

@@ -555,7 +555,7 @@ impl GpuBackend for Dx12Backend {
             .context("Invalid device handle")?;
 
         // For simplicity, all buffers are created in UPLOAD heap to allow CPU writes.
-        // This matches the high-level RAG API which assumes all buffers can be written to.
+        // This matches the high-level Goldy API which assumes all buffers can be written to.
         // A more sophisticated implementation would use DEFAULT heap for GPU-only buffers
         // with staging buffer copies, but that's an optimization for later.
         let heap_type = D3D12_HEAP_TYPE_UPLOAD;

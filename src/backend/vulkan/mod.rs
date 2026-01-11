@@ -76,14 +76,14 @@ impl VulkanBackend {
         tracing::info!("Vulkan instance version: {}.{}", major, minor);
 
         if major < 1 || (major == 1 && minor < 3) {
-            anyhow::bail!("RAG requires Vulkan 1.3+, found {}.{}", major, minor);
+            anyhow::bail!("Goldy requires Vulkan 1.3+, found {}.{}", major, minor);
         }
 
         // Create instance with Vulkan 1.3 and surface extensions
         let app_info = vk::ApplicationInfo::default()
-            .application_name(c"rag")
+            .application_name(c"goldy")
             .application_version(vk::make_api_version(0, 0, 1, 0))
-            .engine_name(c"rag")
+            .engine_name(c"goldy")
             .engine_version(vk::make_api_version(0, 0, 1, 0))
             .api_version(vk::API_VERSION_1_3);
 

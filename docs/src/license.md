@@ -1,6 +1,6 @@
 # License
 
-RAG is licensed under the MIT License.
+Goldy is licensed under the MIT License.
 
 ```
 MIT License
@@ -29,7 +29,7 @@ SOFTWARE.
 ## What This Means
 
 You can:
-- ✅ Use RAG commercially
+- ✅ Use Goldy commercially
 - ✅ Modify the source code
 - ✅ Distribute copies
 - ✅ Use privately
@@ -44,7 +44,7 @@ You cannot:
 
 ## Dependencies
 
-RAG depends on various open-source libraries with their own licenses:
+Goldy depends on various open-source libraries with their own licenses:
 
 | Dependency | License |
 |------------|---------|

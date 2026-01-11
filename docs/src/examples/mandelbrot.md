@@ -152,5 +152,5 @@ var z = in.complex_coord;          // Start at pixel position
 
 ## Full Source
 
-See `rag/examples/mandelbrot.rs` for the complete code.
+See `goldy/examples/mandelbrot.rs` for the complete code.
 

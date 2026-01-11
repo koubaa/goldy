@@ -1,22 +1,22 @@
 # WASI Integration
 
-RAG is designed to be exposed to WebAssembly guests through WASI (WebAssembly System Interface).
+Goldy is designed to be exposed to WebAssembly guests through WASI (WebAssembly System Interface).
 
 ## Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     WASM Guest App                           │
-│               (uses rag-guest crate)                         │
+│               (uses goldy-guest crate)                         │
 │                                                              │
 │   Compiled to wasm32-wasip2, runs in Wasmtime               │
 └─────────────────────────┬───────────────────────────────────┘
                           │
-                          │ WIT interface (rag:gpu)
+                          │ WIT interface (goldy:gpu)
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                       rag-host                               │
-│            (implements WIT, uses RAG internally)             │
+│                       goldy-host                               │
+│            (implements WIT, uses Goldy internally)             │
 │                                                              │
 │   • Resource handle management (ResourceTable)              │
 │   • Memory transfer (guest ↔ GPU)                           │
@@ -25,7 +25,7 @@ RAG is designed to be exposed to WebAssembly guests through WASI (WebAssembly Sy
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                          RAG                                 │
+│                          Goldy                                 │
 │                   (same core library)                        │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -35,8 +35,8 @@ RAG is designed to be exposed to WebAssembly guests through WASI (WebAssembly Sy
 The WASI interface is defined using WIT (WebAssembly Interface Types):
 
 ```wit
-// rag:gpu/types
-package rag:gpu;
+// goldy:gpu/types
+package goldy:gpu;
 
 interface types {
     record color {
@@ -62,7 +62,7 @@ interface types {
 ```
 
 ```wit
-// rag:gpu/device
+// goldy:gpu/device
 interface device {
     use types.{buffer-usage, texture-format};
     
@@ -195,5 +195,5 @@ WASI integration is designed but not fully implemented:
 | Guest crate | 🔜 Planned |
 | Wasmtime integration | 🔜 Planned |
 
-Any WASI runtime can implement the `rag:gpu` interface.
+Any WASI runtime can implement the `goldy:gpu` interface.
 

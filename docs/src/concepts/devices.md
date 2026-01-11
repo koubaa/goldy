@@ -1,13 +1,13 @@
 # Devices and Instances
 
-The `Instance` and `Device` are the foundation of RAG.
+The `Instance` and `Device` are the foundation of Goldy.
 
 ## Instance
 
 The `Instance` represents a connection to the GPU subsystem and is used to discover available hardware.
 
 ```rust
-use rag::Instance;
+use goldy::Instance;
 
 let instance = Instance::new()?;
 ```
@@ -48,7 +48,7 @@ pub struct AdapterInfo {
 A `Device` represents an opened connection to a specific GPU.
 
 ```rust
-use rag::{Instance, DeviceType};
+use goldy::{Instance, DeviceType};
 
 let instance = Instance::new()?;
 let device = instance.create_device(DeviceType::DiscreteGpu)?;
@@ -67,7 +67,7 @@ pub enum DeviceType {
 
 ### Device Selection
 
-RAG will select the first matching adapter:
+Goldy will select the first matching adapter:
 
 ```rust
 // Prefer discrete GPU (gaming/workstation)
@@ -147,5 +147,5 @@ pub enum BackendType {
 }
 ```
 
-Currently RAG only supports Vulkan. Metal and DX12 backends are planned.
+Currently Goldy only supports Vulkan. Metal and DX12 backends are planned.
 

@@ -4,7 +4,7 @@
 //!
 //! Run with: cargo run --example plasma
 
-use rag::{
+use goldy::{
     BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding, BufferUsage,
     Color, CommandEncoder, DeviceType, Surface, Instance, RenderPipeline, RenderPipelineDesc,
     ShaderModule, Vertex2DUv, FULLSCREEN_QUAD, shaders,
@@ -28,7 +28,7 @@ struct Uniforms {
 
 struct App {
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     bind_group_layout: Option<BindGroupLayout>,
@@ -163,7 +163,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("RAG - Plasma Effect (Uniform Buffers)")
+                            .with_title("Goldy - Plasma Effect (Uniform Buffers)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
                     .unwrap(),
@@ -201,7 +201,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("RAG Plasma Example (Uniform Buffers) - Press Escape to exit");
+    println!("Goldy Plasma Example (Uniform Buffers) - Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;

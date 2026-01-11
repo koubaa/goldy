@@ -2,13 +2,13 @@
 //!
 //! These tests verify that bind groups work correctly with actual GPU rendering.
 
-use rag::{
+use goldy::{
     BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
     BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
     RenderPipelineDesc, RenderTarget, ShaderModule, ShaderStages, TextureFormat, Vertex2D,
 };
 
-fn create_device() -> Option<rag::Device> {
+fn create_device() -> Option<goldy::Device> {
     let instance = Instance::new().ok()?;
     instance.create_device(DeviceType::DiscreteGpu).ok()
         .or_else(|| {

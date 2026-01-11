@@ -1,6 +1,6 @@
 # Slang Shader Reference
 
-RAG uses [Slang](https://shader-slang.org/) as its sole shading language.
+Goldy uses [Slang](https://shader-slang.org/) as its sole shading language.
 
 ## Shader Structure
 

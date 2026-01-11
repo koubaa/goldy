@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 /// # Example
 ///
 /// ```rust,no_run
-/// # use rag::{RenderPipelineDesc, Surface, TextureFormat};
+/// # use goldy::{RenderPipelineDesc, Surface, TextureFormat};
 /// # fn example(surface: &Surface) {
 /// let desc = RenderPipelineDesc {
 ///     target_format: surface.format(), // Always match the target!

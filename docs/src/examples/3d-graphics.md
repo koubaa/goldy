@@ -1,6 +1,6 @@
 # 3D Graphics Examples
 
-RAG includes several examples demonstrating 3D rendering concepts.
+Goldy includes several examples demonstrating 3D rendering concepts.
 
 ---
 
@@ -83,7 +83,7 @@ let tunnel_angle = angle / 3.14159 + time * 0.2;
 
 ## Building Your Own 3D
 
-RAG provides the primitives for 3D rendering:
+Goldy provides the primitives for 3D rendering:
 
 1. **Vertex buffers** - Store transformed vertices
 2. **Line/triangle primitives** - Draw edges or faces
@@ -96,6 +96,6 @@ For complex 3D, you might:
 
 ## Full Source
 
-- `rag/examples/spinning_cube.rs`
-- `rag/examples/starfield.rs`
-- `rag/examples/tunnel.rs`
+- `goldy/examples/spinning_cube.rs`
+- `goldy/examples/starfield.rs`
+- `goldy/examples/tunnel.rs`

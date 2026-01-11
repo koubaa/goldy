@@ -1,13 +1,13 @@
-# RAG: Rust Abstract Graphics
+# Goldy: Modern GPU Library
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A modern Rust Graphics library that deliberately sheds legacy baggage. RAG targets only modern GPU APIs (Vulkan 1.4+, Metal 2+, DX12) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
+A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets only modern GPU APIs (Vulkan 1.3+, DX12, Metal) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
 
 ## Quick Example
 
 ```rust
-use rag::{Instance, DeviceType, Buffer, BufferUsage, Color, CommandEncoder, FrameOutput, TextureFormat};
+use goldy::{Instance, DeviceType, Buffer, BufferUsage, Color, CommandEncoder, FrameOutput, TextureFormat};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
@@ -30,9 +30,9 @@ fn main() -> anyhow::Result<()> {
 | Attribute | Description |
 |-----------|-------------|
 | **Rust-native** | Idiomatic Rust API, not a wrapper around C |
-| **Modern-only** | Vulkan 1.4+, Metal 2+, DX12 baseline |
+| **Modern-only** | Vulkan 1.3+, DX12, Metal baseline |
 | **Slang shaders** | Single shader language for all backends |
-| **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL |
+| **Legacy-free** | No OpenGL, no Vulkan <1.3, no OpenCL |
 | **Unified** | Graphics and compute in one API |
 | **Fast-moving** | Not a standard—can iterate quickly |
 | **WASI-ready** | Designed for sandboxed GPU access |
@@ -41,17 +41,17 @@ fn main() -> anyhow::Result<()> {
 
 ```toml
 [dependencies]
-rag = "0.1"
+goldy = "0.1"
 ```
 
 ## Documentation
 
-📖 **[Full Documentation](https://koubaa.github.io/rag/)**
+📖 **[Full Documentation](https://koubaa.github.io/goldy/)**
 
-- [Getting Started](https://koubaa.github.io/rag/getting-started/installation.html)
-- [Examples](https://koubaa.github.io/rag/examples/overview.html)
-- [API Reference](https://koubaa.github.io/rag/reference/api.html)
-- [Design Philosophy](https://koubaa.github.io/rag/design/motivation.html)
+- [Getting Started](https://koubaa.github.io/goldy/getting-started/installation.html)
+- [Examples](https://koubaa.github.io/goldy/examples/overview.html)
+- [API Reference](https://koubaa.github.io/goldy/reference/api.html)
+- [Design Philosophy](https://koubaa.github.io/goldy/design/motivation.html)
 
 ## Examples
 
@@ -66,29 +66,25 @@ cargo run --example starfield --release     # 3D starfield
 cargo run --example particles --release     # Rain/snow
 ```
 
-See [all 13 examples](https://koubaa.github.io/rag/examples/overview.html).
+See [all examples](https://koubaa.github.io/goldy/examples/overview.html).
 
 ## Motivation
 
-RAG is inspired by Sebastian Aaltonen's ["No Graphics API"](https://www.sebastianaaltonen.com/blog/no-graphics-api) vision of what's possible with modern GPU hardware. By targeting only modern GPUs (2018+), RAG can:
+Goldy is inspired by Sebastian Aaltonen's ["No Graphics API"](https://www.sebastianaaltonen.com/blog/no-graphics-api) vision of what's possible with modern GPU hardware. By targeting only modern GPUs (2018+), Goldy can:
 
 - Use dynamic rendering (no render pass objects)
 - Use bindless descriptors (no descriptor sets)
 - Assume coherent caches (simpler synchronization)
 - Provide a dramatically simpler API
 
-RAG is also inspired by Wayland
+Goldy is also inspired by:
+- Wayland's compositor architecture
+- Ralph Levien's ["Requiem for piet-gpu-hal"](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html)
+- Slang's vision for unified shader language
+- [WGPU](https://gfx-rs.github.io/2019/03/06/wgpu.html)
+- This paper on GPU abstractions: https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf
 
-RAG is also inspired by Ralph Levien's ["Requiem for piet-gpu-hal"](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html)
-
-RAG is also inspired by slang vision
-
-RAG is also inspired by WGPU https://gfx-rs.github.io/2019/03/06/wgpu.html
-
-RAG is also inspired by this paper: https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf
-
-
-Read more in [Design Philosophy](https://koubaa.github.io/rag/design/motivation.html).
+Read more in [Design Philosophy](https://koubaa.github.io/goldy/design/motivation.html).
 
 ## Target Hardware
 
@@ -109,4 +105,4 @@ Mohamed Koubaa
 
 ## Contributing
 
-Contributions welcome! See [CONTRIBUTING](https://koubaa.github.io/rag/contributing.html).
+Contributions welcome! See [CONTRIBUTING](https://koubaa.github.io/goldy/contributing.html).

@@ -2,7 +2,7 @@
 //!
 //! # Thread Safety
 //!
-//! RAG uses a single-threaded command submission model with lock-free command recording:
+//! Goldy uses a single-threaded command submission model with lock-free command recording:
 //!
 //! - **Command Recording**: [`CommandEncoder`](crate::CommandEncoder) is completely lock-free.
 //!   You can create and record commands on any thread without any synchronization.
@@ -29,7 +29,7 @@ use crate::types::*;
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 
-/// GPU instance - entry point for RAG.
+/// GPU instance - entry point for Goldy.
 ///
 /// Create an instance to enumerate adapters and create devices.
 pub struct Instance {
@@ -37,7 +37,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Create a new RAG instance.
+    /// Create a new Goldy instance.
     pub fn new() -> Result<Self> {
         let backend = backend::create_default_backend()?;
         Ok(Self {
@@ -195,7 +195,7 @@ impl Device {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use rag::{Instance, DeviceType};
+    /// use goldy::{Instance, DeviceType};
     ///
     /// let instance = Instance::new()?;
     /// let device = instance.create_device(DeviceType::DiscreteGpu)?;

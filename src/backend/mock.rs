@@ -130,7 +130,7 @@ impl MockBackend {
                 AdapterInfo {
                     id: 0,
                     name: "Mock GPU".to_string(),
-                    vendor: "RAG Test".to_string(),
+                    vendor: "Goldy Test".to_string(),
                     backend: BackendType::Vulkan, // Pretend to be Vulkan
                     device_type: DeviceType::DiscreteGpu,
                 }

@@ -31,7 +31,7 @@ impl<'a> std::fmt::Debug for ComputePipelineDesc<'a> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use rag::{Instance, DeviceType, ShaderModule, ComputePipeline, ComputePipelineDesc};
+/// use goldy::{Instance, DeviceType, ShaderModule, ComputePipeline, ComputePipelineDesc};
 ///
 /// let instance = Instance::new()?;
 /// let device = instance.create_device(DeviceType::DiscreteGpu)?;
@@ -98,7 +98,7 @@ impl Drop for ComputePipeline {
 /// # Example
 ///
 /// ```rust,no_run
-/// use rag::{Instance, DeviceType, ComputeEncoder};
+/// use goldy::{Instance, DeviceType, ComputeEncoder};
 ///
 /// let instance = Instance::new()?;
 /// let device = instance.create_device(DeviceType::DiscreteGpu)?;

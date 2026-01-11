@@ -1,11 +1,11 @@
 # Examples Overview
 
-RAG includes 20 examples demonstrating various GPU rendering techniques.
+Goldy includes 20 examples demonstrating various GPU rendering techniques.
 
 ## Running Examples
 
 ```bash
-cd rag
+cd goldy
 cargo run --example <name> --release
 ```
 
@@ -72,10 +72,10 @@ All examples support:
 
 ## Source Code
 
-All examples are in `rag/examples/`:
+All examples are in `goldy/examples/`:
 
 ```
-rag/examples/
+goldy/examples/
 ├── triangle.rs         # Basic triangle
 ├── window.rs           # Surface API basics
 ├── digital_clock.rs    # 7-segment clock
@@ -105,7 +105,7 @@ rag/examples/
 ```rust
 struct App {
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,

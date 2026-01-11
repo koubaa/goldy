@@ -1,4 +1,4 @@
-//! Common types used throughout RAG.
+//! Common types used throughout Goldy.
 
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};

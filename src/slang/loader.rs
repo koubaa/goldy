@@ -36,7 +36,7 @@ impl SlangLibrary {
     ///
     /// Search order:
     /// 1. RAG_SLANG_PATH environment variable
-    /// 2. Vendored binaries in rag/slang/bin/{platform}/
+    /// 2. Vendored binaries in goldy/slang/bin/{platform}/
     /// 3. Vulkan SDK (Windows only, for development)
     pub fn load() -> Result<Self> {
         let lib_path = Self::find_library()?;
@@ -129,7 +129,7 @@ impl SlangLibrary {
         anyhow::bail!(
             "Could not find Slang library. Options:\n\
              1. Set RAG_SLANG_PATH environment variable\n\
-             2. Run rag/slang/download.sh to fetch vendored binaries\n\
+             2. Run goldy/slang/download.sh to fetch vendored binaries\n\
              3. Install Vulkan SDK 1.3.296+ (Windows)"
         )
     }

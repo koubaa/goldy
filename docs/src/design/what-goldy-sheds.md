@@ -1,6 +1,6 @@
-# What RAG Sheds
+# What Goldy Sheds
 
-Because RAG targets **modern hardware only**, it can drop significant complexity that other libraries must maintain.
+Because Goldy targets **modern hardware only**, it can drop significant complexity that other libraries must maintain.
 
 ## From Vulkan Legacy
 
@@ -35,7 +35,7 @@ Because RAG targets **modern hardware only**, it can drop significant complexity
 
 ## What This Enables
 
-By dropping legacy support, RAG can assume:
+By dropping legacy support, Goldy can assume:
 
 ### 1. Coherent Caches
 No complex flush/invalidate patterns. Modern GPUs have coherent L2 caches that handle synchronization automatically.
@@ -44,7 +44,7 @@ No complex flush/invalidate patterns. Modern GPUs have coherent L2 caches that h
 Descriptors live in GPU memory. Shaders access resources by index:
 
 ```rust
-// RAG - resources are bindless
+// Goldy - resources are bindless
 let buffer = device.create_buffer(&desc)?;
 // Access in shader by index, no explicit binding
 ```
@@ -84,7 +84,7 @@ A typical Vulkan "hello triangle" requires:
 - Synchronization primitives
 - Drawing loop with acquire/present
 
-RAG's equivalent:
+Goldy's equivalent:
 
 ```rust
 let instance = Instance::new()?;
@@ -108,5 +108,6 @@ frame.render(encoder)?;
 surface.present(frame)?;
 ```
 
-That's it. No render passes, no framebuffers, no command pools, no explicit synchronization. RAG handles the complexity internally using modern GPU features.
+That's it. No render passes, no framebuffers, no command pools, no explicit synchronization. Goldy handles the complexity internally using modern GPU features.
+
 

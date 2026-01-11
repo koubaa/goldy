@@ -5,7 +5,7 @@ A `RenderPipeline` combines shaders with rendering configuration.
 ## Creating a Pipeline
 
 ```rust
-use rag::{RenderPipeline, RenderPipelineDesc, TextureFormat, PrimitiveTopology};
+use goldy::{RenderPipeline, RenderPipelineDesc, TextureFormat, PrimitiveTopology};
 
 let pipeline = RenderPipeline::new(
     &device,
@@ -187,7 +187,7 @@ In traditional APIs, pipeline state includes:
 - Culling mode
 - Polygon mode (fill/wireframe)
 
-RAG currently uses sensible defaults:
+Goldy currently uses sensible defaults:
 - Alpha blending disabled
 - No depth testing
 - No culling

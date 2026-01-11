@@ -7,7 +7,7 @@
 //!
 //! Run with: cargo run --example multi_window
 
-use rag::{
+use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
     VertexBufferLayout, VertexAttribute, VertexFormat,
@@ -118,7 +118,7 @@ const MAX_FRAMES_IN_FLIGHT: usize = 2;
 impl WindowState {
     fn new(
         window: Arc<Window>,
-        device: &Arc<rag::Device>,
+        device: &Arc<goldy::Device>,
         effect_type: EffectType,
     ) -> anyhow::Result<Self> {
         let surface = Surface::new(&device, window.as_ref())?;
@@ -188,7 +188,7 @@ impl WindowState {
         self.time_multiplier = 1.0;
     }
     
-    fn render(&mut self, device: &rag::Device) -> anyhow::Result<()> {
+    fn render(&mut self, device: &goldy::Device) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
@@ -235,7 +235,7 @@ impl WindowState {
 
 struct App {
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     windows: HashMap<WindowId, WindowState>,
     effects_to_create: Vec<EffectType>,
 }
@@ -259,7 +259,7 @@ impl App {
         let device = self.device.as_ref().unwrap().clone();
         
         let attrs = WindowAttributes::default()
-            .with_title(format!("RAG - {}", effect_type.title()))
+            .with_title(format!("Goldy - {}", effect_type.title()))
             .with_inner_size(LogicalSize::new(500, 500))
             .with_position(winit::dpi::LogicalPosition::new(position.0, position.1));
         
@@ -397,7 +397,7 @@ impl ApplicationHandler for App {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     
-    println!("RAG Multi-Window Example");
+    println!("Goldy Multi-Window Example");
     println!("========================");
     println!("Three windows, three effects, independent controls:");
     println!();

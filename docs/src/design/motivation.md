@@ -2,7 +2,7 @@
 
 ## The State of Graphics APIs in 2025
 
-The complexity of graphics APIs, shader frameworks, and drivers has increased  over the past decades. The pipeline state object (PSO) explosion has gotten out of hand. How did we end up with 100GB local shader pipeline caches and massive cloud rapidlyservers to host them?
+The complexity of graphics APIs, shader frameworks, and drivers has increased rapidly over the past decades. The pipeline state object (PSO) explosion has gotten out of hand. How did we end up with 100GB local shader pipeline caches and massive cloud servers to host them?
 
 Sebastian Aaltonen's blog post **["No Graphics API"](https://www.sebastianaaltonen.com/blog/no-graphics-api)** articulates this problem brilliantly:
 
@@ -39,9 +39,9 @@ The so-called modern APIs (DX12, Vulkan, Metal) carry significant historical bag
 - Complex platform/device enumeration
 - NDRange dispatch complexity
 
-## RAG's Answer
+## Goldy's Answer
 
-RAG takes the position that **we can do better by doing less**. By targeting only modern hardware (Vulkan 1.4+, Metal 2+, DX12), RAG can:
+Goldy takes the position that **we can do better by doing less**. By targeting only modern hardware (Vulkan 1.3+, DX12, Metal), Goldy can:
 
 1. **Drop compatibility complexity** - No fallback paths for 10-year-old GPUs
 2. **Use modern defaults** - Bindless, dynamic rendering, unified memory
@@ -54,9 +54,9 @@ From analysis of GPU abstraction history:
 
 > "Classic HAL failed by abstracting behavior AND cost. Modern approaches succeed by abstracting meaning and rules while exposing cost and reality."
 
-RAG follows this principle:
+Goldy follows this principle:
 
-| Abstract (RAG's job) | Expose (not RAG's job) |
+| Abstract (Goldy's job) | Expose (not Goldy's job) |
 |---------------------|------------------------|
 | Semantics (what operations mean) | Performance characteristics |
 | Safety guarantees | Optimal usage patterns |
@@ -67,20 +67,20 @@ RAG follows this principle:
 
 [wgpu](https://wgpu.rs/) is excellent and serves a different purpose:
 
-| Aspect | wgpu | RAG |
+| Aspect | wgpu | Goldy |
 |--------|------|-----|
 | **Identity** | WebGPU implementation for Rust | Modern Rust GPU library |
 | **Governance** | Bound by WebGPU spec committee | Independent, opinionated |
 | **Pace** | Moves at spec speed | Moves as fast as we want |
 | **Legacy** | Must support WebGPU's LCD | Assumes modern features |
 | **Metal** | Via WebGPU abstraction | Native Metal idioms |
-| **Vulkan** | Must work on 1.0+ | Requires 1.4+ |
+| **Vulkan** | Must work on 1.0+ | Requires 1.3+ |
 
-wgpu is the right choice for web compatibility and broad device support. RAG is for when you want simplicity and can require modern hardware.
+wgpu is the right choice for web compatibility and broad device support. Goldy is for when you want simplicity and can require modern hardware.
 
 ## Slang: One Shader Language
 
-RAG uses [Slang](https://shader-slang.org/) as its sole shading language. This is a deliberate choice:
+Goldy uses [Slang](https://shader-slang.org/) as its sole shading language. This is a deliberate choice:
 
 | Aspect | Benefit |
 |--------|---------|
@@ -89,11 +89,11 @@ RAG uses [Slang](https://shader-slang.org/) as its sole shading language. This i
 | **Modern features** | Modules, generics, automatic differentiation |
 | **Khronos governance** | Long-term stability and active development |
 
-Rather than supporting multiple shader languages (WGSL, GLSL, HLSL) and maintaining translation layers, RAG trusts Slang to handle cross-platform compilation. This keeps RAG's codebase simple while providing maximum portability.
+Rather than supporting multiple shader languages (WGSL, GLSL, HLSL) and maintaining translation layers, Goldy trusts Slang to handle cross-platform compilation. This keeps Goldy's codebase simple while providing maximum portability.
 
 ## Inspiration
 
-RAG draws inspiration from:
+Goldy draws inspiration from:
 
 - **Sebastian Aaltonen's "No Graphics API"** - The vision of what's possible with modern hardware
 - **Slang** - A modern shader language with cross-platform compilation
@@ -104,6 +104,6 @@ RAG draws inspiration from:
 ## Further Reading
 
 - [Sebastian Aaltonen: No Graphics API](https://www.sebastianaaltonen.com/blog/no-graphics-api) - Essential reading on modern GPU architecture
-- [What RAG Sheds](./what-rag-sheds.md) - Detailed breakdown of removed complexity
-- [RAG vs wgpu](./comparison.md) - When to use which
+- [What Goldy Sheds](./what-goldy-sheds.md) - Detailed breakdown of removed complexity
+- [Goldy vs wgpu](./comparison.md) - When to use which
 

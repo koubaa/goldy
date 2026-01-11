@@ -1,9 +1,9 @@
-# RAG: Rust Abstract GPU
+# Goldy: Modern Graphics Library
 
-**RAG** is a modern Rust GPU library that deliberately sheds legacy baggage. It targets only modern GPU APIs (Vulkan 1.4+, Metal 2+, DX12) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
+**Goldy** is a modern Rust GPU library that deliberately sheds legacy baggage. It targets only modern GPU APIs (Vulkan 1.3+, DX12, Metal) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
 
 ```rust
-use rag::{Instance, DeviceType, Color, CommandEncoder, Surface};
+use goldy::{Instance, DeviceType, Color, CommandEncoder, Surface};
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
@@ -33,13 +33,13 @@ fn main() -> anyhow::Result<()> {
 | Attribute | Description |
 |-----------|-------------|
 | **Rust-native** | Idiomatic Rust API, not a wrapper around C APIs |
-| **Modern-only** | Assumes Vulkan 1.4+, Metal 2+, DX12 baseline |
-| **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL baggage |
+| **Modern-only** | Assumes Vulkan 1.3+, DX12, Metal baseline |
+| **Legacy-free** | No OpenGL, no Vulkan <1.3, no OpenCL baggage |
 | **Unified** | Graphics and compute in one API |
 | **Fast-moving** | Not a standard—can iterate quickly |
 | **WASI-ready** | Can be exposed to WASM guests via WIT |
 
-## What RAG Is Not
+## What Goldy Is Not
 
 - **Not a Vulkan wrapper**: Each backend is native (Metal uses Metal idioms, not translated Vulkan)
 - **Not a WebGPU implementation**: Not bound by WebGPU spec committee
@@ -52,8 +52,8 @@ fn main() -> anyhow::Result<()> {
 - [Getting Started](./getting-started/installation.md)
 - [Examples](./examples/overview.md)
 - [Design Philosophy](./design/motivation.md)
-- [GitHub Repository](https://github.com/koubaa/rag)
+- [GitHub Repository](https://github.com/koubaa/goldy)
 
 ## License
 
-RAG is MIT licensed. See [License](./license.md) for details.
+Goldy is MIT licensed. See [License](./license.md) for details.

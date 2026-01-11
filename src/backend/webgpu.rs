@@ -122,7 +122,7 @@ impl WebGpuBackend {
             .adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    label: Some("RAG Device"),
+                    label: Some("Goldy Device"),
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
                     memory_hints: wgpu::MemoryHints::default(),
@@ -283,7 +283,7 @@ impl GpuBackend for WebGpuBackend {
         }
 
         let buffer = device.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("RAG Buffer"),
+            label: Some("Goldy Buffer"),
             size,
             usage: wgpu_usage | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -341,7 +341,7 @@ impl GpuBackend for WebGpuBackend {
             .context("Invalid WGSL output from Slang")?;
 
         let module = device.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RAG Shader"),
+            label: Some("Goldy Shader"),
             source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
         });
 
@@ -404,7 +404,7 @@ impl GpuBackend for WebGpuBackend {
             .collect();
 
         let layout = device.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("RAG Bind Group Layout"),
+            label: Some("Goldy Bind Group Layout"),
             entries: &wgpu_entries,
         });
 
@@ -451,7 +451,7 @@ impl GpuBackend for WebGpuBackend {
             .collect();
 
         let bind_group = device.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RAG Bind Group"),
+            label: Some("Goldy Bind Group"),
             layout: &layout.layout,
             entries: &wgpu_entries,
         });
@@ -518,7 +518,7 @@ impl GpuBackend for WebGpuBackend {
         let layout_refs: Vec<&wgpu::BindGroupLayout> = wgpu_layouts.iter().map(|l| *l).collect();
 
         let pipeline_layout = device.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("RAG Pipeline Layout"),
+            label: Some("Goldy Pipeline Layout"),
             bind_group_layouts: &layout_refs,
             push_constant_ranges: &[],
         });
@@ -541,7 +541,7 @@ impl GpuBackend for WebGpuBackend {
         };
 
         let pipeline = device.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("RAG Render Pipeline"),
+            label: Some("Goldy Render Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vs.module,

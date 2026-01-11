@@ -1,6 +1,6 @@
 # Understanding the API
 
-RAG's API is designed to be minimal and predictable. This page covers the core concepts.
+Goldy's API is designed to be minimal and predictable. This page covers the core concepts.
 
 ## Resource Ownership
 
@@ -95,7 +95,7 @@ let pixels = target.read_to_cpu()?;  // Only when needed
 
 ## Vertex Types
 
-RAG provides `Vertex2D` for simple cases:
+Goldy provides `Vertex2D` for simple cases:
 
 ```rust
 #[repr(C)]
@@ -150,7 +150,7 @@ Color { r: 0.5, g: 0.2, b: 0.8, a: 1.0 }
 
 ## Error Handling
 
-RAG uses `anyhow::Result` for most operations:
+Goldy uses `anyhow::Result` for most operations:
 
 ```rust
 fn setup() -> anyhow::Result<()> {
@@ -168,7 +168,7 @@ Common error cases:
 
 ## Coordinate System
 
-RAG uses normalized device coordinates (NDC):
+Goldy uses normalized device coordinates (NDC):
 
 ```
         +Y (1.0)

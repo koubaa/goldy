@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use rag::{Instance, DeviceType, Surface, TextureFormat, CommandEncoder, Color};
+//! use goldy::{Instance, DeviceType, Surface, TextureFormat, CommandEncoder, Color};
 //! use winit::window::Window;
 //!
 //! # fn example(window: &Window) -> anyhow::Result<()> {
@@ -168,7 +168,7 @@ impl Surface {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use rag::{Surface, RenderPipelineDesc};
+    /// # use goldy::{Surface, RenderPipelineDesc};
     /// # fn example(surface: &Surface) {
     /// let desc = RenderPipelineDesc {
     ///     target_format: surface.format(),
@@ -189,7 +189,7 @@ impl Surface {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use rag::{Surface, RenderPipelineDesc, TextureFormat};
+    /// # use goldy::{Surface, RenderPipelineDesc, TextureFormat};
     /// # fn example(surface: &Surface, desc: &RenderPipelineDesc) -> anyhow::Result<()> {
     /// surface.validate_pipeline_format(desc.target_format)?;
     /// # Ok(())

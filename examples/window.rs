@@ -4,7 +4,7 @@
 //!
 //! Run with: cargo run --example window
 
-use rag::{
+use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, Vertex2D,
     shader::builtins,
@@ -18,9 +18,9 @@ use winit::{
 };
 
 struct App {
-    // RAG resources
+    // Goldy resources
     instance: Instance,
-    device: Option<Arc<rag::Device>>,
+    device: Option<Arc<goldy::Device>>,
     vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
@@ -137,7 +137,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let attrs = Window::default_attributes()
-                .with_title("RAG - Window (Surface API)")
+                .with_title("Goldy - Window (Surface API)")
                 .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
             
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    println!("RAG Window Example (Surface API)");
+    println!("Goldy Window Example (Surface API)");
     println!("=================================");
     println!("Press Escape or close window to exit\n");
 

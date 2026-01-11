@@ -131,5 +131,5 @@ fn render_frame(&mut self) -> anyhow::Result<()> {
 
 ## Full Source
 
-See `rag/examples/digital_clock.rs` for the complete code.
+See `goldy/examples/digital_clock.rs` for the complete code.
 

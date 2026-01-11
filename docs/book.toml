@@ -1,7 +1,7 @@
 [book]
-title = "RAG - Rust Abstract GPU"
+title = "Goldy - Modern GPU Library"
 authors = ["Mohamed Koubaa"]
-description = "A modern Rust GPU library for Vulkan 1.4+, Metal 2+, and DX12"
+description = "A modern GPU library for Vulkan 1.3+, DX12, and Metal"
 language = "en"
 src = "src"
 
@@ -11,8 +11,8 @@ build-dir = "book"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/koubaa/rag"
-edit-url-template = "https://github.com/koubaa/rag/edit/main/docs/{path}"
+git-repository-url = "https://github.com/koubaa/goldy"
+edit-url-template = "https://github.com/koubaa/goldy/edit/main/docs/{path}"
 
 [output.html.fold]
 enable = true

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 /// # Example
 ///
 /// ```rust,no_run
-/// use rag::{Device, Sampler, SamplerDesc, FilterMode, AddressMode};
+/// use goldy::{Device, Sampler, SamplerDesc, FilterMode, AddressMode};
 ///
 /// fn create_sampler(device: &Device) -> anyhow::Result<Sampler> {
 ///     Sampler::new(device, &SamplerDesc {

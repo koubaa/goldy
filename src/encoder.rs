@@ -16,7 +16,7 @@ use crate::types::{Color, IndexFormat};
 /// # Example
 ///
 /// ```rust,no_run
-/// use rag::{CommandEncoder, Color};
+/// use goldy::{CommandEncoder, Color};
 ///
 /// let mut encoder = CommandEncoder::new();
 /// let mut pass = encoder.begin_render_pass();

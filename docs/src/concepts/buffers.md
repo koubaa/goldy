@@ -7,7 +7,7 @@ Buffers store data on the GPU - vertices, indices, uniform data, etc.
 ### With Initial Data
 
 ```rust
-use rag::{Buffer, BufferUsage};
+use goldy::{Buffer, BufferUsage};
 
 let vertices = [
     Vertex2D::new(0.0, -0.5, Color::RED),
@@ -115,7 +115,7 @@ let layout = VertexBufferLayout {
 
 ### Built-in Vertex2D
 
-RAG provides `Vertex2D` for common 2D rendering:
+Goldy provides `Vertex2D` for common 2D rendering:
 
 ```rust
 pub struct Vertex2D {

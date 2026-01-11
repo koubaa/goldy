@@ -7,7 +7,7 @@
 //! Run with: `cargo run --example compute_particles`
 
 use anyhow::Result;
-use rag::{
+use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder,
     ComputePipeline, ComputePipelineDesc, DeviceType, Instance,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
@@ -51,7 +51,7 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    device: Arc<rag::Device>,
+    device: Arc<goldy::Device>,
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
@@ -233,7 +233,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("RAG Compute Particles")
+                            .with_title("Goldy Compute Particles")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
                     .expect("Failed to create window"),

@@ -5,7 +5,7 @@
 use crate::types::{AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
 use ash::vk;
 
-/// Convert RAG TextureFormat to Vulkan format.
+/// Convert Goldy TextureFormat to Vulkan format.
 pub fn format_to_vk(format: TextureFormat) -> vk::Format {
     match format {
         TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
@@ -17,7 +17,7 @@ pub fn format_to_vk(format: TextureFormat) -> vk::Format {
     }
 }
 
-/// Convert RAG VertexFormat to Vulkan format.
+/// Convert Goldy VertexFormat to Vulkan format.
 pub fn vertex_format_to_vk(format: VertexFormat) -> vk::Format {
     match format {
         VertexFormat::Float32 => vk::Format::R32_SFLOAT,
@@ -31,7 +31,7 @@ pub fn vertex_format_to_vk(format: VertexFormat) -> vk::Format {
     }
 }
 
-/// Convert RAG PrimitiveTopology to Vulkan topology.
+/// Convert Goldy PrimitiveTopology to Vulkan topology.
 pub fn topology_to_vk(topology: PrimitiveTopology) -> vk::PrimitiveTopology {
     match topology {
         PrimitiveTopology::PointList => vk::PrimitiveTopology::POINT_LIST,
@@ -42,7 +42,7 @@ pub fn topology_to_vk(topology: PrimitiveTopology) -> vk::PrimitiveTopology {
     }
 }
 
-/// Convert RAG IndexFormat to Vulkan index type.
+/// Convert Goldy IndexFormat to Vulkan index type.
 pub fn index_format_to_vk(format: IndexFormat) -> vk::IndexType {
     match format {
         IndexFormat::Uint16 => vk::IndexType::UINT16,
@@ -50,7 +50,7 @@ pub fn index_format_to_vk(format: IndexFormat) -> vk::IndexType {
     }
 }
 
-/// Convert Vulkan format to RAG TextureFormat.
+/// Convert Vulkan format to Goldy TextureFormat.
 /// Returns None for unsupported formats.
 pub fn vk_to_format(format: vk::Format) -> Option<TextureFormat> {
     match format {
@@ -96,7 +96,7 @@ pub fn vendor_name(vendor_id: u32) -> &'static str {
     }
 }
 
-/// Map Vulkan physical device type to RAG DeviceType.
+/// Map Vulkan physical device type to Goldy DeviceType.
 pub fn device_type_from_vk(vk_type: vk::PhysicalDeviceType) -> crate::types::DeviceType {
     match vk_type {
         vk::PhysicalDeviceType::DISCRETE_GPU => crate::types::DeviceType::DiscreteGpu,
@@ -106,7 +106,7 @@ pub fn device_type_from_vk(vk_type: vk::PhysicalDeviceType) -> crate::types::Dev
     }
 }
 
-/// Convert RAG DepthFormat to Vulkan format.
+/// Convert Goldy DepthFormat to Vulkan format.
 pub fn depth_format_to_vk(format: DepthFormat) -> vk::Format {
     match format {
         DepthFormat::Depth16Unorm => vk::Format::D16_UNORM,
@@ -126,7 +126,7 @@ pub fn depth_aspect_mask(format: DepthFormat) -> vk::ImageAspectFlags {
     }
 }
 
-/// Convert RAG CompareFunction to Vulkan compare op.
+/// Convert Goldy CompareFunction to Vulkan compare op.
 pub fn compare_to_vk(compare: CompareFunction) -> vk::CompareOp {
     match compare {
         CompareFunction::Never => vk::CompareOp::NEVER,
@@ -140,7 +140,7 @@ pub fn compare_to_vk(compare: CompareFunction) -> vk::CompareOp {
     }
 }
 
-/// Convert RAG AddressMode to Vulkan sampler address mode.
+/// Convert Goldy AddressMode to Vulkan sampler address mode.
 pub fn address_mode_to_vk(mode: AddressMode) -> vk::SamplerAddressMode {
     match mode {
         AddressMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
@@ -149,7 +149,7 @@ pub fn address_mode_to_vk(mode: AddressMode) -> vk::SamplerAddressMode {
     }
 }
 
-/// Convert RAG FilterMode to Vulkan filter.
+/// Convert Goldy FilterMode to Vulkan filter.
 pub fn filter_to_vk(mode: FilterMode) -> vk::Filter {
     match mode {
         FilterMode::Nearest => vk::Filter::NEAREST,
@@ -157,7 +157,7 @@ pub fn filter_to_vk(mode: FilterMode) -> vk::Filter {
     }
 }
 
-/// Convert RAG FilterMode to Vulkan sampler mipmap mode.
+/// Convert Goldy FilterMode to Vulkan sampler mipmap mode.
 pub fn mipmap_mode_to_vk(mode: FilterMode) -> vk::SamplerMipmapMode {
     match mode {
         FilterMode::Nearest => vk::SamplerMipmapMode::NEAREST,

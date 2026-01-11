@@ -128,5 +128,5 @@ let b = 0.5 + v * 0.5;
 
 ## Full Source
 
-See `rag/examples/plasma.rs` for the complete code.
+See `goldy/examples/plasma.rs` for the complete code.
 
