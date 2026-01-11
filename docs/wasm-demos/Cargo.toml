@@ -1,9 +1,9 @@
 [package]
-name = "rag-web"
+name = "rag-docs-wasm"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "WebGPU backend for RAG - runs in browsers"
+description = "WASM demos for RAG documentation - internal tooling"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,7 +13,7 @@ wasm-opt = false  # Don't optimize vendored slang-wasm.wasm in output dir
 
 [dependencies]
 # RAG core library (for shared examples)
-rag = { path = "..", default-features = false }
+rag = { path = "../..", default-features = false }
 
 # WebGPU via wgpu (supports web target)
 wgpu = { version = "24.0", features = ["webgpu"] }

@@ -1,14 +1,14 @@
-//! 3D Starfield - flying forward through space
+//! Demoscene tunnel effect
 //!
 //! Requires Slang shader compiled via slang-wasm in JavaScript.
-//! The compiled shader is passed to create_starfield_demo().
+//! The compiled shader is passed to create_tunnel_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
 #[wasm_bindgen]
-pub struct StarfieldDemo {
+pub struct TunnelDemo {
     renderer: WebRenderer,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -17,9 +17,9 @@ pub struct StarfieldDemo {
     start_time: f64,
 }
 
-/// Create starfield demo with Slang-compiled shader from JavaScript
+/// Create tunnel demo with Slang-compiled shader from JavaScript
 #[wasm_bindgen]
-pub async fn create_starfield_demo(canvas_id: &str, compiled_shader: &str) -> Result<StarfieldDemo, JsValue> {
+pub async fn create_tunnel_demo(canvas_id: &str, compiled_shader: &str) -> Result<TunnelDemo, JsValue> {
     init();
     
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
@@ -30,7 +30,7 @@ pub async fn create_starfield_demo(canvas_id: &str, compiled_shader: &str) -> Re
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Starfield Shader"),
+        label: Some("Tunnel Shader"),
         source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
@@ -77,7 +77,7 @@ pub async fn create_starfield_demo(canvas_id: &str, compiled_shader: &str) -> Re
     });
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Starfield Pipeline"),
+        label: Some("Tunnel Pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -105,7 +105,7 @@ pub async fn create_starfield_demo(canvas_id: &str, compiled_shader: &str) -> Re
     let window = web_sys::window().unwrap();
     let start_time = window.performance().unwrap().now();
 
-    Ok(StarfieldDemo {
+    Ok(TunnelDemo {
         renderer,
         pipeline,
         vertex_buffer,
@@ -116,7 +116,7 @@ pub async fn create_starfield_demo(canvas_id: &str, compiled_shader: &str) -> Re
 }
 
 #[wasm_bindgen]
-impl StarfieldDemo {
+impl TunnelDemo {
     #[wasm_bindgen]
     pub fn render(&self) -> Result<(), JsValue> {
         let window = web_sys::window().unwrap();
@@ -166,3 +166,4 @@ impl StarfieldDemo {
         Ok(())
     }
 }
+

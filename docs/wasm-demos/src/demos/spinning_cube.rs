@@ -1,35 +1,25 @@
-//! Particle rain/snow demo with toggle
+//! Spinning 3D wireframe cube
 //!
 //! Requires Slang shader compiled via slang-wasm in JavaScript.
-//! The compiled shader is passed to create_particles_demo().
+//! The compiled shader is passed to create_spinning_cube_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Params {
-    time: f32,
-    is_snow: f32,
-    _pad1: f32,
-    _pad2: f32,
-}
-
 #[wasm_bindgen]
-pub struct ParticlesDemo {
+pub struct SpinningCubeDemo {
     renderer: WebRenderer,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
-    params_buffer: wgpu::Buffer,
+    time_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     start_time: f64,
-    is_snow: bool,
 }
 
-/// Create particles demo with Slang-compiled shader from JavaScript
+/// Create spinning cube demo with Slang-compiled shader from JavaScript
 #[wasm_bindgen]
-pub async fn create_particles_demo(canvas_id: &str, compiled_shader: &str) -> Result<ParticlesDemo, JsValue> {
+pub async fn create_spinning_cube_demo(canvas_id: &str, compiled_shader: &str) -> Result<SpinningCubeDemo, JsValue> {
     init();
     
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
@@ -40,12 +30,12 @@ pub async fn create_particles_demo(canvas_id: &str, compiled_shader: &str) -> Re
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Particles Shader"),
+        label: Some("Cube Shader"),
         source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
-    let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Params Buffer"),
+    let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Time Buffer"),
         size: 16,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -76,7 +66,7 @@ pub async fn create_particles_demo(canvas_id: &str, compiled_shader: &str) -> Re
         layout: &bind_group_layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
-            resource: params_buffer.as_entire_binding(),
+            resource: time_buffer.as_entire_binding(),
         }],
     });
 
@@ -87,7 +77,7 @@ pub async fn create_particles_demo(canvas_id: &str, compiled_shader: &str) -> Re
     });
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Particles Pipeline"),
+        label: Some("Cube Pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -115,41 +105,28 @@ pub async fn create_particles_demo(canvas_id: &str, compiled_shader: &str) -> Re
     let window = web_sys::window().unwrap();
     let start_time = window.performance().unwrap().now();
 
-    Ok(ParticlesDemo {
+    Ok(SpinningCubeDemo {
         renderer,
         pipeline,
         vertex_buffer,
-        params_buffer,
+        time_buffer,
         bind_group,
         start_time,
-        is_snow: false,
     })
 }
 
 #[wasm_bindgen]
-impl ParticlesDemo {
-    #[wasm_bindgen]
-    pub fn toggle_mode(&mut self) {
-        self.is_snow = !self.is_snow;
-    }
-
+impl SpinningCubeDemo {
     #[wasm_bindgen]
     pub fn render(&self) -> Result<(), JsValue> {
         let window = web_sys::window().unwrap();
         let now = window.performance().unwrap().now();
         let time = ((now - self.start_time) / 1000.0) as f32;
 
-        let params = Params {
-            time,
-            is_snow: if self.is_snow { 1.0 } else { 0.0 },
-            _pad1: 0.0,
-            _pad2: 0.0,
-        };
-
         self.renderer.queue().write_buffer(
-            &self.params_buffer,
+            &self.time_buffer,
             0,
-            bytemuck::cast_slice(&[params]),
+            bytemuck::cast_slice(&[time]),
         );
 
         let output = self.renderer.get_current_texture()
@@ -189,3 +166,4 @@ impl ParticlesDemo {
         Ok(())
     }
 }
+

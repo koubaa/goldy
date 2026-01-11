@@ -1,4 +1,4 @@
-//! Rendering utilities for rag-web
+//! Rendering utilities for documentation demos
 
 use wgpu::util::DeviceExt;
 use crate::types::*;

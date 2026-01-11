@@ -7,8 +7,8 @@ RAG uses a backend abstraction that allows different GPU APIs while maintaining 
 | Backend | Status | Platforms |
 |---------|--------|-----------|
 | Vulkan | ✅ Implemented | Windows, Linux, (macOS via MoltenVK) |
-| Metal | 🔜 Planned | macOS, iOS |
-| DX12 | 🔜 Planned | Windows |
+| DX12 | ✅ Implemented | Windows |
+| Metal | 🔜 Stub (planned) | macOS, iOS |
 
 ## Backend Independence
 
@@ -36,6 +36,17 @@ Each backend uses **native idioms**, not translation:
 ```
 
 **Key point**: MoltenVK must translate Vulkan → Metal, adding complexity. RAG's Metal backend would use Metal directly.
+
+## Interactive Documentation Demos
+
+The interactive demos embedded in this documentation use WebGPU via wgpu.
+This is **NOT a RAG backend** - it's separate tooling that:
+
+- Imports shared code from RAG (shaders, vertex types)
+- Compiles Slang shaders to WGSL via slang-wasm in the browser
+- Validates shader portability across native and web platforms
+
+RAG does not target web browsers as a platform. The demos exist purely to make the documentation interactive and to validate that the same Slang shader source works across platforms.
 
 ## Vulkan Backend
 
@@ -78,6 +89,14 @@ Direct memory access in shaders:
 // Traditional: buffer bindings
 // RAG: 64-bit pointers
 ```
+
+## DX12 Backend
+
+The DX12 backend provides native Windows support using the `windows` crate:
+
+- **Root signatures** for resource binding
+- **Descriptor heaps** for efficient resource management
+- **Shader compilation** via Slang → DXIL
 
 ## Backend Trait
 
@@ -126,21 +145,20 @@ The backend maps these to native handles internally.
 
 ## Backend Selection
 
-Currently, the Vulkan backend is always used:
+Backend selection based on platform:
 
 ```rust
 impl Instance {
     pub fn new() -> Result<Self> {
-        let backend = VulkanBackend::new()?;
+        #[cfg(windows)]
+        let backend = Dx12Backend::new()?;  // DX12 on Windows
+        
+        #[cfg(not(windows))]
+        let backend = VulkanBackend::new()?; // Vulkan elsewhere
+        
         Ok(Self { backend: Box::new(backend) })
     }
 }
-```
-
-Future versions will support backend selection:
-
-```rust
-let instance = Instance::with_backend(BackendType::Metal)?;
 ```
 
 ## Adding a New Backend
@@ -183,4 +201,3 @@ Translation layers (like MoltenVK) have overhead:
 4. **Validation** - Extra validation layer
 
 Native backends can use each API's strengths directly.
-

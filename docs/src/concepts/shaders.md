@@ -3,9 +3,9 @@
 RAG uses [Slang](https://shader-slang.org/) as its sole shading language. Slang is compiled to:
 
 - **SPIR-V** for Vulkan
-- **WGSL** for WebGPU
-- **HLSL** for DirectX (future)
+- **DXIL/HLSL** for DirectX 12
 - **MSL** for Metal (future)
+- **WGSL** for documentation demos (via slang-wasm)
 
 ## Why Slang?
 

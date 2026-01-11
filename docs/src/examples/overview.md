@@ -1,6 +1,6 @@
 # Examples Overview
 
-RAG includes 14 interactive examples demonstrating various GPU rendering techniques. Many are available as interactive WebGPU demos embedded in these docs!
+RAG includes 20 interactive examples demonstrating various GPU rendering techniques. Many are available as interactive WebGPU demos embedded in these docs!
 
 <div class="rag-demo" data-canvas="gradient-canvas" data-demo="GradientDemo">
     <canvas id="gradient-canvas"></canvas>
@@ -56,27 +56,52 @@ All examples support:
 | `waveform` | Audio waveform visualizer | Line strips, multiple draw calls |
 | `instancing` | 400 rotating quads | Many objects, HSV colors |
 
+### 3D Graphics
+
+| Example | Description | Key Concepts |
+|---------|-------------|--------------|
+| `solid_cube` | Solid 3D cube | 3D rendering, depth buffer |
+| `textured_quad` | Textured 2D quad | Texture loading, samplers |
+
+### Compute
+
+| Example | Description | Key Concepts |
+|---------|-------------|--------------|
+| `compute_particles` | GPU-accelerated particles | Compute shaders, storage buffers |
+| `game_of_life` | Conway's Game of Life | Compute pipeline, ping-pong buffers |
+
+### Advanced
+
+| Example | Description | Key Concepts |
+|---------|-------------|--------------|
+| `multi_window` | Multiple windows | Multiple surfaces, window management |
+
 ## Source Code
 
 All examples are in `rag/examples/`:
 
 ```
 rag/examples/
-├── triangle.rs        # Basic triangle
-├── window.rs          # Surface API basics
-├── digital_clock.rs   # 7-segment clock
-├── gradient.rs        # Animated gradient
-├── plasma.rs          # Plasma effect
-├── tunnel.rs          # Tunnel effect
-├── starfield.rs       # 3D starfield
-├── mandelbrot.rs      # Fractal explorer
-├── bouncing_lines.rs  # Physics lines
-├── spinning_cube.rs   # 3D wireframe
-├── metaballs.rs       # Blob effect
-├── checkerboard.rs    # Procedural texture
-├── instancing.rs      # Many quads
-├── particles.rs       # Rain/snow
-└── waveform.rs        # Audio visualizer
+├── triangle.rs         # Basic triangle
+├── window.rs           # Surface API basics
+├── digital_clock.rs    # 7-segment clock
+├── gradient.rs         # Animated gradient
+├── plasma.rs           # Plasma effect
+├── tunnel.rs           # Tunnel effect
+├── starfield.rs        # 3D starfield
+├── mandelbrot.rs       # Fractal explorer
+├── bouncing_lines.rs   # Physics lines
+├── spinning_cube.rs    # 3D wireframe
+├── metaballs.rs        # Blob effect
+├── checkerboard.rs     # Procedural texture
+├── instancing.rs       # Many quads
+├── particles.rs        # Rain/snow
+├── waveform.rs         # Audio visualizer
+├── solid_cube.rs       # Solid 3D cube
+├── textured_quad.rs    # Textured quad
+├── compute_particles.rs# GPU particles
+├── game_of_life.rs     # Cellular automaton
+└── multi_window.rs     # Multiple windows
 ```
 
 ## Common Patterns

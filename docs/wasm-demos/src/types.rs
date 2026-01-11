@@ -1,4 +1,4 @@
-//! Common types for rag-web
+//! Common types for documentation demos
 //!
 //! These types mirror rag::types but include wgpu-specific implementations.
 //! The data layouts match, allowing interop when needed.
@@ -79,3 +79,4 @@ pub const FULLSCREEN_QUAD: [Vertex2D; 6] = [
     Vertex2D { position: [1.0, 1.0], uv: [1.0, 0.0] },
     Vertex2D { position: [-1.0, 1.0], uv: [0.0, 0.0] },
 ];
+

@@ -192,3 +192,4 @@ impl DigitalClockDemo {
         self.clock_state.next_color();
     }
 }
+

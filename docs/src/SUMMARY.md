@@ -42,7 +42,7 @@
 # Reference
 
 - [API Reference](./reference/api.md)
-- [Shader Language (WGSL)](./reference/shaders.md)
+- [Shader Language (Slang)](./reference/shaders.md)
 
 ---
 

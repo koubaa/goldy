@@ -1,25 +1,35 @@
-//! Animated gradient demo
+//! Particle rain/snow demo with toggle
 //!
 //! Requires Slang shader compiled via slang-wasm in JavaScript.
-//! The compiled shader is passed to create_gradient_demo().
+//! The compiled shader is passed to create_particles_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Params {
+    time: f32,
+    is_snow: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
 #[wasm_bindgen]
-pub struct GradientDemo {
+pub struct ParticlesDemo {
     renderer: WebRenderer,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
-    time_buffer: wgpu::Buffer,
+    params_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     start_time: f64,
+    is_snow: bool,
 }
 
-/// Create gradient demo with Slang-compiled shader from JavaScript
+/// Create particles demo with Slang-compiled shader from JavaScript
 #[wasm_bindgen]
-pub async fn create_gradient_demo(canvas_id: &str, compiled_shader: &str) -> Result<GradientDemo, JsValue> {
+pub async fn create_particles_demo(canvas_id: &str, compiled_shader: &str) -> Result<ParticlesDemo, JsValue> {
     init();
     
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
@@ -30,12 +40,12 @@ pub async fn create_gradient_demo(canvas_id: &str, compiled_shader: &str) -> Res
     let format = renderer.format();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Gradient Shader"),
+        label: Some("Particles Shader"),
         source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
-    let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Time Buffer"),
+    let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Params Buffer"),
         size: 16,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -66,7 +76,7 @@ pub async fn create_gradient_demo(canvas_id: &str, compiled_shader: &str) -> Res
         layout: &bind_group_layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
-            resource: time_buffer.as_entire_binding(),
+            resource: params_buffer.as_entire_binding(),
         }],
     });
 
@@ -77,7 +87,7 @@ pub async fn create_gradient_demo(canvas_id: &str, compiled_shader: &str) -> Res
     });
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Gradient Pipeline"),
+        label: Some("Particles Pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -105,28 +115,41 @@ pub async fn create_gradient_demo(canvas_id: &str, compiled_shader: &str) -> Res
     let window = web_sys::window().unwrap();
     let start_time = window.performance().unwrap().now();
 
-    Ok(GradientDemo {
+    Ok(ParticlesDemo {
         renderer,
         pipeline,
         vertex_buffer,
-        time_buffer,
+        params_buffer,
         bind_group,
         start_time,
+        is_snow: false,
     })
 }
 
 #[wasm_bindgen]
-impl GradientDemo {
+impl ParticlesDemo {
+    #[wasm_bindgen]
+    pub fn toggle_mode(&mut self) {
+        self.is_snow = !self.is_snow;
+    }
+
     #[wasm_bindgen]
     pub fn render(&self) -> Result<(), JsValue> {
         let window = web_sys::window().unwrap();
         let now = window.performance().unwrap().now();
         let time = ((now - self.start_time) / 1000.0) as f32;
 
+        let params = Params {
+            time,
+            is_snow: if self.is_snow { 1.0 } else { 0.0 },
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+
         self.renderer.queue().write_buffer(
-            &self.time_buffer,
+            &self.params_buffer,
             0,
-            bytemuck::cast_slice(&[time]),
+            bytemuck::cast_slice(&[params]),
         );
 
         let output = self.renderer.get_current_texture()
@@ -166,3 +189,4 @@ impl GradientDemo {
         Ok(())
     }
 }
+

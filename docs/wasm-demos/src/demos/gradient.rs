@@ -1,15 +1,14 @@
-//! Plasma effect demo - exported to JavaScript
+//! Animated gradient demo
 //!
 //! Requires Slang shader compiled via slang-wasm in JavaScript.
-//! The compiled shader is passed to create_plasma_demo().
+//! The compiled shader is passed to create_gradient_demo().
 
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 use crate::{WebRenderer, get_canvas, init, types};
 
-/// Plasma demo - exported to JavaScript
 #[wasm_bindgen]
-pub struct PlasmaDemo {
+pub struct GradientDemo {
     renderer: WebRenderer,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -18,9 +17,9 @@ pub struct PlasmaDemo {
     start_time: f64,
 }
 
-/// Create a new plasma demo with Slang-compiled shader from JavaScript
+/// Create gradient demo with Slang-compiled shader from JavaScript
 #[wasm_bindgen]
-pub async fn create_plasma_demo(canvas_id: &str, compiled_shader: &str) -> Result<PlasmaDemo, JsValue> {
+pub async fn create_gradient_demo(canvas_id: &str, compiled_shader: &str) -> Result<GradientDemo, JsValue> {
     init();
     
     let canvas = get_canvas(canvas_id).map_err(|e| e.as_string().unwrap_or_default())?;
@@ -30,13 +29,11 @@ pub async fn create_plasma_demo(canvas_id: &str, compiled_shader: &str) -> Resul
     let device = renderer.device();
     let format = renderer.format();
 
-    // Create shader from Slang-compiled source
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Plasma Shader"),
+        label: Some("Gradient Shader"),
         source: wgpu::ShaderSource::Wgsl(compiled_shader.into()),
     });
 
-    // Create time uniform buffer
     let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Time Buffer"),
         size: 16,
@@ -44,7 +41,12 @@ pub async fn create_plasma_demo(canvas_id: &str, compiled_shader: &str) -> Resul
         mapped_at_creation: false,
     });
 
-    // Bind group layout
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Vertex Buffer"),
+        contents: bytemuck::cast_slice(&types::FULLSCREEN_QUAD),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Bind Group Layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -68,23 +70,14 @@ pub async fn create_plasma_demo(canvas_id: &str, compiled_shader: &str) -> Resul
         }],
     });
 
-    // Pipeline layout
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Pipeline Layout"),
         bind_group_layouts: &[&bind_group_layout],
         push_constant_ranges: &[],
     });
 
-    // Create vertex buffer
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Vertex Buffer"),
-        contents: bytemuck::cast_slice(&types::FULLSCREEN_QUAD),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-
-    // Create pipeline
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Plasma Pipeline"),
+        label: Some("Gradient Pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -112,7 +105,7 @@ pub async fn create_plasma_demo(canvas_id: &str, compiled_shader: &str) -> Resul
     let window = web_sys::window().unwrap();
     let start_time = window.performance().unwrap().now();
 
-    Ok(PlasmaDemo {
+    Ok(GradientDemo {
         renderer,
         pipeline,
         vertex_buffer,
@@ -123,15 +116,13 @@ pub async fn create_plasma_demo(canvas_id: &str, compiled_shader: &str) -> Resul
 }
 
 #[wasm_bindgen]
-impl PlasmaDemo {
-    /// Render one frame
+impl GradientDemo {
     #[wasm_bindgen]
     pub fn render(&self) -> Result<(), JsValue> {
         let window = web_sys::window().unwrap();
         let now = window.performance().unwrap().now();
         let time = ((now - self.start_time) / 1000.0) as f32;
 
-        // Update time uniform
         self.renderer.queue().write_buffer(
             &self.time_buffer,
             0,
@@ -175,3 +166,4 @@ impl PlasmaDemo {
         Ok(())
     }
 }
+

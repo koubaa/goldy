@@ -1,7 +1,8 @@
-//! RAG-Web: WebGPU backend for RAG
+//! RAG Documentation WASM Demos
 //!
-//! This crate provides a browser-compatible implementation of RAG
-//! using the WebGPU API.
+//! Internal tooling for interactive demos in the RAG documentation.
+//! This is NOT a RAG backend - it uses wgpu directly for WebGPU rendering
+//! and imports shared code (shaders, vertex types) from the rag crate.
 //!
 //! ## Slang Shader Sources
 //!
