@@ -56,7 +56,7 @@ impl CompiledShader {
             ShaderTarget::Spirv => None,
         }
     }
-    
+
     /// Get the data as SPIR-V words (for Vulkan).
     pub fn as_spirv(&self) -> Option<&[u32]> {
         if self.target == ShaderTarget::Spirv && self.data.len() % 4 == 0 {
@@ -83,18 +83,18 @@ impl SlangCompiler {
     /// Create a new Slang compiler instance.
     pub fn new() -> Result<Self> {
         let library = Arc::new(SlangLibrary::load()?);
-        
+
         // Create global session
         let session = unsafe { (library.create_session)(ptr::null()) };
         if session.is_null() {
             anyhow::bail!("Failed to create Slang session");
         }
-        
+
         tracing::info!("Slang compiler initialized");
-        
+
         Ok(Self { library, session })
     }
-    
+
     /// Compile Slang source code to the specified target.
     ///
     /// Compiles a single entry point. For shaders with both vertex and fragment,
@@ -103,7 +103,7 @@ impl SlangCompiler {
         // When no entry point is specified, compile all detected entry points
         self.compile_entry_point(source, target, None)
     }
-    
+
     /// Compile a specific entry point to the specified target.
     pub fn compile_entry_point(
         &self,
@@ -117,7 +117,7 @@ impl SlangCompiler {
         };
         self.compile_with_entry_points(source, target, &entry_points)
     }
-    
+
     /// Compile with explicit entry points.
     ///
     /// If `entry_points` is empty, entry points are detected from shader attributes.
@@ -129,7 +129,7 @@ impl SlangCompiler {
     ) -> Result<CompiledShader> {
         self.compile_with_options(source, target, entry_points, &[])
     }
-    
+
     /// Compile with explicit entry points and search paths.
     ///
     /// Search paths are used to resolve `import` statements in Slang modules.
@@ -146,12 +146,12 @@ impl SlangCompiler {
         if request.is_null() {
             anyhow::bail!("Failed to create Slang compile request");
         }
-        
+
         // Ensure cleanup on all paths
         let _guard = scopeguard::guard(request, |req| {
             unsafe { (self.library.destroy_compile_request)(req) };
         });
-        
+
         // Add search paths for module resolution
         for path in search_paths {
             let path_cstr = CString::new(*path).context("Search path contains null bytes")?;
@@ -159,15 +159,14 @@ impl SlangCompiler {
                 (self.library.add_search_path)(request, path_cstr.as_ptr());
             }
         }
-        
+
         // Add target
-        let target_index = unsafe {
-            (self.library.add_code_gen_target)(request, target.to_slang_target() as i32)
-        };
+        let target_index =
+            unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
         if target_index < 0 {
             anyhow::bail!("Failed to add code generation target");
         }
-        
+
         // Add translation unit (the source file)
         let unit_name = CString::new("shader").unwrap();
         let translation_unit = unsafe {
@@ -180,7 +179,7 @@ impl SlangCompiler {
         if translation_unit < 0 {
             anyhow::bail!("Failed to add translation unit");
         }
-        
+
         // Add source code
         let source_path = CString::new("shader.slang").unwrap();
         let source_cstr = CString::new(source).context("Source contains null bytes")?;
@@ -192,7 +191,7 @@ impl SlangCompiler {
                 source_cstr.as_ptr(),
             );
         }
-        
+
         // Add explicit entry points if provided
         for (name, stage) in entry_points {
             let name_cstr = CString::new(*name).context("Entry point name contains null bytes")?;
@@ -208,7 +207,7 @@ impl SlangCompiler {
                 anyhow::bail!("Failed to add entry point: {}", name);
             }
         }
-        
+
         // Compile
         let result = unsafe { (self.library.compile)(request) };
         if !slang_succeeded(result) {
@@ -223,25 +222,25 @@ impl SlangCompiler {
             };
             anyhow::bail!("Slang compilation failed:\n{}", diagnostic);
         }
-        
+
         // Get output code for each entry point and combine
         // For now, get the first entry point's code
         let mut blob: *mut ISlangBlob = ptr::null_mut();
         let result = unsafe {
             (self.library.get_entry_point_code_blob)(request, 0, target_index, &mut blob)
         };
-        
+
         if !slang_succeeded(result) || blob.is_null() {
             anyhow::bail!("Failed to get compiled shader code");
         }
-        
+
         // Copy data from blob
         let (data_ptr, data_size) = unsafe { blob_get_data(blob) };
         let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
-        
+
         // Release blob
         unsafe { blob_release(blob) };
-        
+
         Ok(CompiledShader { data, target })
     }
 }
@@ -260,7 +259,8 @@ impl Drop for SlangCompiler {
 ///
 /// **Deprecated**: Each VulkanBackend now owns its own SlangCompiler to avoid
 /// test isolation issues. This global remains for backward compatibility.
-static GLOBAL_COMPILER: std::sync::OnceLock<Result<SlangCompiler, String>> = std::sync::OnceLock::new();
+static GLOBAL_COMPILER: std::sync::OnceLock<Result<SlangCompiler, String>> =
+    std::sync::OnceLock::new();
 
 /// Get or create the global Slang compiler.
 ///
@@ -274,4 +274,3 @@ pub fn global_compiler() -> Result<&'static SlangCompiler> {
         .as_ref()
         .map_err(|e| anyhow::anyhow!("{}", e))
 }
-

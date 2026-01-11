@@ -5,9 +5,8 @@
 //! Run with: cargo run --example spinning_cube
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D, PrimitiveTopology,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -33,9 +32,18 @@ const CUBE_VERTICES: [[f32; 3]; 8] = [
 
 // Edges of the cube (pairs of vertex indices)
 const CUBE_EDGES: [[usize; 2]; 12] = [
-    [0, 1], [1, 2], [2, 3], [3, 0], // Front face
-    [4, 5], [5, 6], [6, 7], [7, 4], // Back face
-    [0, 4], [1, 5], [2, 6], [3, 7], // Connecting edges
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0], // Front face
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4], // Back face
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7], // Connecting edges
 ];
 
 fn rotate_y(p: [f32; 3], angle: f32) -> [f32; 3] {
@@ -71,8 +79,11 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
-            device: None, pipeline: None, shader: None,
-            window: None, surface: None,
+            device: None,
+            pipeline: None,
+            shader: None,
+            window: None,
+            surface: None,
             start_time: Instant::now(),
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
@@ -82,12 +93,17 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            topology: PrimitiveTopology::LineList,
-            ..Default::default()
-        })?;
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: surface.format(),
+                topology: PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+        )?;
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -98,7 +114,9 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 { return Ok(()); }
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
 
         let time = self.start_time.elapsed().as_secs_f32();
 
@@ -113,7 +131,7 @@ impl App {
         for edge in &CUBE_EDGES {
             let p1 = project(transformed[edge[0]], 2.0);
             let p2 = project(transformed[edge[1]], 2.0);
-            
+
             // Color based on depth (average Z of the two points)
             let z1 = transformed[edge[0]][2];
             let z2 = transformed[edge[1]][2];
@@ -139,11 +157,16 @@ impl App {
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
-        
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color { r: 0.02, g: 0.02, b: 0.05, a: 1.0 });
+            pass.clear(Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.05,
+                a: 1.0,
+            });
             pass.set_pipeline(pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
             pass.draw(0..vertices.len() as u32, 0..1);
@@ -167,11 +190,15 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let window = Arc::new(event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Goldy - Spinning Cube (Surface API)")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 800))
-            ).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Spinning Cube (Surface API)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
             window.request_redraw();
@@ -182,7 +209,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { event_loop.exit(); }
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {

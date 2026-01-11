@@ -12,12 +12,12 @@ mod types;
 mod utils;
 
 use types::*;
-use utils::{format_to_vk, index_format_to_vk, vertex_format_to_vk, topology_to_vk};
+use utils::{format_to_vk, index_format_to_vk, topology_to_vk, vertex_format_to_vk};
 
 use super::*;
 use crate::types::Color;
 use anyhow::{Context, Result};
-use ash::{vk, khr};
+use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::CStr;
 
@@ -25,7 +25,7 @@ use std::ffi::CStr;
 use raw_window_handle::RawWindowHandle;
 
 #[cfg(target_os = "linux")]
-use raw_window_handle::{RawWindowHandle, RawDisplayHandle};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// Vulkan backend.
 pub struct VulkanBackend {
@@ -88,18 +88,18 @@ impl VulkanBackend {
             .api_version(vk::API_VERSION_1_3);
 
         // Surface extensions for windowed presentation
-        let mut extensions: Vec<*const i8> = vec![
-            khr::surface::NAME.as_ptr(),
-        ];
-        
+        let mut extensions: Vec<*const i8> = vec![khr::surface::NAME.as_ptr()];
+
         #[cfg(target_os = "windows")]
         extensions.push(khr::win32_surface::NAME.as_ptr());
-        
+
         #[cfg(target_os = "linux")]
         extensions.push(khr::wayland_surface::NAME.as_ptr());
 
         // Enable validation layers if RAG_VALIDATION=1
-        let enable_validation = std::env::var("RAG_VALIDATION").map(|v| v == "1").unwrap_or(false);
+        let enable_validation = std::env::var("RAG_VALIDATION")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let validation_layers: Vec<*const i8> = if enable_validation {
             tracing::info!("Vulkan validation layers ENABLED");
             extensions.push(ash::ext::debug_utils::NAME.as_ptr());
@@ -115,7 +115,7 @@ impl VulkanBackend {
 
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .context("Failed to create Vulkan instance")?;
-        
+
         if enable_validation {
             tracing::info!("Vulkan instance created with validation layers");
         }
@@ -149,8 +149,8 @@ impl VulkanBackend {
         }
 
         // Create per-backend Slang compiler (avoids global state issues)
-        let slang_compiler = crate::slang::SlangCompiler::new()
-            .context("Failed to create Slang compiler")?;
+        let slang_compiler =
+            crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
         Ok(Self {
             entry,
@@ -198,7 +198,8 @@ impl VulkanBackend {
         window: &dyn raw_window_handle::HasWindowHandle,
         _display: &dyn raw_window_handle::HasDisplayHandle,
     ) -> Result<vk::SurfaceKHR> {
-        let window_handle = window.window_handle()
+        let window_handle = window
+            .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
 
         #[cfg(target_os = "windows")]
@@ -207,13 +208,10 @@ impl VulkanBackend {
                 RawWindowHandle::Win32(h) => {
                     let create_info = vk::Win32SurfaceCreateInfoKHR::default()
                         .hwnd(h.hwnd.get() as isize)
-                        .hinstance(
-                            h.hinstance
-                                .map(|i| i.get() as isize)
-                                .unwrap_or(0)
-                        );
+                        .hinstance(h.hinstance.map(|i| i.get() as isize).unwrap_or(0));
 
-                    let win32_surface = khr::win32_surface::Instance::new(&self.entry, &self.instance);
+                    let win32_surface =
+                        khr::win32_surface::Instance::new(&self.entry, &self.instance);
                     unsafe { win32_surface.create_win32_surface(&create_info, None) }
                         .context("Failed to create Win32 surface")
                 }
@@ -223,7 +221,8 @@ impl VulkanBackend {
 
         #[cfg(target_os = "linux")]
         {
-            let display_handle = _display.display_handle()
+            let display_handle = _display
+                .display_handle()
                 .map_err(|e| anyhow::anyhow!("Failed to get display handle: {:?}", e))?;
 
             match (window_handle.as_raw(), display_handle.as_raw()) {
@@ -232,29 +231,36 @@ impl VulkanBackend {
                         .display(d.display.as_ptr())
                         .surface(w.surface.as_ptr());
 
-                    let wayland_surface = khr::wayland_surface::Instance::new(&self.entry, &self.instance);
+                    let wayland_surface =
+                        khr::wayland_surface::Instance::new(&self.entry, &self.instance);
                     unsafe { wayland_surface.create_wayland_surface(&create_info, None) }
                         .context("Failed to create Wayland surface")
                 }
-                _ => anyhow::bail!("Expected Wayland window/display handles on Linux (X11 not supported)"),
+                _ => anyhow::bail!(
+                    "Expected Wayland window/display handles on Linux (X11 not supported)"
+                ),
             }
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
-            anyhow::bail!("Surface creation not supported on this platform - use Metal backend on macOS")
+            anyhow::bail!(
+                "Surface creation not supported on this platform - use Metal backend on macOS"
+            )
         }
     }
-    
+
     /// Compile a shader for a specific stage on demand.
     fn ensure_shader_stage_compiled(
         &mut self,
         shader_handle: ShaderHandle,
         stage: crate::slang::SlangStage,
     ) -> Result<vk::ShaderModule> {
-        let shader = self.shaders.get_mut(&shader_handle)
+        let shader = self
+            .shaders
+            .get_mut(&shader_handle)
             .context("Invalid shader handle")?;
-        
+
         // Check if already compiled for this stage
         let cached_module = match stage {
             crate::slang::SlangStage::Vertex => shader.vertex_module,
@@ -262,11 +268,11 @@ impl VulkanBackend {
             crate::slang::SlangStage::Compute => shader.compute_module,
             _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
         };
-        
+
         if let Some(module) = cached_module {
             return Ok(module);
         }
-        
+
         // Get the entry point name based on stage
         let entry_point_name = match stage {
             crate::slang::SlangStage::Vertex => "vs_main",
@@ -274,34 +280,46 @@ impl VulkanBackend {
             crate::slang::SlangStage::Compute => "cs_main",
             _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
         };
-        
+
         // Clone source and search paths to avoid borrow issues
         let slang_source = shader.slang_source.clone();
         let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
         let device_handle = shader.device_handle;
-        
+
         // Compile with per-backend Slang compiler (avoids global state issues)
-        let compiled = self.slang_compiler.compile_with_options(
-            &slang_source,
-            crate::slang::ShaderTarget::Spirv,
-            &[(entry_point_name, stage)],
-            &search_paths,
-        ).with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
-        
-        let spirv = compiled.as_spirv()
-            .context("Invalid SPIR-V output")?;
-        
+        let compiled = self
+            .slang_compiler
+            .compile_with_options(
+                &slang_source,
+                crate::slang::ShaderTarget::Spirv,
+                &[(entry_point_name, stage)],
+                &search_paths,
+            )
+            .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
+
+        let spirv = compiled.as_spirv().context("Invalid SPIR-V output")?;
+
         // Get device
-        let logical_device = self.devices.get(&device_handle)
+        let logical_device = self
+            .devices
+            .get(&device_handle)
             .context("Shader's device no longer valid")?;
-        
+
         // Create Vulkan shader module
         let create_info = vk::ShaderModuleCreateInfo::default().code(spirv);
-        let module = unsafe { logical_device.device.create_shader_module(&create_info, None) }
-            .context("Failed to create Vulkan shader module")?;
-        
-        tracing::debug!("Compiled {} ({} SPIR-V words)", entry_point_name, spirv.len());
-        
+        let module = unsafe {
+            logical_device
+                .device
+                .create_shader_module(&create_info, None)
+        }
+        .context("Failed to create Vulkan shader module")?;
+
+        tracing::debug!(
+            "Compiled {} ({} SPIR-V words)",
+            entry_point_name,
+            spirv.len()
+        );
+
         // Cache the module - need to re-get shader as mutable
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         match stage {
@@ -310,7 +328,7 @@ impl VulkanBackend {
             crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
             _ => {} // Already validated above, shouldn't reach here
         }
-        
+
         Ok(module)
     }
 }
@@ -334,4 +352,3 @@ impl Drop for VulkanBackend {
 // Include the GpuBackend implementation from the old file
 // This is kept inline for now but could be further modularized
 include!("impl_gpu_backend.rs");
-

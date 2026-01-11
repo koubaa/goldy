@@ -32,9 +32,9 @@
 //! device.register_library(my_lib)?;
 //! ```
 
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
-use anyhow::{Context, Result};
 
 /// A shader library containing reusable Slang modules.
 ///
@@ -89,7 +89,7 @@ impl ShaderLibrary {
             modules,
         }
     }
-    
+
     /// Create a library from multiple embedded source strings.
     ///
     /// Use this for libraries with multiple modules (primary + sub-modules).
@@ -115,7 +115,7 @@ impl ShaderLibrary {
             modules,
         }
     }
-    
+
     /// Create a library from a directory on the filesystem.
     ///
     /// Scans the directory for `.slang` files and includes them as modules.
@@ -142,30 +142,35 @@ impl ShaderLibrary {
     /// ```
     pub fn from_directory(name: &str, path: &Path) -> Result<Self> {
         let mut modules = HashMap::new();
-        
+
         // Read primary module
         let primary_path = path.join(format!("{}.slang", name));
-        let primary_source = std::fs::read_to_string(&primary_path)
-            .with_context(|| format!("Failed to read primary module: {}", primary_path.display()))?;
+        let primary_source = std::fs::read_to_string(&primary_path).with_context(|| {
+            format!("Failed to read primary module: {}", primary_path.display())
+        })?;
         modules.insert(name.to_string(), primary_source);
-        
+
         // Read sub-modules from subdirectory
         let subdir = path.join(name);
         if subdir.is_dir() {
             Self::read_submodules(&mut modules, name, &subdir)?;
         }
-        
+
         Ok(Self {
             name: name.to_string(),
             modules,
         })
     }
-    
-    fn read_submodules(modules: &mut HashMap<String, String>, prefix: &str, dir: &Path) -> Result<()> {
+
+    fn read_submodules(
+        modules: &mut HashMap<String, String>,
+        prefix: &str,
+        dir: &Path,
+    ) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_file() && path.extension().map_or(false, |e| e == "slang") {
                 let stem = path.file_stem().unwrap().to_string_lossy();
                 let module_name = format!("{}/{}", prefix, stem);
@@ -181,27 +186,27 @@ impl ShaderLibrary {
         }
         Ok(())
     }
-    
+
     /// Get the library name.
     pub fn name(&self) -> &str {
         &self.name
     }
-    
+
     /// Get all module sources in this library.
     pub fn modules(&self) -> &HashMap<String, String> {
         &self.modules
     }
-    
+
     /// Get source for a specific module path.
     pub fn get_module(&self, path: &str) -> Option<&str> {
         self.modules.get(path).map(|s| s.as_str())
     }
-    
+
     /// Check if this library contains a module.
     pub fn has_module(&self, path: &str) -> bool {
         self.modules.contains_key(path)
     }
-    
+
     /// The built-in Goldy shader library (experimental).
     ///
     /// **⚠️ EXPERIMENTAL**: This library's API is unstable and may change
@@ -230,85 +235,99 @@ impl ShaderLibrary {
     /// }
     /// ```
     pub fn goldy_experimental() -> Self {
-        Self::from_embedded("goldy_exp", &[
-            ("goldy_exp", include_str!("../shaders/goldy_exp.slang")),
-            ("goldy_exp/math", include_str!("../shaders/goldy_exp/math.slang")),
-            ("goldy_exp/color", include_str!("../shaders/goldy_exp/color.slang")),
-            ("goldy_exp/vertex", include_str!("../shaders/goldy_exp/vertex.slang")),
-        ])
+        Self::from_embedded(
+            "goldy_exp",
+            &[
+                ("goldy_exp", include_str!("../shaders/goldy_exp.slang")),
+                (
+                    "goldy_exp/math",
+                    include_str!("../shaders/goldy_exp/math.slang"),
+                ),
+                (
+                    "goldy_exp/color",
+                    include_str!("../shaders/goldy_exp/color.slang"),
+                ),
+                (
+                    "goldy_exp/vertex",
+                    include_str!("../shaders/goldy_exp/vertex.slang"),
+                ),
+            ],
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_from_source_creates_single_module() {
         let lib = ShaderLibrary::from_source("test", "module test; void foo() {}");
-        
+
         assert_eq!(lib.name(), "test");
         assert_eq!(lib.modules().len(), 1);
         assert!(lib.has_module("test"));
         assert!(!lib.has_module("other"));
     }
-    
+
     #[test]
     fn test_from_embedded_creates_multiple_modules() {
-        let lib = ShaderLibrary::from_embedded("mylib", &[
-            ("mylib", "module mylib;"),
-            ("mylib/sub", "implementing mylib;"),
-        ]);
-        
+        let lib = ShaderLibrary::from_embedded(
+            "mylib",
+            &[
+                ("mylib", "module mylib;"),
+                ("mylib/sub", "implementing mylib;"),
+            ],
+        );
+
         assert_eq!(lib.name(), "mylib");
         assert_eq!(lib.modules().len(), 2);
         assert!(lib.has_module("mylib"));
         assert!(lib.has_module("mylib/sub"));
     }
-    
+
     #[test]
     fn test_get_module_returns_source() {
         let lib = ShaderLibrary::from_source("test", "module test; float x = 1.0;");
-        
+
         let source = lib.get_module("test").unwrap();
         assert!(source.contains("float x = 1.0"));
     }
-    
+
     #[test]
     fn test_get_module_returns_none_for_missing() {
         let lib = ShaderLibrary::from_source("test", "module test;");
-        
+
         assert!(lib.get_module("nonexistent").is_none());
     }
-    
+
     #[test]
     fn test_goldy_library_has_expected_modules() {
         let lib = ShaderLibrary::goldy_experimental();
-        
+
         assert_eq!(lib.name(), "goldy_exp");
         assert!(lib.has_module("goldy_exp"));
         assert!(lib.has_module("goldy_exp/math"));
         assert!(lib.has_module("goldy_exp/color"));
         assert!(lib.has_module("goldy_exp/vertex"));
     }
-    
+
     #[test]
     fn test_goldy_library_modules_are_valid() {
         let lib = ShaderLibrary::goldy_experimental();
-        
+
         // Primary module should have module declaration
         let primary = lib.get_module("goldy_exp").unwrap();
         assert!(primary.contains("module goldy_exp;"));
-        
+
         // Sub-modules should have implementing declaration
         let math = lib.get_module("goldy_exp/math").unwrap();
         assert!(math.contains("implementing goldy_exp;"));
-        
+
         let color = lib.get_module("goldy_exp/color").unwrap();
         assert!(color.contains("implementing goldy_exp;"));
-        
+
         let vertex = lib.get_module("goldy_exp/vertex").unwrap();
         assert!(vertex.contains("implementing goldy_exp;"));
     }
 }
-

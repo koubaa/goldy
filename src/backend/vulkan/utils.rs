@@ -2,7 +2,10 @@
 //!
 //! Format conversions and memory helpers.
 
-use crate::types::{AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, TextureFormat, VertexFormat, PrimitiveTopology};
+use crate::types::{
+    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
+    TextureFormat, VertexFormat,
+};
 use ash::vk;
 
 /// Convert Goldy TextureFormat to Vulkan format.
@@ -166,4 +169,3 @@ pub fn mipmap_mode_to_vk(mode: FilterMode) -> vk::SamplerMipmapMode {
         FilterMode::Linear => vk::SamplerMipmapMode::LINEAR,
     }
 }
-

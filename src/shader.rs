@@ -81,7 +81,7 @@ impl ShaderModule {
     pub fn from_slang(device: &Device, source: &str) -> Result<Self> {
         Self::from_slang_with_paths(device, source, &[])
     }
-    
+
     /// Create a shader module with additional search paths.
     ///
     /// This is useful when your shaders also need to access modules from
@@ -101,23 +101,28 @@ impl ShaderModule {
     ///     &["my_project/shaders"],
     /// )?;
     /// ```
-    pub fn from_slang_with_paths(device: &Device, source: &str, extra_paths: &[&str]) -> Result<Self> {
+    pub fn from_slang_with_paths(
+        device: &Device,
+        source: &str,
+        extra_paths: &[&str],
+    ) -> Result<Self> {
         // Get search paths from registered libraries
-        let library_paths = device.get_shader_search_paths()
+        let library_paths = device
+            .get_shader_search_paths()
             .context("Failed to prepare shader library paths")?;
-        
+
         // Combine library paths with extra paths
         let all_paths: Vec<String> = library_paths
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .chain(extra_paths.iter().map(|s| s.to_string()))
             .collect();
-        
+
         let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
-        
+
         let mut backend = device.backend.lock().unwrap();
         let handle = backend.create_shader_with_paths(device.handle, source, &path_refs)?;
-        
+
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,

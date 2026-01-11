@@ -3,7 +3,7 @@
 //! This module provides shared types and utilities that work across
 //! both native (Vulkan) and web (WebGPU) platforms.
 
-use crate::types::{VertexBufferLayout, VertexAttribute, VertexFormat};
+use crate::types::{VertexAttribute, VertexBufferLayout, VertexFormat};
 use bytemuck::{Pod, Zeroable};
 
 /// Vertex with 2D position and UV coordinates.
@@ -45,12 +45,30 @@ impl VertexUv {
 
 /// Fullscreen quad vertices (two triangles, CCW winding)
 pub const FULLSCREEN_QUAD: [VertexUv; 6] = [
-    VertexUv { position: [-1.0, -1.0], uv: [0.0, 1.0] },
-    VertexUv { position: [1.0, -1.0], uv: [1.0, 1.0] },
-    VertexUv { position: [1.0, 1.0], uv: [1.0, 0.0] },
-    VertexUv { position: [-1.0, -1.0], uv: [0.0, 1.0] },
-    VertexUv { position: [1.0, 1.0], uv: [1.0, 0.0] },
-    VertexUv { position: [-1.0, 1.0], uv: [0.0, 0.0] },
+    VertexUv {
+        position: [-1.0, -1.0],
+        uv: [0.0, 1.0],
+    },
+    VertexUv {
+        position: [1.0, -1.0],
+        uv: [1.0, 1.0],
+    },
+    VertexUv {
+        position: [1.0, 1.0],
+        uv: [1.0, 0.0],
+    },
+    VertexUv {
+        position: [-1.0, -1.0],
+        uv: [0.0, 1.0],
+    },
+    VertexUv {
+        position: [1.0, 1.0],
+        uv: [1.0, 0.0],
+    },
+    VertexUv {
+        position: [-1.0, 1.0],
+        uv: [0.0, 0.0],
+    },
 ];
 
 /// Vertex with 2D position, UV, and time.
@@ -135,11 +153,23 @@ mod tests {
     #[test]
     fn test_fullscreen_quad_coverage() {
         // Verify the quad covers the entire NDC space
-        let min_x = FULLSCREEN_QUAD.iter().map(|v| v.position[0]).fold(f32::INFINITY, f32::min);
-        let max_x = FULLSCREEN_QUAD.iter().map(|v| v.position[0]).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = FULLSCREEN_QUAD.iter().map(|v| v.position[1]).fold(f32::INFINITY, f32::min);
-        let max_y = FULLSCREEN_QUAD.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
-        
+        let min_x = FULLSCREEN_QUAD
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = FULLSCREEN_QUAD
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = FULLSCREEN_QUAD
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = FULLSCREEN_QUAD
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+
         assert_eq!(min_x, -1.0);
         assert_eq!(max_x, 1.0);
         assert_eq!(min_y, -1.0);
@@ -150,13 +180,12 @@ mod tests {
     fn test_create_fullscreen_quad_with_time() {
         let time = 1.5;
         let quad = create_fullscreen_quad_with_time(time);
-        
+
         assert_eq!(quad.len(), 6);
-        
+
         // All vertices should have the same time
         for v in &quad {
             assert_eq!(v.time, time);
         }
     }
 }
-

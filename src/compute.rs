@@ -1,6 +1,6 @@
 //! Compute pipeline and pass management.
 
-use crate::backend::{ComputeCommand, ComputePipelineHandle, GpuBackend, BindGroupLayoutHandle};
+use crate::backend::{BindGroupLayoutHandle, ComputeCommand, ComputePipelineHandle, GpuBackend};
 use crate::bind_group::{BindGroup, BindGroupLayout};
 use crate::device::Device;
 use crate::shader::ShaderModule;
@@ -62,14 +62,11 @@ impl ComputePipeline {
         desc: &ComputePipelineDesc,
     ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
-        
+
         // Collect bind group layout handles
-        let layout_handles: Vec<BindGroupLayoutHandle> = desc
-            .bind_group_layouts
-            .iter()
-            .map(|l| l.handle)
-            .collect();
-        
+        let layout_handles: Vec<BindGroupLayoutHandle> =
+            desc.bind_group_layouts.iter().map(|l| l.handle).collect();
+
         let handle = backend.create_compute_pipeline(
             device.handle,
             compute_shader.handle,
@@ -158,7 +155,9 @@ pub struct ComputePass<'a> {
 impl<'a> ComputePass<'a> {
     /// Set the active compute pipeline.
     pub fn set_pipeline(&mut self, pipeline: &ComputePipeline) {
-        self.encoder.commands.push(ComputeCommand::SetPipeline(pipeline.handle));
+        self.encoder
+            .commands
+            .push(ComputeCommand::SetPipeline(pipeline.handle));
     }
 
     /// Set a bind group for shader resources (uniforms, storage buffers).
@@ -216,10 +215,14 @@ mod tests {
             pass.dispatch(4, 2, 1);
         }
         let commands = encoder.finish();
-        
+
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            ComputeCommand::Dispatch { workgroups_x, workgroups_y, workgroups_z } => {
+            ComputeCommand::Dispatch {
+                workgroups_x,
+                workgroups_y,
+                workgroups_z,
+            } => {
                 assert_eq!(*workgroups_x, 4);
                 assert_eq!(*workgroups_y, 2);
                 assert_eq!(*workgroups_z, 1);
@@ -238,11 +241,10 @@ mod tests {
             pass.dispatch(256, 1, 1);
         }
         let commands = encoder.finish();
-        
+
         assert_eq!(commands.len(), 3);
         assert!(matches!(&commands[0], ComputeCommand::Dispatch { .. }));
         assert!(matches!(&commands[1], ComputeCommand::Dispatch { .. }));
         assert!(matches!(&commands[2], ComputeCommand::Dispatch { .. }));
     }
 }
-
