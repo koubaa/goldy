@@ -50,7 +50,7 @@ windows = { version = "0.61", optional = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 gpu-allocator = { version = "0.27", optional = true, features = ["d3d12"] }
-windows-core = { version = "0.61", optional = true }
+windows-core = { version = "0.62", optional = true }
 
 # Metal dependencies (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]
