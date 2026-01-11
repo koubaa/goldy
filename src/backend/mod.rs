@@ -51,6 +51,7 @@ pub type DeviceHandle = u64;
 pub type BufferHandle = u64;
 pub type ShaderHandle = u64;
 pub type PipelineHandle = u64;
+pub type ComputePipelineHandle = u64;
 pub type BindGroupHandle = u64;
 pub type BindGroupLayoutHandle = u64;
 pub type RenderTargetHandle = u64;
@@ -89,6 +90,21 @@ pub enum RenderCommand {
         /// Offset added to each index value before fetching the vertex.
         base_vertex: i32,
         first_instance: u32,
+    },
+}
+
+/// Compute command for compute pass recording.
+#[derive(Debug, Clone)]
+pub enum ComputeCommand {
+    /// Set the active compute pipeline.
+    SetPipeline(ComputePipelineHandle),
+    /// Set a bind group.
+    SetBindGroup { index: u32, bind_group: BindGroupHandle },
+    /// Dispatch compute workgroups.
+    Dispatch {
+        workgroups_x: u32,
+        workgroups_y: u32,
+        workgroups_z: u32,
     },
 }
 
@@ -212,6 +228,22 @@ pub trait GpuBackend: Send + Sync {
     /// Get the texture format used by a surface's swapchain.
     /// Use this to ensure your render pipeline matches the surface format.
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat;
+
+    // Compute pipeline management
+    /// Create a compute pipeline from a compute shader.
+    fn create_compute_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        compute_shader: ShaderHandle,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+    ) -> Result<ComputePipelineHandle>;
+
+    /// Destroy a compute pipeline.
+    fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle);
+
+    /// Execute compute commands.
+    /// This submits compute work to the GPU and waits for completion.
+    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand]) -> Result<()>;
 }
 
 /// Bind group layout entry.
@@ -229,7 +261,8 @@ pub struct ShaderStages(pub u32);
 impl ShaderStages {
     pub const VERTEX: ShaderStages = ShaderStages(1);
     pub const FRAGMENT: ShaderStages = ShaderStages(2);
-    pub const ALL: ShaderStages = ShaderStages(3);
+    pub const COMPUTE: ShaderStages = ShaderStages(4);
+    pub const ALL: ShaderStages = ShaderStages(7); // VERTEX | FRAGMENT | COMPUTE
 }
 
 /// Binding type for bind groups.

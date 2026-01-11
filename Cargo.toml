@@ -134,3 +134,11 @@ path = "examples/tunnel.rs"
 name = "multi_window"
 path = "examples/multi_window.rs"
 
+[[example]]
+name = "compute_particles"
+path = "examples/compute_particles.rs"
+
+[[example]]
+name = "game_of_life"
+path = "examples/game_of_life.rs"
+

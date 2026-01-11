@@ -371,6 +371,7 @@ impl GpuBackend for VulkanBackend {
                 slang_source: slang_source.to_string(),
                 vertex_module: None,
                 fragment_module: None,
+                compute_module: None,
             },
         );
 
@@ -1165,6 +1166,8 @@ impl GpuBackend for VulkanBackend {
             .get(&device_handle)
             .context("Invalid device handle")?;
 
+        // Build binding types map and layout bindings
+        let mut binding_types = std::collections::HashMap::new();
         let bindings: Vec<_> = entries
             .iter()
             .map(|e| {
@@ -1172,6 +1175,8 @@ impl GpuBackend for VulkanBackend {
                     vk::ShaderStageFlags::ALL_GRAPHICS
                 } else if e.visibility.0 & ShaderStages::VERTEX.0 != 0 {
                     vk::ShaderStageFlags::VERTEX
+                } else if e.visibility.0 & ShaderStages::COMPUTE.0 != 0 {
+                    vk::ShaderStageFlags::COMPUTE
                 } else {
                     vk::ShaderStageFlags::FRAGMENT
                 };
@@ -1183,6 +1188,9 @@ impl GpuBackend for VulkanBackend {
                     BindingType::Sampler => vk::DescriptorType::SAMPLER,
                     BindingType::StorageTexture => vk::DescriptorType::STORAGE_IMAGE,
                 };
+
+                // Store the descriptor type for use in create_bind_group
+                binding_types.insert(e.binding, descriptor_type);
 
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(e.binding)
@@ -1204,6 +1212,7 @@ impl GpuBackend for VulkanBackend {
         self.bind_group_layouts.insert(handle, BindGroupLayoutState {
             device_handle,
             layout,
+            binding_types,
         });
 
         Ok(handle)
@@ -1219,6 +1228,10 @@ impl GpuBackend for VulkanBackend {
             .bind_group_layouts
             .get(&layout_handle)
             .context("Invalid bind group layout handle")?;
+
+        // Clone what we need before the borrow ends
+        let layout = layout_state.layout;
+        let binding_types = layout_state.binding_types.clone();
 
         // Create a descriptor pool for this bind group
         let pool_sizes = [
@@ -1249,7 +1262,7 @@ impl GpuBackend for VulkanBackend {
         // Allocate descriptor set
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
-            .set_layouts(std::slice::from_ref(&layout_state.layout));
+            .set_layouts(std::slice::from_ref(&layout));
 
         let descriptor_sets = unsafe { logical_device.device.allocate_descriptor_sets(&alloc_info) }
             .context("Failed to allocate descriptor set")?;
@@ -1281,11 +1294,17 @@ impl GpuBackend for VulkanBackend {
             .iter()
             .enumerate()
             .map(|(idx, (binding, _, _, _))| {
+                // Look up the correct descriptor type from the layout
+                let descriptor_type = binding_types
+                    .get(binding)
+                    .copied()
+                    .unwrap_or(vk::DescriptorType::UNIFORM_BUFFER);
+                
                 vk::WriteDescriptorSet::default()
                     .dst_set(descriptor_set)
                     .dst_binding(*binding)
                     .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_type(descriptor_type)
                     .buffer_info(std::slice::from_ref(&vk_buffer_infos[idx]))
             })
             .collect();
@@ -2794,6 +2813,162 @@ impl GpuBackend for VulkanBackend {
                 }
             }
         }
+    }
+
+    fn create_compute_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        compute_shader: ShaderHandle,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+    ) -> Result<ComputePipelineHandle> {
+        // Compile shader on-demand
+        let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
+
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Collect descriptor set layouts
+        let vk_layouts: Vec<_> = bind_group_layouts
+            .iter()
+            .filter_map(|h| self.bind_group_layouts.get(h).map(|s| s.layout))
+            .collect();
+
+        // Create pipeline layout
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&vk_layouts);
+
+        let pipeline_layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+            .context("Failed to create compute pipeline layout")?;
+
+        // Compute shader stage
+        let cs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(cs_module)
+            .name(c"main");
+
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(cs_stage)
+            .layout(pipeline_layout);
+
+        let pipelines = unsafe {
+            logical_device.device.create_compute_pipelines(
+                vk::PipelineCache::null(),
+                &[pipeline_info],
+                None,
+            )
+        }
+        .map_err(|(_, e)| anyhow::anyhow!("Failed to create compute pipeline: {:?}", e))?;
+
+        let handle = self.next_compute_pipeline_handle;
+        self.next_compute_pipeline_handle += 1;
+
+        self.compute_pipelines.insert(handle, ComputePipelineState {
+            device_handle,
+            pipeline: pipelines[0],
+            layout: pipeline_layout,
+        });
+
+        tracing::debug!("Created compute pipeline (handle={})", handle);
+        Ok(handle)
+    }
+
+    fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
+        if let Some(pipeline) = self.compute_pipelines.remove(&pipeline_handle) {
+            if let Some(logical_device) = self.devices.get(&pipeline.device_handle) {
+                unsafe {
+                    logical_device.device.device_wait_idle().ok();
+                    logical_device.device.destroy_pipeline(pipeline.pipeline, None);
+                    logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
+                }
+            }
+        }
+    }
+
+    fn dispatch_compute(&mut self, device_handle: DeviceHandle, commands: &[ComputeCommand]) -> Result<()> {
+        let logical_device = self.devices.get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Allocate command buffer
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(logical_device.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+            .context("Failed to allocate command buffer")?;
+        let cmd = cmd_buffers[0];
+
+        // Begin command buffer
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
+            .context("Failed to begin command buffer")?;
+
+        // Track current pipeline for bind group binding
+        let mut current_pipeline_layout: Option<vk::PipelineLayout> = None;
+
+        // Process commands
+        for command in commands {
+            match command {
+                ComputeCommand::SetPipeline(handle) => {
+                    if let Some(pipeline_state) = self.compute_pipelines.get(handle) {
+                        unsafe {
+                            logical_device.device.cmd_bind_pipeline(
+                                cmd,
+                                vk::PipelineBindPoint::COMPUTE,
+                                pipeline_state.pipeline,
+                            );
+                        }
+                        current_pipeline_layout = Some(pipeline_state.layout);
+                    }
+                }
+                ComputeCommand::SetBindGroup { index, bind_group } => {
+                    if let (Some(layout), Some(bg)) = (current_pipeline_layout, self.bind_groups.get(bind_group)) {
+                        unsafe {
+                            logical_device.device.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::COMPUTE,
+                                layout,
+                                *index,
+                                &[bg.descriptor_set],
+                                &[],
+                            );
+                        }
+                    }
+                }
+                ComputeCommand::Dispatch { workgroups_x, workgroups_y, workgroups_z } => {
+                    unsafe {
+                        logical_device.device.cmd_dispatch(cmd, *workgroups_x, *workgroups_y, *workgroups_z);
+                    }
+                }
+            }
+        }
+
+        // End command buffer
+        unsafe { logical_device.device.end_command_buffer(cmd) }
+            .context("Failed to end command buffer")?;
+
+        // Submit and wait
+        let cmd_buffers = [cmd];
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(&cmd_buffers);
+
+        unsafe {
+            logical_device.device.queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+                .context("Failed to submit command buffer")?;
+            logical_device.device.queue_wait_idle(logical_device.queue)
+                .context("Failed to wait for queue")?;
+        }
+
+        // Cleanup
+        unsafe {
+            logical_device.device.free_command_buffers(logical_device.command_pool, &cmd_buffers);
+        }
+
+        Ok(())
     }
 }
 

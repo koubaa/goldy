@@ -22,6 +22,8 @@ pub struct MockBackend {
     next_shader_handle: ShaderHandle,
     pipelines: HashMap<PipelineHandle, MockPipeline>,
     next_pipeline_handle: PipelineHandle,
+    compute_pipelines: HashMap<ComputePipelineHandle, MockComputePipeline>,
+    next_compute_pipeline_handle: ComputePipelineHandle,
     bind_group_layouts: HashMap<BindGroupLayoutHandle, MockBindGroupLayout>,
     next_bind_group_layout_handle: BindGroupLayoutHandle,
     bind_groups: HashMap<BindGroupHandle, MockBindGroup>,
@@ -34,8 +36,10 @@ pub struct MockBackend {
     next_texture_handle: TextureHandle,
     samplers: HashMap<SamplerHandle, MockSampler>,
     next_sampler_handle: SamplerHandle,
-    /// Commands recorded during the last render operation
+    /// Render commands recorded during render operations
     pub recorded_commands: Vec<Vec<RenderCommand>>,
+    /// Compute commands recorded during dispatch operations
+    pub recorded_compute_commands: Vec<Vec<ComputeCommand>>,
     /// Targets that were created (for verification)
     pub targets_created: Vec<(u32, u32, TextureFormat)>,
     /// Targets with depth buffer that were created (for verification)
@@ -48,6 +52,8 @@ pub struct MockBackend {
     pub textures_created: usize,
     /// Count of samplers created
     pub samplers_created: usize,
+    /// Count of compute dispatches performed
+    pub compute_dispatch_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
 }
@@ -68,6 +74,10 @@ struct MockShader {
 }
 
 struct MockPipeline {
+    device_handle: DeviceHandle,
+}
+
+struct MockComputePipeline {
     device_handle: DeviceHandle,
 }
 
@@ -133,6 +143,8 @@ impl MockBackend {
             next_shader_handle: 1,
             pipelines: HashMap::new(),
             next_pipeline_handle: 1,
+            compute_pipelines: HashMap::new(),
+            next_compute_pipeline_handle: 1,
             bind_group_layouts: HashMap::new(),
             next_bind_group_layout_handle: 1,
             bind_groups: HashMap::new(),
@@ -146,12 +158,14 @@ impl MockBackend {
             samplers: HashMap::new(),
             next_sampler_handle: 1,
             recorded_commands: Vec::new(),
+            recorded_compute_commands: Vec::new(),
             targets_created: Vec::new(),
             targets_with_depth_created: Vec::new(),
             cpu_readback_count: 0,
             surface_present_count: 0,
             textures_created: 0,
             samplers_created: 0,
+            compute_dispatch_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
         }
     }
@@ -167,12 +181,14 @@ impl MockBackend {
     /// Reset recorded state for a new test.
     pub fn reset_tracking(&mut self) {
         self.recorded_commands.clear();
+        self.recorded_compute_commands.clear();
         self.targets_created.clear();
         self.targets_with_depth_created.clear();
         self.cpu_readback_count = 0;
         self.surface_present_count = 0;
         self.textures_created = 0;
         self.samplers_created = 0;
+        self.compute_dispatch_count = 0;
     }
 }
 
@@ -210,6 +226,7 @@ impl GpuBackend for MockBackend {
         self.buffers.retain(|_, b| b.device_handle != device);
         self.shaders.retain(|_, s| s.device_handle != device);
         self.pipelines.retain(|_, p| p.device_handle != device);
+        self.compute_pipelines.retain(|_, p| p.device_handle != device);
         self.bind_group_layouts.retain(|_, l| l.device_handle != device);
         self.bind_groups.retain(|_, g| g.device_handle != device);
         self.render_targets.retain(|_, t| t.device_handle != device);
@@ -624,6 +641,43 @@ impl GpuBackend for MockBackend {
 
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         self.samplers.remove(&sampler);
+    }
+
+    // Compute pipeline management
+    fn create_compute_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        _compute_shader: ShaderHandle,
+        _bind_group_layouts: &[BindGroupLayoutHandle],
+    ) -> Result<ComputePipelineHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let handle = self.next_compute_pipeline_handle;
+        self.next_compute_pipeline_handle += 1;
+
+        self.compute_pipelines.insert(handle, MockComputePipeline {
+            device_handle: device,
+        });
+
+        Ok(handle)
+    }
+
+    fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
+        self.compute_pipelines.remove(&pipeline);
+    }
+
+    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand]) -> Result<()> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        // Record commands
+        self.recorded_compute_commands.push(commands.to_vec());
+        self.compute_dispatch_count += 1;
+
+        Ok(())
     }
 }
 

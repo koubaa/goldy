@@ -39,6 +39,8 @@ pub(crate) struct ShaderState {
     pub vertex_module: Option<vk::ShaderModule>,
     /// Cached compiled fragment shader module
     pub fragment_module: Option<vk::ShaderModule>,
+    /// Cached compiled compute shader module
+    pub compute_module: Option<vk::ShaderModule>,
 }
 
 /// Graphics pipeline state.
@@ -48,10 +50,19 @@ pub(crate) struct PipelineState {
     pub layout: vk::PipelineLayout,
 }
 
+/// Compute pipeline state.
+pub(crate) struct ComputePipelineState {
+    pub device_handle: DeviceHandle,
+    pub pipeline: vk::Pipeline,
+    pub layout: vk::PipelineLayout,
+}
+
 /// Bind group layout (descriptor set layout) state.
 pub(crate) struct BindGroupLayoutState {
     pub device_handle: DeviceHandle,
     pub layout: vk::DescriptorSetLayout,
+    /// Maps binding index to descriptor type for correct bind group creation.
+    pub binding_types: std::collections::HashMap<u32, ash::vk::DescriptorType>,
 }
 
 /// Bind group (descriptor set) state.

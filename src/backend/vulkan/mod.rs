@@ -40,6 +40,8 @@ pub struct VulkanBackend {
     next_shader_handle: ShaderHandle,
     pipelines: HashMap<PipelineHandle, PipelineState>,
     next_pipeline_handle: PipelineHandle,
+    compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
+    next_compute_pipeline_handle: ComputePipelineHandle,
     bind_group_layouts: HashMap<BindGroupLayoutHandle, BindGroupLayoutState>,
     next_bind_group_layout_handle: BindGroupLayoutHandle,
     bind_groups: HashMap<BindGroupHandle, BindGroupState>,
@@ -162,6 +164,8 @@ impl VulkanBackend {
             next_shader_handle: 1,
             pipelines: HashMap::new(),
             next_pipeline_handle: 1,
+            compute_pipelines: HashMap::new(),
+            next_compute_pipeline_handle: 1,
             bind_group_layouts: HashMap::new(),
             next_bind_group_layout_handle: 1,
             bind_groups: HashMap::new(),
@@ -255,7 +259,8 @@ impl VulkanBackend {
         let cached_module = match stage {
             crate::slang::SlangStage::Vertex => shader.vertex_module,
             crate::slang::SlangStage::Fragment => shader.fragment_module,
-            _ => None,
+            crate::slang::SlangStage::Compute => shader.compute_module,
+            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
         };
         
         if let Some(module) = cached_module {
@@ -266,7 +271,8 @@ impl VulkanBackend {
         let entry_point_name = match stage {
             crate::slang::SlangStage::Vertex => "vs_main",
             crate::slang::SlangStage::Fragment => "fs_main",
-            _ => anyhow::bail!("Unsupported shader stage"),
+            crate::slang::SlangStage::Compute => "cs_main",
+            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
         };
         
         // Clone source to avoid borrow issues
@@ -299,7 +305,8 @@ impl VulkanBackend {
         match stage {
             crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
             crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
-            _ => {}
+            crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
+            _ => {} // Already validated above, shouldn't reach here
         }
         
         Ok(module)

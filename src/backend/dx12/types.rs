@@ -47,6 +47,8 @@ pub(crate) struct ShaderState {
     pub vertex_bytecode: Option<Vec<u8>>,
     /// Cached compiled fragment shader bytecode
     pub fragment_bytecode: Option<Vec<u8>>,
+    /// Cached compiled compute shader bytecode
+    pub compute_bytecode: Option<Vec<u8>>,
 }
 
 /// Graphics pipeline state.
@@ -56,6 +58,15 @@ pub(crate) struct PipelineState {
     pub root_signature: Direct3D12::ID3D12RootSignature,
     /// Vertex buffer stride from vertex layout
     pub vertex_stride: u32,
+}
+
+/// Compute pipeline state.
+pub(crate) struct ComputePipelineState {
+    pub device_handle: DeviceHandle,
+    pub pipeline_state: Direct3D12::ID3D12PipelineState,
+    pub root_signature: Direct3D12::ID3D12RootSignature,
+    /// Bind group layout handles for looking up binding types during dispatch.
+    pub bind_group_layouts: Vec<super::super::BindGroupLayoutHandle>,
 }
 
 /// Bind group layout (root signature descriptor table layout) state.
