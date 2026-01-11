@@ -126,7 +126,7 @@ impl App {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer_raw(0, &vertex_buffer);
+            pass.set_vertex_buffer(0, &vertex_buffer);
             pass.draw(0..vertices.len() as u32, 0..1);
         }
 

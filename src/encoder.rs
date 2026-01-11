@@ -81,11 +81,6 @@ impl<'a> RenderPass<'a> {
         });
     }
 
-    /// Set a vertex buffer (alias for set_vertex_buffer).
-    pub fn set_vertex_buffer_raw(&mut self, slot: u32, buffer: &Buffer) {
-        self.set_vertex_buffer(slot, buffer);
-    }
-
     /// Set a vertex buffer with an offset.
     pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &Buffer, offset: u64) {
         self.encoder.commands.push(RenderCommand::SetVertexBuffer {
