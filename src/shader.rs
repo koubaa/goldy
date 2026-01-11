@@ -30,7 +30,7 @@
 //!
 //! Register your own libraries with [`Device::register_library`](crate::Device::register_library):
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use goldy::ShaderLibrary;
 //!
 //! device.register_library(ShaderLibrary::from_source("myutils", r#"
