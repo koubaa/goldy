@@ -41,23 +41,28 @@ for platform_pair in "${PLATFORMS[@]}"; do
         mkdir -p "$TMP_DIR"
         unzip -q -o "$TMP_ZIP" -d "$TMP_DIR"
         
-        # Find and copy all required libraries
-        # We need: slang, slang-glslang (for SPIR-V generation)
-        find "$TMP_DIR" -type f \( \
-            -name "libslang.so*" -o \
-            -name "libslang-glslang.so*" \
-            -name "slang.dll" -o \
-            -name "slang-glslang.dll" -o \
-            -name "libslang.dylib" -o \
-            -name "libslang-glslang.dylib" \
-        \) -exec cp {} "bin/${local_dir}/" \; 2>/dev/null || true
+        # Copy libraries - handle different archive structures
+        # Archives may have files in: lib/, bin/, or nested in a subdirectory
+        # Use -L to dereference symlinks (Linux uses symlinks for .so files)
         
-        # Also try lib/ and bin/ subdirectories explicitly
-        for subdir in lib bin release/lib release/bin; do
-            if [ -d "$TMP_DIR"/*/"$subdir" ] 2>/dev/null; then
-                cp "$TMP_DIR"/*/"$subdir"/*slang*.so* "bin/${local_dir}/" 2>/dev/null || true
-                cp "$TMP_DIR"/*/"$subdir"/*slang*.dll "bin/${local_dir}/" 2>/dev/null || true
-                cp "$TMP_DIR"/*/"$subdir"/*slang*.dylib "bin/${local_dir}/" 2>/dev/null || true
+        # Try direct lib/ and bin/ directories first (newer archive format)
+        for dir in "$TMP_DIR/lib" "$TMP_DIR/bin"; do
+            if [ -d "$dir" ]; then
+                # Windows: slang.dll, slang-glslang.dll
+                cp -L "$dir"/slang*.dll "bin/${local_dir}/" 2>/dev/null || true
+                # Linux: libslang*.so* (including versioned like libslang-glslang-2025.24.3.so)
+                cp -L "$dir"/libslang*.so* "bin/${local_dir}/" 2>/dev/null || true
+                # macOS: libslang*.dylib
+                cp -L "$dir"/libslang*.dylib "bin/${local_dir}/" 2>/dev/null || true
+            fi
+        done
+        
+        # Try nested subdirectory (older archive format: slang-VERSION-PLATFORM/lib/)
+        for dir in "$TMP_DIR"/*/lib "$TMP_DIR"/*/bin; do
+            if [ -d "$dir" ]; then
+                cp -L "$dir"/slang*.dll "bin/${local_dir}/" 2>/dev/null || true
+                cp -L "$dir"/libslang*.so* "bin/${local_dir}/" 2>/dev/null || true
+                cp -L "$dir"/libslang*.dylib "bin/${local_dir}/" 2>/dev/null || true
             fi
         done
         
@@ -65,8 +70,12 @@ for platform_pair in "${PLATFORMS[@]}"; do
         rm -rf "$TMP_DIR" "$TMP_ZIP"
         
         # Verify what we got
-        count=$(ls -1 "bin/${local_dir}/"*slang* 2>/dev/null | wc -l)
-        echo "    ✓ ${github_name} (${count} files)"
+        count=$(ls -1 "bin/${local_dir}/"*slang* 2>/dev/null | wc -l || echo 0)
+        if [ "$count" -gt 0 ]; then
+            echo "    ✓ ${github_name} (${count} files)"
+        else
+            echo "    ✗ ${github_name} (no libraries found in archive)"
+        fi
     else
         echo "    ✗ ${github_name} (not available or download failed)"
     fi
