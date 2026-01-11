@@ -48,6 +48,14 @@ windows = { version = "0.61", optional = true, features = [
 gpu-allocator = { version = "0.27", optional = true, features = ["d3d12"] }
 windows-core = { version = "0.61", optional = true }
 
+# Metal dependencies (macOS only)
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.31", optional = true }
+cocoa = { version = "0.26", optional = true }
+objc = { version = "0.2", optional = true }
+core-graphics-types = { version = "0.2", optional = true }
+foreign-types = { version = "0.5", optional = true }
+
 [dev-dependencies]
 # PNG output for examples
 image = "0.25"
@@ -62,6 +70,7 @@ winit = "0.30"
 default = ["vulkan"]
 vulkan = ["dep:ash"]
 dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core"]
+metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types"]
 
 [[example]]
 name = "triangle"

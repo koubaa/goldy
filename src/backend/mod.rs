@@ -14,7 +14,7 @@ pub mod dx12;
 pub mod mock;
 
 // Metal backend for macOS (native Metal, not MoltenVK)
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 
 // WebGPU backend is currently native-only (uses native Slang compiler)
@@ -296,18 +296,26 @@ pub enum BindingResource {
 
 /// Create the default backend for the current platform.
 pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
+    // On macOS with metal feature, prefer Metal
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    {
+        tracing::info!("Creating Metal backend");
+        Ok(Box::new(metal::MetalBackend::new()?))
+    }
+
     // On Windows with dx12 feature, prefer DX12
-    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    #[cfg(all(feature = "dx12", target_os = "windows", not(all(feature = "metal", target_os = "macos"))))]
     {
         tracing::info!("Creating DX12 backend");
         Ok(Box::new(dx12::Dx12Backend::new()?))
     }
 
-    // Vulkan fallback on non-DX12 platforms
+    // Vulkan fallback on non-DX12/non-Metal platforms
     #[cfg(all(
         feature = "vulkan",
         not(target_arch = "wasm32"),
-        not(all(feature = "dx12", target_os = "windows"))
+        not(all(feature = "dx12", target_os = "windows")),
+        not(all(feature = "metal", target_os = "macos"))
     ))]
     {
         tracing::info!("Creating Vulkan backend");
@@ -316,11 +324,12 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 
     // No backend available
     #[cfg(not(any(
+        all(feature = "metal", target_os = "macos"),
         all(feature = "dx12", target_os = "windows"),
         all(feature = "vulkan", not(target_arch = "wasm32"))
     )))]
     {
-        anyhow::bail!("No GPU backend available - enable 'vulkan' or 'dx12' feature")
+        anyhow::bail!("No GPU backend available - enable 'vulkan', 'dx12', or 'metal' feature")
     }
 }
 
@@ -336,6 +345,11 @@ pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> 
         BackendType::Dx12 => {
             tracing::info!("Creating DX12 backend");
             Ok(Box::new(dx12::Dx12Backend::new()?))
+        }
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        BackendType::Metal => {
+            tracing::info!("Creating Metal backend");
+            Ok(Box::new(metal::MetalBackend::new()?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
     }
