@@ -111,21 +111,28 @@ impl SlangLibrary {
     
     /// Find the Slang library path.
     fn find_library() -> Result<PathBuf> {
-        // 1. Check RAG_SLANG_PATH environment variable
-        if let Ok(path) = std::env::var("RAG_SLANG_PATH") {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                return Ok(path);
+        // 1. Check GOLDY_SLANG_PATH or RAG_SLANG_PATH environment variable
+        for env_var in ["GOLDY_SLANG_PATH", "RAG_SLANG_PATH"] {
+            if let Ok(path) = std::env::var(env_var) {
+                let path = PathBuf::from(path);
+                if path.exists() {
+                    return Ok(path);
+                }
+                tracing::warn!("{} set but file not found: {}", env_var, path.display());
             }
-            tracing::warn!("RAG_SLANG_PATH set but file not found: {}", path.display());
         }
         
-        // 2. Check vendored binaries
+        // 2. Check build.rs downloaded binaries (via GOLDY_SLANG_DIR compile-time env)
+        if let Some(path) = Self::find_build_script_library() {
+            return Ok(path);
+        }
+        
+        // 3. Check vendored binaries (for development)
         if let Some(path) = Self::find_vendored_library() {
             return Ok(path);
         }
         
-        // 3. Check Vulkan SDK (Windows development fallback)
+        // 4. Check Vulkan SDK (Windows development fallback)
         #[cfg(target_os = "windows")]
         if let Some(path) = Self::find_vulkan_sdk_library() {
             return Ok(path);
@@ -133,10 +140,22 @@ impl SlangLibrary {
         
         anyhow::bail!(
             "Could not find Slang library. Options:\n\
-             1. Set RAG_SLANG_PATH environment variable\n\
-             2. Run goldy/slang/download.sh to fetch vendored binaries\n\
-             3. Install Vulkan SDK 1.3.296+ (Windows)"
+             1. Set GOLDY_SLANG_PATH environment variable\n\
+             2. Install Vulkan SDK 1.3.296+ (Windows)\n\
+             3. For development: run slang/download.sh"
         )
+    }
+    
+    /// Find library downloaded by build.rs.
+    fn find_build_script_library() -> Option<PathBuf> {
+        // GOLDY_SLANG_DIR is set at compile time by build.rs
+        let slang_dir = option_env!("GOLDY_SLANG_DIR")?;
+        let lib_name = Self::library_name();
+        let path = PathBuf::from(slang_dir).join(lib_name);
+        if path.exists() {
+            return Some(path);
+        }
+        None
     }
     
     /// Find vendored library based on platform.

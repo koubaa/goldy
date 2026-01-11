@@ -1669,7 +1669,7 @@ impl GpuBackend for VulkanBackend {
 
     fn surface_acquire(&mut self, surface_handle: SurfaceHandle) -> Result<SwapchainImageHandle> {
         // Get surface state and current frame index
-        let (device_handle, current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
+        let (device_handle, _current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
             let surface_state = self.surfaces.get(&surface_handle)
                 .context("Invalid surface handle")?;
             let frame = &surface_state.frame_sync[surface_state.current_frame];

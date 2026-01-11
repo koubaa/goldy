@@ -84,6 +84,7 @@ pub fn find_memory_type(
 }
 
 /// Map vendor ID to vendor name.
+#[allow(dead_code)]
 pub fn vendor_name(vendor_id: u32) -> &'static str {
     match vendor_id {
         0x1002 | 0x1022 => "AMD",
@@ -97,6 +98,7 @@ pub fn vendor_name(vendor_id: u32) -> &'static str {
 }
 
 /// Map Vulkan physical device type to Goldy DeviceType.
+#[allow(dead_code)]
 pub fn device_type_from_vk(vk_type: vk::PhysicalDeviceType) -> crate::types::DeviceType {
     match vk_type {
         vk::PhysicalDeviceType::DISCRETE_GPU => crate::types::DeviceType::DiscreteGpu,

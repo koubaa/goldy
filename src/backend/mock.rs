@@ -58,37 +58,45 @@ pub struct MockBackend {
     pub default_surface_format: TextureFormat,
 }
 
+#[allow(dead_code)]
 struct MockDevice {
     adapter_id: u32,
 }
 
+#[allow(dead_code)]
 struct MockBuffer {
     device_handle: DeviceHandle,
     size: u64,
     data: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct MockShader {
     device_handle: DeviceHandle,
     source: String,
 }
 
+#[allow(dead_code)]
 struct MockPipeline {
     device_handle: DeviceHandle,
 }
 
+#[allow(dead_code)]
 struct MockComputePipeline {
     device_handle: DeviceHandle,
 }
 
+#[allow(dead_code)]
 struct MockBindGroupLayout {
     device_handle: DeviceHandle,
 }
 
+#[allow(dead_code)]
 struct MockBindGroup {
     device_handle: DeviceHandle,
 }
 
+#[allow(dead_code)]
 struct MockRenderTarget {
     device_handle: DeviceHandle,
     width: u32,
@@ -100,6 +108,7 @@ struct MockRenderTarget {
     data: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct MockTexture {
     device_handle: DeviceHandle,
     width: u32,
@@ -108,12 +117,14 @@ struct MockTexture {
     data: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct MockSampler {
     device_handle: DeviceHandle,
     #[allow(dead_code)]
     desc: SamplerDesc,
 }
 
+#[allow(dead_code)]
 struct MockSurface {
     device_handle: DeviceHandle,
     width: u32,

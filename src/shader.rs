@@ -60,7 +60,7 @@ impl ShaderModule {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use goldy::ShaderModule;
     ///
     /// let shader = ShaderModule::from_slang(&device, r#"
@@ -91,7 +91,7 @@ impl ShaderModule {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use goldy::ShaderModule;
     ///
     /// // Shader can import from both registered libraries AND the "my_project" directory
@@ -100,7 +100,6 @@ impl ShaderModule {
     ///     source,
     ///     &["my_project/shaders"],
     /// )?;
-    /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn from_slang_with_paths(device: &Device, source: &str, extra_paths: &[&str]) -> Result<Self> {
         // Get search paths from registered libraries

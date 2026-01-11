@@ -17,8 +17,10 @@ pub(crate) struct PhysicalDeviceInfo {
 pub(crate) struct LogicalDevice {
     pub device: ash::Device,
     pub physical_device: vk::PhysicalDevice,
+    #[allow(dead_code)]
     pub adapter_id: u32,
     pub queue: vk::Queue,
+    #[allow(dead_code)]
     pub queue_family: u32,
     pub command_pool: vk::CommandPool,
 }
@@ -61,6 +63,7 @@ pub(crate) struct ComputePipelineState {
 
 /// Bind group layout (descriptor set layout) state.
 pub(crate) struct BindGroupLayoutState {
+    #[allow(dead_code)]
     pub device_handle: DeviceHandle,
     pub layout: vk::DescriptorSetLayout,
     /// Maps binding index to descriptor type for correct bind group creation.
@@ -103,6 +106,7 @@ pub(crate) struct TextureState {
     pub device_handle: DeviceHandle,
     pub width: u32,
     pub height: u32,
+    #[allow(dead_code)]
     pub format: TextureFormat,
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
@@ -149,6 +153,7 @@ pub(crate) struct SurfaceState {
 
 /// Pending buffer operations for command recording.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) struct PendingBuffer {
     pub buffer: BufferHandle,
     pub slot: u32,

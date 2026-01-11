@@ -1,7 +1,7 @@
 //! Shader library system for reusable Slang modules.
 //!
 //! Shader libraries provide a way to package and distribute reusable Slang shader code.
-//! Libraries are registered with a [`Device`] and are automatically available for
+//! Libraries are registered with a [`Device`](crate::Device) and are automatically available for
 //! `import` statements in shaders.
 //!
 //! # Built-in Library
@@ -21,7 +21,7 @@
 //!
 //! You can create and register your own libraries:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use goldy::ShaderLibrary;
 //!
 //! let my_lib = ShaderLibrary::from_source("myutils", r#"

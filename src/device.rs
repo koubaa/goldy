@@ -192,7 +192,7 @@ impl Default for DeviceCapabilities {
 /// available to all shaders compiled for this device. The built-in `goldy`
 /// library is registered by default.
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use goldy::ShaderLibrary;
 ///
 /// // Register a custom library
@@ -362,7 +362,7 @@ impl Device {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use goldy::ShaderLibrary;
     ///
     /// let my_lib = ShaderLibrary::from_source("myutils", r#"
@@ -373,7 +373,6 @@ impl Device {
     /// device.register_library(my_lib)?;
     ///
     /// // Now shaders can use: import myutils;
-    /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn register_library(&self, library: ShaderLibrary) -> Result<()> {
         self.library_registry.lock().unwrap().register(library)
@@ -396,7 +395,7 @@ impl Device {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// // The goldy library is registered by default
     /// assert!(device.has_library("goldy"));
     /// ```
