@@ -11,9 +11,22 @@ cbuffer Uniforms {
     float _padding;  // Align to 16 bytes
 };
 
+// Vertex-less fullscreen triangle - generates geometry from vertex index
 [shader("vertex")]
-FullscreenVarying vs_main(FullscreenVertex input) {
-    return vs_fullscreen(input);
+FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
+    FullscreenVarying output;
+    
+    // Generate UV from vertex index: (0,0), (2,0), (0,2)
+    float2 uv = float2(
+        float((vertex_id << 1u) & 2u),
+        float(vertex_id & 2u)
+    );
+    
+    // Position: UV [0,2] -> NDC [-1,3]
+    output.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+    output.uv = uv;
+    
+    return output;
 }
 
 [shader("fragment")]
