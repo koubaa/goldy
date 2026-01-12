@@ -1,0 +1,29 @@
+[package]
+name = "goldy-py"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Python bindings for the Goldy GPU library"
+repository = "https://github.com/koubaa/goldy"
+keywords = ["gpu", "graphics", "python", "pyo3"]
+
+[lib]
+name = "_goldy"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Core goldy library
+goldy = { path = ".." }
+
+# Python bindings
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+# NumPy interop for zero-copy buffer access
+numpy = "0.23"
+
+# Error handling
+anyhow = "1.0"
+
+# For casting buffer data
+bytemuck = "1.21"
+
