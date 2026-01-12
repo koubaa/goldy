@@ -17,7 +17,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-cl
 ash = { version = "0.38", optional = true }
 
 # Dynamic library loading for Slang compiler
-libloading = "0.8"
+libloading = "0.9"
 
 # Error handling
 anyhow = "1.0"
@@ -37,7 +37,7 @@ winit = { version = "0.30", optional = true }
 
 # DX12 dependencies (Windows only)
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", optional = true, features = [
+windows = { version = "0.62", optional = true, features = [
     "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D_Dxc",
@@ -49,7 +49,8 @@ windows = { version = "0.61", optional = true, features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
-gpu-allocator = { version = "0.27", optional = true, features = ["d3d12"] }
+
+gpu-allocator = { version = "0.28", optional = true, features = ["d3d12"] }
 windows-core = { version = "0.62", optional = true }
 
 # Metal dependencies (macOS only)
