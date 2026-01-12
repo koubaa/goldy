@@ -94,4 +94,3 @@ impl PyBuiltins {
     #[classattr]
     const SOLID_COLOR: &'static str = goldy::shader::builtins::SOLID_COLOR;
 }
-

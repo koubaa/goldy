@@ -23,4 +23,3 @@ impl<T> IntoPyResult<T> for anyhow::Result<T> {
         self.map_err(to_py_err)
     }
 }
-

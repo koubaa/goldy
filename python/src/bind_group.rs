@@ -177,10 +177,7 @@ impl PyBindGroupLayoutBinding {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "BindGroupLayoutBinding(binding={})",
-            self.inner.binding
-        )
+        format!("BindGroupLayoutBinding(binding={})", self.inner.binding)
     }
 }
 
@@ -297,4 +294,3 @@ impl PyBindGroup {
         "BindGroup()".to_string()
     }
 }
-

@@ -129,4 +129,3 @@ impl PyRenderPipeline {
         "RenderPipeline()".to_string()
     }
 }
-

@@ -227,4 +227,3 @@ impl PyComputePass {
         "ComputePass()".to_string()
     }
 }
-

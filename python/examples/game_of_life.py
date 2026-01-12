@@ -16,6 +16,7 @@ The simulation runs for a set number of generations and saves frames as images.
 import goldy
 import numpy as np
 import time
+from pathlib import Path
 
 try:
     from PIL import Image
@@ -24,140 +25,19 @@ except ImportError:
     HAS_PIL = False
     print("Note: Install Pillow for image output: pip install pillow")
 
-# Grid dimensions
+# Grid dimensions (must match shader constants)
 GRID_WIDTH = 128
 GRID_HEIGHT = 128
 CELL_COUNT = GRID_WIDTH * GRID_HEIGHT
 
-# Compute shader - runs Game of Life rules
-COMPUTE_SHADER = f"""
-// Conway's Game of Life compute shader
-// Uses ping-pong buffers: reads from one, writes to the other
+# Path to shader files (shared with Rust examples)
+SHADER_DIR = Path(__file__).parent.parent.parent / "shaders"
 
-static const uint GRID_WIDTH = {GRID_WIDTH};
-static const uint GRID_HEIGHT = {GRID_HEIGHT};
 
-// Ping-pong buffers: read from current, write to next
-[[vk::binding(0, 0)]] StructuredBuffer<uint> currentState;
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> nextState;
-
-// Get cell state (1 = alive, 0 = dead)
-uint getCell(int x, int y) {{
-    // Wrap around edges (toroidal grid)
-    x = (x + GRID_WIDTH) % GRID_WIDTH;
-    y = (y + GRID_HEIGHT) % GRID_HEIGHT;
-    return currentState[y * GRID_WIDTH + x];
-}}
-
-// Count living neighbors
-uint countNeighbors(int x, int y) {{
-    uint count = 0;
-    count += getCell(x - 1, y - 1);
-    count += getCell(x,     y - 1);
-    count += getCell(x + 1, y - 1);
-    count += getCell(x - 1, y);
-    count += getCell(x + 1, y);
-    count += getCell(x - 1, y + 1);
-    count += getCell(x,     y + 1);
-    count += getCell(x + 1, y + 1);
-    return count;
-}}
-
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {{
-    if (id.x >= GRID_WIDTH || id.y >= GRID_HEIGHT) return;
-    
-    uint idx = id.y * GRID_WIDTH + id.x;
-    uint cell = currentState[idx];
-    uint neighbors = countNeighbors(int(id.x), int(id.y));
-    
-    // Conway's rules:
-    // - Living cell with 2-3 neighbors survives
-    // - Dead cell with exactly 3 neighbors becomes alive
-    // - All other cells die or stay dead
-    uint newState = 0;
-    if (cell == 1) {{
-        // Living cell
-        newState = (neighbors == 2 || neighbors == 3) ? 1 : 0;
-    }} else {{
-        // Dead cell
-        newState = (neighbors == 3) ? 1 : 0;
-    }}
-    
-    nextState[idx] = newState;
-}}
-"""
-
-# Render shader - draws the grid as a fullscreen quad
-RENDER_SHADER = f"""
-// Game of Life rendering shader
-// Renders the grid as a fullscreen quad with cell colors
-
-static const uint GRID_WIDTH = {GRID_WIDTH};
-static const uint GRID_HEIGHT = {GRID_HEIGHT};
-
-[[vk::binding(0, 0)]] StructuredBuffer<uint> cells;
-
-struct VSOutput {{
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-}};
-
-// Fullscreen triangle (covers entire viewport with one triangle)
-static const float2 positions[3] = {{
-    float2(-1, -1),
-    float2( 3, -1),
-    float2(-1,  3)
-}};
-
-static const float2 uvs[3] = {{
-    float2(0, 1),
-    float2(2, 1),
-    float2(0, -1)
-}};
-
-[shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID) {{
-    VSOutput output;
-    output.position = float4(positions[vertexID], 0.0, 1.0);
-    output.uv = uvs[vertexID];
-    return output;
-}}
-
-[shader("fragment")]
-float4 fs_main(VSOutput input) : SV_Target {{
-    // Get grid coordinates from UV
-    float2 uv = input.uv;
-    
-    // Flip Y so origin is top-left
-    uv.y = 1.0 - uv.y;
-    
-    int x = int(uv.x * GRID_WIDTH);
-    int y = int(uv.y * GRID_HEIGHT);
-    
-    // Clamp to grid bounds
-    x = clamp(x, 0, int(GRID_WIDTH) - 1);
-    y = clamp(y, 0, int(GRID_HEIGHT) - 1);
-    
-    uint idx = y * GRID_WIDTH + x;
-    uint cell = cells[idx];
-    
-    // Grid lines for visual clarity
-    float2 cellUV = frac(float2(uv.x * GRID_WIDTH, uv.y * GRID_HEIGHT));
-    float gridLine = (cellUV.x < 0.05 || cellUV.y < 0.05) ? 0.15 : 0.0;
-    
-    if (cell == 1) {{
-        // Living cell - bright green with slight variation
-        float3 alive = float3(0.2, 0.9, 0.3);
-        return float4(alive + gridLine, 1.0);
-    }} else {{
-        // Dead cell - dark background
-        float3 dead = float3(0.05, 0.08, 0.1);
-        return float4(dead + gridLine, 1.0);
-    }}
-}}
-"""
+def load_shader(name: str) -> str:
+    """Load a shader from the shared shaders directory."""
+    path = SHADER_DIR / name
+    return path.read_text()
 
 
 def create_initial_state():
@@ -249,9 +129,10 @@ def main():
         goldy.BufferBinding(1, buffer_a),
     ])
     
-    # Compile compute shader
-    compute_shader = goldy.ShaderModule.from_slang(device, COMPUTE_SHADER)
-    print("Compiled compute shader")
+    # Load and compile compute shader from shared file
+    compute_shader_src = load_shader("game_of_life.slang")
+    compute_shader = goldy.ShaderModule.from_slang(device, compute_shader_src)
+    print("Compiled compute shader (game_of_life.slang)")
     
     compute_pipeline = goldy.ComputePipeline(
         device, compute_shader,
@@ -277,9 +158,10 @@ def main():
         goldy.BufferBinding(0, buffer_b),
     ])
     
-    # Compile render shader
-    render_shader = goldy.ShaderModule.from_slang(device, RENDER_SHADER)
-    print("Compiled render shader")
+    # Load and compile render shader from shared file
+    render_shader_src = load_shader("game_of_life_render.slang")
+    render_shader = goldy.ShaderModule.from_slang(device, render_shader_src)
+    print("Compiled render shader (game_of_life_render.slang)")
     
     render_pipeline = goldy.RenderPipeline(
         device, render_shader, render_shader,
@@ -370,4 +252,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

@@ -603,7 +603,11 @@ impl PyDepthStencilState {
     /// Create a new depth stencil state.
     #[new]
     #[pyo3(signature = (format=PyDepthFormat::DEPTH24_PLUS, depth_write_enabled=true, depth_compare=PyCompareFunction::LESS))]
-    fn new(format: PyDepthFormat, depth_write_enabled: bool, depth_compare: PyCompareFunction) -> Self {
+    fn new(
+        format: PyDepthFormat,
+        depth_write_enabled: bool,
+        depth_compare: PyCompareFunction,
+    ) -> Self {
         PyDepthStencilState {
             inner: goldy::DepthStencilState {
                 format: format.into(),
@@ -626,4 +630,3 @@ impl PyDepthStencilState {
         )
     }
 }
-
