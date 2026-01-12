@@ -1321,8 +1321,7 @@ impl GpuBackend for MetalBackend {
         // Get texture from drawable - use from_ptr_unchecked to get a reference
         // The drawable owns the texture, we just need a reference without taking ownership
         let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
-        let texture: &mtl::TextureRef =
-            unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+        let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
         // Find clear color from commands
         let mut clear_color = None;
