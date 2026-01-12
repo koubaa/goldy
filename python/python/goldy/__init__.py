@@ -65,6 +65,9 @@ from goldy._goldy import (
     ComputePipeline,
     ComputeEncoder,
     ComputePass,
+    # Surface (windowed rendering)
+    Surface,
+    SurfaceFrame,
 )
 
 __all__ = [
@@ -110,6 +113,9 @@ __all__ = [
     "ComputePipeline",
     "ComputeEncoder",
     "ComputePass",
+    # Surface (windowed rendering)
+    "Surface",
+    "SurfaceFrame",
 ]
 
 __version__ = "0.1.0"

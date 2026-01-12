@@ -318,7 +318,7 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
-          pip install target/wheels/*.whl
+          pip install "$(ls target/wheels/*.whl)"
           pytest tests/ -v
 
       - name: Run Python examples

@@ -12,6 +12,7 @@ mod instance;
 mod pipeline;
 mod render_target;
 mod shader;
+mod surface;
 mod types;
 
 use pyo3::prelude::*;
@@ -67,6 +68,10 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<compute::PyComputePipeline>()?;
     m.add_class::<compute::PyComputeEncoder>()?;
     m.add_class::<compute::PyComputePass>()?;
+
+    // Surface (windowed rendering)
+    m.add_class::<surface::PySurface>()?;
+    m.add_class::<surface::PySurfaceFrame>()?;
 
     Ok(())
 }
