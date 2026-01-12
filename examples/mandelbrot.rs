@@ -7,7 +7,7 @@
 use goldy::{
     shaders, BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding,
     BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline, RenderPipelineDesc,
-    ShaderModule, Surface, Vertex2DUv, FULLSCREEN_QUAD,
+    ShaderModule, Surface,
 };
 use std::sync::Arc;
 use winit::{
@@ -35,7 +35,6 @@ struct App {
     bind_group_layout: Option<BindGroupLayout>,
     bind_group: Option<BindGroup>,
     uniform_buffer: Option<Buffer>,
-    vertex_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     center: [f32; 2],
@@ -52,7 +51,6 @@ impl App {
             bind_group_layout: None,
             bind_group: None,
             uniform_buffer: None,
-            vertex_buffer: None,
             window: None,
             surface: None,
             center: [-0.5, 0.0],
@@ -74,21 +72,21 @@ impl App {
             BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform_fragment(0)])?;
 
         // Create pipeline with bind group layout
+        // Empty vertex layout - vertex shader generates geometry from SV_VertexID
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
             &shader,
             &RenderPipelineDesc {
-                vertex_layout: Vertex2DUv::layout(),
+                vertex_layout: goldy::VertexBufferLayout {
+                    stride: 0,
+                    attributes: vec![],
+                },
                 target_format: surface.format(),
                 bind_group_layouts: &[&bind_group_layout],
                 ..Default::default()
             },
         )?;
-
-        // Create static vertex buffer (fullscreen quad)
-        let vertex_buffer =
-            Buffer::with_data(device.as_ref(), &FULLSCREEN_QUAD, BufferUsage::VERTEX)?;
 
         // Create uniform buffer
         let uniform_buffer = Buffer::new(
@@ -108,7 +106,6 @@ impl App {
         self.shader = Some(shader);
         self.bind_group_layout = Some(bind_group_layout);
         self.pipeline = Some(pipeline);
-        self.vertex_buffer = Some(vertex_buffer);
         self.uniform_buffer = Some(uniform_buffer);
         self.bind_group = Some(bind_group);
         self.surface = Some(surface);
@@ -125,7 +122,6 @@ impl App {
 
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
         let bind_group = self.bind_group.as_ref().unwrap();
 
@@ -146,8 +142,8 @@ impl App {
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group);
-            pass.set_vertex_buffer(0, vertex_buffer);
-            pass.draw(0..6, 0..1);
+            // No vertex buffer needed - vertex shader generates fullscreen triangle from SV_VertexID
+            pass.draw(0..3, 0..1);
         }
 
         frame.render(encoder)?;
