@@ -30,7 +30,7 @@ use crate::types::Color;
 use anyhow::{Context, Result};
 use cocoa::base::{id, nil, YES};
 use core_graphics_types::geometry::CGSize;
-use foreign_types::ForeignType;
+use foreign_types::{ForeignType, ForeignTypeRef};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 use std::collections::HashMap;
@@ -257,8 +257,8 @@ impl MetalBackend {
 
     /// Create a render pass for the given texture with clear color.
     fn create_render_pass<'a>(
-        texture: &mtl::Texture,
-        depth_texture: Option<&mtl::Texture>,
+        texture: &mtl::TextureRef,
+        depth_texture: Option<&mtl::TextureRef>,
         clear_color: Option<Color>,
         clear_depth: Option<f32>,
     ) -> &'a mtl::RenderPassDescriptorRef {
@@ -677,23 +677,27 @@ impl GpuBackend for MetalBackend {
         let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
         color_attachment.set_pixel_format(format_to_mtl(target_format));
 
-        // Set vertex descriptor
-        let vertex_descriptor = mtl::VertexDescriptor::new();
-        let layout = vertex_descriptor.layouts().object_at(0).unwrap();
-        layout.set_stride(vertex_layout.stride as u64);
-        layout.set_step_function(mtl::MTLVertexStepFunction::PerVertex);
+        // Set vertex descriptor (only if there are vertex attributes)
+        // For vertex-less rendering (e.g., fullscreen triangle from SV_VertexID),
+        // we skip the vertex descriptor entirely
+        if !vertex_layout.attributes.is_empty() {
+            let vertex_descriptor = mtl::VertexDescriptor::new();
+            let layout = vertex_descriptor.layouts().object_at(0).unwrap();
+            layout.set_stride(vertex_layout.stride as u64);
+            layout.set_step_function(mtl::MTLVertexStepFunction::PerVertex);
 
-        for attr in &vertex_layout.attributes {
-            let attr_desc = vertex_descriptor
-                .attributes()
-                .object_at(attr.location as u64)
-                .unwrap();
-            attr_desc.set_format(vertex_format_to_mtl(attr.format));
-            attr_desc.set_offset(attr.offset as u64);
-            attr_desc.set_buffer_index(0);
+            for attr in &vertex_layout.attributes {
+                let attr_desc = vertex_descriptor
+                    .attributes()
+                    .object_at(attr.location as u64)
+                    .unwrap();
+                attr_desc.set_format(vertex_format_to_mtl(attr.format));
+                attr_desc.set_offset(attr.offset as u64);
+                attr_desc.set_buffer_index(0);
+            }
+
+            descriptor.set_vertex_descriptor(Some(vertex_descriptor));
         }
-
-        descriptor.set_vertex_descriptor(Some(vertex_descriptor));
 
         // Set depth format if depth stencil is enabled
         let depth_stencil_state = if let Some(ds) = depth_stencil {
@@ -843,8 +847,8 @@ impl GpuBackend for MetalBackend {
 
         // Create render pass
         let render_pass = Self::create_render_pass(
-            &render_target.texture,
-            render_target.depth_texture.as_ref(),
+            &*render_target.texture,
+            render_target.depth_texture.as_deref(),
             clear_color,
             clear_depth,
         );
@@ -1314,9 +1318,10 @@ impl GpuBackend for MetalBackend {
             anyhow::bail!("Failed to get next drawable");
         }
 
-        // Get texture from drawable
+        // Get texture from drawable - use from_ptr_unchecked to get a reference
+        // The drawable owns the texture, we just need a reference without taking ownership
         let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
-        let texture = unsafe { mtl::Texture::from_ptr(texture_ptr as *mut mtl::MTLTexture) };
+        let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
         // Find clear color from commands
         let mut clear_color = None;
@@ -1466,9 +1471,8 @@ impl GpuBackend for MetalBackend {
 
         encoder.end_encoding();
 
-        // Present drawable
-        command_buffer
-            .present_drawable(unsafe { &mtl::MetalDrawable::from_ptr(drawable as *mut _) });
+        // Present drawable - use msg_send! directly since drawable is autoreleased
+        let _: () = unsafe { msg_send![command_buffer.as_ptr(), presentDrawable: drawable] };
         command_buffer.commit();
 
         Ok(())
