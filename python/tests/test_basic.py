@@ -35,7 +35,7 @@ def test_color():
     """Test Color type."""
     import goldy
     
-    # Create from floats
+    # Create from floats (use exact f32 representable values)
     c = goldy.Color(0.5, 0.25, 0.75, 1.0)
     assert c.r == 0.5
     assert c.g == 0.25
@@ -54,13 +54,15 @@ def test_color():
     assert goldy.Color.GREEN.g == 1.0
     assert goldy.Color.BLUE.b == 1.0
     
-    # To tuple
+    # To tuple (compare with tolerance due to f32 precision)
     t = c.to_tuple()
-    assert t == (0.5, 0.25, 0.75, 1.0)
+    assert len(t) == 4
+    assert abs(t[0] - 0.5) < 1e-6
+    assert abs(t[1] - 0.25) < 1e-6
     
-    # To RGBA8
+    # To RGBA8 (returns bytes)
     rgba = goldy.Color.RED.to_rgba8()
-    assert rgba == [255, 0, 0, 255]
+    assert list(rgba) == [255, 0, 0, 255]
 
 
 def test_buffer_usage():

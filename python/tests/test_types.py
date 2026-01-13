@@ -13,7 +13,8 @@ class TestColor:
         assert c.r == 0.5
         assert c.g == 0.25
         assert c.b == 0.75
-        assert c.a == 0.8
+        # f32 precision: 0.8 isn't exactly representable
+        assert abs(c.a - 0.8) < 1e-6
     
     def test_create_with_default_alpha(self):
         import goldy
@@ -44,7 +45,12 @@ class TestColor:
         
         c = goldy.Color(0.1, 0.2, 0.3, 0.4)
         t = c.to_tuple()
-        assert t == (0.1, 0.2, 0.3, 0.4)
+        # f32 precision means values aren't exactly equal
+        assert len(t) == 4
+        assert abs(t[0] - 0.1) < 1e-6
+        assert abs(t[1] - 0.2) < 1e-6
+        assert abs(t[2] - 0.3) < 1e-6
+        assert abs(t[3] - 0.4) < 1e-6
     
     def test_to_rgba8(self):
         import goldy
