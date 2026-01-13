@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "python"]
+members = [".", "python", "ffi"]
 resolver = "2"
 
 [package]
