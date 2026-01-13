@@ -19,12 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download Slang compiler
-        run: |
-          cd slang
-          chmod +x download.sh
-          ./download.sh
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -36,9 +30,6 @@ jobs:
           args: --release --out dist
           working-directory: python
           manylinux: auto
-          before-script-linux: |
-            # Install Vulkan and X11 development dependencies (manylinux uses yum)
-            yum install -y vulkan-devel libxcb-devel libxkbcommon-devel || dnf install -y vulkan-devel libxcb-devel libxkbcommon-devel || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -63,9 +54,6 @@ jobs:
           args: --release --out dist
           working-directory: python
           manylinux: auto
-          before-script-linux: |
-            # Install Vulkan and X11 development dependencies (manylinux uses yum)
-            yum install -y vulkan-devel libxcb-devel libxkbcommon-devel || dnf install -y vulkan-devel libxcb-devel libxkbcommon-devel || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -98,7 +86,7 @@ jobs:
   # Build wheels for macOS x86_64
   build-macos-x86_64:
     name: Build macOS x86_64
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v6
 
@@ -121,7 +109,7 @@ jobs:
   # Build wheels for macOS aarch64 (Apple Silicon)
   build-macos-aarch64:
     name: Build macOS aarch64
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -141,26 +129,8 @@ jobs:
           name: wheels-macos-aarch64
           path: python/dist
 
-  # Build source distribution
-  build-sdist:
-    name: Build source distribution
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-          working-directory: python
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: python/dist
-
   # Publish all wheels to PyPI
+  # Note: sdist skipped because python/Cargo.toml depends on parent goldy crate via path
   publish:
     name: Publish to PyPI
     needs:
@@ -169,7 +139,6 @@ jobs:
       - build-windows
       - build-macos-x86_64
       - build-macos-aarch64
-      - build-sdist
     runs-on: ubuntu-latest
     environment:
       name: pypi
