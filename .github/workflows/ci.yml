@@ -314,7 +314,7 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
-          maturin develop --release
+          pip install .
           pytest tests/ -v
 
       - name: Run Python examples
