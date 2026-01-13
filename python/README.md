@@ -165,6 +165,27 @@ Tests are organized into:
 - NumPy 1.20+
 - Vulkan 1.3+ compatible GPU
 
+## Publishing to PyPI
+
+This package uses GitHub Actions with PyPI Trusted Publishers for automated releases.
+
+### Creating a release
+
+1. Update version in `pyproject.toml` and `python/goldy/__init__.py`
+2. Commit and push changes
+3. Create a git tag matching the version:
+   ```bash
+   git tag v0.1.1dev0
+   git push origin v0.1.1dev0
+   ```
+4. create a release:
+   `gh release create v0.1.1dev0 --title "v0.1.1dev0" --notes "..."`
+5. The publish workflow will automatically build wheels and upload to PyPI
+
+### Manual testing (TestPyPI)
+
+For testing before a real release, you can configure a separate Trusted Publisher for TestPyPI at https://test.pypi.org/manage/account/publishing/ and modify the workflow to publish there first.
+
 ## License
 
 MIT License

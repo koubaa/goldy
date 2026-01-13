@@ -37,9 +37,8 @@ jobs:
           working-directory: python
           manylinux: auto
           before-script-linux: |
-            # Install Vulkan development dependencies
-            apt-get update
-            apt-get install -y libvulkan-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+            # Install Vulkan and X11 development dependencies (manylinux uses yum)
+            yum install -y vulkan-devel libxcb-devel libxkbcommon-devel || dnf install -y vulkan-devel libxcb-devel libxkbcommon-devel || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -65,8 +64,8 @@ jobs:
           working-directory: python
           manylinux: auto
           before-script-linux: |
-            apt-get update
-            apt-get install -y libvulkan-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+            # Install Vulkan and X11 development dependencies (manylinux uses yum)
+            yum install -y vulkan-devel libxcb-devel libxkbcommon-devel || dnf install -y vulkan-devel libxcb-devel libxkbcommon-devel || true
 
       - uses: actions/upload-artifact@v4
         with:
