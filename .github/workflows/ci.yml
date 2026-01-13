@@ -306,10 +306,6 @@ jobs:
         run: |
           pip install maturin numpy pillow pytest
 
-      - name: Build Python bindings
-        working-directory: python
-        run: maturin build --release
-
       - name: Install and test Python bindings
         working-directory: python
         env:
@@ -318,7 +314,7 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
-          pip install "$(ls target/wheels/*.whl)"
+          maturin develop --release
           pytest tests/ -v
 
       - name: Run Python examples
