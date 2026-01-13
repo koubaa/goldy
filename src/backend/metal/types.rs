@@ -67,6 +67,10 @@ pub(crate) struct LogicalDevice {
     pub resource_registry: ResourceRegistry,
     /// Whether bindless is enabled (Argument Buffers Tier 2)
     pub bindless_enabled: bool,
+    /// Count of buffers allocated from heap (for use_heap_at safety)
+    pub heap_buffer_count: u32,
+    /// Count of textures allocated from heap (for use_heap_at safety)
+    pub heap_texture_count: u32,
 }
 
 /// Registry for tracking bindless resource indices

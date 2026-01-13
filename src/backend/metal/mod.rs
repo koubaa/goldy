@@ -39,7 +39,8 @@ use std::collections::HashMap;
 // Re-import metal crate with explicit path to avoid name collision
 use ::metal as mtl;
 use mtl::{
-    Device as MTLDevice, Library, MTLClearColor, MTLLoadAction,
+    Device as MTLDevice, HeapDescriptor, Library, MTLClearColor, MTLCPUCacheMode, MTLHeapType,
+    MTLLoadAction,
     MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLSize,
     MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor, TextureDescriptor,
 };
@@ -389,20 +390,40 @@ impl GpuBackend for MetalBackend {
         let (buffer_heap, texture_heap, argument_buffer, argument_encoder) = if bindless_enabled {
             tracing::info!("Metal Argument Buffers Tier 2 supported - enabling bindless");
 
-            // Create global argument buffer (for storing resource IDs)
+            // Create global argument buffer first (for storing resource IDs)
             let arg_buffer = device.new_buffer(
                 ARGUMENT_BUFFER_SIZE,
                 MTLResourceOptions::StorageModeShared,
             );
-            tracing::debug!("Created argument buffer");
+            tracing::info!("Created argument buffer");
 
-            // Note: Heap creation is temporarily disabled while we debug
-            // Resource allocation will use traditional path with registry tracking
+            // Try to create heaps for resource allocation
+            // Use Automatic heap type and Shared storage for CPU-accessible buffers
+            // IMPORTANT: CPU cache mode must match between heap and buffer allocation
+            let heap_size: u64 = 64 * 1024 * 1024; // 64MB (smaller to start)
+
+            tracing::info!("Creating buffer heap...");
+            let buffer_heap_desc = HeapDescriptor::new();
+            buffer_heap_desc.set_size(heap_size);
+            buffer_heap_desc.set_storage_mode(MTLStorageMode::Shared);
+            buffer_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
+            buffer_heap_desc.set_heap_type(MTLHeapType::Automatic);
+            let buffer_heap = device.new_heap(&buffer_heap_desc);
+            tracing::info!("Created buffer heap (size={}MB)", heap_size / 1024 / 1024);
+
+            tracing::info!("Creating texture heap...");
+            let texture_heap_desc = HeapDescriptor::new();
+            texture_heap_desc.set_size(heap_size);
+            texture_heap_desc.set_storage_mode(MTLStorageMode::Private);
+            texture_heap_desc.set_heap_type(MTLHeapType::Automatic);
+            let texture_heap = device.new_heap(&texture_heap_desc);
+            tracing::info!("Created texture heap (size={}MB)", heap_size / 1024 / 1024);
+
             let arg_encoder: Option<mtl::ArgumentEncoder> = None;
 
             (
-                None, // buffer_heap disabled for now
-                None, // texture_heap disabled for now
+                Some(buffer_heap),
+                Some(texture_heap),
                 Some(arg_buffer),
                 arg_encoder,
             )
@@ -436,6 +457,8 @@ impl GpuBackend for MetalBackend {
                 argument_encoder,
                 resource_registry: ResourceRegistry::new(),
                 bindless_enabled,
+                heap_buffer_count: 0,
+                heap_texture_count: 0,
             },
         );
 
@@ -505,25 +528,12 @@ impl GpuBackend for MetalBackend {
                                 index
                             );
 
-                            // Encode GPU resource ID into argument buffer
-                            if let Some(arg_buffer) = &logical_device.argument_buffer {
-                                // Write the buffer's gpu_resource_id to the argument buffer
-                                // Each entry is 8 bytes (u64 for MTLResourceID)
-                                let offset = (index as u64) * 8;
-                                if offset + 8 <= ARGUMENT_BUFFER_SIZE {
-                                    unsafe {
-                                        let gpu_id: u64 = msg_send![&*buffer, gpuResourceID];
-                                        let ptr =
-                                            arg_buffer.contents().add(offset as usize) as *mut u64;
-                                        *ptr = gpu_id;
-                                    }
-                                    tracing::trace!(
-                                        "Encoded buffer {} GPU ID at arg buffer offset {}",
-                                        handle,
-                                        offset
-                                    );
-                                }
-                            }
+                            // Note: gpuResourceID encoding is deferred - calling it via msg_send!
+                            // causes crashes. Buffers still benefit from heap allocation for
+                            // residency management via use_heap_at().
+
+                            // Track heap allocation for use_heap_at safety
+                            logical_device.heap_buffer_count += 1;
 
                             (buffer, None, true, Some(index))
                         }
@@ -1005,25 +1015,24 @@ impl GpuBackend for MetalBackend {
         let encoder = command_buffer.new_render_command_encoder(render_pass);
 
         // Set up bindless rendering if enabled
-        // Note: use_heap_at is called to make resources allocated from heaps resident
-        // Only call if we have resources allocated from heaps
+        // Note: Bindless setup is deferred until we have actual heap resources
+        // This avoids issues with empty heaps or shader incompatibility
         if logical_device.bindless_enabled {
-            if let Some(argument_buffer) = &logical_device.argument_buffer {
-                // Bind the global argument buffer at the dedicated slot
-                encoder.set_vertex_buffer(
-                    types::ARGUMENT_BUFFER_SLOT,
-                    Some(argument_buffer),
-                    0,
-                );
-                encoder.set_fragment_buffer(
-                    types::ARGUMENT_BUFFER_SLOT,
-                    Some(argument_buffer),
-                    0,
-                );
+            // Make heaps resident for the render pass (only if they have resources)
+            let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
+            if logical_device.heap_buffer_count > 0 {
+                if let Some(buffer_heap) = &logical_device.buffer_heap {
+                    encoder.use_heap_at(buffer_heap, render_stages);
+                }
             }
-            // Note: use_heap_at calls are skipped for now as they may cause issues
-            // when heaps are empty or have incompatible resources
-            // TODO: Re-enable once heap allocation is working properly
+            if logical_device.heap_texture_count > 0 {
+                if let Some(texture_heap) = &logical_device.texture_heap {
+                    encoder.use_heap_at(texture_heap, render_stages);
+                }
+            }
+
+            // Note: Argument buffer binding is only needed when shaders use it
+            // Binding to an unused slot is fine, but we skip it for now to isolate issues
         }
 
         // Set viewport and scissor
@@ -1327,61 +1336,12 @@ impl GpuBackend for MetalBackend {
         }
         descriptor.set_usage(mtl_usage);
 
-        // Allocate texture - from heap if bindless, otherwise traditional
-        let (texture, is_heap_allocated, arg_buffer_index) = if logical_device.bindless_enabled {
-            if let Some(heap) = &logical_device.texture_heap {
-                // Set storage mode to Private for heap allocation
-                descriptor.set_storage_mode(MTLStorageMode::Private);
-
-                match heap.new_texture(&descriptor) {
-                    Some(texture) => {
-                        // Register in bindless registry
-                        let index = logical_device.resource_registry.register_texture(handle);
-                        tracing::debug!(
-                            "Allocated texture {} from heap at bindless index {}",
-                            handle,
-                            index
-                        );
-
-                        // Encode GPU resource ID into argument buffer
-                        if let Some(arg_buffer) = &logical_device.argument_buffer {
-                            let offset = (index as u64) * 8;
-                            if offset + 8 <= ARGUMENT_BUFFER_SIZE {
-                                let gpu_id = texture.gpu_resource_id();
-                                unsafe {
-                                    let ptr =
-                                        arg_buffer.contents().add(offset as usize) as *mut u64;
-                                    *ptr = gpu_id._impl;
-                                }
-                                tracing::trace!(
-                                    "Encoded texture {} GPU ID at arg buffer offset {}",
-                                    handle,
-                                    offset
-                                );
-                            }
-                        }
-
-                        (texture, true, Some(index))
-                    }
-                    None => {
-                        // Heap allocation failed, fall back to traditional
-                        tracing::warn!(
-                            "Heap allocation failed for texture {}, using traditional allocation",
-                            handle
-                        );
-                        descriptor.set_storage_mode(MTLStorageMode::Managed);
-                        let texture = logical_device.device.new_texture(&descriptor);
-                        (texture, false, None)
-                    }
-                }
-            } else {
-                // No heap available, use traditional allocation
-                descriptor.set_storage_mode(MTLStorageMode::Managed);
-                let texture = logical_device.device.new_texture(&descriptor);
-                (texture, false, None)
-            }
-        } else {
-            // Traditional allocation for non-bindless
+        // Allocate texture - traditional allocation for now
+        // Note: Texture heap allocation requires Private storage, which doesn't support
+        // CPU-side writes via replace_region. Full bindless textures would need a
+        // staging buffer + blit encoder workflow. For now, use traditional allocation
+        // with Managed storage to allow CPU texture uploads.
+        let (texture, is_heap_allocated, arg_buffer_index) = {
             descriptor.set_storage_mode(MTLStorageMode::Managed);
             let texture = logical_device.device.new_texture(&descriptor);
             (texture, false, None)
@@ -1671,20 +1631,18 @@ impl GpuBackend for MetalBackend {
 
         // Set up bindless rendering if enabled
         if logical_device.bindless_enabled {
-            if let Some(argument_buffer) = &logical_device.argument_buffer {
-                // Bind the global argument buffer at the dedicated slot
-                encoder.set_vertex_buffer(
-                    types::ARGUMENT_BUFFER_SLOT,
-                    Some(argument_buffer),
-                    0,
-                );
-                encoder.set_fragment_buffer(
-                    types::ARGUMENT_BUFFER_SLOT,
-                    Some(argument_buffer),
-                    0,
-                );
+            // Make heaps resident for the render pass (only if they have resources)
+            let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
+            if logical_device.heap_buffer_count > 0 {
+                if let Some(buffer_heap) = &logical_device.buffer_heap {
+                    encoder.use_heap_at(buffer_heap, render_stages);
+                }
             }
-            // Note: use_heap_at calls are skipped for now
+            if logical_device.heap_texture_count > 0 {
+                if let Some(texture_heap) = &logical_device.texture_heap {
+                    encoder.use_heap_at(texture_heap, render_stages);
+                }
+            }
         }
 
         // Set viewport and scissor
@@ -1998,11 +1956,17 @@ impl GpuBackend for MetalBackend {
 
         // Set up bindless rendering if enabled
         if logical_device.bindless_enabled {
-            if let Some(argument_buffer) = &logical_device.argument_buffer {
-                // Bind the global argument buffer at the dedicated slot
-                encoder.set_buffer(types::ARGUMENT_BUFFER_SLOT, Some(argument_buffer), 0);
+            // Make heaps resident for the compute pass (only if they have resources)
+            if logical_device.heap_buffer_count > 0 {
+                if let Some(buffer_heap) = &logical_device.buffer_heap {
+                    encoder.use_heap(buffer_heap);
+                }
             }
-            // Note: use_heap calls are skipped for now
+            if logical_device.heap_texture_count > 0 {
+                if let Some(texture_heap) = &logical_device.texture_heap {
+                    encoder.use_heap(texture_heap);
+                }
+            }
         }
 
         let mut current_pipeline: Option<&ComputePipelineState> = None;
