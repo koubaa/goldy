@@ -59,7 +59,7 @@ windows-core = { version = "0.62", optional = true }
 
 # Metal dependencies (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = { version = "0.31", optional = true }
+metal = { version = "0.33", optional = true }
 cocoa = { version = "0.26", optional = true }
 objc = { version = "0.2", optional = true }
 core-graphics-types = { version = "0.2", optional = true }

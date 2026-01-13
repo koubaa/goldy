@@ -61,8 +61,10 @@ pub(crate) struct LogicalDevice {
     pub texture_heap: Option<Heap>,
     /// Global argument buffer containing resource IDs
     pub argument_buffer: Option<MTLBuffer>,
-    /// Encoder for writing to the argument buffer
+    /// Encoder for writing buffers to the argument buffer
     pub argument_encoder: Option<ArgumentEncoder>,
+    /// Encoder for writing textures to the argument buffer
+    pub texture_encoder: Option<ArgumentEncoder>,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
     /// Whether bindless is enabled (Argument Buffers Tier 2)
