@@ -23,9 +23,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 keywords = ["gpu", "graphics", "vulkan", "rendering", "compute"]
+authors = [
+    { name = "Mohamed Koubaa" }
+]
 dependencies = [
     "numpy>=1.20",
 ]
+
+[project.urls]
+Homepage = "https://github.com/koubaa/goldy"
+Repository = "https://github.com/koubaa/goldy"
+Documentation = "https://github.com/koubaa/goldy#readme"
 
 [project.optional-dependencies]
 dev = [
