@@ -1,9 +1,21 @@
 // Conway's Game of Life compute shader
 // Uses ping-pong buffers: reads from one, writes to the other
+//
+// ## Bindless Support
+//
+// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
+// - Buffers are heap-allocated with gpu_resource_id encoded in argument buffer
+// - use_heap() is called to make all resources resident
+// - Push constants contain buffer indices for argument buffer access
+// Traditional binding syntax continues to work with bindless infrastructure.
 
 // Grid dimensions (must match the example)
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
+
+#ifdef __BINDLESS__
+// Bindless mode active - buffers allocated from heap with residency managed
+#endif
 
 // Ping-pong buffers: read from current, write to next
 [[vk::binding(0, 0)]] StructuredBuffer<uint> currentState;

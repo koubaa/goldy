@@ -122,6 +122,11 @@ pub type FnSpAddTranslationUnitSourceString = unsafe extern "C" fn(
 );
 pub type FnSpAddSearchPath =
     unsafe extern "C" fn(request: *mut SlangCompileRequest, path: *const c_char);
+pub type FnSpAddPreprocessorDefine = unsafe extern "C" fn(
+    request: *mut SlangCompileRequest,
+    key: *const c_char,
+    value: *const c_char,
+);
 pub type FnSpAddEntryPoint = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     translation_unit_index: c_int,

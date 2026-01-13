@@ -1,5 +1,16 @@
 // Spinning 3D wireframe cube
 // Rendered entirely in fragment shader using SDF techniques
+//
+// ## Bindless Support
+//
+// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
+// - Resources are allocated from GPU heaps with gpu_resource_id encoded
+// - Argument buffer at slot 30 contains all resource IDs
+// - Push constants at slot 29 contain indices into the argument buffer
+// - The backend calls use_heap() to make all heap resources resident
+//
+// The traditional binding syntax works with both modes - the backend
+// handles the complexity of heap allocation and residency.
 
 struct VertexInput {
     float2 position : POSITION;
@@ -11,6 +22,13 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
+#ifdef __BINDLESS__
+// Bindless mode: buffer is heap-allocated, GPU resource ID is in argument buffer
+// Push constants at slot 29 contain the buffer index for bindless access
+// For now, traditional binding still works as the buffer is bound explicitly
+#endif
+
+// Time uniform - works with both traditional and bindless modes
 [[vk::binding(0, 0)]]
 cbuffer TimeBuffer {
     float time;

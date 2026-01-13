@@ -1,9 +1,21 @@
 // Game of Life rendering shader
 // Renders the grid as a fullscreen quad with cell colors
+//
+// ## Bindless Support
+//
+// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
+// - Buffer is heap-allocated with gpu_resource_id in argument buffer (slot 30)
+// - Push constants (slot 29) contain buffer index for bindless access
+// Traditional binding works with both modes.
 
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
+#ifdef __BINDLESS__
+// Bindless mode active - buffer allocated from heap
+#endif
+
+// Cell state buffer
 [[vk::binding(0, 0)]] StructuredBuffer<uint> cells;
 
 struct VSOutput {

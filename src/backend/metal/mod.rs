@@ -17,8 +17,9 @@ mod utils;
 
 use types::{
     BindGroupLayoutState, BindGroupState, BindingState, BufferState, ComputePipelineState,
-    LogicalDevice, PipelineState, RenderTargetState, SamplerState_ as SamplerStateInternal,
-    SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
+    LogicalDevice, PipelineState, RenderTargetState, ResourceRegistry,
+    SamplerState_ as SamplerStateInternal, SurfaceState, TextureState, ARGUMENT_BUFFER_SIZE,
+    MAX_FRAMES_IN_FLIGHT,
 };
 use utils::{
     address_mode_to_mtl, compare_to_mtl, depth_format_to_mtl, filter_to_mtl, format_to_mtl,
@@ -38,9 +39,9 @@ use std::collections::HashMap;
 // Re-import metal crate with explicit path to avoid name collision
 use ::metal as mtl;
 use mtl::{
-    Device as MTLDevice, Library, MTLClearColor, MTLLoadAction, MTLOrigin, MTLPixelFormat,
-    MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLSize, MTLStorageMode, MTLStoreAction,
-    MTLTextureUsage, RenderPassDescriptor, TextureDescriptor,
+    Device as MTLDevice, Library, MTLClearColor, MTLLoadAction,
+    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLSize,
+    MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor, TextureDescriptor,
 };
 
 // Re-export from our types module
@@ -140,19 +141,21 @@ impl MetalBackend {
         search_paths: &[String],
         entry_point: &str,
         stage: crate::slang::SlangStage,
+        bindless: bool,
     ) -> Result<Library> {
         let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
         // Compile Slang to MSL with specific entry point
-        let compiled = self
-            .slang_compiler
-            .compile_with_options(
-                slang_source,
-                crate::slang::ShaderTarget::Metal,
-                &[(entry_point, stage)],
-                &search_path_refs,
-            )
-            .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
+        // Note: __BINDLESS__ define is available via compile_bindless
+        // For now, using standard compilation while we debug heap allocation issues
+        let _ = bindless; // suppress unused warning
+        let compiled = self.slang_compiler.compile_with_options(
+            slang_source,
+            crate::slang::ShaderTarget::Metal,
+            &[(entry_point, stage)],
+            &search_path_refs,
+        )
+        .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
 
         let msl_source = compiled
             .as_str()
@@ -160,9 +163,10 @@ impl MetalBackend {
             .to_string();
 
         tracing::debug!(
-            "Compiled MSL {} shader ({} bytes)",
+            "Compiled MSL {} shader ({} bytes, bindless={})",
             entry_point,
-            msl_source.len()
+            msl_source.len(),
+            bindless
         );
 
         // Create Metal library from MSL
@@ -195,12 +199,14 @@ impl MetalBackend {
             .get(&device_handle)
             .context("Shader's device no longer valid")?;
 
+        let bindless = logical_device.bindless_enabled;
         let library = self.compile_shader_stage(
             &logical_device.device,
             &slang_source,
             &search_paths,
             "vs_main",
             crate::slang::SlangStage::Vertex,
+            bindless,
         )?;
 
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
@@ -229,12 +235,14 @@ impl MetalBackend {
             .get(&device_handle)
             .context("Shader's device no longer valid")?;
 
+        let bindless = logical_device.bindless_enabled;
         let library = self.compile_shader_stage(
             &logical_device.device,
             &slang_source,
             &search_paths,
             "fs_main",
             crate::slang::SlangStage::Fragment,
+            bindless,
         )?;
 
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
@@ -263,12 +271,14 @@ impl MetalBackend {
             .get(&device_handle)
             .context("Shader's device no longer valid")?;
 
+        let bindless = logical_device.bindless_enabled;
         let library = self.compile_shader_stage(
             &logical_device.device,
             &slang_source,
             &search_paths,
             "cs_main",
             crate::slang::SlangStage::Compute,
+            bindless,
         )?;
 
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
@@ -369,14 +379,49 @@ impl GpuBackend for MetalBackend {
 
         let command_queue = device.new_command_queue();
 
+        // Check for Argument Buffers Tier 2 support (required for bindless)
+        let arg_buffers_tier = device.argument_buffers_support();
+        let bindless_enabled =
+            arg_buffers_tier == mtl::MTLArgumentBuffersTier::Tier2;
+
+        // Initialize bindless infrastructure if supported
+        // For now, disable heap creation to debug crash
+        let (buffer_heap, texture_heap, argument_buffer, argument_encoder) = if bindless_enabled {
+            tracing::info!("Metal Argument Buffers Tier 2 supported - enabling bindless");
+
+            // Create global argument buffer (for storing resource IDs)
+            let arg_buffer = device.new_buffer(
+                ARGUMENT_BUFFER_SIZE,
+                MTLResourceOptions::StorageModeShared,
+            );
+            tracing::debug!("Created argument buffer");
+
+            // Note: Heap creation is temporarily disabled while we debug
+            // Resource allocation will use traditional path with registry tracking
+            let arg_encoder: Option<mtl::ArgumentEncoder> = None;
+
+            (
+                None, // buffer_heap disabled for now
+                None, // texture_heap disabled for now
+                Some(arg_buffer),
+                arg_encoder,
+            )
+        } else {
+            tracing::info!(
+                "Metal Argument Buffers Tier 2 not supported - using traditional bindings"
+            );
+            (None, None, None, None)
+        };
+
         let handle = self.next_device_handle;
         self.next_device_handle += 1;
 
         tracing::info!(
-            "Created Metal device {} for adapter {} ({})",
+            "Created Metal device {} for adapter {} ({}) [bindless={}]",
             handle,
             adapter_id,
-            device.name()
+            device.name(),
+            bindless_enabled
         );
 
         self.devices.insert(
@@ -385,6 +430,12 @@ impl GpuBackend for MetalBackend {
                 device,
                 command_queue,
                 adapter_id,
+                buffer_heap,
+                texture_heap,
+                argument_buffer,
+                argument_encoder,
+                resource_registry: ResourceRegistry::new(),
+                bindless_enabled,
             },
         );
 
@@ -429,24 +480,89 @@ impl GpuBackend for MetalBackend {
     ) -> Result<BufferHandle> {
         let logical_device = self
             .devices
-            .get(&device_handle)
+            .get_mut(&device_handle)
             .context("Invalid device handle")?;
-
-        // Use managed storage mode for CPU-visible buffers
-        let options =
-            MTLResourceOptions::StorageModeManaged | MTLResourceOptions::CPUCacheModeWriteCombined;
-
-        let buffer = logical_device.device.new_buffer(size, options);
 
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
+
+        // Allocate buffer - from heap if bindless, otherwise traditional
+        let (buffer, staging_buffer, is_heap_allocated, arg_buffer_index) =
+            if logical_device.bindless_enabled {
+                if let Some(heap) = &logical_device.buffer_heap {
+                    // Allocate from heap with Shared storage (CPU-accessible)
+                    // Use default CPU cache mode to match the heap's mode
+                    let options = MTLResourceOptions::StorageModeShared
+                        | MTLResourceOptions::CPUCacheModeDefaultCache;
+
+                    match heap.new_buffer(size, options) {
+                        Some(buffer) => {
+                            // Register in bindless registry
+                            let index = logical_device.resource_registry.register_buffer(handle);
+                            tracing::debug!(
+                                "Allocated buffer {} from heap at bindless index {}",
+                                handle,
+                                index
+                            );
+
+                            // Encode GPU resource ID into argument buffer
+                            if let Some(arg_buffer) = &logical_device.argument_buffer {
+                                // Write the buffer's gpu_resource_id to the argument buffer
+                                // Each entry is 8 bytes (u64 for MTLResourceID)
+                                let offset = (index as u64) * 8;
+                                if offset + 8 <= ARGUMENT_BUFFER_SIZE {
+                                    unsafe {
+                                        let gpu_id: u64 = msg_send![&*buffer, gpuResourceID];
+                                        let ptr =
+                                            arg_buffer.contents().add(offset as usize) as *mut u64;
+                                        *ptr = gpu_id;
+                                    }
+                                    tracing::trace!(
+                                        "Encoded buffer {} GPU ID at arg buffer offset {}",
+                                        handle,
+                                        offset
+                                    );
+                                }
+                            }
+
+                            (buffer, None, true, Some(index))
+                        }
+                        None => {
+                            // Heap allocation failed (e.g., heap full), fall back to traditional
+                            tracing::warn!(
+                                "Heap allocation failed for buffer {}, using traditional allocation",
+                                handle
+                            );
+                            let options = MTLResourceOptions::StorageModeManaged
+                                | MTLResourceOptions::CPUCacheModeWriteCombined;
+                            let buffer = logical_device.device.new_buffer(size, options);
+                            (buffer, None, false, None)
+                        }
+                    }
+                } else {
+                    // No heap available, use traditional allocation
+                    let options = MTLResourceOptions::StorageModeManaged
+                        | MTLResourceOptions::CPUCacheModeWriteCombined;
+                    let buffer = logical_device.device.new_buffer(size, options);
+                    (buffer, None, false, None)
+                }
+            } else {
+                // Traditional allocation for non-bindless
+                let options = MTLResourceOptions::StorageModeManaged
+                    | MTLResourceOptions::CPUCacheModeWriteCombined;
+                let buffer = logical_device.device.new_buffer(size, options);
+                (buffer, None, false, None)
+            };
 
         self.buffers.insert(
             handle,
             BufferState {
                 device_handle,
                 buffer,
+                staging_buffer,
                 size,
+                arg_buffer_index,
+                is_heap_allocated,
             },
         );
 
@@ -454,7 +570,12 @@ impl GpuBackend for MetalBackend {
     }
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
-        self.buffers.remove(&buffer_handle);
+        if let Some(buffer) = self.buffers.remove(&buffer_handle) {
+            // Unregister from bindless registry
+            if let Some(device) = self.devices.get_mut(&buffer.device_handle) {
+                device.resource_registry.unregister_buffer(buffer_handle);
+            }
+        }
     }
 
     fn write_buffer(
@@ -477,10 +598,13 @@ impl GpuBackend for MetalBackend {
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
         }
 
-        // Notify Metal of the modification
-        buffer
-            .buffer
-            .did_modify_range(mtl::NSRange::new(offset, data.len() as u64));
+        // Notify Metal of the modification (only needed for Managed storage)
+        // Heap-allocated buffers use Shared storage, which doesn't need this
+        if !buffer.is_heap_allocated {
+            buffer
+                .buffer
+                .did_modify_range(mtl::NSRange::new(offset, data.len() as u64));
+        }
 
         Ok(())
     }
@@ -880,6 +1004,28 @@ impl GpuBackend for MetalBackend {
         let command_buffer = logical_device.command_queue.new_command_buffer();
         let encoder = command_buffer.new_render_command_encoder(render_pass);
 
+        // Set up bindless rendering if enabled
+        // Note: use_heap_at is called to make resources allocated from heaps resident
+        // Only call if we have resources allocated from heaps
+        if logical_device.bindless_enabled {
+            if let Some(argument_buffer) = &logical_device.argument_buffer {
+                // Bind the global argument buffer at the dedicated slot
+                encoder.set_vertex_buffer(
+                    types::ARGUMENT_BUFFER_SLOT,
+                    Some(argument_buffer),
+                    0,
+                );
+                encoder.set_fragment_buffer(
+                    types::ARGUMENT_BUFFER_SLOT,
+                    Some(argument_buffer),
+                    0,
+                );
+            }
+            // Note: use_heap_at calls are skipped for now as they may cause issues
+            // when heaps are empty or have incompatible resources
+            // TODO: Re-enable once heap allocation is working properly
+        }
+
         // Set viewport and scissor
         encoder.set_viewport(mtl::MTLViewport {
             originX: 0.0,
@@ -932,11 +1078,16 @@ impl GpuBackend for MetalBackend {
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
                     if let Some(bg) = self.bind_groups.get(bind_group) {
+                        // Collect bindless indices for push constants
+                        let mut bindless_indices = types::BindlessIndices::default();
+                        let mut has_bindless_resources = false;
+
                         for (binding_idx, binding) in bg.bindings.iter().enumerate() {
                             let buffer_index = (*index as usize * 16 + binding_idx) as u64;
                             match binding {
                                 BindingState::Buffer { buffer, offset, .. } => {
                                     if let Some(buf) = self.buffers.get(buffer) {
+                                        // Traditional binding (for backward compatibility)
                                         encoder.set_vertex_buffer(
                                             buffer_index,
                                             Some(&buf.buffer),
@@ -947,23 +1098,72 @@ impl GpuBackend for MetalBackend {
                                             Some(&buf.buffer),
                                             *offset,
                                         );
+
+                                        // Collect bindless index if available
+                                        if let Some(arg_idx) = buf.arg_buffer_index {
+                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                bindless_indices.buffer_indices[binding_idx] =
+                                                    arg_idx;
+                                                has_bindless_resources = true;
+                                            }
+                                        }
                                     }
                                 }
                                 BindingState::Texture(tex_handle) => {
                                     if let Some(tex) = self.textures.get(tex_handle) {
+                                        // Traditional binding
                                         encoder
                                             .set_fragment_texture(buffer_index, Some(&tex.texture));
+
+                                        // Collect bindless index if available
+                                        if let Some(arg_idx) = tex.arg_buffer_index {
+                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                bindless_indices.texture_indices[binding_idx] =
+                                                    arg_idx;
+                                                has_bindless_resources = true;
+                                            }
+                                        }
                                     }
                                 }
                                 BindingState::Sampler(samp_handle) => {
                                     if let Some(samp) = self.samplers.get(samp_handle) {
+                                        // Traditional binding
                                         encoder.set_fragment_sampler_state(
                                             buffer_index,
                                             Some(&samp.sampler),
                                         );
+
+                                        // Collect bindless index if available
+                                        if let Some(arg_idx) = samp.arg_buffer_index {
+                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                bindless_indices.sampler_indices[binding_idx] =
+                                                    arg_idx;
+                                                has_bindless_resources = true;
+                                            }
+                                        }
                                     }
                                 }
                             }
+                        }
+
+                        // If bindless resources exist, pass indices via push constants (slot 29)
+                        if has_bindless_resources {
+                            let indices_bytes: &[u8] = unsafe {
+                                std::slice::from_raw_parts(
+                                    &bindless_indices as *const _ as *const u8,
+                                    std::mem::size_of::<types::BindlessIndices>(),
+                                )
+                            };
+                            encoder.set_vertex_bytes(
+                                types::PUSH_CONSTANTS_SLOT,
+                                indices_bytes.len() as u64,
+                                indices_bytes.as_ptr() as *const _,
+                            );
+                            encoder.set_fragment_bytes(
+                                types::PUSH_CONSTANTS_SLOT,
+                                indices_bytes.len() as u64,
+                                indices_bytes.as_ptr() as *const _,
+                            );
                         }
                     }
                 }
@@ -1104,8 +1304,11 @@ impl GpuBackend for MetalBackend {
     ) -> Result<TextureHandle> {
         let logical_device = self
             .devices
-            .get(&device_handle)
+            .get_mut(&device_handle)
             .context("Invalid device handle")?;
+
+        let handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
 
         let descriptor = TextureDescriptor::new();
         descriptor.set_width(width as u64);
@@ -1123,12 +1326,66 @@ impl GpuBackend for MetalBackend {
             mtl_usage |= MTLTextureUsage::RenderTarget;
         }
         descriptor.set_usage(mtl_usage);
-        descriptor.set_storage_mode(MTLStorageMode::Managed);
 
-        let texture = logical_device.device.new_texture(&descriptor);
+        // Allocate texture - from heap if bindless, otherwise traditional
+        let (texture, is_heap_allocated, arg_buffer_index) = if logical_device.bindless_enabled {
+            if let Some(heap) = &logical_device.texture_heap {
+                // Set storage mode to Private for heap allocation
+                descriptor.set_storage_mode(MTLStorageMode::Private);
 
-        let handle = self.next_texture_handle;
-        self.next_texture_handle += 1;
+                match heap.new_texture(&descriptor) {
+                    Some(texture) => {
+                        // Register in bindless registry
+                        let index = logical_device.resource_registry.register_texture(handle);
+                        tracing::debug!(
+                            "Allocated texture {} from heap at bindless index {}",
+                            handle,
+                            index
+                        );
+
+                        // Encode GPU resource ID into argument buffer
+                        if let Some(arg_buffer) = &logical_device.argument_buffer {
+                            let offset = (index as u64) * 8;
+                            if offset + 8 <= ARGUMENT_BUFFER_SIZE {
+                                let gpu_id = texture.gpu_resource_id();
+                                unsafe {
+                                    let ptr =
+                                        arg_buffer.contents().add(offset as usize) as *mut u64;
+                                    *ptr = gpu_id._impl;
+                                }
+                                tracing::trace!(
+                                    "Encoded texture {} GPU ID at arg buffer offset {}",
+                                    handle,
+                                    offset
+                                );
+                            }
+                        }
+
+                        (texture, true, Some(index))
+                    }
+                    None => {
+                        // Heap allocation failed, fall back to traditional
+                        tracing::warn!(
+                            "Heap allocation failed for texture {}, using traditional allocation",
+                            handle
+                        );
+                        descriptor.set_storage_mode(MTLStorageMode::Managed);
+                        let texture = logical_device.device.new_texture(&descriptor);
+                        (texture, false, None)
+                    }
+                }
+            } else {
+                // No heap available, use traditional allocation
+                descriptor.set_storage_mode(MTLStorageMode::Managed);
+                let texture = logical_device.device.new_texture(&descriptor);
+                (texture, false, None)
+            }
+        } else {
+            // Traditional allocation for non-bindless
+            descriptor.set_storage_mode(MTLStorageMode::Managed);
+            let texture = logical_device.device.new_texture(&descriptor);
+            (texture, false, None)
+        };
 
         self.textures.insert(
             handle,
@@ -1138,15 +1395,18 @@ impl GpuBackend for MetalBackend {
                 height,
                 format,
                 texture,
+                arg_buffer_index,
+                is_heap_allocated,
             },
         );
 
         tracing::debug!(
-            "Created texture {} ({}x{}, {:?})",
+            "Created texture {} ({}x{}, {:?}) [heap={}]",
             handle,
             width,
             height,
-            format
+            format,
+            is_heap_allocated
         );
         Ok(handle)
     }
@@ -1189,7 +1449,12 @@ impl GpuBackend for MetalBackend {
     }
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
-        self.textures.remove(&texture_handle);
+        if let Some(texture) = self.textures.remove(&texture_handle) {
+            // Unregister from bindless registry
+            if let Some(device) = self.devices.get_mut(&texture.device_handle) {
+                device.resource_registry.unregister_texture(texture_handle);
+            }
+        }
     }
 
     fn create_sampler(
@@ -1199,8 +1464,11 @@ impl GpuBackend for MetalBackend {
     ) -> Result<SamplerHandle> {
         let logical_device = self
             .devices
-            .get(&device_handle)
+            .get_mut(&device_handle)
             .context("Invalid device handle")?;
+
+        let handle = self.next_sampler_handle;
+        self.next_sampler_handle += 1;
 
         let descriptor = mtl::SamplerDescriptor::new();
         descriptor.set_min_filter(filter_to_mtl(desc.min_filter));
@@ -1213,29 +1481,66 @@ impl GpuBackend for MetalBackend {
         descriptor.set_lod_min_clamp(desc.lod_min_clamp);
         descriptor.set_lod_max_clamp(desc.lod_max_clamp);
 
+        // Enable argument buffer support for bindless
+        descriptor.set_support_argument_buffers(true);
+
         if let Some(compare) = desc.compare {
             descriptor.set_compare_function(compare_to_mtl(compare));
         }
 
         let sampler = logical_device.device.new_sampler(&descriptor);
 
-        let handle = self.next_sampler_handle;
-        self.next_sampler_handle += 1;
+        // Register in bindless registry and encode GPU resource ID if enabled
+        let arg_buffer_index = if logical_device.bindless_enabled {
+            let index = logical_device.resource_registry.register_sampler(handle);
+            tracing::debug!(
+                "Registered sampler {} at bindless index {}",
+                handle,
+                index
+            );
+
+            // Encode GPU resource ID into argument buffer
+            if let Some(arg_buffer) = &logical_device.argument_buffer {
+                let offset = (index as u64) * 8;
+                if offset + 8 <= ARGUMENT_BUFFER_SIZE {
+                    let gpu_id = sampler.gpu_resource_id();
+                    unsafe {
+                        let ptr = arg_buffer.contents().add(offset as usize) as *mut u64;
+                        *ptr = gpu_id._impl;
+                    }
+                    tracing::trace!(
+                        "Encoded sampler {} GPU ID at arg buffer offset {}",
+                        handle,
+                        offset
+                    );
+                }
+            }
+
+            Some(index)
+        } else {
+            None
+        };
 
         self.samplers.insert(
             handle,
             SamplerStateInternal {
                 device_handle,
                 sampler,
+                arg_buffer_index,
             },
         );
 
-        tracing::debug!("Created sampler (handle={})", handle);
+        tracing::debug!("Created sampler (handle={}) [bindless={}]", handle, arg_buffer_index.is_some());
         Ok(handle)
     }
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
-        self.samplers.remove(&sampler_handle);
+        if let Some(sampler) = self.samplers.remove(&sampler_handle) {
+            // Unregister from bindless registry
+            if let Some(device) = self.devices.get_mut(&sampler.device_handle) {
+                device.resource_registry.unregister_sampler(sampler_handle);
+            }
+        }
     }
 
     fn create_surface(
@@ -1364,6 +1669,24 @@ impl GpuBackend for MetalBackend {
         let command_buffer = logical_device.command_queue.new_command_buffer();
         let encoder = command_buffer.new_render_command_encoder(render_pass);
 
+        // Set up bindless rendering if enabled
+        if logical_device.bindless_enabled {
+            if let Some(argument_buffer) = &logical_device.argument_buffer {
+                // Bind the global argument buffer at the dedicated slot
+                encoder.set_vertex_buffer(
+                    types::ARGUMENT_BUFFER_SLOT,
+                    Some(argument_buffer),
+                    0,
+                );
+                encoder.set_fragment_buffer(
+                    types::ARGUMENT_BUFFER_SLOT,
+                    Some(argument_buffer),
+                    0,
+                );
+            }
+            // Note: use_heap_at calls are skipped for now
+        }
+
         // Set viewport and scissor
         encoder.set_viewport(mtl::MTLViewport {
             originX: 0.0,
@@ -1414,11 +1737,16 @@ impl GpuBackend for MetalBackend {
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
                     if let Some(bg) = self.bind_groups.get(bind_group) {
+                        // Collect bindless indices for push constants
+                        let mut bindless_indices = types::BindlessIndices::default();
+                        let mut has_bindless_resources = false;
+
                         for (binding_idx, binding) in bg.bindings.iter().enumerate() {
                             let buffer_index = (*index as usize * 16 + binding_idx) as u64;
                             match binding {
                                 BindingState::Buffer { buffer, offset, .. } => {
                                     if let Some(buf) = self.buffers.get(buffer) {
+                                        // Traditional binding (for backward compatibility)
                                         encoder.set_vertex_buffer(
                                             buffer_index,
                                             Some(&buf.buffer),
@@ -1429,23 +1757,72 @@ impl GpuBackend for MetalBackend {
                                             Some(&buf.buffer),
                                             *offset,
                                         );
+
+                                        // Collect bindless index if available
+                                        if let Some(arg_idx) = buf.arg_buffer_index {
+                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                bindless_indices.buffer_indices[binding_idx] =
+                                                    arg_idx;
+                                                has_bindless_resources = true;
+                                            }
+                                        }
                                     }
                                 }
                                 BindingState::Texture(tex_handle) => {
                                     if let Some(tex) = self.textures.get(tex_handle) {
+                                        // Traditional binding
                                         encoder
                                             .set_fragment_texture(buffer_index, Some(&tex.texture));
+
+                                        // Collect bindless index if available
+                                        if let Some(arg_idx) = tex.arg_buffer_index {
+                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                bindless_indices.texture_indices[binding_idx] =
+                                                    arg_idx;
+                                                has_bindless_resources = true;
+                                            }
+                                        }
                                     }
                                 }
                                 BindingState::Sampler(samp_handle) => {
                                     if let Some(samp) = self.samplers.get(samp_handle) {
+                                        // Traditional binding
                                         encoder.set_fragment_sampler_state(
                                             buffer_index,
                                             Some(&samp.sampler),
                                         );
+
+                                        // Collect bindless index if available
+                                        if let Some(arg_idx) = samp.arg_buffer_index {
+                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                bindless_indices.sampler_indices[binding_idx] =
+                                                    arg_idx;
+                                                has_bindless_resources = true;
+                                            }
+                                        }
                                     }
                                 }
                             }
+                        }
+
+                        // If bindless resources exist, pass indices via push constants (slot 29)
+                        if has_bindless_resources {
+                            let indices_bytes: &[u8] = unsafe {
+                                std::slice::from_raw_parts(
+                                    &bindless_indices as *const _ as *const u8,
+                                    std::mem::size_of::<types::BindlessIndices>(),
+                                )
+                            };
+                            encoder.set_vertex_bytes(
+                                types::PUSH_CONSTANTS_SLOT,
+                                indices_bytes.len() as u64,
+                                indices_bytes.as_ptr() as *const _,
+                            );
+                            encoder.set_fragment_bytes(
+                                types::PUSH_CONSTANTS_SLOT,
+                                indices_bytes.len() as u64,
+                                indices_bytes.as_ptr() as *const _,
+                            );
                         }
                     }
                 }
@@ -1618,6 +1995,15 @@ impl GpuBackend for MetalBackend {
 
         let command_buffer = logical_device.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
+
+        // Set up bindless rendering if enabled
+        if logical_device.bindless_enabled {
+            if let Some(argument_buffer) = &logical_device.argument_buffer {
+                // Bind the global argument buffer at the dedicated slot
+                encoder.set_buffer(types::ARGUMENT_BUFFER_SLOT, Some(argument_buffer), 0);
+            }
+            // Note: use_heap calls are skipped for now
+        }
 
         let mut current_pipeline: Option<&ComputePipelineState> = None;
 

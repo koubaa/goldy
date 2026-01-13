@@ -118,6 +118,20 @@ impl SlangCompiler {
         self.compile_with_entry_points(source, target, &entry_points)
     }
 
+    /// Compile for bindless rendering (adds __BINDLESS__ preprocessor define).
+    ///
+    /// This is used by backends that support bindless resource access.
+    /// Shaders can check for `#ifdef __BINDLESS__` to use bindless patterns.
+    pub fn compile_bindless(
+        &self,
+        source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+    ) -> Result<CompiledShader> {
+        self.compile_with_defines(source, target, entry_points, search_paths, &[("__BINDLESS__", "1")])
+    }
+
     /// Compile with explicit entry points.
     ///
     /// If `entry_points` is empty, entry points are detected from shader attributes.
@@ -141,6 +155,22 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
     ) -> Result<CompiledShader> {
+        self.compile_with_defines(source, target, entry_points, search_paths, &[])
+    }
+
+    /// Compile with explicit entry points, search paths, and preprocessor defines.
+    ///
+    /// Search paths are used to resolve `import` statements in Slang modules.
+    /// If `entry_points` is empty, entry points are detected from shader attributes.
+    /// Defines are passed to the preprocessor as key=value pairs (value can be empty).
+    pub fn compile_with_defines(
+        &self,
+        source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+    ) -> Result<CompiledShader> {
         // Create compile request
         let request = unsafe { (self.library.create_compile_request)(self.session) };
         if request.is_null() {
@@ -157,6 +187,19 @@ impl SlangCompiler {
             let path_cstr = CString::new(*path).context("Search path contains null bytes")?;
             unsafe {
                 (self.library.add_search_path)(request, path_cstr.as_ptr());
+            }
+        }
+
+        // Add preprocessor defines
+        for (key, value) in defines {
+            let key_cstr = CString::new(*key).context("Define key contains null bytes")?;
+            let value_cstr = CString::new(*value).context("Define value contains null bytes")?;
+            unsafe {
+                (self.library.add_preprocessor_define)(
+                    request,
+                    key_cstr.as_ptr(),
+                    value_cstr.as_ptr(),
+                );
             }
         }
 

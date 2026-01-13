@@ -24,6 +24,7 @@ pub struct SlangLibrary {
     pub add_translation_unit_source_string: FnSpAddTranslationUnitSourceString,
     pub add_entry_point: FnSpAddEntryPoint,
     pub add_search_path: FnSpAddSearchPath,
+    pub add_preprocessor_define: FnSpAddPreprocessorDefine,
     // Compilation
     pub compile: FnSpCompile,
     pub get_diagnostic_output: FnSpGetDiagnosticOutput,
@@ -78,6 +79,9 @@ impl SlangLibrary {
             let add_search_path: FnSpAddSearchPath = *library
                 .get(b"spAddSearchPath\0")
                 .context("Failed to load spAddSearchPath")?;
+            let add_preprocessor_define: FnSpAddPreprocessorDefine = *library
+                .get(b"spAddPreprocessorDefine\0")
+                .context("Failed to load spAddPreprocessorDefine")?;
             let compile: FnSpCompile = *library
                 .get(b"spCompile\0")
                 .context("Failed to load spCompile")?;
@@ -102,6 +106,7 @@ impl SlangLibrary {
                 add_translation_unit_source_string,
                 add_entry_point,
                 add_search_path,
+                add_preprocessor_define,
                 compile,
                 get_diagnostic_output,
                 get_entry_point_code_blob,
