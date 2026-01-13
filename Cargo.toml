@@ -76,7 +76,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 winit = "0.30"
 
 [features]
-default = ["vulkan"]
+# Default enables all platform-appropriate backends
+# On macOS: metal is used, on Windows: dx12/vulkan, on Linux: vulkan
+default = ["vulkan", "metal", "dx12"]
 vulkan = ["dep:ash"]
 dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core"]
 metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types"]

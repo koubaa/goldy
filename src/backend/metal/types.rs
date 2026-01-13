@@ -10,8 +10,8 @@ use crate::types::{DepthFormat, TextureFormat};
 use ::metal as mtl;
 use mtl::{
     Buffer as MTLBuffer, CommandQueue, ComputePipelineState as MTLComputePipelineState,
-    DepthStencilState as MTLDepthStencilState, Device as MTLDevice, Library, RenderPipelineState,
-    SamplerState, Texture as MTLTexture,
+    DepthStencilState as MTLDepthStencilState, Device as MTLDevice, Library, MTLPrimitiveType,
+    RenderPipelineState, SamplerState, Texture as MTLTexture,
 };
 
 /// A logical Metal device with associated resources.
@@ -47,12 +47,15 @@ pub(crate) struct PipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
+    pub primitive_type: MTLPrimitiveType,
 }
 
 /// Compute pipeline state.
 pub(crate) struct ComputePipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: MTLComputePipelineState,
+    /// Thread group size from [numthreads(x, y, z)] attribute
+    pub workgroup_size: [u32; 3],
 }
 
 /// Bind group layout state.

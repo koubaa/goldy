@@ -22,7 +22,7 @@ use types::{
 };
 use utils::{
     address_mode_to_mtl, compare_to_mtl, depth_format_to_mtl, filter_to_mtl, format_to_mtl,
-    index_format_to_mtl, mipmap_mode_to_mtl, vertex_format_to_mtl,
+    index_format_to_mtl, mipmap_mode_to_mtl, topology_to_mtl, vertex_format_to_mtl,
 };
 
 use super::*;
@@ -45,6 +45,28 @@ use mtl::{
 
 // Re-export from our types module
 use types::ShaderState;
+
+/// Parse [numthreads(x, y, z)] from Slang shader source.
+/// Returns None if not found.
+fn parse_numthreads(source: &str) -> Option<[u32; 3]> {
+    // Find [numthreads(x, y, z)] pattern
+    let start = source.find("[numthreads(")?;
+    let after_open = start + "[numthreads(".len();
+    let end = source[after_open..].find(')')? + after_open;
+    let args = &source[after_open..end];
+
+    // Split by comma and parse
+    let parts: Vec<&str> = args.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let x = parts[0].parse().ok()?;
+    let y = parts[1].parse().ok()?;
+    let z = parts[2].parse().ok()?;
+
+    Some([x, y, z])
+}
 
 /// Metal backend for macOS.
 pub struct MetalBackend {
@@ -633,7 +655,7 @@ impl GpuBackend for MetalBackend {
         vertex_shader: ShaderHandle,
         fragment_shader: ShaderHandle,
         vertex_layout: &VertexBufferLayout,
-        _topology: PrimitiveTopology,
+        topology: PrimitiveTopology,
         target_format: TextureFormat,
         _bind_group_layouts: &[BindGroupLayoutHandle],
         depth_stencil: Option<&crate::types::DepthStencilState>,
@@ -732,10 +754,11 @@ impl GpuBackend for MetalBackend {
                 device_handle,
                 pipeline,
                 depth_stencil: depth_stencil_state,
+                primitive_type: topology_to_mtl(topology),
             },
         );
 
-        tracing::debug!("Created render pipeline {}", handle);
+        tracing::debug!("Created render pipeline {} with topology {:?}", handle, topology);
         Ok(handle)
     }
 
@@ -875,6 +898,7 @@ impl GpuBackend for MetalBackend {
 
         // Process commands
         let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
+        let mut current_primitive_type = MTLPrimitiveType::Triangle;
 
         for cmd in commands {
             match cmd {
@@ -884,6 +908,7 @@ impl GpuBackend for MetalBackend {
                 RenderCommand::SetPipeline(pipeline_handle) => {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         encoder.set_render_pipeline_state(&pipeline.pipeline);
+                        current_primitive_type = pipeline.primitive_type;
                         if let Some(ds) = &pipeline.depth_stencil {
                             encoder.set_depth_stencil_state(ds);
                         }
@@ -952,7 +977,7 @@ impl GpuBackend for MetalBackend {
                         tracing::warn!("Metal backend: first_instance != 0 not supported");
                     }
                     encoder.draw_primitives_instanced(
-                        MTLPrimitiveType::Triangle,
+                        current_primitive_type,
                         *first_vertex as u64,
                         *vertex_count as u64,
                         *instance_count as u64,
@@ -976,7 +1001,7 @@ impl GpuBackend for MetalBackend {
                             let index_offset =
                                 offset + (*first_index as u64 * format.size() as u64);
                             encoder.draw_indexed_primitives_instanced(
-                                MTLPrimitiveType::Triangle,
+                                current_primitive_type,
                                 *index_count as u64,
                                 index_type,
                                 &buf.buffer,
@@ -1357,6 +1382,7 @@ impl GpuBackend for MetalBackend {
 
         // Process commands (similar to render_to_target)
         let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
+        let mut current_primitive_type = MTLPrimitiveType::Triangle;
 
         for cmd in commands {
             match cmd {
@@ -1364,6 +1390,7 @@ impl GpuBackend for MetalBackend {
                 RenderCommand::SetPipeline(pipeline_handle) => {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         encoder.set_render_pipeline_state(&pipeline.pipeline);
+                        current_primitive_type = pipeline.primitive_type;
                         if let Some(ds) = &pipeline.depth_stencil {
                             encoder.set_depth_stencil_state(ds);
                         }
@@ -1432,7 +1459,7 @@ impl GpuBackend for MetalBackend {
                         tracing::warn!("Metal backend: first_instance != 0 not supported");
                     }
                     encoder.draw_primitives_instanced(
-                        MTLPrimitiveType::Triangle,
+                        current_primitive_type,
                         *first_vertex as u64,
                         *vertex_count as u64,
                         *instance_count as u64,
@@ -1456,7 +1483,7 @@ impl GpuBackend for MetalBackend {
                             let index_offset =
                                 offset + (*first_index as u64 * format.size() as u64);
                             encoder.draw_indexed_primitives_instanced(
-                                MTLPrimitiveType::Triangle,
+                                current_primitive_type,
                                 *index_count as u64,
                                 index_type,
                                 &buf.buffer,
@@ -1540,6 +1567,9 @@ impl GpuBackend for MetalBackend {
             .get(&compute_shader)
             .context("Invalid compute shader")?;
 
+        // Parse [numthreads(x, y, z)] from shader source
+        let workgroup_size = parse_numthreads(&shader.slang_source).unwrap_or([64, 1, 1]);
+
         let library = shader.compute_library.as_ref().unwrap();
 
         // Get compute function - Slang outputs the original function name for MSL
@@ -1560,10 +1590,15 @@ impl GpuBackend for MetalBackend {
             ComputePipelineState {
                 device_handle,
                 pipeline,
+                workgroup_size,
             },
         );
 
-        tracing::debug!("Created compute pipeline (handle={})", handle);
+        tracing::debug!(
+            "Created compute pipeline (handle={}, workgroup_size={:?})",
+            handle,
+            workgroup_size
+        );
         Ok(handle)
     }
 
@@ -1630,9 +1665,9 @@ impl GpuBackend for MetalBackend {
                 } => {
                     if let Some(pipeline) = current_pipeline {
                         let threads_per_group = MTLSize {
-                            width: pipeline.pipeline.thread_execution_width(),
-                            height: 1,
-                            depth: 1,
+                            width: pipeline.workgroup_size[0] as u64,
+                            height: pipeline.workgroup_size[1] as u64,
+                            depth: pipeline.workgroup_size[2] as u64,
                         };
                         let threadgroups = MTLSize {
                             width: *workgroups_x as u64,
