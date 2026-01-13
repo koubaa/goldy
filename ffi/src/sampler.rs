@@ -25,13 +25,13 @@ pub unsafe extern "C" fn goldy_sampler_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
-    
+
     let sampler_desc: goldy::SamplerDesc = if desc.is_null() {
         goldy::SamplerDesc::default()
     } else {
         (*desc).into()
     };
-    
+
     match goldy::Sampler::new(&(*device).inner, &sampler_desc) {
         Ok(sampler) => Box::into_raw(Box::new(GoldySampler { inner: sampler })),
         Err(e) => {
@@ -48,7 +48,9 @@ pub unsafe extern "C" fn goldy_sampler_create(
 /// # Safety
 /// The device pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_sampler_create_default(device: *const GoldyDevice) -> *mut GoldySampler {
+pub unsafe extern "C" fn goldy_sampler_create_default(
+    device: *const GoldyDevice,
+) -> *mut GoldySampler {
     goldy_sampler_create(device, ptr::null())
 }
 
@@ -62,4 +64,3 @@ pub unsafe extern "C" fn goldy_sampler_destroy(sampler: *mut GoldySampler) {
         drop(Box::from_raw(sampler));
     }
 }
-

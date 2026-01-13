@@ -51,11 +51,9 @@ pub(crate) fn set_last_error_from_anyhow(err: &anyhow::Error) {
 /// Returns null if no error has occurred.
 #[no_mangle]
 pub extern "C" fn goldy_get_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| {
-        match e.borrow().as_ref() {
-            Some(s) => s.as_ptr(),
-            None => ptr::null(),
-        }
+    LAST_ERROR.with(|e| match e.borrow().as_ref() {
+        Some(s) => s.as_ptr(),
+        None => ptr::null(),
     })
 }
 
@@ -66,4 +64,3 @@ pub extern "C" fn goldy_clear_error() {
         *e.borrow_mut() = None;
     });
 }
-

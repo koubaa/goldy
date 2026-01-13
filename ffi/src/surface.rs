@@ -86,7 +86,7 @@ pub unsafe extern "C" fn goldy_surface_resize(
     if surface.is_null() {
         return GoldyResult::NullPointer;
     }
-    
+
     match (*surface).inner.resize(width, height) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
@@ -103,12 +103,14 @@ pub unsafe extern "C" fn goldy_surface_resize(
 /// # Safety
 /// The surface pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_surface_acquire(surface: *const GoldySurface) -> *mut GoldySurfaceFrame {
+pub unsafe extern "C" fn goldy_surface_acquire(
+    surface: *const GoldySurface,
+) -> *mut GoldySurfaceFrame {
     if surface.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Surface is null"));
         return ptr::null_mut();
     }
-    
+
     match (*surface).inner.acquire() {
         Ok(frame) => Box::into_raw(Box::new(GoldySurfaceFrame { inner: frame })),
         Err(e) => {
@@ -133,7 +135,7 @@ pub unsafe extern "C" fn goldy_surface_present(
     if surface.is_null() || frame.is_null() {
         return GoldyResult::NullPointer;
     }
-    
+
     let frame = Box::from_raw(frame);
     match (*surface).inner.present(frame.inner) {
         Ok(()) => GoldyResult::Ok,
@@ -159,7 +161,7 @@ pub unsafe extern "C" fn goldy_surface_frame_render(
     if frame.is_null() || encoder.is_null() {
         return GoldyResult::NullPointer;
     }
-    
+
     let encoder = Box::from_raw(encoder);
     match (*frame).inner.render(encoder.inner) {
         Ok(()) => GoldyResult::Ok,
@@ -202,7 +204,7 @@ pub unsafe extern "C" fn goldy_surface_frame_height(frame: *const GoldySurfaceFr
 mod windows_surface {
     use super::*;
     use std::ffi::c_void;
-    
+
     /// Create a surface from a Win32 HWND.
     ///
     /// # Safety
@@ -220,4 +222,3 @@ mod windows_surface {
         ptr::null_mut()
     }
 }
-

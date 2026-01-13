@@ -29,7 +29,7 @@ pub unsafe extern "C" fn goldy_render_target_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
-    
+
     match goldy::RenderTarget::new(&(*device).inner, width, height, format.into()) {
         Ok(target) => Box::into_raw(Box::new(GoldyRenderTarget { inner: target })),
         Err(e) => {
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn goldy_render_target_create_with_depth(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
-    
+
     match goldy::RenderTarget::new_with_depth(
         &(*device).inner,
         width,
@@ -113,7 +113,9 @@ pub unsafe extern "C" fn goldy_render_target_height(target: *const GoldyRenderTa
 /// # Safety
 /// The target pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_render_target_format(target: *const GoldyRenderTarget) -> GoldyTextureFormat {
+pub unsafe extern "C" fn goldy_render_target_format(
+    target: *const GoldyRenderTarget,
+) -> GoldyTextureFormat {
     if target.is_null() {
         return GoldyTextureFormat::Rgba8Unorm;
     }
@@ -137,7 +139,9 @@ pub unsafe extern "C" fn goldy_render_target_has_depth(target: *const GoldyRende
 /// # Safety
 /// The target pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_render_target_buffer_size(target: *const GoldyRenderTarget) -> usize {
+pub unsafe extern "C" fn goldy_render_target_buffer_size(
+    target: *const GoldyRenderTarget,
+) -> usize {
     if target.is_null() {
         return 0;
     }
@@ -159,7 +163,7 @@ pub unsafe extern "C" fn goldy_render_target_render(
     if target.is_null() || encoder.is_null() {
         return GoldyResult::NullPointer;
     }
-    
+
     let encoder = Box::from_raw(encoder);
     match (*target).inner.render(encoder.inner) {
         Ok(()) => GoldyResult::Ok,
@@ -184,7 +188,7 @@ pub unsafe extern "C" fn goldy_render_target_read_to_buffer(
     if target.is_null() || output.is_null() {
         return GoldyResult::NullPointer;
     }
-    
+
     let required_size = (*target).inner.buffer_size();
     if output_size < required_size {
         set_last_error_from_anyhow(&anyhow::anyhow!(
@@ -194,7 +198,7 @@ pub unsafe extern "C" fn goldy_render_target_read_to_buffer(
         ));
         return GoldyResult::InvalidArgument;
     }
-    
+
     let output_slice = slice::from_raw_parts_mut(output, required_size);
     match (*target).inner.read_to_buffer(output_slice) {
         Ok(()) => GoldyResult::Ok,
@@ -204,4 +208,3 @@ pub unsafe extern "C" fn goldy_render_target_read_to_buffer(
         }
     }
 }
-

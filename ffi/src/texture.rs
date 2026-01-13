@@ -28,7 +28,7 @@ pub unsafe extern "C" fn goldy_texture_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
-    
+
     match goldy::Texture::new(&(*device).inner, width, height, format.into(), usage.into()) {
         Ok(texture) => Box::into_raw(Box::new(GoldyTexture { inner: texture })),
         Err(e) => {
@@ -84,4 +84,3 @@ pub unsafe extern "C" fn goldy_texture_format(texture: *const GoldyTexture) -> G
     }
     (*texture).inner.format().into()
 }
-

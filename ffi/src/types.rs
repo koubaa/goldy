@@ -328,21 +328,21 @@ impl GoldyAdapterInfo {
             name: [0; 256],
             vendor: [0; 64],
         };
-        
+
         // Copy name
         let name_bytes = adapter.name().as_bytes();
         let name_len = name_bytes.len().min(255);
         for (i, &b) in name_bytes[..name_len].iter().enumerate() {
             info.name[i] = b as c_char;
         }
-        
+
         // Copy vendor
         let vendor_bytes = adapter.vendor().as_bytes();
         let vendor_len = vendor_bytes.len().min(63);
         for (i, &b) in vendor_bytes[..vendor_len].iter().enumerate() {
             info.vendor[i] = b as c_char;
         }
-        
+
         info
     }
 }
@@ -484,12 +484,15 @@ impl From<GoldyBindingType> for goldy::BindingType {
     fn from(t: GoldyBindingType) -> Self {
         match t {
             GoldyBindingType::UniformBuffer => goldy::BindingType::UniformBuffer,
-            GoldyBindingType::StorageBufferReadOnly => goldy::BindingType::StorageBuffer { read_only: true },
-            GoldyBindingType::StorageBufferReadWrite => goldy::BindingType::StorageBuffer { read_only: false },
+            GoldyBindingType::StorageBufferReadOnly => {
+                goldy::BindingType::StorageBuffer { read_only: true }
+            }
+            GoldyBindingType::StorageBufferReadWrite => {
+                goldy::BindingType::StorageBuffer { read_only: false }
+            }
             GoldyBindingType::Texture => goldy::BindingType::Texture,
             GoldyBindingType::Sampler => goldy::BindingType::Sampler,
             GoldyBindingType::StorageTexture => goldy::BindingType::StorageTexture,
         }
     }
 }
-

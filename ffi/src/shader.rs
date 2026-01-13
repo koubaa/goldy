@@ -30,7 +30,7 @@ pub unsafe extern "C" fn goldy_shader_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Source is null"));
         return ptr::null_mut();
     }
-    
+
     let source = match CStr::from_ptr(source).to_str() {
         Ok(s) => s,
         Err(e) => {
@@ -38,7 +38,7 @@ pub unsafe extern "C" fn goldy_shader_create(
             return ptr::null_mut();
         }
     };
-    
+
     match goldy::ShaderModule::from_slang(&(*device).inner, source) {
         Ok(shader) => Box::into_raw(Box::new(GoldyShaderModule { inner: shader })),
         Err(e) => {
@@ -89,7 +89,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
 }
 "#,
         "\0"
-    ).as_bytes();
+    )
+    .as_bytes();
     SOURCE.as_ptr() as *const c_char
 }
-

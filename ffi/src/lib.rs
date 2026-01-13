@@ -3,33 +3,32 @@
 //! This crate provides a stable C ABI for interoperating with Goldy from
 //! other languages (C#, Python via ctypes, etc.).
 
-mod error;
-mod types;
-mod instance;
-mod device;
-mod buffer;
-mod render_target;
-mod shader;
-mod pipeline;
-mod encoder;
 mod bind_group;
+mod buffer;
 mod compute;
-mod texture;
+mod device;
+mod encoder;
+mod error;
+mod instance;
+mod pipeline;
+mod render_target;
 mod sampler;
+mod shader;
 mod surface;
+mod texture;
+mod types;
 
-pub use error::*;
-pub use types::*;
-pub use instance::*;
-pub use device::*;
-pub use buffer::*;
-pub use render_target::*;
-pub use shader::*;
-pub use pipeline::*;
-pub use encoder::*;
 pub use bind_group::*;
+pub use buffer::*;
 pub use compute::*;
-pub use texture::*;
+pub use device::*;
+pub use encoder::*;
+pub use error::*;
+pub use instance::*;
+pub use pipeline::*;
+pub use render_target::*;
 pub use sampler::*;
+pub use shader::*;
 pub use surface::*;
-
+pub use texture::*;
+pub use types::*;

@@ -71,13 +71,13 @@ pub unsafe extern "C" fn goldy_bind_group_layout_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
-    
+
     let bindings_slice = if binding_count > 0 && !bindings.is_null() {
         slice::from_raw_parts(bindings, binding_count as usize)
     } else {
         &[]
     };
-    
+
     let layout_bindings: Vec<goldy::BindGroupLayoutBinding> = bindings_slice
         .iter()
         .map(|b| goldy::BindGroupLayoutBinding {
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn goldy_bind_group_layout_create(
             ty: b.binding_type.into(),
         })
         .collect();
-    
+
     match goldy::BindGroupLayout::new(&(*device).inner, &layout_bindings) {
         Ok(layout) => Box::into_raw(Box::new(GoldyBindGroupLayout { inner: layout })),
         Err(e) => {
@@ -153,14 +153,14 @@ pub unsafe extern "C" fn goldy_bind_group_create_with_resources(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device or layout is null"));
         return ptr::null_mut();
     }
-    
+
     // Process buffer bindings
     let buffer_bindings_slice = if buffer_binding_count > 0 && !buffer_bindings.is_null() {
         slice::from_raw_parts(buffer_bindings, buffer_binding_count as usize)
     } else {
         &[]
     };
-    
+
     let buffer_bindings_vec: Vec<goldy::BufferBinding> = buffer_bindings_slice
         .iter()
         .filter(|b| !b.buffer.is_null())
@@ -172,33 +172,33 @@ pub unsafe extern "C" fn goldy_bind_group_create_with_resources(
             }
         })
         .collect();
-    
+
     // Process texture bindings
     let texture_bindings_slice = if texture_binding_count > 0 && !texture_bindings.is_null() {
         slice::from_raw_parts(texture_bindings, texture_binding_count as usize)
     } else {
         &[]
     };
-    
+
     let texture_bindings_vec: Vec<goldy::TextureBinding> = texture_bindings_slice
         .iter()
         .filter(|t| !t.texture.is_null())
         .map(|t| goldy::TextureBinding::new(t.binding, &(*t.texture).inner))
         .collect();
-    
+
     // Process sampler bindings
     let sampler_bindings_slice = if sampler_binding_count > 0 && !sampler_bindings.is_null() {
         slice::from_raw_parts(sampler_bindings, sampler_binding_count as usize)
     } else {
         &[]
     };
-    
+
     let sampler_bindings_vec: Vec<goldy::SamplerBinding> = sampler_bindings_slice
         .iter()
         .filter(|s| !s.sampler.is_null())
         .map(|s| goldy::SamplerBinding::new(s.binding, &(*s.sampler).inner))
         .collect();
-    
+
     match goldy::BindGroup::with_resources(
         &(*device).inner,
         &(*layout).inner,
@@ -224,4 +224,3 @@ pub unsafe extern "C" fn goldy_bind_group_destroy(bind_group: *mut GoldyBindGrou
         drop(Box::from_raw(bind_group));
     }
 }
-

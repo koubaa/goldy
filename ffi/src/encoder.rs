@@ -185,4 +185,3 @@ pub unsafe extern "C" fn goldy_encoder_draw_indexed(
         instance_start..(instance_start + instance_count),
     );
 }
-

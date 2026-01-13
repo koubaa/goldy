@@ -27,7 +27,7 @@ pub unsafe extern "C" fn goldy_buffer_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
-    
+
     match goldy::Buffer::new(&(*device).inner, size, usage.into()) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
@@ -59,13 +59,13 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data(
         set_last_error_from_anyhow(&anyhow::anyhow!("Data is null"));
         return ptr::null_mut();
     }
-    
+
     let data_slice = if size > 0 {
         slice::from_raw_parts(data, size)
     } else {
         &[]
     };
-    
+
     match goldy::Buffer::with_bytes(&(*device).inner, data_slice, usage.into()) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
@@ -104,13 +104,13 @@ pub unsafe extern "C" fn goldy_buffer_write(
     if data.is_null() && size > 0 {
         return GoldyResult::NullPointer;
     }
-    
+
     let data_slice = if size > 0 {
         slice::from_raw_parts(data, size)
     } else {
         &[]
     };
-    
+
     match (*buffer).inner.write(offset, data_slice) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
@@ -143,4 +143,3 @@ pub unsafe extern "C" fn goldy_buffer_usage(buffer: *const GoldyBuffer) -> Goldy
     }
     (*buffer).inner.usage().into()
 }
-

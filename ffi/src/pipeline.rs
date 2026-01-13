@@ -79,48 +79,53 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Null pointer in pipeline creation"));
         return ptr::null_mut();
     }
-    
+
     let desc = &*desc;
-    
+
     // Build vertex layout
-    let attributes: Vec<goldy::VertexAttribute> = if desc.vertex_attribute_count > 0 && !desc.vertex_attributes.is_null() {
-        slice::from_raw_parts(desc.vertex_attributes, desc.vertex_attribute_count as usize)
-            .iter()
-            .map(|a| (*a).into())
-            .collect()
-    } else {
-        // Default Vertex2D layout
-        vec![
-            goldy::VertexAttribute {
-                location: 0,
-                format: goldy::VertexFormat::Float32x2,
-                offset: 0,
-            },
-            goldy::VertexAttribute {
-                location: 1,
-                format: goldy::VertexFormat::Float32x4,
-                offset: 8,
-            },
-        ]
-    };
-    
+    let attributes: Vec<goldy::VertexAttribute> =
+        if desc.vertex_attribute_count > 0 && !desc.vertex_attributes.is_null() {
+            slice::from_raw_parts(desc.vertex_attributes, desc.vertex_attribute_count as usize)
+                .iter()
+                .map(|a| (*a).into())
+                .collect()
+        } else {
+            // Default Vertex2D layout
+            vec![
+                goldy::VertexAttribute {
+                    location: 0,
+                    format: goldy::VertexFormat::Float32x2,
+                    offset: 0,
+                },
+                goldy::VertexAttribute {
+                    location: 1,
+                    format: goldy::VertexFormat::Float32x4,
+                    offset: 8,
+                },
+            ]
+        };
+
     let vertex_layout = goldy::VertexBufferLayout {
         stride: desc.vertex_stride,
         attributes,
     };
-    
+
     // Collect bind group layouts
-    let layouts: Vec<&goldy::BindGroupLayout> = if desc.bind_group_layout_count > 0 && !desc.bind_group_layouts.is_null() {
-        slice::from_raw_parts(desc.bind_group_layouts, desc.bind_group_layout_count as usize)
+    let layouts: Vec<&goldy::BindGroupLayout> =
+        if desc.bind_group_layout_count > 0 && !desc.bind_group_layouts.is_null() {
+            slice::from_raw_parts(
+                desc.bind_group_layouts,
+                desc.bind_group_layout_count as usize,
+            )
             .iter()
             .map(|&ptr| &(*ptr).inner)
             .collect()
-    } else {
-        vec![]
-    };
-    
+        } else {
+            vec![]
+        };
+
     let layout_refs: Vec<&goldy::BindGroupLayout> = layouts.iter().copied().collect();
-    
+
     // Build depth stencil state
     let depth_stencil = if desc.depth_enabled {
         Some(goldy::DepthStencilState {
@@ -131,7 +136,7 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
     } else {
         None
     };
-    
+
     let pipeline_desc = goldy::RenderPipelineDesc {
         vertex_layout,
         topology: desc.topology.into(),
@@ -139,7 +144,7 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
         bind_group_layouts: &layout_refs,
         depth_stencil,
     };
-    
+
     match goldy::RenderPipeline::new(
         &(*device).inner,
         &(*vertex_shader).inner,
@@ -164,4 +169,3 @@ pub unsafe extern "C" fn goldy_render_pipeline_destroy(pipeline: *mut GoldyRende
         drop(Box::from_raw(pipeline));
     }
 }
-

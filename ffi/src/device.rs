@@ -54,12 +54,11 @@ pub unsafe extern "C" fn goldy_device_has_library(
     if device.is_null() || name.is_null() {
         return false;
     }
-    
+
     let name = match CStr::from_ptr(name).to_str() {
         Ok(s) => s,
         Err(_) => return false,
     };
-    
+
     (*device).inner.has_library(name)
 }
-

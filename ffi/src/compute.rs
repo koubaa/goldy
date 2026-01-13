@@ -34,23 +34,24 @@ pub unsafe extern "C" fn goldy_compute_pipeline_create(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device or shader is null"));
         return ptr::null_mut();
     }
-    
+
     // Collect bind group layouts
-    let layouts: Vec<&goldy::BindGroupLayout> = if bind_group_layout_count > 0 && !bind_group_layouts.is_null() {
-        slice::from_raw_parts(bind_group_layouts, bind_group_layout_count as usize)
-            .iter()
-            .map(|&ptr| &(*ptr).inner)
-            .collect()
-    } else {
-        vec![]
-    };
-    
+    let layouts: Vec<&goldy::BindGroupLayout> =
+        if bind_group_layout_count > 0 && !bind_group_layouts.is_null() {
+            slice::from_raw_parts(bind_group_layouts, bind_group_layout_count as usize)
+                .iter()
+                .map(|&ptr| &(*ptr).inner)
+                .collect()
+        } else {
+            vec![]
+        };
+
     let layout_refs: Vec<&goldy::BindGroupLayout> = layouts.iter().copied().collect();
-    
+
     let desc = goldy::ComputePipelineDesc {
         bind_group_layouts: &layout_refs,
     };
-    
+
     match goldy::ComputePipeline::new(&(*device).inner, &(*compute_shader).inner, &desc) {
         Ok(pipeline) => Box::into_raw(Box::new(GoldyComputePipeline { inner: pipeline })),
         Err(e) => {
@@ -153,7 +154,7 @@ pub unsafe extern "C" fn goldy_compute_encoder_execute(
     if encoder.is_null() || device.is_null() {
         return GoldyResult::NullPointer;
     }
-    
+
     match (*encoder).inner.dispatch(&(*device).inner) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
@@ -162,4 +163,3 @@ pub unsafe extern "C" fn goldy_compute_encoder_execute(
         }
     }
 }
-
