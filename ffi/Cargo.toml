@@ -1,0 +1,25 @@
+[package]
+name = "goldy-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "C FFI bindings for the Goldy GPU library"
+repository = "https://github.com/koubaa/goldy"
+keywords = ["gpu", "graphics", "ffi", "c-bindings"]
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+# Core goldy library
+goldy = { path = ".." }
+
+# Error handling
+anyhow = "1.0"
+
+# For libc types
+libc = "0.2"
+
+# Thread-local storage for error messages
+once_cell = "1.19"
+

@@ -1,0 +1,15 @@
+# Build outputs
+bin/
+obj/
+
+# Native runtime libraries (built by CI)
+runtimes/
+
+# NuGet packages
+*.nupkg
+*.snupkg
+
+# IDE
+.vs/
+*.user
+
