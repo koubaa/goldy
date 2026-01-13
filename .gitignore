@@ -16,3 +16,14 @@ Cargo.lock
 .vscode/
 *.swp
 
+# Python bindings
+/python/target/
+/python/.venv/
+/python/*.egg-info/
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.whl
+.pytest_cache/
+

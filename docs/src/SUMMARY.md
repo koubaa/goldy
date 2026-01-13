@@ -39,6 +39,14 @@
 - [Backend Independence](./architecture/backends.md)
 - [WASI Integration](./architecture/wasi.md)
 
+# Python Bindings
+
+- [Installation](./python/installation.md)
+- [Quick Start](./python/quickstart.md)
+- [NumPy Integration](./python/numpy.md)
+- [Compute Shaders](./python/compute.md)
+- [API Reference](./python/api.md)
+
 # Reference
 
 - [API Reference](./reference/api.md)

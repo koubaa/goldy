@@ -234,3 +234,137 @@ jobs:
       - name: Run mock tests
         run: cargo test --lib backend::mock
 
+  # Python bindings build and test (Linux with lavapipe)
+  python-linux:
+    name: Python Bindings (Linux)
+    runs-on: ubuntu-24.04
+    needs: [check, test-mock]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Vulkan dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan1 \
+            libvulkan-dev \
+            vulkan-tools \
+            mesa-vulkan-drivers \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev
+
+      - name: Download Slang compiler
+        run: |
+          cd slang
+          chmod +x download.sh
+          ./download.sh
+          SLANG_DIR="$(pwd)/bin/linux-x86_64"
+          SLANG_LIB="$SLANG_DIR/libslang.so"
+          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
+          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+
+      - name: Verify lavapipe installation
+        run: |
+          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
+          if [ -z "$LAVAPIPE_ICD" ]; then
+            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+                        /usr/share/vulkan/icd.d/lvp_icd.json; do
+              if [ -f "$path" ]; then
+                LAVAPIPE_ICD="$path"
+                break
+              fi
+            done
+          fi
+          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> $GITHUB_ENV
+          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || true
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-python-
+
+      - name: Install maturin and dependencies
+        run: |
+          pip install maturin numpy pillow pytest
+
+      - name: Install and test Python bindings
+        working-directory: python
+        env:
+          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
+          VK_LAYER_PATH: ""
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: |
+          pip install .
+          pytest tests/ -v
+
+      - name: Run Python examples
+        working-directory: python
+        env:
+          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
+          VK_LAYER_PATH: ""
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: |
+          python examples/adapter_info.py
+          python examples/compute_demo.py
+          python examples/game_of_life.py
+
+  # Python bindings build (Windows)
+  python-windows:
+    name: Python Bindings (Windows)
+    runs-on: windows-latest
+    needs: [check, test-mock]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-python-
+
+      - name: Install maturin
+        run: pip install maturin numpy
+
+      - name: Build Python bindings
+        working-directory: python
+        run: maturin build --release
+
+      # Note: Can't run GPU tests on Windows CI without hardware
+      # Just verify the build succeeds
+
