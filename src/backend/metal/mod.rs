@@ -147,15 +147,22 @@ impl MetalBackend {
         let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
         // Compile Slang to MSL with specific entry point
-        // Note: __BINDLESS__ define is available via compile_bindless
-        // For now, using standard compilation while we debug heap allocation issues
-        let _ = bindless; // suppress unused warning
-        let compiled = self.slang_compiler.compile_with_options(
-            slang_source,
-            crate::slang::ShaderTarget::Metal,
-            &[(entry_point, stage)],
-            &search_path_refs,
-        )
+        // Use compile_bindless when bindless is enabled to add __BINDLESS__ define
+        let compiled = if bindless {
+            self.slang_compiler.compile_bindless(
+                slang_source,
+                crate::slang::ShaderTarget::Metal,
+                &[(entry_point, stage)],
+                &search_path_refs,
+            )
+        } else {
+            self.slang_compiler.compile_with_options(
+                slang_source,
+                crate::slang::ShaderTarget::Metal,
+                &[(entry_point, stage)],
+                &search_path_refs,
+            )
+        }
         .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
 
         let msl_source = compiled
