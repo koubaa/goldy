@@ -1,0 +1,249 @@
+# Build and upload C++ FFI binaries for GitHub releases
+# Triggered when a release is published
+
+name: Release C++ Binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build FFI library for Linux x64
+  build-linux-x64:
+    name: Build Linux x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build FFI library
+        run: cargo build --package goldy-ffi --release
+
+      - name: Create package directory
+        run: |
+          mkdir -p release-package/lib
+          mkdir -p release-package/include
+
+      - name: Copy library and headers
+        run: |
+          cp target/release/libgoldy_ffi.so release-package/lib/
+          cp cpp/include/goldy.h release-package/include/
+          cp cpp/include/goldy.hpp release-package/include/
+
+      - name: Create tarball
+        run: |
+          cd release-package
+          tar czf ../goldy_ffi-linux-x64.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goldy_ffi-linux-x64
+          path: goldy_ffi-linux-x64.tar.gz
+
+  # Build FFI library for Windows x64
+  build-windows-x64:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build FFI library
+        run: cargo build --package goldy-ffi --release
+
+      - name: Create package directory
+        run: |
+          New-Item -ItemType Directory -Force -Path release-package\lib
+          New-Item -ItemType Directory -Force -Path release-package\include
+
+      - name: Copy library and headers
+        run: |
+          Copy-Item target\release\goldy_ffi.dll release-package\lib\
+          Copy-Item target\release\goldy_ffi.dll.lib release-package\lib\
+          Copy-Item cpp\include\goldy.h release-package\include\
+          Copy-Item cpp\include\goldy.hpp release-package\include\
+
+      - name: Create zip archive
+        run: |
+          Compress-Archive -Path release-package\* -DestinationPath goldy_ffi-windows-x64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goldy_ffi-windows-x64
+          path: goldy_ffi-windows-x64.zip
+
+  # Build FFI library for macOS x64
+  build-macos-x64:
+    name: Build macOS x64
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build FFI library
+        run: cargo build --package goldy-ffi --release
+
+      - name: Create package directory
+        run: |
+          mkdir -p release-package/lib
+          mkdir -p release-package/include
+
+      - name: Copy library and headers
+        run: |
+          cp target/release/libgoldy_ffi.dylib release-package/lib/
+          cp cpp/include/goldy.h release-package/include/
+          cp cpp/include/goldy.hpp release-package/include/
+
+      - name: Create tarball
+        run: |
+          cd release-package
+          tar czf ../goldy_ffi-macos-x64.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goldy_ffi-macos-x64
+          path: goldy_ffi-macos-x64.tar.gz
+
+  # Build FFI library for macOS ARM64
+  build-macos-arm64:
+    name: Build macOS ARM64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build FFI library
+        run: cargo build --package goldy-ffi --release
+
+      - name: Create package directory
+        run: |
+          mkdir -p release-package/lib
+          mkdir -p release-package/include
+
+      - name: Copy library and headers
+        run: |
+          cp target/release/libgoldy_ffi.dylib release-package/lib/
+          cp cpp/include/goldy.h release-package/include/
+          cp cpp/include/goldy.hpp release-package/include/
+
+      - name: Create tarball
+        run: |
+          cd release-package
+          tar czf ../goldy_ffi-macos-arm64.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goldy_ffi-macos-arm64
+          path: goldy_ffi-macos-arm64.tar.gz
+
+  # Upload all binaries to GitHub release
+  upload-release:
+    name: Upload to Release
+    needs:
+      - build-linux-x64
+      - build-windows-x64
+      - build-macos-x64
+      - build-macos-arm64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: goldy_ffi-*
+          merge-multiple: false
+          path: release-binaries
+
+      - name: List artifacts
+        run: |
+          find release-binaries -type f -name "*.zip" -o -name "*.tar.gz" | sort
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            release-binaries/*/goldy_ffi-*.zip
+            release-binaries/*/goldy_ffi-*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
