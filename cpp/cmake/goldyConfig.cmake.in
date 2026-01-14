@@ -1,0 +1,31 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/goldyTargets.cmake")
+
+check_required_components(goldy)
+
+# Find the native library
+if(WIN32)
+    find_library(GOLDY_FFI_LIBRARY
+        NAMES goldy_ffi
+        PATHS "${PACKAGE_PREFIX_DIR}/lib"
+        NO_DEFAULT_PATH
+    )
+    find_file(GOLDY_FFI_DLL
+        NAMES goldy_ffi.dll
+        PATHS "${PACKAGE_PREFIX_DIR}/bin"
+        NO_DEFAULT_PATH
+    )
+else()
+    find_library(GOLDY_FFI_LIBRARY
+        NAMES goldy_ffi
+        PATHS "${PACKAGE_PREFIX_DIR}/lib"
+        NO_DEFAULT_PATH
+    )
+endif()
+
+if(NOT GOLDY_FFI_LIBRARY)
+    set(goldy_FOUND FALSE)
+    set(goldy_NOT_FOUND_MESSAGE "Could not find goldy_ffi library")
+endif()
+
