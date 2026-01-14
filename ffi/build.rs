@@ -7,16 +7,19 @@ fn main() {
 
     // Generate C header
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let output_dir = std::path::Path::new(&crate_dir).join("..").join("cpp").join("include");
-    
+    let output_dir = std::path::Path::new(&crate_dir)
+        .join("..")
+        .join("cpp")
+        .join("include");
+
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&output_dir).ok();
-    
+
     let output_file = output_dir.join("goldy.h");
 
     // Run cbindgen
-    let config = cbindgen::Config::from_file("cbindgen.toml")
-        .expect("Failed to read cbindgen.toml");
+    let config =
+        cbindgen::Config::from_file("cbindgen.toml").expect("Failed to read cbindgen.toml");
 
     cbindgen::Builder::new()
         .with_crate(&crate_dir)
@@ -27,4 +30,3 @@ fn main() {
 
     println!("cargo:warning=Generated C header at {:?}", output_file);
 }
-
