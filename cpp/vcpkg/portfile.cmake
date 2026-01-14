@@ -1,79 +1,97 @@
 # Goldy vcpkg portfile
-# This portfile builds goldy-ffi from source using Cargo and installs the C++ headers
+# Downloads pre-built native library (C ABI) and installs C++ headers
+#
+# Architecture:
+#   - goldy.hpp: Header-only C++ wrapper (built from source)
+#   - goldy_ffi: Pre-built native library with stable C ABI
+#
+# This is the standard approach for C++ packages wrapping non-C++ libraries
+# (similar to CUDA, Vulkan SDK, Intel MKL, etc.)
 
 vcpkg_check_linkage(ONLY_DYNAMIC_LIBRARY)
 
-# Find cargo
-find_program(CARGO cargo REQUIRED)
-if(NOT CARGO)
-    message(FATAL_ERROR "Cargo is required to build goldy. Install Rust from https://rustup.rs")
-endif()
-
-# Download source
+# Download source for headers and license
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO koubaa/goldy
     REF "v${VERSION}"
-    SHA512 0  # Update with actual SHA after first release
+    SHA512 8ff9ac74d796cc5ac4660232cf55edda9f848aca4fd565e59d4e6a90c3d2c1ced444b96aa4f2ab4cfe300049eda5aaa275238ba4e7c341771ef3c8b723df79a0
     HEAD_REF main
 )
 
-# Build the Rust FFI library
-message(STATUS "Building goldy-ffi with Cargo...")
+# Download pre-built native library for target platform
+if(VCPKG_TARGET_IS_WINDOWS AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
+        URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-windows-x64.zip"
+        FILENAME "goldy_ffi-${VERSION}-windows-x64.zip"
+        SHA512 15142e06536046d4f2768c95256471efb8c0cb1b52a905f34aaab9636d5f98139b7a038afeace680879298695dfe952061a404eb7da5ef6999f65b8317455ef9
+    )
+    set(ARCHIVE_TYPE ZIP)
+elseif(VCPKG_TARGET_IS_LINUX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
+        URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-linux-x64.tar.gz"
+        FILENAME "goldy_ffi-${VERSION}-linux-x64.tar.gz"
+        SHA512 ebc70ffdc0895ed8755a5e475d0e06e91114998e0dab1a6a2db4f909a1b606a3b6c150e9325a23ff498a3d82c67ff7e433fe5524399bbbb4e4308f2969ac527f
+    )
+    set(ARCHIVE_TYPE TARGZ)
+elseif(VCPKG_TARGET_IS_OSX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
+        URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-macos-x64.tar.gz"
+        FILENAME "goldy_ffi-${VERSION}-macos-x64.tar.gz"
+        SHA512 416ad1957f96fb7a9e6a5a0711ae58e75c0658f8f84014797b041b482698b4780fd422ffcd515e46796395a69400ece2487ff2225b7df729959c87b05da826e1
+    )
+    set(ARCHIVE_TYPE TARGZ)
+elseif(VCPKG_TARGET_IS_OSX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
+    vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
+        URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-macos-arm64.tar.gz"
+        FILENAME "goldy_ffi-${VERSION}-macos-arm64.tar.gz"
+        SHA512 7451fb6cbec47f869c295db480a2d9f32a064e0602e40cc8b9742543e78fccf35fae542e24d883b0ea632d803cc2789a120dfe880ca84e806b5f0091edf5007a
+    )
+    set(ARCHIVE_TYPE TARGZ)
+else()
+    message(FATAL_ERROR "Unsupported platform: ${VCPKG_TARGET_TRIPLET}")
+endif()
 
-vcpkg_execute_required_process(
-    COMMAND ${CARGO} build --package goldy-ffi --release
-    WORKING_DIRECTORY "${SOURCE_PATH}"
-    LOGNAME build-goldy-ffi
+# Extract the pre-built library archive
+vcpkg_extract_source_archive(
+    BINARY_PATH
+    ARCHIVE "${GOLDY_FFI_ARCHIVE}"
+    NO_REMOVE_ONE_LEVEL
 )
 
-# Install headers
+# Install headers from source
 file(INSTALL "${SOURCE_PATH}/cpp/include/goldy.h" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
 file(INSTALL "${SOURCE_PATH}/cpp/include/goldy.hpp" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
 
-# Install libraries
+# Install native library from pre-built archive
 if(VCPKG_TARGET_IS_WINDOWS)
-    file(INSTALL "${SOURCE_PATH}/target/release/goldy_ffi.dll"
+    file(INSTALL "${BINARY_PATH}/lib/goldy_ffi.dll"
          DESTINATION "${CURRENT_PACKAGES_DIR}/bin")
-    file(INSTALL "${SOURCE_PATH}/target/release/goldy_ffi.dll.lib"
+    file(INSTALL "${BINARY_PATH}/lib/goldy_ffi.dll.lib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/lib"
          RENAME "goldy_ffi.lib")
     
-    # Debug builds
-    vcpkg_execute_required_process(
-        COMMAND ${CARGO} build --package goldy-ffi
-        WORKING_DIRECTORY "${SOURCE_PATH}"
-        LOGNAME build-goldy-ffi-debug
-    )
-    
-    file(INSTALL "${SOURCE_PATH}/target/debug/goldy_ffi.dll"
+    # vcpkg expects debug libraries - use release for both since we don't ship debug builds
+    file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/bin")
+    file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/lib")
+    file(INSTALL "${BINARY_PATH}/lib/goldy_ffi.dll"
          DESTINATION "${CURRENT_PACKAGES_DIR}/debug/bin")
-    file(INSTALL "${SOURCE_PATH}/target/debug/goldy_ffi.dll.lib"
+    file(INSTALL "${BINARY_PATH}/lib/goldy_ffi.dll.lib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib"
          RENAME "goldy_ffi.lib")
 elseif(VCPKG_TARGET_IS_LINUX)
-    file(INSTALL "${SOURCE_PATH}/target/release/libgoldy_ffi.so"
+    file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.so"
          DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
     
-    vcpkg_execute_required_process(
-        COMMAND ${CARGO} build --package goldy-ffi
-        WORKING_DIRECTORY "${SOURCE_PATH}"
-        LOGNAME build-goldy-ffi-debug
-    )
-    
-    file(INSTALL "${SOURCE_PATH}/target/debug/libgoldy_ffi.so"
+    file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/lib")
+    file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.so"
          DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
 elseif(VCPKG_TARGET_IS_OSX)
-    file(INSTALL "${SOURCE_PATH}/target/release/libgoldy_ffi.dylib"
+    file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.dylib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
     
-    vcpkg_execute_required_process(
-        COMMAND ${CARGO} build --package goldy-ffi
-        WORKING_DIRECTORY "${SOURCE_PATH}"
-        LOGNAME build-goldy-ffi-debug
-    )
-    
-    file(INSTALL "${SOURCE_PATH}/target/debug/libgoldy_ffi.dylib"
+    file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/lib")
+    file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.dylib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
 endif()
 
@@ -120,4 +138,3 @@ Include the headers:
 Note: goldy_ffi.dll must be in your PATH or next to your executable at runtime.
 The Slang compiler (slang.dll) is also required at runtime (from Vulkan SDK).
 ]])
-

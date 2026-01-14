@@ -5,7 +5,7 @@
     "description": "Modern GPU library with Slang shader support",
     "homepage": "https://github.com/koubaa/goldy",
     "license": "MIT",
-    "supports": "windows & x64",
+    "supports": "(windows & x64) | (linux & x64) | (osx & x64) | (osx & arm64)",
     "dependencies": [],
     "features": {
         "examples": {
