@@ -438,7 +438,7 @@ jobs:
             ${{ runner.os }}-cargo-cpp-
 
       - name: Build Rust FFI library
-        run: cargo build --package goldy-ffi --release --features vulkan
+        run: cargo build --package goldy-ffi --release
 
       - name: Configure CMake
         working-directory: cpp
@@ -510,7 +510,7 @@ jobs:
             ${{ runner.os }}-cargo-cpp-
 
       - name: Build Rust FFI library
-        run: cargo build --package goldy-ffi --release --features vulkan
+        run: cargo build --package goldy-ffi --release
 
       - name: Configure CMake
         working-directory: cpp
@@ -552,7 +552,7 @@ jobs:
             ${{ runner.os }}-cargo-cpp-
 
       - name: Build Rust FFI library
-        run: cargo build --package goldy-ffi --release --features vulkan
+        run: cargo build --package goldy-ffi --release
 
       - name: Configure CMake
         working-directory: cpp
