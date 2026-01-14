@@ -102,9 +102,9 @@ cmake --build build
 | Platform | Status |
 |----------|--------|
 | Windows x64 | ✅ Supported |
-| Linux x64 | 🚧 Planned |
-| macOS x64 | 🚧 Planned |
-| macOS ARM64 | 🚧 Planned |
+| Linux x64 | ✅ Supported |
+| macOS x64 | ✅ Supported |
+| macOS ARM64 | ✅ Supported |
 
 ## API Reference
 
