@@ -4,29 +4,36 @@
 // ## Bindless Support
 //
 // When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Buffers are heap-allocated with gpu_resource_id encoded in argument buffer
-// - use_heap() is called to make all resources resident
-// - Push constants contain buffer indices for argument buffer access
-// Traditional binding syntax continues to work with bindless infrastructure.
+// - Buffers are accessed via ParameterBlock for argument buffer support
+// - Traditional binding syntax works as fallback
 
 // Grid dimensions (must match the example)
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
 #ifdef __BINDLESS__
-// Bindless mode active - buffers allocated from heap with residency managed
-#endif
-
-// Ping-pong buffers: read from current, write to next
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+struct GameOfLifeResources {
+    StructuredBuffer<uint> currentState;
+    RWStructuredBuffer<uint> nextState;
+};
+ParameterBlock<GameOfLifeResources> gResources;
+#define CURRENT_STATE gResources.currentState
+#define NEXT_STATE gResources.nextState
+#else
+// Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<uint> currentState;
 [[vk::binding(1, 0)]] RWStructuredBuffer<uint> nextState;
+#define CURRENT_STATE currentState
+#define NEXT_STATE nextState
+#endif
 
 // Get cell state (1 = alive, 0 = dead)
 uint getCell(int x, int y) {
     // Wrap around edges (toroidal grid)
     x = (x + GRID_WIDTH) % GRID_WIDTH;
     y = (y + GRID_HEIGHT) % GRID_HEIGHT;
-    return currentState[y * GRID_WIDTH + x];
+    return CURRENT_STATE[y * GRID_WIDTH + x];
 }
 
 // Count living neighbors
@@ -49,7 +56,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= GRID_WIDTH || id.y >= GRID_HEIGHT) return;
     
     uint idx = id.y * GRID_WIDTH + id.x;
-    uint cell = currentState[idx];
+    uint cell = CURRENT_STATE[idx];
     uint neighbors = countNeighbors(int(id.x), int(id.y));
     
     // Conway's rules:
@@ -65,6 +72,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         newState = (neighbors == 3) ? 1 : 0;
     }
     
-    nextState[idx] = newState;
+    NEXT_STATE[idx] = newState;
 }
 

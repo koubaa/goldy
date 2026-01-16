@@ -4,19 +4,24 @@
 // ## Bindless Support
 //
 // When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Buffer is heap-allocated with gpu_resource_id in argument buffer (slot 30)
-// - Push constants (slot 29) contain buffer index for bindless access
-// Traditional binding works with both modes.
+// - Buffers are accessed via ParameterBlock for argument buffer support
+// - Traditional binding syntax works as fallback
 
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
 #ifdef __BINDLESS__
-// Bindless mode active - buffer allocated from heap
-#endif
-
-// Cell state buffer
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+struct GameOfLifeRenderResources {
+    StructuredBuffer<uint> cells;
+};
+ParameterBlock<GameOfLifeRenderResources> gResources;
+#define CELLS gResources.cells
+#else
+// Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<uint> cells;
+#define CELLS cells
+#endif
 
 struct VSOutput {
     float4 position : SV_Position;
@@ -60,7 +65,7 @@ float4 fs_main(VSOutput input) : SV_Target {
     y = clamp(y, 0, int(GRID_HEIGHT) - 1);
     
     uint idx = y * GRID_WIDTH + x;
-    uint cell = cells[idx];
+    uint cell = CELLS[idx];
     
     // Grid lines for visual clarity
     float2 cellUV = frac(float2(uv.x * GRID_WIDTH, uv.y * GRID_HEIGHT));

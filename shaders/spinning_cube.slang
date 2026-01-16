@@ -4,13 +4,8 @@
 // ## Bindless Support
 //
 // When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Resources are allocated from GPU heaps with gpu_resource_id encoded
-// - Argument buffer at slot 30 contains all resource IDs
-// - Push constants at slot 29 contain indices into the argument buffer
-// - The backend calls use_heap() to make all heap resources resident
-//
-// The traditional binding syntax works with both modes - the backend
-// handles the complexity of heap allocation and residency.
+// - Uniforms are accessed via ParameterBlock for argument buffer support
+// - Traditional binding syntax works as fallback
 
 struct VertexInput {
     float2 position : POSITION;
@@ -22,17 +17,24 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-#ifdef __BINDLESS__
-// Bindless mode: buffer is heap-allocated, GPU resource ID is in argument buffer
-// Push constants at slot 29 contain the buffer index for bindless access
-// For now, traditional binding still works as the buffer is bound explicitly
-#endif
-
-// Time uniform - works with both traditional and bindless modes
-[[vk::binding(0, 0)]]
-cbuffer TimeBuffer {
+// Uniform structure
+struct TimeUniforms {
     float time;
 };
+
+#ifdef __BINDLESS__
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+struct SpinningCubeResources {
+    ConstantBuffer<TimeUniforms> uniforms;
+};
+ParameterBlock<SpinningCubeResources> gResources;
+#define TIME gResources.uniforms.time
+#else
+// Traditional binding mode
+[[vk::binding(0, 0)]]
+ConstantBuffer<TimeUniforms> uniforms;
+#define TIME uniforms.time
+#endif
 
 [shader("vertex")]
 VertexOutput vs_main(VertexInput input) {
@@ -70,7 +72,7 @@ float line_dist(float2 p, float2 a, float2 b) {
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
-    float t = time;
+    float t = TIME;
     
     // Cube vertices (8 corners)
     float3 verts[8];

@@ -265,6 +265,13 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
+        // #region agent log
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+            let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"game_of_life.rs:render","message":"render_entry","data":{{"frame_count":{}}},"timestamp":{}}}"#, self.frame_count, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+        // #endregion
+
         // Update simulation ~30 times per second
         let now = std::time::Instant::now();
         let should_update = now.duration_since(self.last_update).as_millis() > 33;
@@ -290,7 +297,28 @@ impl RenderState {
                 let workgroups_y = (GRID_HEIGHT + 7) / 8;
                 pass.dispatch(workgroups_x, workgroups_y, 1);
             }
-            compute_encoder.dispatch(&self.device)?;
+            // #region agent log
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"game_of_life.rs:compute_dispatch","message":"before_compute_dispatch","data":{{"use_buffer_a":{}}},"timestamp":{}}}"#, self.use_buffer_a, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+            }
+            // #endregion
+            match compute_encoder.dispatch(&self.device) {
+                Ok(_) => {
+                    // #region agent log
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                        let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"game_of_life.rs:compute_dispatch","message":"compute_dispatch_ok","timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    }
+                    // #endregion
+                }
+                Err(e) => {
+                    // #region agent log
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                        let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"game_of_life.rs:compute_dispatch","message":"compute_dispatch_error","data":{{"error":"{}"}},"timestamp":{}}}"#, e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    }
+                    // #endregion
+                    return Err(e);
+                }
+            }
 
             // Toggle buffer for next frame
             self.use_buffer_a = !self.use_buffer_a;
@@ -316,10 +344,37 @@ impl RenderState {
             pass.draw(0..3, 0..1);
         }
 
-        frame.render(encoder)?;
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+            let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"game_of_life.rs:frame_render","message":"before_frame_render","timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+        // #endregion
+        match frame.render(encoder) {
+            Ok(_) => {
+                // #region agent log
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"game_of_life.rs:frame_render","message":"frame_render_ok","timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                }
+                // #endregion
+            }
+            Err(e) => {
+                // #region agent log
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"game_of_life.rs:frame_render","message":"frame_render_error","data":{{"error":"{}"}},"timestamp":{}}}"#, e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                }
+                // #endregion
+                return Err(e);
+            }
+        }
         self.surface.present(frame)?;
 
         self.window.request_redraw();
+
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+            let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"game_of_life.rs:render","message":"render_complete","data":{{"frame_count":{}}},"timestamp":{}}}"#, self.frame_count, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+        // #endregion
 
         Ok(())
     }
@@ -344,6 +399,12 @@ impl ApplicationHandler for App {
                     window.request_redraw(); // Trigger initial render
                 }
                 Err(e) => {
+                    // #region agent log
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                        let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"game_of_life.rs:resumed","message":"render_state_creation_failed","data":{{"error":"{}"}},"timestamp":{}}}"#, e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    }
+                    // #endregion
                     eprintln!("Failed to create render state: {}", e);
                     event_loop.exit();
                 }
@@ -354,6 +415,12 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                // #region agent log
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"game_of_life.rs:window_event","message":"close_requested","timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                }
+                // #endregion
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -366,6 +433,12 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let Some(state) = &mut self.state {
                     if let Err(e) = state.render() {
+                        // #region agent log
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
+                            let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"game_of_life.rs:redraw","message":"render_error","data":{{"error":"{}"}},"timestamp":{}}}"#, e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                        }
+                        // #endregion
                         eprintln!("Render error: {}", e);
                     }
                     state.window.request_redraw(); // Continue render loop

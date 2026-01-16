@@ -1,5 +1,11 @@
 // Particle rain/snow demo
 // Toggle between rain and snow modes via uniform
+//
+// ## Bindless Support
+//
+// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
+// - Uniforms are accessed via ParameterBlock for argument buffer support
+// - Traditional binding syntax works as fallback
 
 struct VertexInput {
     float2 position : POSITION;
@@ -11,13 +17,29 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-[[vk::binding(0, 0)]]
-cbuffer Params {
+// Uniform structure for particle parameters
+struct ParticleParams {
     float time;
     float is_snow;  // 0.0 = rain, 1.0 = snow
     float _pad1;
     float _pad2;
 };
+
+#ifdef __BINDLESS__
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+struct ParticlesResources {
+    ConstantBuffer<ParticleParams> params;
+};
+ParameterBlock<ParticlesResources> gResources;
+#define TIME gResources.params.time
+#define IS_SNOW gResources.params.is_snow
+#else
+// Traditional binding mode
+[[vk::binding(0, 0)]]
+ConstantBuffer<ParticleParams> params;
+#define TIME params.time
+#define IS_SNOW params.is_snow
+#endif
 
 [shader("vertex")]
 VertexOutput vs_main(VertexInput input) {
@@ -34,7 +56,7 @@ float hash(float p) {
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = input.uv;
-    bool snow = is_snow > 0.5;
+    bool snow = IS_SNOW > 0.5;
     
     float3 bg_color;
     float3 particle_color;
@@ -58,7 +80,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
         
         // Snow drifts horizontally
         if (snow) {
-            x += sin(time * 0.5 + fi * 0.3) * 0.05;
+            x += sin(TIME * 0.5 + fi * 0.3) * 0.05;
             x = frac(x);
         }
         
@@ -67,7 +89,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
         float speed = base_speed + hash(fi + 100.0) * (snow ? 0.08 : 0.4);
         float phase = hash(fi + 200.0) * 10.0;
         
-        float t = frac(time * speed + phase);
+        float t = frac(TIME * speed + phase);
         float particle_y = t;
         
         float2 particle_pos = float2(x, particle_y);

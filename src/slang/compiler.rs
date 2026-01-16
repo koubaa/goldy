@@ -463,21 +463,27 @@ impl SlangCompiler {
         let element_type_layout =
             unsafe { (self.library.reflection_type_layout_get_element_type_layout)(type_layout) };
 
-        // Get size and alignment from the element type
-        let (size, alignment, fields) = if !element_type_layout.is_null() {
-            let size = unsafe {
+        // Get size, alignment, and fields from the element type
+        // Note: Slang returns slot counts, not byte sizes. Each slot = 8 bytes.
+        const SLOT_SIZE_BYTES: usize = 8;
+
+        let (mut size, alignment, fields) = if !element_type_layout.is_null() {
+            // Try MetalArgumentBufferElement first (for argument buffers with resources)
+            let size_slots = unsafe {
                 (self.library.reflection_type_layout_get_size)(
                     element_type_layout,
-                    SlangParameterCategory::Uniform as i32,
+                    SlangParameterCategory::MetalArgumentBufferElement as i32,
                 )
             };
             let alignment = unsafe {
                 (self.library.reflection_type_layout_get_alignment)(
                     element_type_layout,
-                    SlangParameterCategory::Uniform as i32,
+                    SlangParameterCategory::MetalArgumentBufferElement as i32,
                 )
             };
             let fields = self.extract_struct_fields(element_type_layout)?;
+            // Convert slots to bytes
+            let size = size_slots * SLOT_SIZE_BYTES;
             (size, alignment, fields)
         } else {
             // Fallback: use the type_layout directly
@@ -496,17 +502,30 @@ impl SlangCompiler {
             (size, alignment, Vec::new())
         };
 
+        // If size is still 0, calculate from fields (each resource pointer is 8 bytes)
+        if size == 0 && !fields.is_empty() {
+            size = fields.iter().map(|f| f.offset + f.size).max().unwrap_or(0);
+        }
+
+        // Alignment from Slang reflection is also in slots, convert to bytes
+        // For Metal argument buffers, minimum alignment is 8 bytes (pointer size)
+        let alignment_bytes = if alignment > 0 {
+            alignment * SLOT_SIZE_BYTES
+        } else {
+            SLOT_SIZE_BYTES // Default to 8-byte alignment
+        };
+
         Ok(ParameterBlockLayout {
             name: name.to_string(),
             binding_slot,
             binding_space,
             size,
-            alignment: if alignment == 0 { 8 } else { alignment }, // Default to 8-byte alignment
+            alignment: alignment_bytes,
             fields,
         })
     }
 
-    /// Extract field layouts from a struct type.
+    /// Extract field layouts from a struct type (used for ParameterBlock element types).
     fn extract_struct_fields(
         &self,
         type_layout: *mut SlangReflectionTypeLayout,
@@ -545,24 +564,34 @@ impl SlangCompiler {
                 continue;
             }
 
-            // Get offset
-            let offset = unsafe {
-                (self.library.reflection_variable_layout_get_offset)(
-                    field_var,
-                    SlangParameterCategory::Uniform as i32,
-                )
-            };
-
-            // Get size
-            let size = unsafe {
-                (self.library.reflection_type_layout_get_size)(
-                    field_type_layout,
-                    SlangParameterCategory::Uniform as i32,
-                )
-            };
-
             // Determine resource kind
             let resource_kind = self.determine_resource_kind(field_type_layout);
+
+            // For Metal argument buffers (ParameterBlock context), try MetalArgumentBufferElement
+            // category first. This handles buffers, textures, and other resources correctly.
+            // Slang returns SLOT indices, not byte offsets. Each slot is 8 bytes (GPU pointer size).
+            let offset_slots = unsafe {
+                (self.library.reflection_variable_layout_get_offset)(
+                    field_var,
+                    SlangParameterCategory::MetalArgumentBufferElement as i32,
+                )
+            };
+            let size_slots = unsafe {
+                (self.library.reflection_type_layout_get_size)(
+                    field_type_layout,
+                    SlangParameterCategory::MetalArgumentBufferElement as i32,
+                )
+            };
+
+            // Convert slot counts to byte offsets/sizes (each slot = 8 bytes = GPU pointer)
+            const SLOT_SIZE_BYTES: usize = 8;
+            let offset = offset_slots * SLOT_SIZE_BYTES;
+            let size = if size_slots > 0 { size_slots * SLOT_SIZE_BYTES } else { SLOT_SIZE_BYTES };
+
+            tracing::trace!(
+                "Field {} (index {}): offset_slots={}, size_slots={} -> offset={}, size={}, resource_kind={:?}",
+                name, i, offset_slots, size_slots, offset, size, resource_kind
+            );
 
             // Get type name
             let field_type =
@@ -600,6 +629,15 @@ impl SlangCompiler {
         }
 
         let type_kind = unsafe { (self.library.reflection_type_get_kind)(type_ptr) };
+        let binding_type =
+            unsafe { (self.library.reflection_type_layout_get_binding_type)(type_layout) };
+
+        // Debug logging for type detection
+        tracing::trace!(
+            "determine_resource_kind: type_kind={}, binding_type={}",
+            type_kind,
+            binding_type
+        );
 
         match type_kind {
             k if k == SlangTypeKind::SamplerState as i32 => ResourceKind::Sampler,
@@ -607,8 +645,6 @@ impl SlangCompiler {
             k if k == SlangTypeKind::ParameterBlock as i32 => ResourceKind::ParameterBlock,
             k if k == SlangTypeKind::Resource as i32 => {
                 // Check binding type to distinguish buffer vs texture, mutable vs immutable
-                let binding_type =
-                    unsafe { (self.library.reflection_type_layout_get_binding_type)(type_layout) };
                 match binding_type {
                     b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
                     b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
@@ -620,7 +656,21 @@ impl SlangCompiler {
                 }
             }
             k if k == SlangTypeKind::ShaderStorageBuffer as i32 => ResourceKind::MutableBuffer,
-            _ => ResourceKind::Other,
+            _ => {
+                // Try to infer from binding type if type_kind doesn't match expected values
+                // This helps with StructuredBuffer which may have different type_kind
+                match binding_type {
+                    b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
+                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
+                    b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
+                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                    b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
+                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
+                    b if b == SlangBindingType::Sampler as i32 => ResourceKind::Sampler,
+                    b if b == SlangBindingType::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
+                    _ => ResourceKind::Other,
+                }
+            }
         }
     }
 
