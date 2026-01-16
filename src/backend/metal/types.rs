@@ -12,7 +12,9 @@
 
 #![allow(dead_code)] // Some fields are for future use
 
-use super::super::{BindGroupLayoutEntry, BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
+use super::super::{
+    BindGroupLayoutEntry, BufferHandle, DeviceHandle, SamplerHandle, TextureHandle,
+};
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
 // Use explicit crate path to avoid collision with our module name

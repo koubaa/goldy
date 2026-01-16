@@ -48,7 +48,8 @@ pub struct SlangLibrary {
     pub reflection_type_layout_get_type: FnSpReflectionTypeLayoutGetType,
     pub reflection_type_get_kind: FnSpReflectionTypeGetKind,
     pub reflection_type_get_name: FnSpReflectionTypeGetName,
-    pub reflection_type_layout_get_element_type_layout: FnSpReflectionTypeLayoutGetElementTypeLayout,
+    pub reflection_type_layout_get_element_type_layout:
+        FnSpReflectionTypeLayoutGetElementTypeLayout,
     pub reflection_variable_layout_get_type_layout: FnSpReflectionVariableLayoutGetTypeLayout,
     pub reflection_variable_layout_get_offset: FnSpReflectionVariableLayoutGetOffset,
     pub reflection_type_layout_get_binding_type: FnSpReflectionTypeLayoutGetBindingType,
@@ -69,15 +70,6 @@ impl SlangLibrary {
         // Safety: We're loading a known library with a stable C ABI
         let library = unsafe { Library::new(&lib_path) }
             .with_context(|| format!("Failed to load Slang library from {}", lib_path.display()))?;
-
-        // #region agent log
-        {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"loader.rs:load","message":"Library dlopen succeeded","data":{{"path":"{}"}}}}"#, lib_path.display());
-            }
-        }
-        // #endregion
 
         // Load function pointers
         // Safety: These are all C functions with stable ABI from the Slang library
@@ -126,15 +118,6 @@ impl SlangLibrary {
                 .get(b"spGetTargetCodeBlob\0")
                 .context("Failed to load spGetTargetCodeBlob")?;
 
-            // #region agent log
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"loader.rs:core_symbols","message":"Core FFI symbols loaded successfully","data":{{}}}}"#);
-                }
-            }
-            // #endregion
-
             // Reflection API
             let get_reflection: FnSpGetReflection = *library
                 .get(b"spGetReflection\0")
@@ -145,55 +128,45 @@ impl SlangLibrary {
             let reflection_get_parameter_by_index: FnSpReflectionGetParameterByIndex = *library
                 .get(b"spReflection_GetParameterByIndex\0")
                 .context("Failed to load spReflection_GetParameterByIndex")?;
-            let reflection_parameter_get_type_layout: FnSpReflectionParameterGetTypeLayout = *library
-                .get(b"spReflectionVariableLayout_GetTypeLayout\0")
-                .context("Failed to load spReflectionVariableLayout_GetTypeLayout")?;
-            let reflection_variable_layout_get_variable: FnSpReflectionVariableLayoutGetVariable = *library
-                .get(b"spReflectionVariableLayout_GetVariable\0")
-                .context("Failed to load spReflectionVariableLayout_GetVariable")?;
+            let reflection_parameter_get_type_layout: FnSpReflectionParameterGetTypeLayout =
+                *library
+                    .get(b"spReflectionVariableLayout_GetTypeLayout\0")
+                    .context("Failed to load spReflectionVariableLayout_GetTypeLayout")?;
+            let reflection_variable_layout_get_variable: FnSpReflectionVariableLayoutGetVariable =
+                *library
+                    .get(b"spReflectionVariableLayout_GetVariable\0")
+                    .context("Failed to load spReflectionVariableLayout_GetVariable")?;
             let reflection_variable_get_name: FnSpReflectionVariableGetName = *library
                 .get(b"spReflectionVariable_GetName\0")
                 .context("Failed to load spReflectionVariable_GetName")?;
 
-            // #region agent log
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"hypothesisId":"F","location":"loader.rs:reflection_group1","message":"Reflection API group 1 loaded (basic reflection)","data":{{}}}}"#);
-                }
-            }
-            // #endregion
-
-            let reflection_parameter_get_binding_index: FnSpReflectionParameterGetBindingIndex = *library
-                .get(b"spReflectionParameter_GetBindingIndex\0")
-                .context("Failed to load spReflectionParameter_GetBindingIndex")?;
-            let reflection_parameter_get_binding_space: FnSpReflectionParameterGetBindingSpace = *library
-                .get(b"spReflectionParameter_GetBindingSpace\0")
-                .context("Failed to load spReflectionParameter_GetBindingSpace")?;
+            let reflection_parameter_get_binding_index: FnSpReflectionParameterGetBindingIndex =
+                *library
+                    .get(b"spReflectionParameter_GetBindingIndex\0")
+                    .context("Failed to load spReflectionParameter_GetBindingIndex")?;
+            let reflection_parameter_get_binding_space: FnSpReflectionParameterGetBindingSpace =
+                *library
+                    .get(b"spReflectionParameter_GetBindingSpace\0")
+                    .context("Failed to load spReflectionParameter_GetBindingSpace")?;
             let reflection_type_layout_get_size: FnSpReflectionTypeLayoutGetSize = *library
                 .get(b"spReflectionTypeLayout_GetSize\0")
                 .context("Failed to load spReflectionTypeLayout_GetSize")?;
             let reflection_type_layout_get_stride: FnSpReflectionTypeLayoutGetStride = *library
                 .get(b"spReflectionTypeLayout_GetStride\0")
                 .context("Failed to load spReflectionTypeLayout_GetStride")?;
-            let reflection_type_layout_get_alignment: FnSpReflectionTypeLayoutGetAlignment = *library
-                .get(b"spReflectionTypeLayout_getAlignment\0")
-                .context("Failed to load spReflectionTypeLayout_getAlignment")?;
+            let reflection_type_layout_get_alignment: FnSpReflectionTypeLayoutGetAlignment =
+                *library
+                    .get(b"spReflectionTypeLayout_getAlignment\0")
+                    .context("Failed to load spReflectionTypeLayout_getAlignment")?;
 
-            // #region agent log
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"hypothesisId":"F","location":"loader.rs:reflection_group2","message":"Reflection API group 2 loaded (type layout basics)","data":{{}}}}"#);
-                }
-            }
-            // #endregion
-            let reflection_type_layout_get_field_count: FnSpReflectionTypeLayoutGetFieldCount = *library
-                .get(b"spReflectionTypeLayout_GetFieldCount\0")
-                .context("Failed to load spReflectionTypeLayout_GetFieldCount")?;
-            let reflection_type_layout_get_field_by_index: FnSpReflectionTypeLayoutGetFieldByIndex = *library
-                .get(b"spReflectionTypeLayout_GetFieldByIndex\0")
-                .context("Failed to load spReflectionTypeLayout_GetFieldByIndex")?;
+            let reflection_type_layout_get_field_count: FnSpReflectionTypeLayoutGetFieldCount =
+                *library
+                    .get(b"spReflectionTypeLayout_GetFieldCount\0")
+                    .context("Failed to load spReflectionTypeLayout_GetFieldCount")?;
+            let reflection_type_layout_get_field_by_index: FnSpReflectionTypeLayoutGetFieldByIndex =
+                *library
+                    .get(b"spReflectionTypeLayout_GetFieldByIndex\0")
+                    .context("Failed to load spReflectionTypeLayout_GetFieldByIndex")?;
             let reflection_type_layout_get_type: FnSpReflectionTypeLayoutGetType = *library
                 .get(b"spReflectionTypeLayout_GetType\0")
                 .context("Failed to load spReflectionTypeLayout_GetType")?;
@@ -209,44 +182,21 @@ impl SlangLibrary {
             let reflection_variable_layout_get_type_layout: FnSpReflectionVariableLayoutGetTypeLayout = *library
                 .get(b"spReflectionVariableLayout_GetTypeLayout\0")
                 .context("Failed to load spReflectionVariableLayout_GetTypeLayout")?;
-            let reflection_variable_layout_get_offset: FnSpReflectionVariableLayoutGetOffset = *library
-                .get(b"spReflectionVariableLayout_GetOffset\0")
-                .context("Failed to load spReflectionVariableLayout_GetOffset")?;
+            let reflection_variable_layout_get_offset: FnSpReflectionVariableLayoutGetOffset =
+                *library
+                    .get(b"spReflectionVariableLayout_GetOffset\0")
+                    .context("Failed to load spReflectionVariableLayout_GetOffset")?;
 
-            // #region agent log
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"loader.rs:before_binding_type","message":"About to load spReflectionTypeLayout_getDescriptorSetDescriptorRangeType","data":{{}}}}"#);
-                }
-            }
-            // #endregion
-
-            let reflection_type_layout_get_binding_type: FnSpReflectionTypeLayoutGetBindingType = *library
-                .get(b"spReflectionTypeLayout_getDescriptorSetDescriptorRangeType\0")
-                .context("Failed to load spReflectionTypeLayout_getDescriptorSetDescriptorRangeType")?;
-
-            // #region agent log
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"loader.rs:after_binding_type","message":"Loaded spReflectionTypeLayout_getDescriptorSetDescriptorRangeType successfully","data":{{}}}}"#);
-                }
-            }
-            // #endregion
+            let reflection_type_layout_get_binding_type: FnSpReflectionTypeLayoutGetBindingType =
+                *library
+                    .get(b"spReflectionTypeLayout_getDescriptorSetDescriptorRangeType\0")
+                    .context(
+                        "Failed to load spReflectionTypeLayout_getDescriptorSetDescriptorRangeType",
+                    )?;
 
             let reflection_type_layout_get_category: FnSpReflectionTypeLayoutGetCategory = *library
                 .get(b"spReflectionTypeLayout_GetParameterCategory\0")
                 .context("Failed to load spReflectionTypeLayout_GetParameterCategory")?;
-
-            // #region agent log
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"loader.rs:reflection_symbols","message":"All FFI symbols loaded successfully","data":{{}}}}"#);
-                }
-            }
-            // #endregion
 
             Ok(Self {
                 _library: library,

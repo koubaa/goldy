@@ -79,9 +79,9 @@ pub enum SlangBindingType {
     ExistentialValue = 13,
     PushConstant = 14,
     MutableFlag = 0x100,
-    MutableTexture = 0x102,       // Texture | MutableFlag
-    MutableTypedBuffer = 0x105,   // TypedBuffer | MutableFlag
-    MutableRawBuffer = 0x106,     // RawBuffer | MutableFlag
+    MutableTexture = 0x102,     // Texture | MutableFlag
+    MutableTypedBuffer = 0x105, // TypedBuffer | MutableFlag
+    MutableRawBuffer = 0x106,   // RawBuffer | MutableFlag
 }
 
 /// Slang parameter category (for layout)
@@ -253,14 +253,12 @@ pub type FnSpGetTargetCodeBlob = unsafe extern "C" fn(
 // ============================================================================
 
 /// Get reflection data from a compile request (call after spCompile succeeds)
-pub type FnSpGetReflection = unsafe extern "C" fn(
-    request: *mut SlangCompileRequest,
-) -> *mut SlangReflection;
+pub type FnSpGetReflection =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *mut SlangReflection;
 
 /// Get the number of parameters in the program
-pub type FnSpReflectionGetParameterCount = unsafe extern "C" fn(
-    reflection: *mut SlangReflection,
-) -> c_int;
+pub type FnSpReflectionGetParameterCount =
+    unsafe extern "C" fn(reflection: *mut SlangReflection) -> c_int;
 
 /// Get a parameter by index
 pub type FnSpReflectionGetParameterByIndex = unsafe extern "C" fn(
@@ -270,102 +268,89 @@ pub type FnSpReflectionGetParameterByIndex = unsafe extern "C" fn(
 
 /// Get the type layout of a variable layout (parameter)
 /// Note: In Slang, parameters are VariableLayouts
-pub type FnSpReflectionParameterGetTypeLayout = unsafe extern "C" fn(
-    var_layout: *mut SlangReflectionVariableLayout,
-) -> *mut SlangReflectionTypeLayout;
+pub type FnSpReflectionParameterGetTypeLayout =
+    unsafe extern "C" fn(
+        var_layout: *mut SlangReflectionVariableLayout,
+    ) -> *mut SlangReflectionTypeLayout;
 
 /// Get the underlying variable from a variable layout
-pub type FnSpReflectionVariableLayoutGetVariable = unsafe extern "C" fn(
-    var_layout: *mut SlangReflectionVariableLayout,
-) -> *mut SlangReflectionVariable;
+pub type FnSpReflectionVariableLayoutGetVariable =
+    unsafe extern "C" fn(
+        var_layout: *mut SlangReflectionVariableLayout,
+    ) -> *mut SlangReflectionVariable;
 
 /// Opaque reflection variable handle
 pub type SlangReflectionVariable = c_void;
 
 /// Get the name of a variable
-pub type FnSpReflectionVariableGetName = unsafe extern "C" fn(
-    variable: *mut SlangReflectionVariable,
-) -> *const c_char;
+pub type FnSpReflectionVariableGetName =
+    unsafe extern "C" fn(variable: *mut SlangReflectionVariable) -> *const c_char;
 
 /// Get the binding index for a parameter
-pub type FnSpReflectionParameterGetBindingIndex = unsafe extern "C" fn(
-    parameter: *mut SlangReflectionParameter,
-) -> c_int;
+pub type FnSpReflectionParameterGetBindingIndex =
+    unsafe extern "C" fn(parameter: *mut SlangReflectionParameter) -> c_int;
 
 /// Get the binding space/set for a parameter  
-pub type FnSpReflectionParameterGetBindingSpace = unsafe extern "C" fn(
-    parameter: *mut SlangReflectionParameter,
-) -> c_int;
+pub type FnSpReflectionParameterGetBindingSpace =
+    unsafe extern "C" fn(parameter: *mut SlangReflectionParameter) -> c_int;
 
 /// Get the size of a type layout in bytes
-pub type FnSpReflectionTypeLayoutGetSize = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-    category: c_int,
-) -> usize;
+pub type FnSpReflectionTypeLayoutGetSize =
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout, category: c_int) -> usize;
 
 /// Get the stride of a type layout (for arrays/buffers)
-pub type FnSpReflectionTypeLayoutGetStride = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-    category: c_int,
-) -> usize;
+pub type FnSpReflectionTypeLayoutGetStride =
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout, category: c_int) -> usize;
 
 /// Get the alignment of a type layout
-pub type FnSpReflectionTypeLayoutGetAlignment = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-    category: c_int,
-) -> usize;
+pub type FnSpReflectionTypeLayoutGetAlignment =
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout, category: c_int) -> usize;
 
 /// Get the number of fields in a struct type layout
-pub type FnSpReflectionTypeLayoutGetFieldCount = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-) -> c_int;
+pub type FnSpReflectionTypeLayoutGetFieldCount =
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> c_int;
 
 /// Get a field by index from a type layout
-pub type FnSpReflectionTypeLayoutGetFieldByIndex = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-    index: c_int,
-) -> *mut SlangReflectionVariableLayout;
+pub type FnSpReflectionTypeLayoutGetFieldByIndex =
+    unsafe extern "C" fn(
+        type_layout: *mut SlangReflectionTypeLayout,
+        index: c_int,
+    ) -> *mut SlangReflectionVariableLayout;
 
 /// Get the type from a type layout
-pub type FnSpReflectionTypeLayoutGetType = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-) -> *mut SlangReflectionType;
+pub type FnSpReflectionTypeLayoutGetType =
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> *mut SlangReflectionType;
 
 /// Get the kind of a type
-pub type FnSpReflectionTypeGetKind = unsafe extern "C" fn(
-    type_: *mut SlangReflectionType,
-) -> c_int;
+pub type FnSpReflectionTypeGetKind = unsafe extern "C" fn(type_: *mut SlangReflectionType) -> c_int;
 
 /// Get the name of a type
-pub type FnSpReflectionTypeGetName = unsafe extern "C" fn(
-    type_: *mut SlangReflectionType,
-) -> *const c_char;
+pub type FnSpReflectionTypeGetName =
+    unsafe extern "C" fn(type_: *mut SlangReflectionType) -> *const c_char;
 
 /// Get the element type layout (for arrays, buffers, parameter blocks)
-pub type FnSpReflectionTypeLayoutGetElementTypeLayout = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-) -> *mut SlangReflectionTypeLayout;
+pub type FnSpReflectionTypeLayoutGetElementTypeLayout =
+    unsafe extern "C" fn(
+        type_layout: *mut SlangReflectionTypeLayout,
+    ) -> *mut SlangReflectionTypeLayout;
 
 /// Get the type layout of a variable layout (field)
-pub type FnSpReflectionVariableLayoutGetTypeLayout = unsafe extern "C" fn(
-    var_layout: *mut SlangReflectionVariableLayout,
-) -> *mut SlangReflectionTypeLayout;
+pub type FnSpReflectionVariableLayoutGetTypeLayout =
+    unsafe extern "C" fn(
+        var_layout: *mut SlangReflectionVariableLayout,
+    ) -> *mut SlangReflectionTypeLayout;
 
 /// Get the offset of a variable layout within its container
-pub type FnSpReflectionVariableLayoutGetOffset = unsafe extern "C" fn(
-    var_layout: *mut SlangReflectionVariableLayout,
-    category: c_int,
-) -> usize;
+pub type FnSpReflectionVariableLayoutGetOffset =
+    unsafe extern "C" fn(var_layout: *mut SlangReflectionVariableLayout, category: c_int) -> usize;
 
 /// Get the binding type of a type layout (for resources)
-pub type FnSpReflectionTypeLayoutGetBindingType = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-) -> c_int;
+pub type FnSpReflectionTypeLayoutGetBindingType =
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> c_int;
 
 /// Get the category of a type layout
-pub type FnSpReflectionTypeLayoutGetCategory = unsafe extern "C" fn(
-    type_layout: *mut SlangReflectionTypeLayout,
-) -> c_int;
+pub type FnSpReflectionTypeLayoutGetCategory =
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> c_int;
 
 // ISlangBlob interface methods (COM-style vtable)
 pub type FnBlobGetBufferPointer = unsafe extern "C" fn(blob: *mut ISlangBlob) -> *const c_void;

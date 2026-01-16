@@ -46,7 +46,7 @@ pub struct FieldLayout {
     pub size: usize,
     /// What kind of resource this field represents
     pub resource_kind: ResourceKind,
-    /// Type name (e.g., "StructuredBuffer<Particle>")
+    /// Type name (e.g., `StructuredBuffer<Particle>`)
     pub type_name: String,
 }
 
@@ -155,37 +155,10 @@ unsafe impl Sync for SlangCompiler {}
 impl SlangCompiler {
     /// Create a new Slang compiler instance.
     pub fn new() -> Result<Self> {
-        // #region agent log
-        {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"compiler.rs:new_start","message":"SlangCompiler::new() called","data":{{}}}}"#);
-            }
-        }
-        // #endregion
-
         let library = Arc::new(SlangLibrary::load()?);
-
-        // #region agent log
-        {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"compiler.rs:library_loaded","message":"SlangLibrary::load() succeeded","data":{{}}}}"#);
-            }
-        }
-        // #endregion
 
         // Create global session
         let session = unsafe { (library.create_session)(ptr::null()) };
-
-        // #region agent log
-        {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/mohamedkoubaa/dev/KOB3/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"compiler.rs:session_created","message":"spCreateSession returned","data":{{"is_null":{}}}}}"#, session.is_null());
-            }
-        }
-        // #endregion
 
         if session.is_null() {
             anyhow::bail!("Failed to create Slang session");
@@ -230,7 +203,13 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
     ) -> Result<CompiledShader> {
-        self.compile_with_defines(source, target, entry_points, search_paths, &[("__BINDLESS__", "1")])
+        self.compile_with_defines(
+            source,
+            target,
+            entry_points,
+            search_paths,
+            &[("__BINDLESS__", "1")],
+        )
     }
 
     /// Compile for bindless rendering with reflection data.
@@ -397,8 +376,7 @@ impl SlangCompiler {
         let mut parameter_blocks = Vec::new();
 
         // Get parameter count
-        let param_count =
-            unsafe { (self.library.reflection_get_parameter_count)(reflection_ptr) };
+        let param_count = unsafe { (self.library.reflection_get_parameter_count)(reflection_ptr) };
 
         for i in 0..param_count {
             let param =
@@ -438,7 +416,8 @@ impl SlangCompiler {
 
             // Check if this is a ParameterBlock
             if type_kind == SlangTypeKind::ParameterBlock as i32 {
-                let block_layout = self.extract_parameter_block_layout(param, type_layout, &name)?;
+                let block_layout =
+                    self.extract_parameter_block_layout(param, type_layout, &name)?;
                 parameter_blocks.push(block_layout);
             }
         }
@@ -543,7 +522,8 @@ impl SlangCompiler {
             }
 
             // Get field name (variable layout -> variable -> name)
-            let variable = unsafe { (self.library.reflection_variable_layout_get_variable)(field_var) };
+            let variable =
+                unsafe { (self.library.reflection_variable_layout_get_variable)(field_var) };
             let name = if !variable.is_null() {
                 let name_ptr = unsafe { (self.library.reflection_variable_get_name)(variable) };
                 if !name_ptr.is_null() {
@@ -586,7 +566,11 @@ impl SlangCompiler {
             // Convert slot counts to byte offsets/sizes (each slot = 8 bytes = GPU pointer)
             const SLOT_SIZE_BYTES: usize = 8;
             let offset = offset_slots * SLOT_SIZE_BYTES;
-            let size = if size_slots > 0 { size_slots * SLOT_SIZE_BYTES } else { SLOT_SIZE_BYTES };
+            let size = if size_slots > 0 {
+                size_slots * SLOT_SIZE_BYTES
+            } else {
+                SLOT_SIZE_BYTES
+            };
 
             tracing::trace!(
                 "Field {} (index {}): offset_slots={}, size_slots={} -> offset={}, size={}, resource_kind={:?}",
@@ -647,11 +631,17 @@ impl SlangCompiler {
                 // Check binding type to distinguish buffer vs texture, mutable vs immutable
                 match binding_type {
                     b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
+                    b if b == SlangBindingType::MutableTexture as i32 => {
+                        ResourceKind::MutableTexture
+                    }
                     b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
+                    b if b == SlangBindingType::MutableTypedBuffer as i32 => {
+                        ResourceKind::MutableBuffer
+                    }
                     b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                    b if b == SlangBindingType::MutableRawBuffer as i32 => {
+                        ResourceKind::MutableBuffer
+                    }
                     _ => ResourceKind::Other,
                 }
             }
@@ -661,13 +651,21 @@ impl SlangCompiler {
                 // This helps with StructuredBuffer which may have different type_kind
                 match binding_type {
                     b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
+                    b if b == SlangBindingType::MutableTypedBuffer as i32 => {
+                        ResourceKind::MutableBuffer
+                    }
                     b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                    b if b == SlangBindingType::MutableRawBuffer as i32 => {
+                        ResourceKind::MutableBuffer
+                    }
                     b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
+                    b if b == SlangBindingType::MutableTexture as i32 => {
+                        ResourceKind::MutableTexture
+                    }
                     b if b == SlangBindingType::Sampler as i32 => ResourceKind::Sampler,
-                    b if b == SlangBindingType::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
+                    b if b == SlangBindingType::ConstantBuffer as i32 => {
+                        ResourceKind::ConstantBuffer
+                    }
                     _ => ResourceKind::Other,
                 }
             }

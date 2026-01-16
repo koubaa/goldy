@@ -39,10 +39,10 @@ use std::collections::HashMap;
 // Re-import metal crate with explicit path to avoid name collision
 use ::metal as mtl;
 use mtl::{
-    Device as MTLDevice, HeapDescriptor, Library, MTLClearColor, MTLCPUCacheMode, MTLHeapType,
-    MTLLoadAction,
-    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLSize,
-    MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor, TextureDescriptor,
+    Device as MTLDevice, HeapDescriptor, Library, MTLCPUCacheMode, MTLClearColor, MTLHeapType,
+    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLResourceOptions,
+    MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureUsage, RenderPassDescriptor,
+    TextureDescriptor,
 };
 
 // Re-export from our types module
@@ -149,14 +149,16 @@ impl MetalBackend {
         // Compile Slang to MSL with specific entry point
         // Use compile_bindless_with_reflection when bindless is enabled
         let (compiled, reflection) = if bindless {
-            let result = self.slang_compiler.compile_bindless_with_reflection(
-                slang_source,
-                crate::slang::ShaderTarget::Metal,
-                &[(entry_point, stage)],
-                &search_path_refs,
-            )
-            .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
-            
+            let result = self
+                .slang_compiler
+                .compile_bindless_with_reflection(
+                    slang_source,
+                    crate::slang::ShaderTarget::Metal,
+                    &[(entry_point, stage)],
+                    &search_path_refs,
+                )
+                .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
+
             // Log reflection data for debugging
             if !result.reflection.parameter_blocks.is_empty() {
                 tracing::info!(
@@ -184,16 +186,18 @@ impl MetalBackend {
                     }
                 }
             }
-            
+
             (result.shader, Some(result.reflection))
         } else {
-            let result = self.slang_compiler.compile_with_options(
-                slang_source,
-                crate::slang::ShaderTarget::Metal,
-                &[(entry_point, stage)],
-                &search_path_refs,
-            )
-            .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
+            let result = self
+                .slang_compiler
+                .compile_with_options(
+                    slang_source,
+                    crate::slang::ShaderTarget::Metal,
+                    &[(entry_point, stage)],
+                    &search_path_refs,
+                )
+                .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
             (result, None)
         };
 
@@ -433,85 +437,82 @@ impl GpuBackend for MetalBackend {
 
         // Check for Argument Buffers Tier 2 support (required for bindless)
         let arg_buffers_tier = device.argument_buffers_support();
-        let bindless_enabled =
-            arg_buffers_tier == mtl::MTLArgumentBuffersTier::Tier2;
+        let bindless_enabled = arg_buffers_tier == mtl::MTLArgumentBuffersTier::Tier2;
 
         // Initialize bindless infrastructure if supported
         let (buffer_heap, texture_heap, argument_buffer, argument_encoder, texture_encoder) =
             if bindless_enabled {
-            tracing::info!("Metal Argument Buffers Tier 2 supported - enabling bindless");
+                tracing::info!("Metal Argument Buffers Tier 2 supported - enabling bindless");
 
-            // Create global argument buffer first (for storing resource IDs)
-            let arg_buffer = device.new_buffer(
-                ARGUMENT_BUFFER_SIZE,
-                MTLResourceOptions::StorageModeShared,
-            );
-            tracing::info!("Created argument buffer");
+                // Create global argument buffer first (for storing resource IDs)
+                let arg_buffer =
+                    device.new_buffer(ARGUMENT_BUFFER_SIZE, MTLResourceOptions::StorageModeShared);
+                tracing::info!("Created argument buffer");
 
-            // Try to create heaps for resource allocation
-            // Use Automatic heap type and Shared storage for CPU-accessible buffers
-            // IMPORTANT: CPU cache mode must match between heap and buffer allocation
-            let heap_size: u64 = 64 * 1024 * 1024; // 64MB (smaller to start)
+                // Try to create heaps for resource allocation
+                // Use Automatic heap type and Shared storage for CPU-accessible buffers
+                // IMPORTANT: CPU cache mode must match between heap and buffer allocation
+                let heap_size: u64 = 64 * 1024 * 1024; // 64MB (smaller to start)
 
-            tracing::info!("Creating buffer heap...");
-            let buffer_heap_desc = HeapDescriptor::new();
-            buffer_heap_desc.set_size(heap_size);
-            buffer_heap_desc.set_storage_mode(MTLStorageMode::Shared);
-            buffer_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
-            buffer_heap_desc.set_heap_type(MTLHeapType::Automatic);
-            let buffer_heap = device.new_heap(&buffer_heap_desc);
-            tracing::info!("Created buffer heap (size={}MB)", heap_size / 1024 / 1024);
+                tracing::info!("Creating buffer heap...");
+                let buffer_heap_desc = HeapDescriptor::new();
+                buffer_heap_desc.set_size(heap_size);
+                buffer_heap_desc.set_storage_mode(MTLStorageMode::Shared);
+                buffer_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
+                buffer_heap_desc.set_heap_type(MTLHeapType::Automatic);
+                let buffer_heap = device.new_heap(&buffer_heap_desc);
+                tracing::info!("Created buffer heap (size={}MB)", heap_size / 1024 / 1024);
 
-            tracing::info!("Creating texture heap...");
-            let texture_heap_desc = HeapDescriptor::new();
-            texture_heap_desc.set_size(heap_size);
-            // Use Shared storage to allow CPU writes via replace_region()
-            // Private would require staging buffer + blit
-            texture_heap_desc.set_storage_mode(MTLStorageMode::Shared);
-            texture_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
-            texture_heap_desc.set_heap_type(MTLHeapType::Automatic);
-            let texture_heap = device.new_heap(&texture_heap_desc);
-            tracing::info!("Created texture heap (size={}MB)", heap_size / 1024 / 1024);
+                tracing::info!("Creating texture heap...");
+                let texture_heap_desc = HeapDescriptor::new();
+                texture_heap_desc.set_size(heap_size);
+                // Use Shared storage to allow CPU writes via replace_region()
+                // Private would require staging buffer + blit
+                texture_heap_desc.set_storage_mode(MTLStorageMode::Shared);
+                texture_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
+                texture_heap_desc.set_heap_type(MTLHeapType::Automatic);
+                let texture_heap = device.new_heap(&texture_heap_desc);
+                tracing::info!("Created texture heap (size={}MB)", heap_size / 1024 / 1024);
 
-            // Create ArgumentEncoder for encoding buffers into argument buffer
-            // Each slot in the argument buffer holds one resource reference
-            let buffer_arg_desc = mtl::ArgumentDescriptor::new();
-            buffer_arg_desc.set_index(0);
-            buffer_arg_desc.set_data_type(mtl::MTLDataType::Pointer);
-            buffer_arg_desc.set_access(mtl::MTLArgumentAccess::ReadWrite);
-            let buffer_encoder =
-                device.new_argument_encoder(mtl::Array::from_slice(&[buffer_arg_desc]));
-            tracing::info!(
-                "Created buffer ArgumentEncoder (encoded_length={})",
-                buffer_encoder.encoded_length()
-            );
+                // Create ArgumentEncoder for encoding buffers into argument buffer
+                // Each slot in the argument buffer holds one resource reference
+                let buffer_arg_desc = mtl::ArgumentDescriptor::new();
+                buffer_arg_desc.set_index(0);
+                buffer_arg_desc.set_data_type(mtl::MTLDataType::Pointer);
+                buffer_arg_desc.set_access(mtl::MTLArgumentAccess::ReadWrite);
+                let buffer_encoder =
+                    device.new_argument_encoder(mtl::Array::from_slice(&[buffer_arg_desc]));
+                tracing::info!(
+                    "Created buffer ArgumentEncoder (encoded_length={})",
+                    buffer_encoder.encoded_length()
+                );
 
-            // Create ArgumentEncoder for encoding textures
-            let texture_arg_desc = mtl::ArgumentDescriptor::new();
-            texture_arg_desc.set_index(0);
-            texture_arg_desc.set_data_type(mtl::MTLDataType::Texture);
-            texture_arg_desc.set_texture_type(mtl::MTLTextureType::D2);
-            texture_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
-            let texture_encoder =
-                device.new_argument_encoder(mtl::Array::from_slice(&[texture_arg_desc]));
-            tracing::info!(
-                "Created texture ArgumentEncoder (encoded_length={})",
-                texture_encoder.encoded_length()
-            );
+                // Create ArgumentEncoder for encoding textures
+                let texture_arg_desc = mtl::ArgumentDescriptor::new();
+                texture_arg_desc.set_index(0);
+                texture_arg_desc.set_data_type(mtl::MTLDataType::Texture);
+                texture_arg_desc.set_texture_type(mtl::MTLTextureType::D2);
+                texture_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
+                let texture_encoder =
+                    device.new_argument_encoder(mtl::Array::from_slice(&[texture_arg_desc]));
+                tracing::info!(
+                    "Created texture ArgumentEncoder (encoded_length={})",
+                    texture_encoder.encoded_length()
+                );
 
-            (
-                Some(buffer_heap),
-                Some(texture_heap),
-                Some(arg_buffer),
-                Some(buffer_encoder),
-                Some(texture_encoder),
-            )
-        } else {
-            tracing::info!(
-                "Metal Argument Buffers Tier 2 not supported - using traditional bindings"
-            );
-            (None, None, None, None, None)
-        };
+                (
+                    Some(buffer_heap),
+                    Some(texture_heap),
+                    Some(arg_buffer),
+                    Some(buffer_encoder),
+                    Some(texture_encoder),
+                )
+            } else {
+                tracing::info!(
+                    "Metal Argument Buffers Tier 2 not supported - using traditional bindings"
+                );
+                (None, None, None, None, None)
+            };
 
         let handle = self.next_device_handle;
         self.next_device_handle += 1;
@@ -638,9 +639,9 @@ impl GpuBackend for MetalBackend {
                         None => {
                             // Heap allocation failed (e.g., heap full), fall back to traditional
                             tracing::warn!(
-                                "Heap allocation failed for buffer {}, using traditional allocation",
-                                handle
-                            );
+                            "Heap allocation failed for buffer {}, using traditional allocation",
+                            handle
+                        );
                             let options = MTLResourceOptions::StorageModeManaged
                                 | MTLResourceOptions::CPUCacheModeWriteCombined;
                             let buffer = logical_device.device.new_buffer(size, options);
@@ -986,7 +987,9 @@ impl GpuBackend for MetalBackend {
             .unwrap_or_default();
 
         // Allocate argument buffer for ParameterBlocks if bindless is enabled
-        let bindless_arg_buffer = if logical_device.bindless_enabled && !parameter_block_layouts.is_empty() {
+        let bindless_arg_buffer = if logical_device.bindless_enabled
+            && !parameter_block_layouts.is_empty()
+        {
             // Calculate total size needed for all ParameterBlock structs
             // For simplicity, use the first ParameterBlock's size (most common case)
             let total_size = parameter_block_layouts
@@ -996,10 +999,9 @@ impl GpuBackend for MetalBackend {
                 .unwrap_or(64)
                 .max(64); // Minimum 64 bytes for alignment
 
-            let arg_buffer = logical_device.device.new_buffer(
-                total_size,
-                MTLResourceOptions::StorageModeShared,
-            );
+            let arg_buffer = logical_device
+                .device
+                .new_buffer(total_size, MTLResourceOptions::StorageModeShared);
 
             tracing::info!(
                 "Allocated bindless argument buffer ({} bytes) for pipeline with {} ParameterBlock(s)",
@@ -1036,7 +1038,11 @@ impl GpuBackend for MetalBackend {
             },
         );
 
-        tracing::debug!("Created render pipeline {} with topology {:?}", handle, topology);
+        tracing::debug!(
+            "Created render pipeline {} with topology {:?}",
+            handle,
+            topology
+        );
         Ok(handle)
     }
 
@@ -1254,12 +1260,19 @@ impl GpuBackend for MetalBackend {
                                             BindingState::Buffer { buffer, offset, .. } => {
                                                 if let Some(buf) = self.buffers.get(buffer) {
                                                     // Find the field offset from reflection
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
                                                             // Write GPU address to argument buffer at field offset
-                                                            let gpu_addr = buf.buffer.gpu_address() + *offset;
+                                                            let gpu_addr =
+                                                                buf.buffer.gpu_address() + *offset;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = gpu_addr;
                                                             }
                                                             tracing::trace!(
@@ -1274,11 +1287,18 @@ impl GpuBackend for MetalBackend {
                                             }
                                             BindingState::Texture(tex_handle) => {
                                                 if let Some(tex) = self.textures.get(tex_handle) {
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
-                                                            let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
+                                                            let resource_id =
+                                                                tex.texture.gpu_resource_id()._impl;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = resource_id;
                                                             }
                                                         }
@@ -1287,11 +1307,20 @@ impl GpuBackend for MetalBackend {
                                             }
                                             BindingState::Sampler(samp_handle) => {
                                                 if let Some(samp) = self.samplers.get(samp_handle) {
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
-                                                            let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
+                                                            let resource_id = samp
+                                                                .sampler
+                                                                .gpu_resource_id()
+                                                                ._impl;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = resource_id;
                                                             }
                                                         }
@@ -1302,7 +1331,9 @@ impl GpuBackend for MetalBackend {
                                     }
 
                                     // Bind the argument buffer at the slot from reflection
-                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    if let Some(pb_layout) =
+                                        pipeline.parameter_block_layouts.first()
+                                    {
                                         encoder.set_vertex_buffer(
                                             pb_layout.binding_slot as u64,
                                             Some(arg_buffer),
@@ -1344,7 +1375,8 @@ impl GpuBackend for MetalBackend {
 
                                             if let Some(arg_idx) = buf.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.buffer_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.buffer_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -1352,11 +1384,15 @@ impl GpuBackend for MetalBackend {
                                     }
                                     BindingState::Texture(tex_handle) => {
                                         if let Some(tex) = self.textures.get(tex_handle) {
-                                            encoder.set_fragment_texture(buffer_index, Some(&tex.texture));
+                                            encoder.set_fragment_texture(
+                                                buffer_index,
+                                                Some(&tex.texture),
+                                            );
 
                                             if let Some(arg_idx) = tex.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.texture_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.texture_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -1364,11 +1400,15 @@ impl GpuBackend for MetalBackend {
                                     }
                                     BindingState::Sampler(samp_handle) => {
                                         if let Some(samp) = self.samplers.get(samp_handle) {
-                                            encoder.set_fragment_sampler_state(buffer_index, Some(&samp.sampler));
+                                            encoder.set_fragment_sampler_state(
+                                                buffer_index,
+                                                Some(&samp.sampler),
+                                            );
 
                                             if let Some(arg_idx) = samp.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.sampler_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.sampler_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -1745,11 +1785,7 @@ impl GpuBackend for MetalBackend {
         // Register in bindless registry and encode GPU resource ID if enabled
         let arg_buffer_index = if logical_device.bindless_enabled {
             let index = logical_device.resource_registry.register_sampler(handle);
-            tracing::debug!(
-                "Registered sampler {} at bindless index {}",
-                handle,
-                index
-            );
+            tracing::debug!("Registered sampler {} at bindless index {}", handle, index);
 
             // Encode GPU resource ID into argument buffer
             if let Some(arg_buffer) = &logical_device.argument_buffer {
@@ -1782,7 +1818,11 @@ impl GpuBackend for MetalBackend {
             },
         );
 
-        tracing::debug!("Created sampler (handle={}) [bindless={}]", handle, arg_buffer_index.is_some());
+        tracing::debug!(
+            "Created sampler (handle={}) [bindless={}]",
+            handle,
+            arg_buffer_index.is_some()
+        );
         Ok(handle)
     }
 
@@ -2010,12 +2050,19 @@ impl GpuBackend for MetalBackend {
                                             BindingState::Buffer { buffer, offset, .. } => {
                                                 if let Some(buf) = self.buffers.get(buffer) {
                                                     // Find the field offset from reflection
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
                                                             // Write GPU address to argument buffer at field offset
-                                                            let gpu_addr = buf.buffer.gpu_address() + *offset;
+                                                            let gpu_addr =
+                                                                buf.buffer.gpu_address() + *offset;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = gpu_addr;
                                                             }
                                                             tracing::trace!(
@@ -2030,11 +2077,18 @@ impl GpuBackend for MetalBackend {
                                             }
                                             BindingState::Texture(tex_handle) => {
                                                 if let Some(tex) = self.textures.get(tex_handle) {
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
-                                                            let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
+                                                            let resource_id =
+                                                                tex.texture.gpu_resource_id()._impl;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = resource_id;
                                                             }
                                                         }
@@ -2043,11 +2097,20 @@ impl GpuBackend for MetalBackend {
                                             }
                                             BindingState::Sampler(samp_handle) => {
                                                 if let Some(samp) = self.samplers.get(samp_handle) {
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
-                                                            let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
+                                                            let resource_id = samp
+                                                                .sampler
+                                                                .gpu_resource_id()
+                                                                ._impl;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = resource_id;
                                                             }
                                                         }
@@ -2058,7 +2121,9 @@ impl GpuBackend for MetalBackend {
                                     }
 
                                     // Bind the argument buffer at the slot from reflection
-                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    if let Some(pb_layout) =
+                                        pipeline.parameter_block_layouts.first()
+                                    {
                                         encoder.set_vertex_buffer(
                                             pb_layout.binding_slot as u64,
                                             Some(arg_buffer),
@@ -2100,7 +2165,8 @@ impl GpuBackend for MetalBackend {
 
                                             if let Some(arg_idx) = buf.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.buffer_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.buffer_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -2108,11 +2174,15 @@ impl GpuBackend for MetalBackend {
                                     }
                                     BindingState::Texture(tex_handle) => {
                                         if let Some(tex) = self.textures.get(tex_handle) {
-                                            encoder.set_fragment_texture(buffer_index, Some(&tex.texture));
+                                            encoder.set_fragment_texture(
+                                                buffer_index,
+                                                Some(&tex.texture),
+                                            );
 
                                             if let Some(arg_idx) = tex.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.texture_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.texture_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -2120,11 +2190,15 @@ impl GpuBackend for MetalBackend {
                                     }
                                     BindingState::Sampler(samp_handle) => {
                                         if let Some(samp) = self.samplers.get(samp_handle) {
-                                            encoder.set_fragment_sampler_state(buffer_index, Some(&samp.sampler));
+                                            encoder.set_fragment_sampler_state(
+                                                buffer_index,
+                                                Some(&samp.sampler),
+                                            );
 
                                             if let Some(arg_idx) = samp.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.sampler_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.sampler_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -2311,7 +2385,9 @@ impl GpuBackend for MetalBackend {
             .unwrap_or_default();
 
         // Allocate argument buffer for ParameterBlocks if bindless is enabled
-        let bindless_arg_buffer = if logical_device.bindless_enabled && !parameter_block_layouts.is_empty() {
+        let bindless_arg_buffer = if logical_device.bindless_enabled
+            && !parameter_block_layouts.is_empty()
+        {
             // Calculate total size needed for all ParameterBlock structs
             let total_size = parameter_block_layouts
                 .iter()
@@ -2320,10 +2396,9 @@ impl GpuBackend for MetalBackend {
                 .unwrap_or(64)
                 .max(64); // Minimum 64 bytes for alignment
 
-            let arg_buffer = logical_device.device.new_buffer(
-                total_size,
-                MTLResourceOptions::StorageModeShared,
-            );
+            let arg_buffer = logical_device
+                .device
+                .new_buffer(total_size, MTLResourceOptions::StorageModeShared);
 
             tracing::info!(
                 "Allocated bindless argument buffer ({} bytes) for compute pipeline with {} ParameterBlock(s)",
@@ -2433,12 +2508,19 @@ impl GpuBackend for MetalBackend {
                                                 if let Some(buf) = self.buffers.get(buffer) {
                                                     // Find the field offset from reflection
                                                     // Assume bind group index 0 maps to first ParameterBlock
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
                                                             // Write GPU address to argument buffer at field offset
-                                                            let gpu_addr = buf.buffer.gpu_address() + *offset;
+                                                            let gpu_addr =
+                                                                buf.buffer.gpu_address() + *offset;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = gpu_addr;
                                                             }
                                                             tracing::trace!(
@@ -2454,11 +2536,18 @@ impl GpuBackend for MetalBackend {
                                             BindingState::Texture(tex_handle) => {
                                                 if let Some(tex) = self.textures.get(tex_handle) {
                                                     // For textures, write the gpuResourceID
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
-                                                            let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
+                                                            let resource_id =
+                                                                tex.texture.gpu_resource_id()._impl;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = resource_id;
                                                             }
                                                         }
@@ -2468,11 +2557,20 @@ impl GpuBackend for MetalBackend {
                                             BindingState::Sampler(samp_handle) => {
                                                 if let Some(samp) = self.samplers.get(samp_handle) {
                                                     // For samplers, write the gpuResourceID
-                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
-                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
-                                                            let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                    if let Some(pb_layout) =
+                                                        pipeline.parameter_block_layouts.first()
+                                                    {
+                                                        if let Some(field) =
+                                                            pb_layout.fields.get(binding_idx)
+                                                        {
+                                                            let resource_id = samp
+                                                                .sampler
+                                                                .gpu_resource_id()
+                                                                ._impl;
                                                             unsafe {
-                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                let ptr = arg_buffer
+                                                                    .contents()
+                                                                    .add(field.offset);
                                                                 *(ptr as *mut u64) = resource_id;
                                                             }
                                                         }
@@ -2483,7 +2581,9 @@ impl GpuBackend for MetalBackend {
                                     }
 
                                     // Bind the argument buffer at the slot from reflection
-                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    if let Some(pb_layout) =
+                                        pipeline.parameter_block_layouts.first()
+                                    {
                                         encoder.set_buffer(
                                             pb_layout.binding_slot as u64,
                                             Some(arg_buffer),
@@ -2516,7 +2616,8 @@ impl GpuBackend for MetalBackend {
                                             // Collect bindless index if available (legacy path)
                                             if let Some(arg_idx) = buf.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.buffer_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.buffer_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -2528,7 +2629,8 @@ impl GpuBackend for MetalBackend {
 
                                             if let Some(arg_idx) = tex.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.texture_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.texture_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
@@ -2536,11 +2638,15 @@ impl GpuBackend for MetalBackend {
                                     }
                                     BindingState::Sampler(samp_handle) => {
                                         if let Some(samp) = self.samplers.get(samp_handle) {
-                                            encoder.set_sampler_state(buffer_index, Some(&samp.sampler));
+                                            encoder.set_sampler_state(
+                                                buffer_index,
+                                                Some(&samp.sampler),
+                                            );
 
                                             if let Some(arg_idx) = samp.arg_buffer_index {
                                                 if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.sampler_indices[binding_idx] = arg_idx;
+                                                    bindless_indices.sampler_indices[binding_idx] =
+                                                        arg_idx;
                                                     has_bindless_resources = true;
                                                 }
                                             }
