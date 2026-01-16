@@ -1,6 +1,6 @@
 """Goldy GPU library for Python.
 
-A modern GPU library targeting Vulkan 1.3+, DX12, and Metal.
+A modern GPU library targeting Vulkan 1.4+, DX12, and Metal.
 
 Example:
     >>> import goldy

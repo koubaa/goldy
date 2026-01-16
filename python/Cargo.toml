@@ -29,4 +29,3 @@ bytemuck = "1.21"
 
 # Window handle support for Surface
 raw-window-handle = "0.6"
-

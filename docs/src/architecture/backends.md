@@ -39,7 +39,7 @@ Each backend uses **native idioms**, not translation:
 
 ## Vulkan Backend
 
-The Vulkan backend uses modern Vulkan 1.3+ features:
+The Vulkan backend uses modern Vulkan 1.4+ features:
 
 ### Dynamic Rendering
 

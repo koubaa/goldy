@@ -23,7 +23,7 @@ If we were to design an API tailored for modern GPUs today, it wouldn't need mos
 The so-called modern APIs (DX12, Vulkan, Metal) carry significant historical baggage:
 
 ### From Vulkan
-- Render pass objects (replaced by dynamic rendering in 1.3+)
+- Render pass objects (replaced by dynamic rendering in 1.4+)
 - Descriptor set layouts (replaced by bindless descriptors in 1.2+)
 - Complex image layout transitions
 - Pipeline layouts as explicit objects
@@ -41,7 +41,7 @@ The so-called modern APIs (DX12, Vulkan, Metal) carry significant historical bag
 
 ## Goldy's Answer
 
-Goldy takes the position that **we can do better by doing less**. By targeting only modern hardware (Vulkan 1.3+, DX12, Metal), Goldy can:
+Goldy takes the position that **we can do better by doing less**. By targeting only modern hardware (Vulkan 1.4+, DX12, Metal), Goldy can:
 
 1. **Drop compatibility complexity** - No fallback paths for 10-year-old GPUs
 2. **Use modern defaults** - Bindless, dynamic rendering, unified memory
@@ -74,7 +74,7 @@ Goldy follows this principle:
 | **Pace** | Moves at spec speed | Moves as fast as we want |
 | **Legacy** | Must support WebGPU's LCD | Assumes modern features |
 | **Metal** | Via WebGPU abstraction | Native Metal idioms |
-| **Vulkan** | Must work on 1.0+ | Requires 1.3+ |
+| **Vulkan** | Must work on 1.0+ | Requires 1.4+ |
 
 wgpu is the right choice for web compatibility and broad device support. Goldy is for when you want simplicity and can require modern hardware.
 

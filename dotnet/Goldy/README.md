@@ -1,6 +1,6 @@
 # Goldy - Modern GPU Library for .NET
 
-Goldy is a modern GPU library targeting Vulkan 1.3+, DX12, and Metal, with C# bindings using .NET 7+ source-generated interop.
+Goldy is a modern GPU library targeting Vulkan 1.4+, DX12, and Metal, with C# bindings using .NET 7+ source-generated interop.
 
 ## Quick Start
 
@@ -27,7 +27,7 @@ byte[] pixels = target.ReadToCpu();
 
 ## Features
 
-- Modern GPU API targeting Vulkan 1.3+, DX12, and Metal
+- Modern GPU API targeting Vulkan 1.4+, DX12, and Metal
 - Slang shader compiler integration
 - Zero-allocation render loop design
 - SafeHandle-based resource management
@@ -38,7 +38,7 @@ byte[] pixels = target.ReadToCpu();
 
 - .NET 8.0 or later
 - Windows x64, Linux x64, or macOS (x64/arm64)
-- A Vulkan 1.3+, DX12, or Metal compatible GPU
+- A Vulkan 1.4+, DX12, or Metal compatible GPU
 
 ## License
 

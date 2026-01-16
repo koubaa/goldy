@@ -1,6 +1,6 @@
 //! Vulkan backend implementation.
 //!
-//! Targets Vulkan 1.3+ with dynamic rendering.
+//! Targets Vulkan 1.4+ with dynamic rendering.
 //! Supports surface presentation on Windows (VK_KHR_win32_surface) and Linux (VK_KHR_wayland_surface).
 //!
 //! ## Module Structure
@@ -69,26 +69,26 @@ impl VulkanBackend {
         // Load Vulkan library
         let entry = unsafe { ash::Entry::load() }.context("Failed to load Vulkan library")?;
 
-        // Check instance version
+        // Check instance version (note: this is the loader version, not driver version)
         let instance_version = unsafe { entry.try_enumerate_instance_version() }
             .context("Failed to enumerate instance version")?
             .unwrap_or(vk::API_VERSION_1_0);
 
         let major = vk::api_version_major(instance_version);
         let minor = vk::api_version_minor(instance_version);
-        tracing::info!("Vulkan instance version: {}.{}", major, minor);
+        tracing::info!("Vulkan loader version: {}.{}", major, minor);
 
-        if major < 1 || (major == 1 && minor < 3) {
-            anyhow::bail!("Goldy requires Vulkan 1.3+, found {}.{}", major, minor);
-        }
+        // Note: We request 1.4 from the instance, but the loader may be older.
+        // The actual version check happens per-device when we enumerate physical devices.
+        // Drivers can support 1.4 even if the loader is 1.3.
 
-        // Create instance with Vulkan 1.3 and surface extensions
+        // Create instance with Vulkan 1.4 and surface extensions
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"goldy")
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(c"goldy")
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::API_VERSION_1_3);
+            .api_version(vk::make_api_version(0, 1, 4, 0));
 
         // Surface extensions for windowed presentation
         let mut extensions: Vec<*const i8> = vec![khr::surface::NAME.as_ptr()];
@@ -143,11 +143,38 @@ impl VulkanBackend {
         tracing::info!("Found {} Vulkan physical devices", physical_devices.len());
         for dev in &physical_devices {
             let name = unsafe { CStr::from_ptr(dev.properties.device_name.as_ptr()) };
+            let dev_major = vk::api_version_major(dev.properties.api_version);
+            let dev_minor = vk::api_version_minor(dev.properties.api_version);
             tracing::info!(
-                "  [{}] {} ({:?})",
+                "  [{}] {} ({:?}) - Vulkan {}.{}",
                 dev.adapter_id,
                 name.to_string_lossy(),
-                dev.properties.device_type
+                dev.properties.device_type,
+                dev_major,
+                dev_minor
+            );
+        }
+
+        // Check that at least one device supports Vulkan 1.4+
+        let has_vulkan_14 = physical_devices.iter().any(|dev| {
+            let major = vk::api_version_major(dev.properties.api_version);
+            let minor = vk::api_version_minor(dev.properties.api_version);
+            major > 1 || (major == 1 && minor >= 4)
+        });
+
+        if !has_vulkan_14 {
+            let versions: Vec<String> = physical_devices
+                .iter()
+                .map(|dev| {
+                    let name = unsafe { CStr::from_ptr(dev.properties.device_name.as_ptr()) };
+                    let major = vk::api_version_major(dev.properties.api_version);
+                    let minor = vk::api_version_minor(dev.properties.api_version);
+                    format!("{}: {}.{}", name.to_string_lossy(), major, minor)
+                })
+                .collect();
+            anyhow::bail!(
+                "Goldy requires Vulkan 1.4+, but no compatible devices found. Available: [{}]",
+                versions.join(", ")
             );
         }
 

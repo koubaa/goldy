@@ -1,6 +1,6 @@
 # Goldy: Modern Graphics Library
 
-**Goldy** is a modern Rust GPU library that deliberately sheds legacy baggage. It targets only modern GPU APIs (Vulkan 1.3+, DX12, Metal) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
+**Goldy** is a modern Rust GPU library that deliberately sheds legacy baggage. It targets only modern GPU APIs (Vulkan 1.4+, DX12, Metal) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
 
 ```rust
 use goldy::{Instance, DeviceType, Color, CommandEncoder, Surface};
@@ -33,8 +33,8 @@ fn main() -> anyhow::Result<()> {
 | Attribute | Description |
 |-----------|-------------|
 | **Rust-native** | Idiomatic Rust API, not a wrapper around C APIs |
-| **Modern-only** | Assumes Vulkan 1.3+, DX12, Metal baseline |
-| **Legacy-free** | No OpenGL, no Vulkan <1.3, no OpenCL baggage |
+| **Modern-only** | Assumes Vulkan 1.4+, DX12, Metal baseline |
+| **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL baggage |
 | **Unified** | Graphics and compute in one API |
 | **Fast-moving** | Not a standard—can iterate quickly |
 | **WASI-ready** | Can be exposed to WASM guests via WIT |

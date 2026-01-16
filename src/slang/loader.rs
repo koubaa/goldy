@@ -285,7 +285,7 @@ impl SlangLibrary {
         anyhow::bail!(
             "Could not find Slang library. Options:\n\
              1. Set GOLDY_SLANG_PATH environment variable\n\
-             2. Install Vulkan SDK 1.3.296+ (Windows)\n\
+             2. Install Vulkan SDK 1.4+ (Windows)\n\
              3. For development: run slang/download.sh"
         )
     }

@@ -1,6 +1,7 @@
 # Goldy CI/CD Pipeline
 # Runs GPU tests on:
 # - Linux: lavapipe (Mesa's Vulkan software renderer)
+#          Requires Mesa 25.0+ for Vulkan 1.4 support in lavapipe. 
 # - macOS: Native Metal backend (Apple Silicon GPU)
 
 name: CI
@@ -78,6 +79,7 @@ jobs:
         run: cargo test --lib backend::mock
 
   # Full GPU tests using lavapipe (software Vulkan)
+  # Requires Mesa 25.0+ for Vulkan 1.4 support
   test-vulkan:
     name: Vulkan Tests (lavapipe)
     runs-on: ubuntu-24.04
@@ -87,9 +89,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Vulkan dependencies
+      - name: Install Vulkan dependencies (Mesa 25.0+ for Vulkan 1.4)
         run: |
+          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
           sudo apt-get update
+          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
           sudo apt-get install -y \
             libvulkan1 \
             libvulkan-dev \
@@ -305,9 +309,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Vulkan dependencies
+      - name: Install Vulkan dependencies (Mesa 25.0+ for Vulkan 1.4)
         run: |
+          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
           sudo apt-get update
+          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
           sudo apt-get install -y \
             libvulkan1 \
             libvulkan-dev \
@@ -504,9 +510,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install build dependencies
+      - name: Install build dependencies (Mesa 25.0+ for Vulkan 1.4)
         run: |
+          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
           sudo apt-get update
+          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
           sudo apt-get install -y \
             cmake \
             ninja-build \

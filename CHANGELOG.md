@@ -11,7 +11,7 @@ Initial release of Goldy, a modern GPU library for Rust.
 
 ### Added
 
-- **Vulkan 1.3+ backend** - Full support for modern Vulkan features including dynamic rendering
+- **Vulkan 1.4+ backend** - Full support for modern Vulkan features including dynamic rendering
 - **DX12 backend** (Windows) - DirectX 12 support for Windows platforms
 - **Slang shader compilation** - Compile Slang shaders to SPIR-V at runtime
 - **Shader library system** - Register reusable shader modules with `import` support
@@ -31,5 +31,5 @@ Initial release of Goldy, a modern GPU library for Rust.
 ### Dependencies
 
 - Requires Slang compiler (auto-downloaded during build, or provide via Vulkan SDK)
-- Vulkan 1.3+ capable GPU (2018 or newer recommended)
+- Vulkan 1.4+ capable GPU (2018 or newer recommended)
 

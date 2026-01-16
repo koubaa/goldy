@@ -6,7 +6,7 @@ Because Goldy targets **modern hardware only**, it can drop significant complexi
 
 | Dropped | Replacement | Why |
 |---------|-------------|-----|
-| Render pass objects | Dynamic rendering (1.3+) | Modern GPUs don't need ahead-of-time render pass specification |
+| Render pass objects | Dynamic rendering (1.4+) | Modern GPUs don't need ahead-of-time render pass specification |
 | Descriptor set layouts | Bindless descriptors (1.2+) | Index into descriptor heaps directly |
 | Image layout transitions | Unified layouts (extension) | Hardware handles hazards automatically |
 | Pipeline layouts as objects | Implicit from shader reflection | Redundant with shader metadata |

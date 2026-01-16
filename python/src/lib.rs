@@ -19,7 +19,7 @@ use pyo3::prelude::*;
 
 /// Goldy GPU library for Python.
 ///
-/// A modern GPU library targeting Vulkan 1.3+, DX12, and Metal.
+/// A modern GPU library targeting Vulkan 1.4+, DX12, and Metal.
 #[pymodule]
 fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register the custom exception
