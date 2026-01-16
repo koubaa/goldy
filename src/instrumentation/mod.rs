@@ -162,7 +162,7 @@ pub fn install_json_logger(path: &str) -> std::io::Result<()> {
     tracing_subscriber::registry()
         .with(json_layer)
         .try_init()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     Ok(())
 }

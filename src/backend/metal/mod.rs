@@ -1167,7 +1167,7 @@ impl GpuBackend for MetalBackend {
 
         // Create render pass
         let render_pass = Self::create_render_pass(
-            &*render_target.texture,
+            &render_target.texture,
             render_target.depth_texture.as_deref(),
             clear_color,
             clear_depth,
@@ -1976,7 +1976,7 @@ impl GpuBackend for MetalBackend {
         }
 
         // Create render pass
-        let render_pass = Self::create_render_pass(&texture, None, clear_color, None);
+        let render_pass = Self::create_render_pass(texture, None, clear_color, None);
 
         // Create command buffer and encoder
         let command_buffer = logical_device.command_queue.new_command_buffer();

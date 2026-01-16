@@ -49,11 +49,7 @@ impl JsonFileLayer {
     ///
     /// The file is created if it doesn't exist.
     pub fn new_append(path: &str) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         Ok(Self {
             file: Mutex::new(file),
