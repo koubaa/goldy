@@ -1,6 +1,6 @@
 ## Development
 
-Before submitting a PR, run the CI checks locally:
+After completing any task, run the CI checks locally:
 
 ```bash
 cargo fmt --all -- --check

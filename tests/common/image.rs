@@ -118,10 +118,13 @@ impl From<std::io::Error> for ImageComparisonError {
 }
 
 /// Read a PNG file and return its RGBA pixel data.
-fn read_png(path: &Path, expected_width: u32, expected_height: u32) -> Result<Vec<u8>, ImageComparisonError> {
-    let data = std::fs::read(path).map_err(|_| {
-        ImageComparisonError::ReferenceNotFound(path.display().to_string())
-    })?;
+fn read_png(
+    path: &Path,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<Vec<u8>, ImageComparisonError> {
+    let data = std::fs::read(path)
+        .map_err(|_| ImageComparisonError::ReferenceNotFound(path.display().to_string()))?;
 
     let decoder = png::Decoder::new(std::io::Cursor::new(data));
     let mut reader = decoder.read_info().map_err(|e| {
@@ -270,10 +273,7 @@ pub fn compare_images(
     // Gather statistics
     let mut pool = nv_flip::FlipPool::from_image(&error_map);
 
-    println!(
-        "Comparing against reference: {}",
-        reference_path.display()
-    );
+    println!("Comparing against reference: {}", reference_path.display());
     print_flip_stats(&mut pool);
 
     // Run all checks
@@ -299,12 +299,24 @@ pub fn compare_images(
     let difference_path = parent.join(format!("{}-diff.png", stem));
 
     // Write actual image
-    write_png(&actual_path, width, height, actual_rgba, png::Compression::Fast)?;
+    write_png(
+        &actual_path,
+        width,
+        height,
+        actual_rgba,
+        png::Compression::Fast,
+    )?;
 
     // Convert error map to magma colormap and write difference image
     let magma_rgb = error_map.apply_color_lut(&nv_flip::magma_lut()).to_vec();
     let magma_rgba = add_alpha(&magma_rgb);
-    write_png(&difference_path, width, height, &magma_rgba, png::Compression::Fast)?;
+    write_png(
+        &difference_path,
+        width,
+        height,
+        &magma_rgba,
+        png::Compression::Fast,
+    )?;
 
     println!("  Result: FAIL");
     println!("    Actual image saved to: {}", actual_path.display());
@@ -334,4 +346,3 @@ mod tests {
         assert_eq!(rgba, vec![255, 128, 64, 255, 0, 0, 0, 255]);
     }
 }
-

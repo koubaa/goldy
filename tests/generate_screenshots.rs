@@ -173,21 +173,42 @@ fn create_gol_initial_state() -> Vec<u32> {
     let mut cells = vec![0u32; GOL_CELL_COUNT as usize];
 
     let gun = [
-        (1, 5), (1, 6), (2, 5), (2, 6),
-        (11, 5), (11, 6), (11, 7),
-        (12, 4), (12, 8),
-        (13, 3), (13, 9),
-        (14, 3), (14, 9),
+        (1, 5),
+        (1, 6),
+        (2, 5),
+        (2, 6),
+        (11, 5),
+        (11, 6),
+        (11, 7),
+        (12, 4),
+        (12, 8),
+        (13, 3),
+        (13, 9),
+        (14, 3),
+        (14, 9),
         (15, 6),
-        (16, 4), (16, 8),
-        (17, 5), (17, 6), (17, 7),
+        (16, 4),
+        (16, 8),
+        (17, 5),
+        (17, 6),
+        (17, 7),
         (18, 6),
-        (21, 3), (21, 4), (21, 5),
-        (22, 3), (22, 4), (22, 5),
-        (23, 2), (23, 6),
-        (25, 1), (25, 2), (25, 6), (25, 7),
-        (35, 3), (35, 4),
-        (36, 3), (36, 4),
+        (21, 3),
+        (21, 4),
+        (21, 5),
+        (22, 3),
+        (22, 4),
+        (22, 5),
+        (23, 2),
+        (23, 6),
+        (25, 1),
+        (25, 2),
+        (25, 6),
+        (25, 7),
+        (35, 3),
+        (35, 4),
+        (36, 3),
+        (36, 4),
     ];
 
     let offset_x = 10;
@@ -218,17 +239,13 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     let render_width = 512u32;
     let render_height = 512u32;
 
-    let compute_shader = ShaderModule::from_slang(
-        device,
-        include_str!("../shaders/game_of_life.slang"),
-    )
-    .expect("Failed to load compute shader");
+    let compute_shader =
+        ShaderModule::from_slang(device, include_str!("../shaders/game_of_life.slang"))
+            .expect("Failed to load compute shader");
 
-    let render_shader = ShaderModule::from_slang(
-        device,
-        include_str!("../shaders/game_of_life_render.slang"),
-    )
-    .expect("Failed to load render shader");
+    let render_shader =
+        ShaderModule::from_slang(device, include_str!("../shaders/game_of_life_render.slang"))
+            .expect("Failed to load render shader");
 
     let initial_state = create_gol_initial_state();
     let buffer_a = Buffer::with_data(device, &initial_state, BufferUsage::STORAGE)
@@ -336,12 +353,19 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             }
             pass.dispatch(workgroups_x, workgroups_y, 1);
         }
-        compute_encoder.dispatch(device).expect("Compute dispatch failed");
+        compute_encoder
+            .dispatch(device)
+            .expect("Compute dispatch failed");
         use_buffer_a = !use_buffer_a;
     }
 
-    let target = RenderTarget::new(device, render_width, render_height, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target = RenderTarget::new(
+        device,
+        render_width,
+        render_height,
+        TextureFormat::Rgba8Unorm,
+    )
+    .expect("Failed to create render target");
 
     let mut encoder = CommandEncoder::new();
     {
@@ -383,4 +407,3 @@ fn generate_game_of_life_100() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/game_of_life_100.png");
     save_png(&path, 512, 512, &pixels);
 }
-
