@@ -172,4 +172,3 @@ pub fn install_json_logger(path: &str) -> std::io::Result<()> {
 pub fn install_json_logger(_path: &str) -> std::io::Result<()> {
     Ok(())
 }
-

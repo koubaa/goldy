@@ -431,7 +431,10 @@ impl SlangCompiler {
         goldy_event!(
             "slang.reflection.extract",
             parameter_blocks = parameter_blocks.len(),
-            total_fields = parameter_blocks.iter().map(|pb| pb.fields.len()).sum::<usize>()
+            total_fields = parameter_blocks
+                .iter()
+                .map(|pb| pb.fields.len())
+                .sum::<usize>()
         );
 
         Ok(ShaderReflection { parameter_blocks })
