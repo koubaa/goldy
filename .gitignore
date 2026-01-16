@@ -2,8 +2,9 @@
 /target/
 Cargo.lock
 
-# Output files from examples
+# Output files from examples (but not test reference screenshots)
 *.png
+!tests/screenshots/*.png
 
 # Documentation build output
 /docs/book/
