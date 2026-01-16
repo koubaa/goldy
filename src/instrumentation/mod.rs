@@ -70,12 +70,12 @@ pub const TARGET: &str = "goldy";
 #[cfg(feature = "instrumentation")]
 #[macro_export]
 macro_rules! goldy_span {
-    ($name:expr $(, $($key:tt = $value:expr),* $(,)?)?) => {
+    ($name:expr $(, $($rest:tt)*)?) => {
         tracing::span!(
             target: $crate::instrumentation::TARGET,
             tracing::Level::DEBUG,
             $name
-            $(, $($key = $value),*)?
+            $(, $($rest)*)?
         )
     };
 }
@@ -84,7 +84,7 @@ macro_rules! goldy_span {
 #[cfg(not(feature = "instrumentation"))]
 #[macro_export]
 macro_rules! goldy_span {
-    ($name:expr $(, $($key:tt = $value:expr),* $(,)?)?) => {
+    ($name:expr $(, $($rest:tt)*)?) => {
         $crate::instrumentation::NoopSpan
     };
 }
@@ -106,12 +106,12 @@ macro_rules! goldy_span {
 #[cfg(feature = "instrumentation")]
 #[macro_export]
 macro_rules! goldy_event {
-    ($name:expr $(, $($key:tt = $value:expr),* $(,)?)?) => {
+    ($name:expr $(, $($rest:tt)*)?) => {
         tracing::event!(
             target: $crate::instrumentation::TARGET,
             tracing::Level::DEBUG,
             name = $name
-            $(, $($key = $value),*)?
+            $(, $($rest)*)?
         )
     };
 }
@@ -120,7 +120,7 @@ macro_rules! goldy_event {
 #[cfg(not(feature = "instrumentation"))]
 #[macro_export]
 macro_rules! goldy_event {
-    ($name:expr $(, $($key:tt = $value:expr),* $(,)?)?) => {
+    ($name:expr $(, $($rest:tt)*)?) => {
         // No-op
     };
 }

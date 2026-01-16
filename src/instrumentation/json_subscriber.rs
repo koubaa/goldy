@@ -97,6 +97,13 @@ impl JsonVisitor {
 impl Visit for JsonVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         let value_str = format!("{:?}", value);
+
+        // The "name" field is special - it's the observation point name
+        if field.name() == "name" {
+            self.name = Some(value_str.trim_matches('"').to_string());
+            return;
+        }
+
         // Try to parse as number, otherwise quote as string
         let json_value = if value_str.parse::<i64>().is_ok()
             || value_str.parse::<f64>().is_ok()
@@ -115,12 +122,7 @@ impl Visit for JsonVisitor {
             format!(r#""{}""#, escaped)
         };
 
-        if field.name() == "name" {
-            // The "name" field is special - it's the observation point name
-            self.name = Some(value_str.trim_matches('"').to_string());
-        } else {
-            self.fields.push((field.name().to_string(), json_value));
-        }
+        self.fields.push((field.name().to_string(), json_value));
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
