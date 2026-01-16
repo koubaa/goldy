@@ -42,6 +42,9 @@ pub mod ffi;
 pub mod loader;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use compiler::{CompiledShader, ShaderTarget, SlangCompiler};
+pub use compiler::{
+    CompiledShader, CompiledShaderWithReflection, FieldLayout, ParameterBlockLayout, ResourceKind,
+    ShaderReflection, ShaderTarget, SlangCompiler,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use ffi::SlangStage;

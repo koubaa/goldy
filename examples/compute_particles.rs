@@ -240,6 +240,8 @@ impl ApplicationHandler for App {
             match RenderState::new(window.clone()) {
                 Ok(state) => {
                     self.state = Some(state);
+                    // Request initial redraw to start the render loop
+                    window.request_redraw();
                 }
                 Err(e) => {
                     eprintln!("Failed to create render state: {}", e);

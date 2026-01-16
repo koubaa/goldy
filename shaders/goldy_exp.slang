@@ -10,3 +10,7 @@ __include "goldy_exp/math";
 __include "goldy_exp/color";
 __include "goldy_exp/vertex";
 
+#ifdef __BINDLESS__
+__include "goldy_exp/bindless";
+#endif
+

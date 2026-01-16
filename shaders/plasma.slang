@@ -1,13 +1,32 @@
 // Classic demoscene plasma effect
 // Uses goldy_exp module for vertex format and color utilities
+//
+// ## Bindless Support
+//
+// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
+// - Uniforms are accessed via ParameterBlock for argument buffer support
+// - Traditional binding syntax works as fallback
 
 import goldy_exp;
 
-// Uniform buffer for time (updated each frame)
-[[vk::binding(0, 0)]]
-cbuffer Uniforms {
+// Uniform structure
+struct TimeUniforms {
     float time;
 };
+
+#ifdef __BINDLESS__
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+struct PlasmaResources {
+    ConstantBuffer<TimeUniforms> uniforms;
+};
+ParameterBlock<PlasmaResources> gResources;
+#define TIME gResources.uniforms.time
+#else
+// Traditional binding mode
+[[vk::binding(0, 0)]]
+ConstantBuffer<TimeUniforms> uniforms;
+#define TIME uniforms.time
+#endif
 
 [shader("vertex")]
 FullscreenVarying vs_main(FullscreenVertex input) {
@@ -17,7 +36,7 @@ FullscreenVarying vs_main(FullscreenVertex input) {
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
     float2 uv = scale_uv(input.uv, 4.0);
-    float t = time;
+    float t = TIME;
     
     // Classic plasma formula
     float v = sin(uv.x + t);

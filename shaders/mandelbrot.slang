@@ -1,15 +1,36 @@
 // Interactive Mandelbrot fractal explorer
 // Uses goldy_exp module for vertex format and color utilities
+//
+// ## Bindless Support
+//
+// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
+// - Uniforms are accessed via ParameterBlock for argument buffer support
+// - Traditional binding syntax works as fallback
 
 import goldy_exp;
 
-// Uniform buffer for view parameters (updated on input)
-[[vk::binding(0, 0)]]
-cbuffer Uniforms {
+// Uniform structure for view parameters
+struct ViewUniforms {
     float2 center;
     float zoom;
     float _padding;  // Align to 16 bytes
 };
+
+#ifdef __BINDLESS__
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+struct MandelbrotResources {
+    ConstantBuffer<ViewUniforms> uniforms;
+};
+ParameterBlock<MandelbrotResources> gResources;
+#define CENTER gResources.uniforms.center
+#define ZOOM gResources.uniforms.zoom
+#else
+// Traditional binding mode
+[[vk::binding(0, 0)]]
+ConstantBuffer<ViewUniforms> uniforms;
+#define CENTER uniforms.center
+#define ZOOM uniforms.zoom
+#endif
 
 // Vertex-less fullscreen triangle - generates geometry from vertex index
 [shader("vertex")]
@@ -32,7 +53,7 @@ FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
     // Map UV to complex plane around center with zoom
-    float2 c = center + (input.uv - 0.5) * 4.0 / zoom;
+    float2 c = CENTER + (input.uv - 0.5) * 4.0 / ZOOM;
     float2 z = float2(0.0, 0.0);
     uint i = 0;
     const uint max_iter = 256;

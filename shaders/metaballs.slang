@@ -1,5 +1,11 @@
 // Animated metaballs effect
 // Uses uniform buffer for time animation
+//
+// ## Bindless Support
+//
+// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
+// - Uniforms are accessed via ParameterBlock for argument buffer support
+// - Traditional binding syntax works as fallback
 
 struct VertexInput {
     float2 position : POSITION;
@@ -11,11 +17,24 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-// Uniform buffer for time (updated each frame)
-[[vk::binding(0, 0)]]
-cbuffer Uniforms {
+// Uniform structure
+struct TimeUniforms {
     float time;
 };
+
+#ifdef __BINDLESS__
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+struct MetaballsResources {
+    ConstantBuffer<TimeUniforms> uniforms;
+};
+ParameterBlock<MetaballsResources> gResources;
+#define TIME gResources.uniforms.time
+#else
+// Traditional binding mode
+[[vk::binding(0, 0)]]
+ConstantBuffer<TimeUniforms> uniforms;
+#define TIME uniforms.time
+#endif
 
 [shader("vertex")]
 VertexOutput vs_main(VertexInput input) {
@@ -33,7 +52,7 @@ float metaball(float2 p, float2 center, float radius) {
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
-    float t = time;
+    float t = TIME;
     
     // Moving metaball centers
     float2 c1 = float2(sin(t * 1.1) * 0.5, cos(t * 0.9) * 0.5);

@@ -341,6 +341,7 @@ impl ApplicationHandler for App {
             match RenderState::new(window.clone()) {
                 Ok(state) => {
                     self.state = Some(state);
+                    window.request_redraw(); // Trigger initial render
                 }
                 Err(e) => {
                     eprintln!("Failed to create render state: {}", e);
@@ -367,6 +368,7 @@ impl ApplicationHandler for App {
                     if let Err(e) = state.render() {
                         eprintln!("Render error: {}", e);
                     }
+                    state.window.request_redraw(); // Continue render loop
                 }
             }
             _ => {}

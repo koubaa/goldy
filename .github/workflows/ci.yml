@@ -1,6 +1,7 @@
 # Goldy CI/CD Pipeline
-# Runs tests using lavapipe (Mesa's Vulkan software renderer) for GPU tests
-# without requiring actual GPU hardware.
+# Runs GPU tests on:
+# - Linux: lavapipe (Mesa's Vulkan software renderer)
+# - macOS: Native Metal backend (Apple Silicon GPU)
 
 name: CI
 
@@ -169,6 +170,60 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --features vulkan --test '*'
 
+  # Full GPU tests using native Metal backend (macOS)
+  test-metal:
+    name: Metal Tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download Slang compiler
+        run: |
+          cd slang
+          chmod +x download.sh
+          ./download.sh
+          # macOS runners are Apple Silicon (arm64)
+          if [ "$(uname -m)" = "arm64" ]; then
+            SLANG_DIR="$(pwd)/bin/macos-aarch64"
+          else
+            SLANG_DIR="$(pwd)/bin/macos-x86_64"
+          fi
+          SLANG_LIB="$SLANG_DIR/libslang.dylib"
+          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
+          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+          echo "Slang libraries:"
+          ls -la "$SLANG_DIR" || echo "Directory not found"
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-metal-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-metal-
+
+      - name: Run all tests
+        env:
+          # Point to downloaded Slang library
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          # DYLD_LIBRARY_PATH for macOS dynamic library loading
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test
+
+      - name: Run integration tests
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test --test '*'
+
   # Build documentation
   docs:
     name: Documentation
@@ -329,6 +384,72 @@ jobs:
           python examples/compute_demo.py
           python examples/game_of_life.py
 
+  # Python bindings build and test (macOS with native Metal)
+  python-macos:
+    name: Python Bindings (macOS)
+    runs-on: macos-latest
+    needs: [check, test-mock]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download Slang compiler
+        run: |
+          cd slang
+          chmod +x download.sh
+          ./download.sh
+          if [ "$(uname -m)" = "arm64" ]; then
+            SLANG_DIR="$(pwd)/bin/macos-aarch64"
+          else
+            SLANG_DIR="$(pwd)/bin/macos-x86_64"
+          fi
+          SLANG_LIB="$SLANG_DIR/libslang.dylib"
+          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
+          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-python-
+
+      - name: Install maturin and dependencies
+        run: |
+          pip install maturin numpy pillow pytest
+
+      - name: Install and test Python bindings
+        working-directory: python
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: |
+          pip install .
+          pytest tests/ -v
+
+      - name: Run Python examples
+        working-directory: python
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: |
+          python examples/adapter_info.py
+          python examples/compute_demo.py
+          python examples/game_of_life.py
+
   # Python bindings build (Windows)
   python-windows:
     name: Python Bindings (Windows)
@@ -464,7 +585,7 @@ jobs:
           # Verify output file was created
           test -f triangle.ppm && echo "✓ triangle.ppm created successfully"
 
-  # C++ bindings build (macOS)
+  # C++ bindings build and test (macOS with native Metal)
   cpp-macos:
     name: C++ Bindings (macOS)
     runs-on: macos-latest
@@ -524,8 +645,15 @@ jobs:
         working-directory: cpp
         run: cmake --build build
 
-      # Note: Can't run GPU tests on macOS CI without MoltenVK setup
-      # Just verify the build succeeds
+      - name: Run triangle example
+        working-directory: cpp/build/examples
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: |
+          ./triangle
+          # Verify output file was created
+          test -f triangle.ppm && echo "✓ triangle.ppm created successfully"
 
   # C++ bindings build (Windows)
   cpp-windows:
