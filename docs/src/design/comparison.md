@@ -71,7 +71,7 @@ Application
     ┌────┼────┐
     ▼    ▼    ▼
   Vk  Metal  DX12
- 1.3+   2+
+ 1.4+   2+
 ```
 
 Goldy talks directly to modern backend APIs without a translation layer. Each backend uses native idioms.

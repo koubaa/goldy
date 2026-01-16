@@ -1,6 +1,6 @@
 //! Vulkan backend implementation.
 //!
-//! Targets Vulkan 1.3+ with dynamic rendering.
+//! Targets Vulkan 1.4+ with dynamic rendering.
 //! Supports surface presentation on Windows (VK_KHR_win32_surface) and Linux (VK_KHR_wayland_surface).
 //!
 //! ## Module Structure
@@ -78,17 +78,17 @@ impl VulkanBackend {
         let minor = vk::api_version_minor(instance_version);
         tracing::info!("Vulkan instance version: {}.{}", major, minor);
 
-        if major < 1 || (major == 1 && minor < 3) {
-            anyhow::bail!("Goldy requires Vulkan 1.3+, found {}.{}", major, minor);
+        if major < 1 || (major == 1 && minor < 4) {
+            anyhow::bail!("Goldy requires Vulkan 1.4+, found {}.{}", major, minor);
         }
 
-        // Create instance with Vulkan 1.3 and surface extensions
+        // Create instance with Vulkan 1.4 and surface extensions
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"goldy")
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(c"goldy")
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::API_VERSION_1_3);
+            .api_version(vk::make_api_version(0, 1, 4, 0));
 
         // Surface extensions for windowed presentation
         let mut extensions: Vec<*const i8> = vec![khr::surface::NAME.as_ptr()];

@@ -6,7 +6,7 @@ Goldy provides Python bindings via PyO3, offering a Pythonic API for GPU program
 
 - Python 3.9 or later
 - NumPy 1.20 or later
-- A compatible GPU with Vulkan 1.3+ or DX12 support
+- A compatible GPU with Vulkan 1.4+ or DX12 support
 
 ## Installation
 

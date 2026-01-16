@@ -22,7 +22,7 @@ Goldy welcomes contributions! Here's how to get involved.
 ### Requirements
 
 - Rust 1.70+
-- Vulkan SDK 1.3+
+- Vulkan SDK 1.4+
 - Git
 
 ### Building

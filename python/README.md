@@ -163,7 +163,7 @@ Tests are organized into:
 
 - Python 3.9+
 - NumPy 1.20+
-- Vulkan 1.3+ compatible GPU
+- Vulkan 1.4+ compatible GPU
 
 ## Publishing to PyPI
 

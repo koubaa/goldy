@@ -3,7 +3,7 @@
 ## Requirements
 
 - **Rust** 1.70 or later
-- **Vulkan SDK** 1.3+ (for Vulkan backend)
+- **Vulkan SDK** 1.4+ (for Vulkan backend)
 - A [supported GPU](../design/hardware.md)
 
 ## Adding Goldy to Your Project

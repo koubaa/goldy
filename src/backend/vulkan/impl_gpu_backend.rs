@@ -60,7 +60,7 @@ impl GpuBackend for VulkanBackend {
             .map(|(idx, _)| idx as u32)
             .context("No graphics queue family found")?;
 
-        // Enable Vulkan 1.3 features (dynamic rendering)
+        // Enable Vulkan 1.4 features (dynamic rendering)
         let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -498,7 +498,7 @@ impl GpuBackend for VulkanBackend {
         let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
             .context("Failed to create pipeline layout")?;
 
-        // Dynamic rendering info (Vulkan 1.3)
+        // Dynamic rendering info (Vulkan 1.4)
         let color_format = format_to_vk(target_format);
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(std::slice::from_ref(&color_format));
@@ -1448,7 +1448,7 @@ impl GpuBackend for VulkanBackend {
         let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
             .context("Failed to create pipeline layout")?;
 
-        // Dynamic rendering info (Vulkan 1.3)
+        // Dynamic rendering info (Vulkan 1.4)
         let color_format = format_to_vk(target_format);
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(std::slice::from_ref(&color_format));
@@ -2255,7 +2255,7 @@ impl GpuBackend for VulkanBackend {
         let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
             .context("Failed to create pipeline layout")?;
 
-        // Dynamic rendering info (Vulkan 1.3)
+        // Dynamic rendering info (Vulkan 1.4)
         let color_format = format_to_vk(target_format);
         let depth_format_vk = depth_stencil
             .map(|ds| utils::depth_format_to_vk(ds.format))
