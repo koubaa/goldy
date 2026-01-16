@@ -7,6 +7,7 @@ use libloading::Library;
 use std::path::PathBuf;
 
 use super::ffi::*;
+use crate::{goldy_event, goldy_span};
 
 /// Loaded Slang library with function pointers.
 pub struct SlangLibrary {
@@ -64,12 +65,20 @@ impl SlangLibrary {
     /// 2. Vendored binaries in goldy/slang/bin/{platform}/
     /// 3. Vulkan SDK (Windows only, for development)
     pub fn load() -> Result<Self> {
+        let _span = goldy_span!("slang.library.load").entered();
+
         let lib_path = Self::find_library()?;
         tracing::info!("Loading Slang library from: {}", lib_path.display());
 
         // Safety: We're loading a known library with a stable C ABI
         let library = unsafe { Library::new(&lib_path) }
             .with_context(|| format!("Failed to load Slang library from {}", lib_path.display()))?;
+
+        goldy_event!(
+            "slang.library.load",
+            path = %lib_path.display(),
+            success = true
+        );
 
         // Load function pointers
         // Safety: These are all C functions with stable ABI from the Slang library
@@ -117,6 +126,8 @@ impl SlangLibrary {
             let get_target_code_blob: FnSpGetTargetCodeBlob = *library
                 .get(b"spGetTargetCodeBlob\0")
                 .context("Failed to load spGetTargetCodeBlob")?;
+
+            goldy_event!("slang.ffi.core_symbols", loaded = true);
 
             // Reflection API
             let get_reflection: FnSpGetReflection = *library
@@ -197,6 +208,8 @@ impl SlangLibrary {
             let reflection_type_layout_get_category: FnSpReflectionTypeLayoutGetCategory = *library
                 .get(b"spReflectionTypeLayout_GetParameterCategory\0")
                 .context("Failed to load spReflectionTypeLayout_GetParameterCategory")?;
+
+            goldy_event!("slang.ffi.reflection_symbols", loaded = true);
 
             Ok(Self {
                 _library: library,

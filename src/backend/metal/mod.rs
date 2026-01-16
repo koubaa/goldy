@@ -28,6 +28,7 @@ use utils::{
 
 use super::*;
 use crate::types::Color;
+use crate::{goldy_event, goldy_span};
 use anyhow::{Context, Result};
 use cocoa::base::{id, nil, YES};
 use core_graphics_types::geometry::CGSize;
@@ -101,11 +102,14 @@ pub struct MetalBackend {
 impl MetalBackend {
     /// Create a new Metal backend.
     pub fn new() -> Result<Self> {
+        let _span = goldy_span!("backend.metal.init").entered();
         tracing::info!("Initializing Metal backend");
 
         // Create Slang compiler
         let slang_compiler =
             crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
+
+        goldy_event!("backend.metal.init", success = true);
 
         Ok(Self {
             devices: HashMap::new(),
@@ -582,6 +586,8 @@ impl GpuBackend for MetalBackend {
         size: u64,
         _usage: BufferUsage,
     ) -> Result<BufferHandle> {
+        let _span = goldy_span!("resource.buffer.create", size = size).entered();
+
         let logical_device = self
             .devices
             .get_mut(&device_handle)
@@ -1131,6 +1137,13 @@ impl GpuBackend for MetalBackend {
         target: RenderTargetHandle,
         commands: &[RenderCommand],
     ) -> Result<()> {
+        let _span = goldy_span!(
+            "render.pass.execute",
+            target = target,
+            commands = commands.len()
+        )
+        .entered();
+
         let logical_device = self
             .devices
             .get(&device_handle)
@@ -1589,6 +1602,14 @@ impl GpuBackend for MetalBackend {
         format: TextureFormat,
         usage: TextureUsage,
     ) -> Result<TextureHandle> {
+        let _span = goldy_span!(
+            "resource.texture.create",
+            width = width,
+            height = height,
+            format = ?format
+        )
+        .entered();
+
         let logical_device = self
             .devices
             .get_mut(&device_handle)
@@ -2451,6 +2472,8 @@ impl GpuBackend for MetalBackend {
         device_handle: DeviceHandle,
         commands: &[ComputeCommand],
     ) -> Result<()> {
+        let _span = goldy_span!("render.compute.dispatch", commands = commands.len()).entered();
+
         let logical_device = self
             .devices
             .get(&device_handle)

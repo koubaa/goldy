@@ -27,8 +27,9 @@ libloading = "0.9"
 anyhow = "1.0"
 thiserror = "2.0"
 
-# Logging
+# Logging and instrumentation
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # Utilities
 bitflags = "2.6"
@@ -78,10 +79,12 @@ winit = "0.30"
 [features]
 # Default enables all platform-appropriate backends
 # On macOS: metal is used, on Windows: dx12/vulkan, on Linux: vulkan
-default = ["vulkan", "metal", "dx12"]
+default = ["vulkan", "metal", "dx12", "instrumentation"]
 vulkan = ["dep:ash"]
 dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core"]
 metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types"]
+# Structured instrumentation with named observation points (zero-cost when disabled)
+instrumentation = ["dep:tracing-subscriber"]
 
 [[example]]
 name = "triangle"

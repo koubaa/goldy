@@ -33,6 +33,9 @@ pub mod types;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod slang;
 
+// Structured instrumentation for debugging and profiling
+pub mod instrumentation;
+
 // Re-export main types
 pub use bind_group::{
     BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, BufferBinding, SamplerBinding,

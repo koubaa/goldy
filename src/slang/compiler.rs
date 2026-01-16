@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use super::ffi::*;
 use super::loader::SlangLibrary;
+use crate::{goldy_event, goldy_span};
 
 // ============================================================================
 // Reflection data structures
@@ -155,6 +156,8 @@ unsafe impl Sync for SlangCompiler {}
 impl SlangCompiler {
     /// Create a new Slang compiler instance.
     pub fn new() -> Result<Self> {
+        let _span = goldy_span!("slang.compiler.init").entered();
+
         let library = Arc::new(SlangLibrary::load()?);
 
         // Create global session
@@ -164,6 +167,7 @@ impl SlangCompiler {
             anyhow::bail!("Failed to create Slang session");
         }
 
+        goldy_event!("slang.session.create", success = true);
         tracing::info!("Slang compiler initialized");
 
         Ok(Self { library, session })
@@ -368,6 +372,8 @@ impl SlangCompiler {
 
     /// Extract reflection data from a compiled request.
     fn extract_reflection(&self, request: *mut SlangCompileRequest) -> Result<ShaderReflection> {
+        let _span = goldy_span!("slang.reflection.extract").entered();
+
         let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
         if reflection_ptr.is_null() {
             return Ok(ShaderReflection::default());
@@ -421,6 +427,12 @@ impl SlangCompiler {
                 parameter_blocks.push(block_layout);
             }
         }
+
+        goldy_event!(
+            "slang.reflection.extract",
+            parameter_blocks = parameter_blocks.len(),
+            total_fields = parameter_blocks.iter().map(|pb| pb.fields.len()).sum::<usize>()
+        );
 
         Ok(ShaderReflection { parameter_blocks })
     }
@@ -711,6 +723,21 @@ impl SlangCompiler {
         search_paths: &[&str],
         defines: &[(&str, &str)],
     ) -> Result<CompiledShader> {
+        let _span = goldy_span!(
+            "slang.compile",
+            target = ?target,
+            entry_points = entry_points.len(),
+            bindless = defines.iter().any(|(k, _)| *k == "__BINDLESS__")
+        )
+        .entered();
+
+        goldy_event!(
+            "slang.compile.start",
+            target = ?target,
+            entry_points = entry_points.len(),
+            source_len = source.len()
+        );
+
         // Create compile request
         let request = unsafe { (self.library.create_compile_request)(self.session) };
         if request.is_null() {
@@ -823,6 +850,12 @@ impl SlangCompiler {
 
         // Release blob
         unsafe { blob_release(blob) };
+
+        goldy_event!(
+            "slang.compile.end",
+            output_size = data.len(),
+            success = true
+        );
 
         Ok(CompiledShader { data, target })
     }
