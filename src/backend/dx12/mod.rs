@@ -232,23 +232,63 @@ impl Dx12Backend {
             _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
         };
 
-        // Clone source to avoid borrow issues
+        // Clone source and search paths to avoid borrow issues
         let slang_source = shader.slang_source.clone();
+        let search_paths = shader.search_paths.clone();
+        let device_handle = shader.device_handle;
 
-        // Compile Slang to HLSL first
-        let hlsl_compiled = self
-            .slang_compiler
-            .compile_entry_point(
-                &slang_source,
-                crate::slang::ShaderTarget::Hlsl,
-                Some((entry_point_name, stage)),
-            )
-            .with_context(|| format!("Failed to compile {} shader to HLSL", entry_point_name))?;
+        // Convert search_paths to &str references
+        let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
-        let hlsl_source = hlsl_compiled
-            .as_str()
-            .context("Invalid HLSL output")?
-            .to_string();
+        // Check if bindless is enabled on the device
+        let bindless_enabled = self
+            .devices
+            .get(&device_handle)
+            .map(|d| d.bindless_enabled)
+            .unwrap_or(false);
+
+        // Compile Slang to HLSL (with bindless support if enabled)
+        let (hlsl_source, reflection) = if bindless_enabled {
+            let result = self
+                .slang_compiler
+                .compile_bindless_with_reflection(
+                    &slang_source,
+                    crate::slang::ShaderTarget::Hlsl,
+                    &[(entry_point_name, stage)],
+                    &search_path_refs,
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to compile {} shader to HLSL (bindless)",
+                        entry_point_name
+                    )
+                })?;
+
+            let hlsl = result
+                .shader
+                .as_str()
+                .context("Invalid HLSL output")?
+                .to_string();
+            (hlsl, Some(result.reflection))
+        } else {
+            let hlsl_compiled = self
+                .slang_compiler
+                .compile_with_options(
+                    &slang_source,
+                    crate::slang::ShaderTarget::Hlsl,
+                    &[(entry_point_name, stage)],
+                    &search_path_refs,
+                )
+                .with_context(|| {
+                    format!("Failed to compile {} shader to HLSL", entry_point_name)
+                })?;
+
+            let hlsl = hlsl_compiled
+                .as_str()
+                .context("Invalid HLSL output")?
+                .to_string();
+            (hlsl, None)
+        };
 
         // Compile HLSL to DXIL using DXC (for now we'll use FXC as fallback)
         let target_profile = match stage {
@@ -302,15 +342,34 @@ impl Dx12Backend {
         let bytecode_size = unsafe { blob.GetBufferSize() };
         let bytecode = unsafe { std::slice::from_raw_parts(bytecode_ptr, bytecode_size) }.to_vec();
 
-        tracing::debug!("Compiled {} ({} bytes)", entry_point_name, bytecode.len());
+        tracing::debug!(
+            "Compiled {} ({} bytes, bindless={})",
+            entry_point_name,
+            bytecode.len(),
+            bindless_enabled
+        );
 
-        // Cache the bytecode
+        // Cache the bytecode and reflection data
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         match stage {
             crate::slang::SlangStage::Vertex => shader.vertex_bytecode = Some(bytecode.clone()),
             crate::slang::SlangStage::Fragment => shader.fragment_bytecode = Some(bytecode.clone()),
             crate::slang::SlangStage::Compute => shader.compute_bytecode = Some(bytecode.clone()),
             _ => {} // Already validated above
+        }
+
+        // Store reflection data (merge with existing if any)
+        if let Some(ref new_reflection) = reflection {
+            if let Some(ref mut existing) = shader.reflection {
+                // Merge parameter blocks
+                for pb in &new_reflection.parameter_blocks {
+                    if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                        existing.parameter_blocks.push(pb.clone());
+                    }
+                }
+            } else {
+                shader.reflection = reflection;
+            }
         }
 
         Ok(bytecode)
@@ -414,10 +473,10 @@ impl GpuBackend for Dx12Backend {
         let dsv_descriptor_size =
             unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV) };
 
-        // Create CBV/SRV/UAV descriptor heap
+        // Create CBV/SRV/UAV descriptor heap (large for bindless rendering)
         let cbv_srv_uav_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
             Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            NumDescriptors: 1024,
+            NumDescriptors: 16384, // Large heap for bindless resource access
             Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
             NodeMask: 0,
         };
@@ -430,10 +489,10 @@ impl GpuBackend for Dx12Backend {
             device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
         };
 
-        // Create sampler descriptor heap
+        // Create sampler descriptor heap (large for bindless rendering)
         let sampler_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
             Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-            NumDescriptors: 256,
+            NumDescriptors: 2048, // Large heap for bindless sampler access
             Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
             NodeMask: 0,
         };
@@ -444,6 +503,14 @@ impl GpuBackend for Dx12Backend {
 
         let sampler_descriptor_size =
             unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) };
+
+        // Bindless is always enabled for DX12 since we have shader-visible heaps
+        let bindless_enabled = true;
+        tracing::info!(
+            "DX12 bindless enabled with {} CBV/SRV/UAV and {} sampler descriptors",
+            16384,
+            2048
+        );
 
         // Create fence
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
@@ -469,10 +536,17 @@ impl GpuBackend for Dx12Backend {
                 sampler_descriptor_size,
                 fence,
                 fence_value: 1,
+                bindless_enabled,
+                resource_registry: types::ResourceRegistry::new(),
             },
         );
 
-        tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);
+        tracing::info!(
+            "Created DX12 device {} for adapter {} [bindless={}]",
+            handle,
+            adapter_id,
+            bindless_enabled
+        );
         Ok(handle)
     }
 
@@ -582,7 +656,7 @@ impl GpuBackend for Dx12Backend {
         // A more sophisticated implementation would use DEFAULT heap for GPU-only buffers
         // with staging buffer copies, but that's an optimization for later.
         let heap_type = D3D12_HEAP_TYPE_UPLOAD;
-        let _ = usage; // We use all as CPU-writable for now
+        let is_storage = usage.contains(BufferUsage::STORAGE);
 
         let heap_properties = D3D12_HEAP_PROPERTIES {
             Type: heap_type,
@@ -632,12 +706,18 @@ impl GpuBackend for Dx12Backend {
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
 
+        // Register buffer in bindless descriptor heap if enabled
+        // For now, just track the bindless offset (we'll create descriptors on demand)
+        let bindless_offset = None; // Will be set when descriptor is needed
+
         self.buffers.insert(
             handle,
             BufferState {
                 device_handle,
                 resource,
                 size,
+                bindless_offset,
+                is_storage,
             },
         );
 
@@ -645,7 +725,11 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
-        self.buffers.remove(&buffer_handle);
+        if let Some(buffer) = self.buffers.remove(&buffer_handle) {
+            if let Some(device) = self.devices.get_mut(&buffer.device_handle) {
+                device.resource_registry.unregister_buffer(buffer_handle);
+            }
+        }
     }
 
     fn write_buffer(
@@ -712,7 +796,7 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         device_handle: DeviceHandle,
         slang_source: &str,
-        _search_paths: &[&str],
+        search_paths: &[&str],
     ) -> Result<ShaderHandle> {
         let _ = self
             .devices
@@ -727,9 +811,11 @@ impl GpuBackend for Dx12Backend {
             ShaderState {
                 device_handle,
                 slang_source: slang_source.to_string(),
+                search_paths: search_paths.iter().map(|s| s.to_string()).collect(),
                 vertex_bytecode: None,
                 fragment_bytecode: None,
                 compute_bytecode: None,
+                reflection: None,
             },
         );
 
@@ -1115,6 +1201,7 @@ impl GpuBackend for Dx12Backend {
                 pipeline_state,
                 root_signature,
                 vertex_stride: vertex_layout.stride,
+                parameter_block_layouts: Vec::new(),
             },
         );
 
@@ -2555,6 +2642,7 @@ impl GpuBackend for Dx12Backend {
                 format,
                 resource,
                 srv_offset,
+                bindless_offset: Some(srv_offset), // SRV offset is the bindless offset
             },
         );
 
@@ -2784,6 +2872,7 @@ impl GpuBackend for Dx12Backend {
                 device_handle,
                 sampler_offset,
                 desc: desc.clone(),
+                bindless_offset: Some(sampler_offset), // Sampler offset is the bindless offset
             },
         );
 
@@ -3000,6 +3089,7 @@ impl GpuBackend for Dx12Backend {
                 pipeline_state,
                 root_signature,
                 bind_group_layouts: bind_group_layouts.to_vec(),
+                parameter_block_layouts: Vec::new(),
             },
         );
 

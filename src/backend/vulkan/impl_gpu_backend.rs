@@ -65,8 +65,41 @@ impl GpuBackend for VulkanBackend {
             .dynamic_rendering(true)
             .synchronization2(true);
 
+        // Enable Vulkan 1.2 descriptor indexing features for bindless rendering
+        let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .descriptor_binding_storage_buffer_update_after_bind(true)
+            .descriptor_binding_uniform_buffer_update_after_bind(true)
+            .runtime_descriptor_array(true)
+            .shader_storage_buffer_array_non_uniform_indexing(true)
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .shader_uniform_buffer_array_non_uniform_indexing(true);
+
+        // Query supported features first
+        let mut supported_descriptor_indexing = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        let mut supported_features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut supported_descriptor_indexing);
+        unsafe {
+            self.instance
+                .get_physical_device_features2(physical_device_handle, &mut supported_features2);
+        }
+
+        // Check if bindless is supported (all required features must be available)
+        let bindless_supported = supported_descriptor_indexing.descriptor_binding_partially_bound != 0
+            && supported_descriptor_indexing.descriptor_binding_sampled_image_update_after_bind != 0
+            && supported_descriptor_indexing.runtime_descriptor_array != 0
+            && supported_descriptor_indexing.shader_storage_buffer_array_non_uniform_indexing != 0;
+
+        if bindless_supported {
+            tracing::info!("Vulkan descriptor indexing supported - enabling bindless");
+        } else {
+            tracing::info!("Vulkan descriptor indexing not fully supported - using traditional binding");
+        }
+
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut vulkan_13_features);
+            .push_next(&mut vulkan_13_features)
+            .push_next(&mut descriptor_indexing_features);
 
         // Create logical device with swapchain extension
         let queue_priorities = [1.0f32];
@@ -98,6 +131,127 @@ impl GpuBackend for VulkanBackend {
         let command_pool = unsafe { device.create_command_pool(&pool_info, None) }
             .context("Failed to create command pool")?;
 
+        // Create bindless descriptor infrastructure if supported
+        let (
+            bindless_descriptor_pool,
+            bindless_descriptor_set_layout,
+            bindless_descriptor_set,
+            bindless_pipeline_layout,
+        ) = if bindless_supported {
+            // Create descriptor set layout with update-after-bind flag
+            let binding_flags = [
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+            ];
+
+            let mut binding_flags_info =
+                vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
+                    .binding_flags(&binding_flags);
+
+            let bindings = [
+                // Storage buffers (binding 0)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::STORAGE_BUFFERS)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Uniform buffers (binding 1)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::UNIFORM_BUFFERS)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Sampled images (binding 2)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::SAMPLED_IMAGES)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Samplers (binding 3)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::SAMPLERS)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+            ];
+
+            let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+                .bindings(&bindings)
+                .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                .push_next(&mut binding_flags_info);
+
+            let descriptor_set_layout =
+                unsafe { device.create_descriptor_set_layout(&layout_info, None) }
+                    .context("Failed to create bindless descriptor set layout")?;
+
+            // Create descriptor pool with update-after-bind flag
+            let pool_sizes = [
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLER,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+            ];
+
+            let pool_info = vk::DescriptorPoolCreateInfo::default()
+                .pool_sizes(&pool_sizes)
+                .max_sets(1)
+                .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND);
+
+            let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+                .context("Failed to create bindless descriptor pool")?;
+
+            // Allocate the global descriptor set
+            let set_layouts = [descriptor_set_layout];
+            let alloc_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&set_layouts);
+
+            let descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }
+                .context("Failed to allocate bindless descriptor set")?;
+
+            let descriptor_set = descriptor_sets[0];
+
+            // Create a pipeline layout that includes the bindless set
+            let layouts = [descriptor_set_layout];
+            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&layouts);
+
+            let pipeline_layout =
+                unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
+                    .context("Failed to create bindless pipeline layout")?;
+
+            tracing::info!(
+                "Created bindless descriptor infrastructure: pool, layout, set, pipeline layout"
+            );
+
+            (
+                Some(descriptor_pool),
+                Some(descriptor_set_layout),
+                Some(descriptor_set),
+                Some(pipeline_layout),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
         let handle = self.next_device_handle;
         self.next_device_handle += 1;
 
@@ -110,10 +264,21 @@ impl GpuBackend for VulkanBackend {
                 queue,
                 queue_family: queue_family_index,
                 command_pool,
+                bindless_enabled: bindless_supported,
+                bindless_descriptor_pool,
+                bindless_descriptor_set_layout,
+                bindless_descriptor_set,
+                bindless_pipeline_layout,
+                resource_registry: types::ResourceRegistry::new(),
             },
         );
 
-        tracing::info!("Created Vulkan device {} for adapter {}", handle, adapter_id);
+        tracing::info!(
+            "Created Vulkan device {} for adapter {} [bindless={}]",
+            handle,
+            adapter_id,
+            bindless_supported
+        );
         Ok(handle)
     }
 
@@ -231,6 +396,21 @@ impl GpuBackend for VulkanBackend {
                     }
                 }
 
+                // Destroy bindless infrastructure
+                if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {
+                    logical_device
+                        .device
+                        .destroy_pipeline_layout(pipeline_layout, None);
+                }
+                if let Some(pool) = logical_device.bindless_descriptor_pool {
+                    logical_device.device.destroy_descriptor_pool(pool, None);
+                }
+                if let Some(layout) = logical_device.bindless_descriptor_set_layout {
+                    logical_device
+                        .device
+                        .destroy_descriptor_set_layout(layout, None);
+                }
+
                 logical_device.device.destroy_command_pool(logical_device.command_pool, None);
                 logical_device.device.destroy_device(None);
             }
@@ -268,6 +448,10 @@ impl GpuBackend for VulkanBackend {
             vk_usage |= vk::BufferUsageFlags::TRANSFER_DST;
         }
 
+        let is_storage = usage.contains(BufferUsage::STORAGE);
+        let bindless_enabled = logical_device.bindless_enabled;
+        let bindless_descriptor_set = logical_device.bindless_descriptor_set;
+
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(vk_usage)
@@ -299,6 +483,56 @@ impl GpuBackend for VulkanBackend {
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
 
+        // Register buffer in bindless descriptor set if enabled
+        let bindless_index = if bindless_enabled {
+            let logical_device = self.devices.get_mut(&device_handle).unwrap();
+            let index = logical_device.resource_registry.register_buffer(handle, is_storage);
+
+            // Update the global descriptor set with this buffer
+            if let Some(descriptor_set) = bindless_descriptor_set {
+                let buffer_info = vk::DescriptorBufferInfo::default()
+                    .buffer(buffer)
+                    .offset(0)
+                    .range(size);
+
+                let binding = if is_storage {
+                    types::bindless_bindings::STORAGE_BUFFERS
+                } else {
+                    types::bindless_bindings::UNIFORM_BUFFERS
+                };
+
+                let descriptor_type = if is_storage {
+                    vk::DescriptorType::STORAGE_BUFFER
+                } else {
+                    vk::DescriptorType::UNIFORM_BUFFER
+                };
+
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(binding)
+                    .dst_array_element(index)
+                    .descriptor_type(descriptor_type)
+                    .buffer_info(std::slice::from_ref(&buffer_info));
+
+                unsafe {
+                    logical_device
+                        .device
+                        .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                }
+
+                tracing::trace!(
+                    "Registered buffer {} at bindless index {} (storage={})",
+                    handle,
+                    index,
+                    is_storage
+                );
+            }
+
+            Some(index)
+        } else {
+            None
+        };
+
         self.buffers.insert(
             handle,
             BufferState {
@@ -306,6 +540,8 @@ impl GpuBackend for VulkanBackend {
                 buffer,
                 memory,
                 size,
+                bindless_index,
+                is_storage,
             },
         );
 
@@ -314,7 +550,10 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
         if let Some(buffer) = self.buffers.remove(&buffer_handle) {
-            if let Some(device) = self.devices.get(&buffer.device_handle) {
+            if let Some(device) = self.devices.get_mut(&buffer.device_handle) {
+                // Unregister from bindless registry
+                device.resource_registry.unregister_buffer(buffer_handle);
+
                 unsafe {
                     device.device.destroy_buffer(buffer.buffer, None);
                     device.device.free_memory(buffer.memory, None);
@@ -379,6 +618,7 @@ impl GpuBackend for VulkanBackend {
                 vertex_module: None,
                 fragment_module: None,
                 compute_module: None,
+                reflection: None,
             },
         );
 
@@ -534,6 +774,7 @@ impl GpuBackend for VulkanBackend {
                 device_handle,
                 pipeline: pipelines[0],
                 layout,
+                parameter_block_layouts: Vec::new(),
             },
         );
 
@@ -853,6 +1094,23 @@ impl GpuBackend for VulkanBackend {
                                 vk::PipelineBindPoint::GRAPHICS,
                                 pipeline.pipeline,
                             );
+
+                            // Bind the global bindless descriptor set if enabled
+                            if logical_device.bindless_enabled {
+                                if let (Some(bindless_set), Some(bindless_layout)) = (
+                                    logical_device.bindless_descriptor_set,
+                                    logical_device.bindless_pipeline_layout,
+                                ) {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        bindless_layout,
+                                        0,
+                                        std::slice::from_ref(&bindless_set),
+                                        &[],
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1484,6 +1742,7 @@ impl GpuBackend for VulkanBackend {
                 device_handle,
                 pipeline: pipelines[0],
                 layout,
+                parameter_block_layouts: Vec::new(),
             },
         );
 
@@ -1845,6 +2104,23 @@ impl GpuBackend for VulkanBackend {
                                 vk::PipelineBindPoint::GRAPHICS,
                                 pipeline.pipeline,
                             );
+
+                            // Bind the global bindless descriptor set if enabled
+                            if logical_device.bindless_enabled {
+                                if let (Some(bindless_set), Some(bindless_layout)) = (
+                                    logical_device.bindless_descriptor_set,
+                                    logical_device.bindless_pipeline_layout,
+                                ) {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        bindless_layout,
+                                        0,
+                                        std::slice::from_ref(&bindless_set),
+                                        &[],
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -2297,6 +2573,7 @@ impl GpuBackend for VulkanBackend {
                 device_handle,
                 pipeline: pipelines[0],
                 layout,
+                parameter_block_layouts: Vec::new(),
             },
         );
 
@@ -2561,8 +2838,47 @@ impl GpuBackend for VulkanBackend {
         let view = unsafe { logical_device.device.create_image_view(&view_info, None) }
             .context("Failed to create texture view")?;
 
+        let bindless_enabled = logical_device.bindless_enabled;
+        let bindless_descriptor_set = logical_device.bindless_descriptor_set;
+
         let handle = self.next_texture_handle;
         self.next_texture_handle += 1;
+
+        // Register texture in bindless descriptor set if enabled
+        let bindless_index = if bindless_enabled {
+            let logical_device = self.devices.get_mut(&device_handle).unwrap();
+            let index = logical_device.resource_registry.register_texture(handle);
+
+            // Update the global descriptor set with this texture
+            if let Some(descriptor_set) = bindless_descriptor_set {
+                let image_info = vk::DescriptorImageInfo::default()
+                    .image_view(view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(types::bindless_bindings::SAMPLED_IMAGES)
+                    .dst_array_element(index)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(std::slice::from_ref(&image_info));
+
+                unsafe {
+                    logical_device
+                        .device
+                        .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                }
+
+                tracing::trace!(
+                    "Registered texture {} at bindless index {}",
+                    handle,
+                    index
+                );
+            }
+
+            Some(index)
+        } else {
+            None
+        };
 
         self.textures.insert(handle, TextureState {
             device_handle,
@@ -2574,6 +2890,7 @@ impl GpuBackend for VulkanBackend {
             view,
             staging_buffer: None,
             staging_memory: None,
+            bindless_index,
         });
 
         tracing::debug!("Created texture {}x{} (handle={})", width, height, handle);
@@ -2758,7 +3075,10 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
         if let Some(texture) = self.textures.remove(&texture_handle) {
-            if let Some(logical_device) = self.devices.get(&texture.device_handle) {
+            if let Some(logical_device) = self.devices.get_mut(&texture.device_handle) {
+                // Unregister from bindless registry
+                logical_device.resource_registry.unregister_texture(texture_handle);
+
                 unsafe {
                     logical_device.device.device_wait_idle().ok();
                     logical_device.device.destroy_image_view(texture.view, None);
@@ -2799,12 +3119,46 @@ impl GpuBackend for VulkanBackend {
         let sampler = unsafe { logical_device.device.create_sampler(&sampler_info, None) }
             .context("Failed to create sampler")?;
 
+        let bindless_enabled = logical_device.bindless_enabled;
+        let bindless_descriptor_set = logical_device.bindless_descriptor_set;
+
         let handle = self.next_sampler_handle;
         self.next_sampler_handle += 1;
+
+        // Register sampler in bindless descriptor set if enabled
+        let bindless_index = if bindless_enabled {
+            let logical_device = self.devices.get_mut(&device_handle).unwrap();
+            let index = logical_device.resource_registry.register_sampler(handle);
+
+            // Update the global descriptor set with this sampler
+            if let Some(descriptor_set) = bindless_descriptor_set {
+                let sampler_info = vk::DescriptorImageInfo::default().sampler(sampler);
+
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(types::bindless_bindings::SAMPLERS)
+                    .dst_array_element(index)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(std::slice::from_ref(&sampler_info));
+
+                unsafe {
+                    logical_device
+                        .device
+                        .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                }
+
+                tracing::trace!("Registered sampler {} at bindless index {}", handle, index);
+            }
+
+            Some(index)
+        } else {
+            None
+        };
 
         self.samplers.insert(handle, SamplerState {
             device_handle,
             sampler,
+            bindless_index,
         });
 
         tracing::debug!("Created sampler (handle={})", handle);
@@ -2813,7 +3167,10 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
         if let Some(sampler) = self.samplers.remove(&sampler_handle) {
-            if let Some(logical_device) = self.devices.get(&sampler.device_handle) {
+            if let Some(logical_device) = self.devices.get_mut(&sampler.device_handle) {
+                // Unregister from bindless registry
+                logical_device.resource_registry.unregister_sampler(sampler_handle);
+
                 unsafe {
                     logical_device.device.device_wait_idle().ok();
                     logical_device.device.destroy_sampler(sampler.sampler, None);
@@ -2875,6 +3232,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             pipeline: pipelines[0],
             layout: pipeline_layout,
+            parameter_block_layouts: Vec::new(),
         });
 
         tracing::debug!("Created compute pipeline (handle={})", handle);
@@ -2928,6 +3286,23 @@ impl GpuBackend for VulkanBackend {
                                 vk::PipelineBindPoint::COMPUTE,
                                 pipeline_state.pipeline,
                             );
+
+                            // Bind the global bindless descriptor set if enabled
+                            if logical_device.bindless_enabled {
+                                if let (Some(bindless_set), Some(bindless_layout)) = (
+                                    logical_device.bindless_descriptor_set,
+                                    logical_device.bindless_pipeline_layout,
+                                ) {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::COMPUTE,
+                                        bindless_layout,
+                                        0,
+                                        std::slice::from_ref(&bindless_set),
+                                        &[],
+                                    );
+                                }
+                            }
                         }
                         current_pipeline_layout = Some(pipeline_state.layout);
                     }

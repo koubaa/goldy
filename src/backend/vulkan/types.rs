@@ -1,10 +1,99 @@
 //! Vulkan backend internal types.
 //!
 //! This module contains all the state structs used by the Vulkan backend.
+//!
+//! ## Bindless Architecture
+//!
+//! The Vulkan backend uses descriptor indexing (Vulkan 1.2+) for bindless resource access:
+//! - A global descriptor set contains arrays of all resource types
+//! - Resources are registered at creation time and assigned indices
+//! - Shaders access resources by index using nonuniformEXT qualifier
+//! - Update-after-bind allows descriptor updates without pipeline barriers
 
-use super::super::{BufferHandle, DeviceHandle};
+use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
+use std::collections::HashMap;
+
+/// Maximum number of descriptors per resource type in the global bindless set
+pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
+
+/// Descriptor set index for the global bindless set
+pub const BINDLESS_SET_INDEX: u32 = 0;
+
+/// Binding indices within the global bindless descriptor set
+pub mod bindless_bindings {
+    pub const STORAGE_BUFFERS: u32 = 0;
+    pub const UNIFORM_BUFFERS: u32 = 1;
+    pub const SAMPLED_IMAGES: u32 = 2;
+    pub const SAMPLERS: u32 = 3;
+}
+
+/// Registry for tracking bindless resource indices
+#[derive(Default)]
+pub(crate) struct ResourceRegistry {
+    next_storage_buffer_index: u32,
+    next_uniform_buffer_index: u32,
+    next_texture_index: u32,
+    next_sampler_index: u32,
+    pub buffer_indices: HashMap<BufferHandle, u32>,
+    pub texture_indices: HashMap<TextureHandle, u32>,
+    pub sampler_indices: HashMap<SamplerHandle, u32>,
+}
+
+impl ResourceRegistry {
+    pub fn new() -> Self {
+        Self {
+            next_storage_buffer_index: 0,
+            next_uniform_buffer_index: 0,
+            next_texture_index: 0,
+            next_sampler_index: 0,
+            buffer_indices: HashMap::new(),
+            texture_indices: HashMap::new(),
+            sampler_indices: HashMap::new(),
+        }
+    }
+
+    pub fn register_buffer(&mut self, handle: BufferHandle, is_storage: bool) -> u32 {
+        let index = if is_storage {
+            let idx = self.next_storage_buffer_index;
+            self.next_storage_buffer_index += 1;
+            idx
+        } else {
+            let idx = self.next_uniform_buffer_index;
+            self.next_uniform_buffer_index += 1;
+            idx
+        };
+        self.buffer_indices.insert(handle, index);
+        index
+    }
+
+    pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
+        let index = self.next_texture_index;
+        self.next_texture_index += 1;
+        self.texture_indices.insert(handle, index);
+        index
+    }
+
+    pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
+        let index = self.next_sampler_index;
+        self.next_sampler_index += 1;
+        self.sampler_indices.insert(handle, index);
+        index
+    }
+
+    pub fn unregister_buffer(&mut self, handle: BufferHandle) {
+        self.buffer_indices.remove(&handle);
+    }
+
+    pub fn unregister_texture(&mut self, handle: TextureHandle) {
+        self.texture_indices.remove(&handle);
+    }
+
+    pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
+        self.sampler_indices.remove(&handle);
+    }
+}
 
 /// Information about a physical Vulkan device.
 pub(crate) struct PhysicalDeviceInfo {
@@ -23,6 +112,20 @@ pub(crate) struct LogicalDevice {
     #[allow(dead_code)]
     pub queue_family: u32,
     pub command_pool: vk::CommandPool,
+
+    // Bindless infrastructure
+    /// Whether bindless descriptor indexing is enabled
+    pub bindless_enabled: bool,
+    /// Global descriptor pool for bindless resources
+    pub bindless_descriptor_pool: Option<vk::DescriptorPool>,
+    /// Global descriptor set layout for bindless resources
+    pub bindless_descriptor_set_layout: Option<vk::DescriptorSetLayout>,
+    /// Global descriptor set containing all bindless resources
+    pub bindless_descriptor_set: Option<vk::DescriptorSet>,
+    /// Pipeline layout for bindless rendering (includes the global set)
+    pub bindless_pipeline_layout: Option<vk::PipelineLayout>,
+    /// Registry tracking resource indices in the global descriptor set
+    pub resource_registry: ResourceRegistry,
 }
 
 /// GPU buffer state.
@@ -31,6 +134,10 @@ pub(crate) struct BufferState {
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub size: u64,
+    /// Index in the global bindless descriptor set (if bindless enabled)
+    pub bindless_index: Option<u32>,
+    /// Whether this is a storage buffer (vs uniform buffer)
+    pub is_storage: bool,
 }
 
 /// Shader module state with cached compiled stages.
@@ -45,6 +152,8 @@ pub(crate) struct ShaderState {
     pub fragment_module: Option<vk::ShaderModule>,
     /// Cached compiled compute shader module
     pub compute_module: Option<vk::ShaderModule>,
+    /// Reflection data for bindless rendering (ParameterBlock layouts)
+    pub reflection: Option<crate::slang::ShaderReflection>,
 }
 
 /// Graphics pipeline state.
@@ -52,6 +161,8 @@ pub(crate) struct PipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
+    /// ParameterBlock layouts from shader reflection (for bindless rendering)
+    pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
 /// Compute pipeline state.
@@ -59,6 +170,8 @@ pub(crate) struct ComputePipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
+    /// ParameterBlock layouts from shader reflection (for bindless rendering)
+    pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
 /// Bind group layout (descriptor set layout) state.
@@ -114,12 +227,16 @@ pub(crate) struct TextureState {
     /// Staging buffer for texture uploads
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
+    /// Index in the global bindless descriptor set (if bindless enabled)
+    pub bindless_index: Option<u32>,
 }
 
 /// GPU sampler state.
 pub(crate) struct SamplerState {
     pub device_handle: DeviceHandle,
     pub sampler: vk::Sampler,
+    /// Index in the global bindless descriptor set (if bindless enabled)
+    pub bindless_index: Option<u32>,
 }
 
 /// Maximum number of frames that can be in-flight at once.

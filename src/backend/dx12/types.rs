@@ -1,10 +1,99 @@
 //! DX12 backend internal types.
 //!
 //! This module contains all the state structs used by the DX12 backend.
+//!
+//! ## Bindless Architecture
+//!
+//! The DX12 backend uses shader-visible descriptor heaps for bindless resource access:
+//! - A large CBV/SRV/UAV heap contains all buffer and texture descriptors
+//! - A large sampler heap contains all sampler descriptors
+//! - Resources are registered at creation time and assigned heap offsets
+//! - Shaders access resources by indexing into the descriptor heaps
 
-use super::super::{BufferHandle, DeviceHandle};
+use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
+use std::collections::HashMap;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
+
+/// Maximum number of descriptors in the CBV/SRV/UAV heap for bindless rendering
+pub const MAX_BINDLESS_CBV_SRV_UAV: u32 = 16384;
+
+/// Maximum number of descriptors in the sampler heap for bindless rendering
+pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
+
+/// Registry for tracking bindless resource descriptor heap offsets
+#[derive(Default)]
+pub(crate) struct ResourceRegistry {
+    next_cbv_offset: u32,
+    next_srv_offset: u32,
+    next_uav_offset: u32,
+    next_sampler_offset: u32,
+    pub buffer_offsets: HashMap<BufferHandle, u32>,
+    pub texture_offsets: HashMap<TextureHandle, u32>,
+    pub sampler_offsets: HashMap<SamplerHandle, u32>,
+}
+
+impl ResourceRegistry {
+    pub fn new() -> Self {
+        Self {
+            // Partition the CBV/SRV/UAV heap into sections
+            next_cbv_offset: 0,    // CBVs start at 0
+            next_srv_offset: 4096, // SRVs start at 4096
+            next_uav_offset: 8192, // UAVs start at 8192
+            next_sampler_offset: 0,
+            buffer_offsets: HashMap::new(),
+            texture_offsets: HashMap::new(),
+            sampler_offsets: HashMap::new(),
+        }
+    }
+
+    pub fn register_buffer_cbv(&mut self, handle: BufferHandle) -> u32 {
+        let offset = self.next_cbv_offset;
+        self.next_cbv_offset += 1;
+        self.buffer_offsets.insert(handle, offset);
+        offset
+    }
+
+    pub fn register_buffer_srv(&mut self, handle: BufferHandle) -> u32 {
+        let offset = self.next_srv_offset;
+        self.next_srv_offset += 1;
+        self.buffer_offsets.insert(handle, offset);
+        offset
+    }
+
+    pub fn register_buffer_uav(&mut self, handle: BufferHandle) -> u32 {
+        let offset = self.next_uav_offset;
+        self.next_uav_offset += 1;
+        self.buffer_offsets.insert(handle, offset);
+        offset
+    }
+
+    pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
+        let offset = self.next_srv_offset;
+        self.next_srv_offset += 1;
+        self.texture_offsets.insert(handle, offset);
+        offset
+    }
+
+    pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
+        let offset = self.next_sampler_offset;
+        self.next_sampler_offset += 1;
+        self.sampler_offsets.insert(handle, offset);
+        offset
+    }
+
+    pub fn unregister_buffer(&mut self, handle: BufferHandle) {
+        self.buffer_offsets.remove(&handle);
+    }
+
+    pub fn unregister_texture(&mut self, handle: TextureHandle) {
+        self.texture_offsets.remove(&handle);
+    }
+
+    pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
+        self.sampler_offsets.remove(&handle);
+    }
+}
 
 /// Information about a physical DXGI adapter.
 /// Named DxgiAdapterInfo to avoid conflict with super::AdapterInfo.
@@ -30,6 +119,12 @@ pub(crate) struct LogicalDevice {
     pub sampler_descriptor_size: u32,
     pub fence: Direct3D12::ID3D12Fence,
     pub fence_value: u64,
+
+    // Bindless infrastructure
+    /// Whether bindless descriptor heap indexing is enabled
+    pub bindless_enabled: bool,
+    /// Registry tracking resource offsets in descriptor heaps
+    pub resource_registry: ResourceRegistry,
 }
 
 /// GPU buffer state.
@@ -37,18 +132,26 @@ pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub resource: Direct3D12::ID3D12Resource,
     pub size: u64,
+    /// Descriptor heap offset for bindless access (if bindless enabled)
+    pub bindless_offset: Option<u32>,
+    /// Whether this is a storage buffer (uses UAV instead of CBV/SRV)
+    pub is_storage: bool,
 }
 
 /// Shader module state with cached compiled bytecode.
 pub(crate) struct ShaderState {
     pub device_handle: DeviceHandle,
     pub slang_source: String,
+    /// Search paths for Slang module resolution
+    pub search_paths: Vec<String>,
     /// Cached compiled vertex shader bytecode
     pub vertex_bytecode: Option<Vec<u8>>,
     /// Cached compiled fragment shader bytecode
     pub fragment_bytecode: Option<Vec<u8>>,
     /// Cached compiled compute shader bytecode
     pub compute_bytecode: Option<Vec<u8>>,
+    /// Reflection data for bindless rendering (ParameterBlock layouts)
+    pub reflection: Option<crate::slang::ShaderReflection>,
 }
 
 /// Graphics pipeline state.
@@ -58,6 +161,8 @@ pub(crate) struct PipelineState {
     pub root_signature: Direct3D12::ID3D12RootSignature,
     /// Vertex buffer stride from vertex layout
     pub vertex_stride: u32,
+    /// ParameterBlock layouts from shader reflection (for bindless rendering)
+    pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
 /// Compute pipeline state.
@@ -67,6 +172,8 @@ pub(crate) struct ComputePipelineState {
     pub root_signature: Direct3D12::ID3D12RootSignature,
     /// Bind group layout handles for looking up binding types during dispatch.
     pub bind_group_layouts: Vec<super::super::BindGroupLayoutHandle>,
+    /// ParameterBlock layouts from shader reflection (for bindless rendering)
+    pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
 /// Bind group layout (root signature descriptor table layout) state.
@@ -113,6 +220,8 @@ pub(crate) struct TextureState {
     pub resource: Direct3D12::ID3D12Resource,
     /// SRV descriptor offset in CBV/SRV/UAV heap
     pub srv_offset: u32,
+    /// Bindless descriptor heap offset (same as srv_offset when bindless is enabled)
+    pub bindless_offset: Option<u32>,
 }
 
 /// GPU sampler state.
@@ -122,6 +231,8 @@ pub(crate) struct SamplerState {
     pub sampler_offset: u32,
     #[allow(dead_code)]
     pub desc: SamplerDesc,
+    /// Bindless descriptor heap offset (same as sampler_offset when bindless is enabled)
+    pub bindless_offset: Option<u32>,
 }
 
 /// Maximum number of frames that can be in-flight at once.
