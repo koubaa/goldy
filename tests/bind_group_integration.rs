@@ -1,6 +1,17 @@
 //! Integration tests for bind groups with real GPU.
 //!
 //! These tests verify that bind groups work correctly with actual GPU rendering.
+//!
+//! ## Bindless Support
+//!
+//! On supported backends (Vulkan 1.2+ with descriptor indexing, DX12), bind groups
+//! are transparently converted to bindless operations:
+//! - Resource indices are pushed via push constants (Vulkan) or root constants (DX12)
+//! - The global descriptor set/heap is bound once at pass start
+//! - SetBindGroup translates to pushing indices rather than binding descriptors
+//!
+//! The high-level API remains unchanged - these tests verify both traditional and
+//! bindless code paths produce correct rendering results.
 
 use goldy::{
     BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,

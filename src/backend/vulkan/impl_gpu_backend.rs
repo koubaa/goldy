@@ -229,14 +229,28 @@ impl GpuBackend for VulkanBackend {
 
             let descriptor_set = descriptor_sets[0];
 
-            // Create a pipeline layout that includes the bindless set
+            // Create a pipeline layout that includes the bindless set and push constants
             let layouts = [descriptor_set_layout];
+            
+            // Push constant range for resource indices (16 x u32 = 64 bytes)
+            let push_constant_range = vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::ALL,
+                offset: 0,
+                size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+            };
+            
             let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&layouts);
+                .set_layouts(&layouts)
+                .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
             let pipeline_layout =
                 unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
                     .context("Failed to create bindless pipeline layout")?;
+            
+            tracing::info!(
+                "Bindless pipeline layout includes {} bytes of push constants for resource indices",
+                push_constant_range.size
+            );
 
             tracing::info!(
                 "Created bindless descriptor infrastructure: pool, layout, set, pipeline layout"
@@ -1128,19 +1142,58 @@ impl GpuBackend for VulkanBackend {
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
                     if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        // Find the pipeline layout for this bind group
-                        // For now, we need to iterate pipelines to find one with a layout
-                        // This is a simplification - in production we'd track the current pipeline
-                        if let Some(pipeline) = self.pipelines.values().next() {
-                            unsafe {
-                                logical_device.device.cmd_bind_descriptor_sets(
-                                    cmd,
-                                    vk::PipelineBindPoint::GRAPHICS,
-                                    pipeline.layout,
-                                    *index,
-                                    std::slice::from_ref(&bg_state.descriptor_set),
-                                    &[],
-                                );
+                        if logical_device.bindless_enabled {
+                            // Bindless mode: push resource indices via push constants
+                            if let Some(bindless_layout) = logical_device.bindless_pipeline_layout {
+                                let mut indices = types::BindlessIndices::default();
+                                
+                                // Collect bindless indices from bound resources
+                                for (i, (_, resource_ref)) in bg_state.entries.iter().enumerate() {
+                                    if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                        break;
+                                    }
+                                    indices.indices[i] = match resource_ref {
+                                        BindGroupResourceRef::Buffer(h) => {
+                                            self.buffers.get(h)
+                                                .and_then(|b| b.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                        BindGroupResourceRef::Texture(h) => {
+                                            self.textures.get(h)
+                                                .and_then(|t| t.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                        BindGroupResourceRef::Sampler(h) => {
+                                            self.samplers.get(h)
+                                                .and_then(|s| s.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                    };
+                                }
+                                
+                                unsafe {
+                                    logical_device.device.cmd_push_constants(
+                                        cmd,
+                                        bindless_layout,
+                                        vk::ShaderStageFlags::ALL,
+                                        0,
+                                        bytemuck::bytes_of(&indices),
+                                    );
+                                }
+                            }
+                        } else {
+                            // Traditional mode: bind descriptor sets
+                            if let Some(pipeline) = self.pipelines.values().next() {
+                                unsafe {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        pipeline.layout,
+                                        *index,
+                                        std::slice::from_ref(&bg_state.descriptor_set),
+                                        &[],
+                                    );
+                                }
                             }
                         }
                     }
@@ -1579,6 +1632,19 @@ impl GpuBackend for VulkanBackend {
 
         unsafe { logical_device.device.update_descriptor_sets(&writes, &[]) };
 
+        // Collect entries for bindless index lookup
+        let bind_entries: Vec<(u32, BindGroupResourceRef)> = entries
+            .iter()
+            .map(|e| {
+                let resource_ref = match &e.resource {
+                    BindingResource::Buffer { buffer, .. } => BindGroupResourceRef::Buffer(*buffer),
+                    BindingResource::Texture(tex) => BindGroupResourceRef::Texture(*tex),
+                    BindingResource::Sampler(samp) => BindGroupResourceRef::Sampler(*samp),
+                };
+                (e.binding, resource_ref)
+            })
+            .collect();
+
         let handle = self.next_bind_group_handle;
         self.next_bind_group_handle += 1;
 
@@ -1586,6 +1652,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             descriptor_set,
             pool,
+            entries: bind_entries,
         });
 
         Ok(handle)
@@ -2138,16 +2205,58 @@ impl GpuBackend for VulkanBackend {
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
                     if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        if let Some(pipeline) = self.pipelines.values().next() {
-                            unsafe {
-                                logical_device.device.cmd_bind_descriptor_sets(
-                                    cmd,
-                                    vk::PipelineBindPoint::GRAPHICS,
-                                    pipeline.layout,
-                                    *index,
-                                    std::slice::from_ref(&bg_state.descriptor_set),
-                                    &[],
-                                );
+                        if logical_device.bindless_enabled {
+                            // Bindless mode: push resource indices via push constants
+                            if let Some(bindless_layout) = logical_device.bindless_pipeline_layout {
+                                let mut indices = types::BindlessIndices::default();
+                                
+                                // Collect bindless indices from bound resources
+                                for (i, (_, resource_ref)) in bg_state.entries.iter().enumerate() {
+                                    if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                        break;
+                                    }
+                                    indices.indices[i] = match resource_ref {
+                                        BindGroupResourceRef::Buffer(h) => {
+                                            self.buffers.get(h)
+                                                .and_then(|b| b.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                        BindGroupResourceRef::Texture(h) => {
+                                            self.textures.get(h)
+                                                .and_then(|t| t.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                        BindGroupResourceRef::Sampler(h) => {
+                                            self.samplers.get(h)
+                                                .and_then(|s| s.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                    };
+                                }
+                                
+                                unsafe {
+                                    logical_device.device.cmd_push_constants(
+                                        cmd,
+                                        bindless_layout,
+                                        vk::ShaderStageFlags::ALL,
+                                        0,
+                                        bytemuck::bytes_of(&indices),
+                                    );
+                                }
+                            }
+                        } else {
+                            // Traditional mode: bind descriptor sets
+                            if let Some(pipeline) = self.pipelines.values().next() {
+                                unsafe {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        pipeline.layout,
+                                        *index,
+                                        std::slice::from_ref(&bg_state.descriptor_set),
+                                        &[],
+                                    );
+                                }
                             }
                         }
                     }
@@ -3308,16 +3417,58 @@ impl GpuBackend for VulkanBackend {
                     }
                 }
                 ComputeCommand::SetBindGroup { index, bind_group } => {
-                    if let (Some(layout), Some(bg)) = (current_pipeline_layout, self.bind_groups.get(bind_group)) {
-                        unsafe {
-                            logical_device.device.cmd_bind_descriptor_sets(
-                                cmd,
-                                vk::PipelineBindPoint::COMPUTE,
-                                layout,
-                                *index,
-                                &[bg.descriptor_set],
-                                &[],
-                            );
+                    if let Some(bg) = self.bind_groups.get(bind_group) {
+                        if logical_device.bindless_enabled {
+                            // Bindless mode: push resource indices via push constants
+                            if let Some(bindless_layout) = logical_device.bindless_pipeline_layout {
+                                let mut indices = types::BindlessIndices::default();
+                                
+                                // Collect bindless indices from bound resources
+                                for (i, (_, resource_ref)) in bg.entries.iter().enumerate() {
+                                    if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                        break;
+                                    }
+                                    indices.indices[i] = match resource_ref {
+                                        BindGroupResourceRef::Buffer(h) => {
+                                            self.buffers.get(h)
+                                                .and_then(|b| b.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                        BindGroupResourceRef::Texture(h) => {
+                                            self.textures.get(h)
+                                                .and_then(|t| t.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                        BindGroupResourceRef::Sampler(h) => {
+                                            self.samplers.get(h)
+                                                .and_then(|s| s.bindless_index)
+                                                .unwrap_or(0)
+                                        }
+                                    };
+                                }
+                                
+                                unsafe {
+                                    logical_device.device.cmd_push_constants(
+                                        cmd,
+                                        bindless_layout,
+                                        vk::ShaderStageFlags::COMPUTE,
+                                        0,
+                                        bytemuck::bytes_of(&indices),
+                                    );
+                                }
+                            }
+                        } else if let Some(layout) = current_pipeline_layout {
+                            // Traditional mode: bind descriptor sets
+                            unsafe {
+                                logical_device.device.cmd_bind_descriptor_sets(
+                                    cmd,
+                                    vk::PipelineBindPoint::COMPUTE,
+                                    layout,
+                                    *index,
+                                    &[bg.descriptor_set],
+                                    &[],
+                                );
+                            }
                         }
                     }
                 }

@@ -3,9 +3,12 @@
 //
 // ## Bindless Support
 //
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Uniforms are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
+// This shader demonstrates cross-platform bindless resource access:
+//
+// - Metal (__BINDLESS__ + __METAL__): Uses ParameterBlock for argument buffers
+// - Vulkan (__BINDLESS__ + __SPIRV__): Uses push constants + descriptor arrays
+// - DX12 (__BINDLESS__ + __HLSL__): Uses root constants + ResourceDescriptorHeap
+// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 import goldy_exp;
 
@@ -15,12 +18,32 @@ struct TimeUniforms {
 };
 
 #ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
+
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer support
 struct PlasmaResources {
     ConstantBuffer<TimeUniforms> uniforms;
 };
 ParameterBlock<PlasmaResources> gResources;
 #define TIME gResources.uniforms.time
+
+#elif defined(__SPIRV__)
+// Vulkan: Use push constants for indices + descriptor array
+import goldy_exp.bindless_indices;
+
+// Global descriptor array of uniform buffers
+[[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
+#define TIME g_UniformBuffers[BINDLESS_INDEX(0)].time
+
+#else
+// DX12: Use root constants for indices (ResourceDescriptorHeap for SM 6.6+)
+// For simplicity, fall back to traditional binding in this example
+// Full DX12 SM 6.6 bindless would use ResourceDescriptorHeap[index]
+[[vk::binding(0, 0)]]
+ConstantBuffer<TimeUniforms> uniforms;
+#define TIME uniforms.time
+#endif
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]]

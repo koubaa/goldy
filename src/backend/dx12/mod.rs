@@ -18,7 +18,7 @@ use types::{
 };
 use utils::{
     depth_format_to_dxgi, dxgi_to_format, format_to_dxgi, index_format_to_dxgi,
-    topology_type_to_d3d12, vertex_format_to_dxgi,
+    topology_to_d3d12, topology_type_to_d3d12, vertex_format_to_dxgi,
 };
 
 use super::*;
@@ -868,6 +868,9 @@ impl GpuBackend for Dx12Backend {
             .context("Invalid bind group layout handle")?;
 
         let mut buffer_bindings = Vec::new();
+        let mut texture_bindings = Vec::new();
+        let mut sampler_bindings = Vec::new();
+        
         for entry in entries {
             match &entry.resource {
                 BindingResource::Buffer {
@@ -877,9 +880,11 @@ impl GpuBackend for Dx12Backend {
                 } => {
                     buffer_bindings.push((entry.binding, *buffer, *offset, *size));
                 }
-                BindingResource::Texture(_) | BindingResource::Sampler(_) => {
-                    // TODO: Handle texture and sampler bindings
-                    tracing::warn!("DX12 texture/sampler bindings not fully implemented");
+                BindingResource::Texture(tex) => {
+                    texture_bindings.push((entry.binding, *tex));
+                }
+                BindingResource::Sampler(samp) => {
+                    sampler_bindings.push((entry.binding, *samp));
                 }
             }
         }
@@ -893,6 +898,8 @@ impl GpuBackend for Dx12Backend {
                 device_handle,
                 layout_handle,
                 buffer_bindings,
+                texture_bindings,
+                sampler_bindings,
             },
         );
 
@@ -945,8 +952,64 @@ impl GpuBackend for Dx12Backend {
             .context("Invalid device handle")?;
 
         // Create root signature
-        let root_signature = if bind_group_layouts.is_empty() {
-            // Empty root signature
+        let bindless_enabled = logical_device.bindless_enabled;
+        
+        let root_signature = if bindless_enabled {
+            // Bindless mode: root constants at slot 0 for resource indices
+            let root_constants = D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                Anonymous: D3D12_ROOT_PARAMETER_0 {
+                    Constants: D3D12_ROOT_CONSTANTS {
+                        ShaderRegister: 0,
+                        RegisterSpace: 0,
+                        Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
+                    },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            };
+            
+            let root_params = [root_constants];
+            
+            let desc = D3D12_ROOT_SIGNATURE_DESC {
+                NumParameters: 1,
+                pParameters: root_params.as_ptr(),
+                NumStaticSamplers: 0,
+                pStaticSamplers: std::ptr::null(),
+                Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
+                     | D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+                     | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+            };
+
+            let mut signature_blob: Option<ID3DBlob> = None;
+            let mut error_blob: Option<ID3DBlob> = None;
+
+            unsafe {
+                D3D12SerializeRootSignature(
+                    &desc,
+                    D3D_ROOT_SIGNATURE_VERSION_1,
+                    &mut signature_blob,
+                    Some(&mut error_blob),
+                )
+            }
+            .context("Failed to serialize bindless root signature")?;
+
+            let blob = signature_blob.context("Root signature serialization produced no output")?;
+            let signature: ID3D12RootSignature = unsafe {
+                logical_device.device.CreateRootSignature(
+                    0,
+                    std::slice::from_raw_parts(
+                        blob.GetBufferPointer() as *const u8,
+                        blob.GetBufferSize(),
+                    ),
+                )
+            }
+            .context("Failed to create bindless root signature")?;
+            
+            tracing::debug!("Created bindless root signature with {} root constants", types::MAX_ROOT_CONSTANT_INDICES);
+
+            signature
+        } else if bind_group_layouts.is_empty() {
+            // Empty root signature (traditional mode, no bindings)
             let desc = D3D12_ROOT_SIGNATURE_DESC {
                 NumParameters: 0,
                 pParameters: std::ptr::null(),
@@ -982,7 +1045,7 @@ impl GpuBackend for Dx12Backend {
 
             signature
         } else {
-            // Create root signature with proper descriptor types for each binding
+            // Traditional mode: root signature with per-binding descriptors
             let mut root_params: Vec<D3D12_ROOT_PARAMETER> = Vec::new();
 
             // Track register indices separately for each register space
@@ -1201,6 +1264,7 @@ impl GpuBackend for Dx12Backend {
                 pipeline_state,
                 root_signature,
                 vertex_stride: vertex_layout.stride,
+                topology,
                 parameter_block_layouts: Vec::new(),
             },
         );
@@ -1414,6 +1478,22 @@ impl GpuBackend for Dx12Backend {
             cmd.RSSetScissorRects(&[scissor]);
         }
 
+        // Bind descriptor heaps for bindless rendering (must be done before any draw calls)
+        // We need to re-borrow logical_device here
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+            
+        if logical_device.bindless_enabled {
+            unsafe {
+                cmd.SetDescriptorHeaps(&[
+                    Some(logical_device.cbv_srv_uav_heap.clone()),
+                    Some(logical_device.sampler_heap.clone()),
+                ]);
+            }
+        }
+
         // Execute render commands
         let mut current_vertex_stride = 24u32; // Default stride
         for command in commands {
@@ -1430,6 +1510,7 @@ impl GpuBackend for Dx12Backend {
                         unsafe {
                             cmd.SetGraphicsRootSignature(&pipeline.root_signature);
                             cmd.SetPipelineState(&pipeline.pipeline_state);
+                            cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
                         }
                     }
                 }
@@ -1464,40 +1545,96 @@ impl GpuBackend for Dx12Backend {
                     }
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
+                    // Re-borrow device to check bindless mode
+                    let bindless_enabled = self
+                        .devices
+                        .get(&device_handle)
+                        .map(|d| d.bindless_enabled)
+                        .unwrap_or(false);
+                    
                     if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
+                        if bindless_enabled {
+                            // Bindless mode: push resource indices via root constants
+                            let mut indices = types::BindlessIndices::default();
+                            let mut idx = 0usize;
+                            
+                            // Collect buffer indices
+                            for (_, buffer_handle, _, _) in &bg_state.buffer_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
+                                    indices.indices[idx] = buf_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            // Collect texture indices
+                            for (_, tex_handle) in &bg_state.texture_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(tex_state) = self.textures.get(tex_handle) {
+                                    indices.indices[idx] = tex_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            // Collect sampler indices
+                            for (_, samp_handle) in &bg_state.sampler_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(samp_state) = self.samplers.get(samp_handle) {
+                                    indices.indices[idx] = samp_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            unsafe {
+                                cmd.SetGraphicsRoot32BitConstants(
+                                    0,  // Root parameter index
+                                    types::MAX_ROOT_CONSTANT_INDICES as u32,  // Num 32-bit values
+                                    indices.indices.as_ptr() as *const std::ffi::c_void,
+                                    0,  // Dest offset
+                                );
+                            }
+                        } else {
+                            // Traditional mode: per-resource binding
+                            let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
 
-                        for (binding, buffer_handle, _offset, _size) in &bg_state.buffer_bindings {
-                            if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                let gpu_address =
-                                    unsafe { buf_state.resource.GetGPUVirtualAddress() };
-                                let binding_type = layout.and_then(|l| {
-                                    l.entries
-                                        .iter()
-                                        .find(|e| e.binding == *binding)
-                                        .map(|e| &e.ty)
-                                });
-                                let root_param_idx = *index + *binding;
+                            for (binding, buffer_handle, _offset, _size) in &bg_state.buffer_bindings {
+                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
+                                    let gpu_address =
+                                        unsafe { buf_state.resource.GetGPUVirtualAddress() };
+                                    let binding_type = layout.and_then(|l| {
+                                        l.entries
+                                            .iter()
+                                            .find(|e| e.binding == *binding)
+                                            .map(|e| &e.ty)
+                                    });
+                                    let root_param_idx = *index + *binding;
 
-                                unsafe {
-                                    match binding_type {
-                                        Some(BindingType::StorageBuffer { read_only: true }) => {
-                                            cmd.SetGraphicsRootShaderResourceView(
-                                                root_param_idx,
-                                                gpu_address,
-                                            );
-                                        }
-                                        Some(BindingType::StorageBuffer { read_only: false }) => {
-                                            cmd.SetGraphicsRootUnorderedAccessView(
-                                                root_param_idx,
-                                                gpu_address,
-                                            );
-                                        }
-                                        _ => {
-                                            cmd.SetGraphicsRootConstantBufferView(
-                                                root_param_idx,
-                                                gpu_address,
-                                            );
+                                    unsafe {
+                                        match binding_type {
+                                            Some(BindingType::StorageBuffer { read_only: true }) => {
+                                                cmd.SetGraphicsRootShaderResourceView(
+                                                    root_param_idx,
+                                                    gpu_address,
+                                                );
+                                            }
+                                            Some(BindingType::StorageBuffer { read_only: false }) => {
+                                                cmd.SetGraphicsRootUnorderedAccessView(
+                                                    root_param_idx,
+                                                    gpu_address,
+                                                );
+                                            }
+                                            _ => {
+                                                cmd.SetGraphicsRootConstantBufferView(
+                                                    root_param_idx,
+                                                    gpu_address,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -1511,7 +1648,7 @@ impl GpuBackend for Dx12Backend {
                     first_vertex,
                     first_instance,
                 } => unsafe {
-                    cmd.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                    // Topology is now set in SetPipeline, not hardcoded here
                     cmd.DrawInstanced(
                         *vertex_count,
                         *instance_count,
@@ -1526,7 +1663,7 @@ impl GpuBackend for Dx12Backend {
                     base_vertex,
                     first_instance,
                 } => unsafe {
-                    cmd.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                    // Topology is now set in SetPipeline, not hardcoded here
                     cmd.DrawIndexedInstanced(
                         *index_count,
                         *instance_count,
@@ -2031,6 +2168,22 @@ impl GpuBackend for Dx12Backend {
             cmd.RSSetScissorRects(&[scissor]);
         }
 
+        // Bind descriptor heaps for bindless rendering (must be done before any draw calls)
+        // Re-borrow logical_device to get heaps
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+            
+        if logical_device.bindless_enabled {
+            unsafe {
+                cmd.SetDescriptorHeaps(&[
+                    Some(logical_device.cbv_srv_uav_heap.clone()),
+                    Some(logical_device.sampler_heap.clone()),
+                ]);
+            }
+        }
+
         // Execute render commands
         let mut current_vertex_stride = 24u32; // Default stride
         for command in commands {
@@ -2043,6 +2196,7 @@ impl GpuBackend for Dx12Backend {
                         unsafe {
                             cmd.SetGraphicsRootSignature(&pipeline.root_signature);
                             cmd.SetPipelineState(&pipeline.pipeline_state);
+                            cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
                         }
                     }
                 }
@@ -2077,40 +2231,96 @@ impl GpuBackend for Dx12Backend {
                     }
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
+                    // Re-borrow device to check bindless mode
+                    let bindless_enabled = self
+                        .devices
+                        .get(&device_handle)
+                        .map(|d| d.bindless_enabled)
+                        .unwrap_or(false);
+                    
                     if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
+                        if bindless_enabled {
+                            // Bindless mode: push resource indices via root constants
+                            let mut indices = types::BindlessIndices::default();
+                            let mut idx = 0usize;
+                            
+                            // Collect buffer indices
+                            for (_, buffer_handle, _, _) in &bg_state.buffer_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
+                                    indices.indices[idx] = buf_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            // Collect texture indices
+                            for (_, tex_handle) in &bg_state.texture_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(tex_state) = self.textures.get(tex_handle) {
+                                    indices.indices[idx] = tex_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            // Collect sampler indices
+                            for (_, samp_handle) in &bg_state.sampler_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(samp_state) = self.samplers.get(samp_handle) {
+                                    indices.indices[idx] = samp_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            unsafe {
+                                cmd.SetGraphicsRoot32BitConstants(
+                                    0,  // Root parameter index
+                                    types::MAX_ROOT_CONSTANT_INDICES as u32,  // Num 32-bit values
+                                    indices.indices.as_ptr() as *const std::ffi::c_void,
+                                    0,  // Dest offset
+                                );
+                            }
+                        } else {
+                            // Traditional mode: per-resource binding
+                            let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
 
-                        for (binding, buffer_handle, _offset, _size) in &bg_state.buffer_bindings {
-                            if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                let gpu_address =
-                                    unsafe { buf_state.resource.GetGPUVirtualAddress() };
-                                let binding_type = layout.and_then(|l| {
-                                    l.entries
-                                        .iter()
-                                        .find(|e| e.binding == *binding)
-                                        .map(|e| &e.ty)
-                                });
-                                let root_param_idx = *index + *binding;
+                            for (binding, buffer_handle, _offset, _size) in &bg_state.buffer_bindings {
+                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
+                                    let gpu_address =
+                                        unsafe { buf_state.resource.GetGPUVirtualAddress() };
+                                    let binding_type = layout.and_then(|l| {
+                                        l.entries
+                                            .iter()
+                                            .find(|e| e.binding == *binding)
+                                            .map(|e| &e.ty)
+                                    });
+                                    let root_param_idx = *index + *binding;
 
-                                unsafe {
-                                    match binding_type {
-                                        Some(BindingType::StorageBuffer { read_only: true }) => {
-                                            cmd.SetGraphicsRootShaderResourceView(
-                                                root_param_idx,
-                                                gpu_address,
-                                            );
-                                        }
-                                        Some(BindingType::StorageBuffer { read_only: false }) => {
-                                            cmd.SetGraphicsRootUnorderedAccessView(
-                                                root_param_idx,
-                                                gpu_address,
-                                            );
-                                        }
-                                        _ => {
-                                            cmd.SetGraphicsRootConstantBufferView(
-                                                root_param_idx,
-                                                gpu_address,
-                                            );
+                                    unsafe {
+                                        match binding_type {
+                                            Some(BindingType::StorageBuffer { read_only: true }) => {
+                                                cmd.SetGraphicsRootShaderResourceView(
+                                                    root_param_idx,
+                                                    gpu_address,
+                                                );
+                                            }
+                                            Some(BindingType::StorageBuffer { read_only: false }) => {
+                                                cmd.SetGraphicsRootUnorderedAccessView(
+                                                    root_param_idx,
+                                                    gpu_address,
+                                                );
+                                            }
+                                            _ => {
+                                                cmd.SetGraphicsRootConstantBufferView(
+                                                    root_param_idx,
+                                                    gpu_address,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -2124,7 +2334,6 @@ impl GpuBackend for Dx12Backend {
                     first_vertex,
                     first_instance,
                 } => unsafe {
-                    cmd.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                     cmd.DrawInstanced(
                         *vertex_count,
                         *instance_count,
@@ -2139,7 +2348,6 @@ impl GpuBackend for Dx12Backend {
                     base_vertex,
                     first_instance,
                 } => unsafe {
-                    cmd.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                     cmd.DrawIndexedInstanced(
                         *index_count,
                         *instance_count,
@@ -3126,6 +3334,22 @@ impl GpuBackend for Dx12Backend {
         }
         .context("Failed to create command list")?;
 
+        // Bind descriptor heaps for bindless rendering (must be done before any dispatch calls)
+        // Re-borrow logical_device to get heaps
+        let logical_device = self
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+            
+        if logical_device.bindless_enabled {
+            unsafe {
+                command_list.SetDescriptorHeaps(&[
+                    Some(logical_device.cbv_srv_uav_heap.clone()),
+                    Some(logical_device.sampler_heap.clone()),
+                ]);
+            }
+        }
+        
         // Track current pipeline for bind group binding
         let mut current_pipeline_handle: Option<ComputePipelineHandle> = None;
 
@@ -3142,82 +3366,136 @@ impl GpuBackend for Dx12Backend {
                     }
                 }
                 ComputeCommand::SetBindGroup { index, bind_group } => {
-                    if let (Some(pipeline_handle), Some(bg_state)) =
-                        (&current_pipeline_handle, self.bind_groups.get(bind_group))
-                    {
-                        // Get the pipeline to look up layouts
-                        if let Some(pipeline_state) = self.compute_pipelines.get(pipeline_handle) {
-                            // Get the layout for this bind group index
-                            if let Some(layout_handle) =
-                                pipeline_state.bind_group_layouts.get(*index as usize)
-                            {
-                                if let Some(layout) = self.bind_group_layouts.get(layout_handle) {
-                                    // Calculate root parameter index
-                                    // Each binding becomes a separate root parameter
-                                    let mut root_param_base = 0u32;
-                                    for i in 0..*index {
-                                        if let Some(lh) =
-                                            pipeline_state.bind_group_layouts.get(i as usize)
-                                        {
-                                            if let Some(l) = self.bind_group_layouts.get(lh) {
-                                                root_param_base += l.entries.len() as u32;
+                    // Re-borrow device to check bindless mode
+                    let bindless_enabled = self
+                        .devices
+                        .get(&device_handle)
+                        .map(|d| d.bindless_enabled)
+                        .unwrap_or(false);
+                    
+                    if let Some(bg_state) = self.bind_groups.get(bind_group) {
+                        if bindless_enabled {
+                            // Bindless mode: push resource indices via root constants
+                            let mut indices = types::BindlessIndices::default();
+                            let mut idx = 0usize;
+                            
+                            // Collect buffer indices
+                            for (_, buffer_handle, _, _) in &bg_state.buffer_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
+                                    indices.indices[idx] = buf_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            // Collect texture indices
+                            for (_, tex_handle) in &bg_state.texture_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(tex_state) = self.textures.get(tex_handle) {
+                                    indices.indices[idx] = tex_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            // Collect sampler indices
+                            for (_, samp_handle) in &bg_state.sampler_bindings {
+                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
+                                    break;
+                                }
+                                if let Some(samp_state) = self.samplers.get(samp_handle) {
+                                    indices.indices[idx] = samp_state.bindless_offset.unwrap_or(0);
+                                    idx += 1;
+                                }
+                            }
+                            
+                            unsafe {
+                                command_list.SetComputeRoot32BitConstants(
+                                    0,  // Root parameter index
+                                    types::MAX_ROOT_CONSTANT_INDICES as u32,  // Num 32-bit values
+                                    indices.indices.as_ptr() as *const std::ffi::c_void,
+                                    0,  // Dest offset
+                                );
+                            }
+                        } else if let Some(pipeline_handle) = &current_pipeline_handle {
+                            // Traditional mode: per-resource binding
+                            // Get the pipeline to look up layouts
+                            if let Some(pipeline_state) = self.compute_pipelines.get(pipeline_handle) {
+                                // Get the layout for this bind group index
+                                if let Some(layout_handle) =
+                                    pipeline_state.bind_group_layouts.get(*index as usize)
+                                {
+                                    if let Some(layout) = self.bind_group_layouts.get(layout_handle) {
+                                        // Calculate root parameter index
+                                        // Each binding becomes a separate root parameter
+                                        let mut root_param_base = 0u32;
+                                        for i in 0..*index {
+                                            if let Some(lh) =
+                                                pipeline_state.bind_group_layouts.get(i as usize)
+                                            {
+                                                if let Some(l) = self.bind_group_layouts.get(lh) {
+                                                    root_param_base += l.entries.len() as u32;
+                                                }
                                             }
                                         }
-                                    }
 
-                                    for (binding, buffer_handle, _offset, _size) in
-                                        &bg_state.buffer_bindings
-                                    {
-                                        if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                            let gpu_address = unsafe {
-                                                buf_state.resource.GetGPUVirtualAddress()
-                                            };
+                                        for (binding, buffer_handle, _offset, _size) in
+                                            &bg_state.buffer_bindings
+                                        {
+                                            if let Some(buf_state) = self.buffers.get(buffer_handle) {
+                                                let gpu_address = unsafe {
+                                                    buf_state.resource.GetGPUVirtualAddress()
+                                                };
 
-                                            // Find the binding type in the layout
-                                            if let Some(entry) = layout
-                                                .entries
-                                                .iter()
-                                                .find(|e| e.binding == *binding)
-                                            {
-                                                // Find which root parameter this binding corresponds to
-                                                let mut local_idx = 0u32;
-                                                for e in &layout.entries {
-                                                    if e.binding == *binding {
-                                                        break;
+                                                // Find the binding type in the layout
+                                                if let Some(entry) = layout
+                                                    .entries
+                                                    .iter()
+                                                    .find(|e| e.binding == *binding)
+                                                {
+                                                    // Find which root parameter this binding corresponds to
+                                                    let mut local_idx = 0u32;
+                                                    for e in &layout.entries {
+                                                        if e.binding == *binding {
+                                                            break;
+                                                        }
+                                                        local_idx += 1;
                                                     }
-                                                    local_idx += 1;
-                                                }
-                                                let root_param_idx = root_param_base + local_idx;
+                                                    let root_param_idx = root_param_base + local_idx;
 
-                                                unsafe {
-                                                    match &entry.ty {
-                                                        BindingType::StorageBuffer {
-                                                            read_only: true,
-                                                        } => {
-                                                            command_list
-                                                                .SetComputeRootShaderResourceView(
-                                                                    root_param_idx,
-                                                                    gpu_address,
-                                                                );
-                                                        }
-                                                        BindingType::StorageBuffer {
-                                                            read_only: false,
-                                                        } => {
-                                                            command_list
-                                                                .SetComputeRootUnorderedAccessView(
-                                                                    root_param_idx,
-                                                                    gpu_address,
-                                                                );
-                                                        }
-                                                        BindingType::UniformBuffer => {
-                                                            command_list
-                                                                .SetComputeRootConstantBufferView(
-                                                                    root_param_idx,
-                                                                    gpu_address,
-                                                                );
-                                                        }
-                                                        _ => {
-                                                            tracing::warn!("Unsupported binding type in compute dispatch");
+                                                    unsafe {
+                                                        match &entry.ty {
+                                                            BindingType::StorageBuffer {
+                                                                read_only: true,
+                                                            } => {
+                                                                command_list
+                                                                    .SetComputeRootShaderResourceView(
+                                                                        root_param_idx,
+                                                                        gpu_address,
+                                                                    );
+                                                            }
+                                                            BindingType::StorageBuffer {
+                                                                read_only: false,
+                                                            } => {
+                                                                command_list
+                                                                    .SetComputeRootUnorderedAccessView(
+                                                                        root_param_idx,
+                                                                        gpu_address,
+                                                                    );
+                                                            }
+                                                            BindingType::UniformBuffer => {
+                                                                command_list
+                                                                    .SetComputeRootConstantBufferView(
+                                                                        root_param_idx,
+                                                                        gpu_address,
+                                                                    );
+                                                            }
+                                                            _ => {
+                                                                tracing::warn!("Unsupported binding type in compute dispatch");
+                                                            }
                                                         }
                                                     }
                                                 }

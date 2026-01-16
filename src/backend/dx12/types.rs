@@ -21,6 +21,18 @@ pub const MAX_BINDLESS_CBV_SRV_UAV: u32 = 16384;
 /// Maximum number of descriptors in the sampler heap for bindless rendering
 pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
 
+/// Maximum number of resource indices in root constants
+pub const MAX_ROOT_CONSTANT_INDICES: usize = 16;
+
+/// Root constants for passing bindless resource indices to shaders.
+/// This is used to tell shaders which indices in the descriptor heaps to access.
+#[repr(C)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct BindlessIndices {
+    /// Resource indices (buffers, textures, samplers packed sequentially)
+    pub indices: [u32; MAX_ROOT_CONSTANT_INDICES],
+}
+
 /// Registry for tracking bindless resource descriptor heap offsets
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
@@ -161,6 +173,8 @@ pub(crate) struct PipelineState {
     pub root_signature: Direct3D12::ID3D12RootSignature,
     /// Vertex buffer stride from vertex layout
     pub vertex_stride: u32,
+    /// Primitive topology for IASetPrimitiveTopology
+    pub topology: crate::types::PrimitiveTopology,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
@@ -187,6 +201,8 @@ pub(crate) struct BindGroupState {
     pub device_handle: DeviceHandle,
     pub layout_handle: super::super::BindGroupLayoutHandle,
     pub buffer_bindings: Vec<(u32, BufferHandle, u64, u64)>, // binding, buffer, offset, size
+    pub texture_bindings: Vec<(u32, TextureHandle)>,          // binding, texture
+    pub sampler_bindings: Vec<(u32, SamplerHandle)>,          // binding, sampler
 }
 
 /// GPU render target state with optional staging for CPU readback.

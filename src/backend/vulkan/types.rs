@@ -19,6 +19,7 @@ use std::collections::HashMap;
 pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
 
 /// Descriptor set index for the global bindless set
+#[allow(dead_code)]
 pub const BINDLESS_SET_INDEX: u32 = 0;
 
 /// Binding indices within the global bindless descriptor set
@@ -28,6 +29,22 @@ pub mod bindless_bindings {
     pub const SAMPLED_IMAGES: u32 = 2;
     pub const SAMPLERS: u32 = 3;
 }
+
+/// Maximum number of resource indices in push constants
+pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
+
+/// Push constants for passing bindless resource indices to shaders.
+/// This is used to tell shaders which indices in the global descriptor arrays to access.
+#[repr(C)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct BindlessIndices {
+    /// Resource indices (buffers, textures, samplers packed sequentially)
+    pub indices: [u32; MAX_PUSH_CONSTANT_INDICES],
+}
+
+// Safety: BindlessIndices is a POD type with known layout
+unsafe impl bytemuck::Pod for BindlessIndices {}
+unsafe impl bytemuck::Zeroable for BindlessIndices {}
 
 /// Registry for tracking bindless resource indices
 #[derive(Default)]
@@ -135,8 +152,10 @@ pub(crate) struct BufferState {
     pub memory: vk::DeviceMemory,
     pub size: u64,
     /// Index in the global bindless descriptor set (if bindless enabled)
+    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
     /// Whether this is a storage buffer (vs uniform buffer)
+    #[allow(dead_code)]
     pub is_storage: bool,
 }
 
@@ -162,6 +181,7 @@ pub(crate) struct PipelineState {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
+    #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
@@ -171,6 +191,7 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
+    #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
@@ -183,11 +204,22 @@ pub(crate) struct BindGroupLayoutState {
     pub binding_types: std::collections::HashMap<u32, ash::vk::DescriptorType>,
 }
 
+/// Tracks a single binding entry for bindless index lookup.
+#[derive(Clone)]
+pub(crate) enum BindGroupResourceRef {
+    Buffer(BufferHandle),
+    Texture(TextureHandle),
+    Sampler(SamplerHandle),
+}
+
 /// Bind group (descriptor set) state.
 pub(crate) struct BindGroupState {
     pub device_handle: DeviceHandle,
     pub descriptor_set: vk::DescriptorSet,
     pub pool: vk::DescriptorPool,
+    /// Resource references for bindless index lookup (binding -> resource).
+    /// Used to retrieve bindless indices when SetBindGroup is called.
+    pub entries: Vec<(u32, BindGroupResourceRef)>,
 }
 
 /// GPU render target state with optional staging for CPU readback.
@@ -228,6 +260,7 @@ pub(crate) struct TextureState {
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
     /// Index in the global bindless descriptor set (if bindless enabled)
+    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
 }
 
@@ -236,6 +269,7 @@ pub(crate) struct SamplerState {
     pub device_handle: DeviceHandle,
     pub sampler: vk::Sampler,
     /// Index in the global bindless descriptor set (if bindless enabled)
+    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
 }
 
