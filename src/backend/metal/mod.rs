@@ -134,8 +134,8 @@ impl MetalBackend {
         })
     }
 
-    /// Compile a shader stage to MSL and create a Metal library.
-    fn compile_shader_stage(
+    /// Compile a shader stage to MSL and create a Metal library, returning reflection data.
+    fn compile_shader_stage_with_reflection(
         &self,
         device: &MTLDevice,
         slang_source: &str,
@@ -143,27 +143,59 @@ impl MetalBackend {
         entry_point: &str,
         stage: crate::slang::SlangStage,
         bindless: bool,
-    ) -> Result<Library> {
+    ) -> Result<(Library, Option<crate::slang::ShaderReflection>)> {
         let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
         // Compile Slang to MSL with specific entry point
-        // Use compile_bindless when bindless is enabled to add __BINDLESS__ define
-        let compiled = if bindless {
-            self.slang_compiler.compile_bindless(
+        // Use compile_bindless_with_reflection when bindless is enabled
+        let (compiled, reflection) = if bindless {
+            let result = self.slang_compiler.compile_bindless_with_reflection(
                 slang_source,
                 crate::slang::ShaderTarget::Metal,
                 &[(entry_point, stage)],
                 &search_path_refs,
             )
+            .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
+            
+            // Log reflection data for debugging
+            if !result.reflection.parameter_blocks.is_empty() {
+                tracing::info!(
+                    "Shader {} has {} ParameterBlock(s):",
+                    entry_point,
+                    result.reflection.parameter_blocks.len()
+                );
+                for pb in &result.reflection.parameter_blocks {
+                    tracing::info!(
+                        "  - {} at slot {} (size={}, alignment={}, fields={})",
+                        pb.name,
+                        pb.binding_slot,
+                        pb.size,
+                        pb.alignment,
+                        pb.fields.len()
+                    );
+                    for field in &pb.fields {
+                        tracing::debug!(
+                            "    - {}: {:?} at offset {} (size={})",
+                            field.name,
+                            field.resource_kind,
+                            field.offset,
+                            field.size
+                        );
+                    }
+                }
+            }
+            
+            (result.shader, Some(result.reflection))
         } else {
-            self.slang_compiler.compile_with_options(
+            let result = self.slang_compiler.compile_with_options(
                 slang_source,
                 crate::slang::ShaderTarget::Metal,
                 &[(entry_point, stage)],
                 &search_path_refs,
             )
-        }
-        .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
+            .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
+            (result, None)
+        };
 
         let msl_source = compiled
             .as_str()
@@ -184,7 +216,7 @@ impl MetalBackend {
                 anyhow::anyhow!("Failed to create Metal library for {}: {}", entry_point, e)
             })?;
 
-        Ok(library)
+        Ok((library, reflection))
     }
 
     /// Ensure the vertex shader stage is compiled.
@@ -208,7 +240,7 @@ impl MetalBackend {
             .context("Shader's device no longer valid")?;
 
         let bindless = logical_device.bindless_enabled;
-        let library = self.compile_shader_stage(
+        let (library, reflection) = self.compile_shader_stage_with_reflection(
             &logical_device.device,
             &slang_source,
             &search_paths,
@@ -219,6 +251,10 @@ impl MetalBackend {
 
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         shader.vertex_library = Some(library);
+        // Store reflection if not already set (first stage to compile stores it)
+        if shader.reflection.is_none() {
+            shader.reflection = reflection;
+        }
 
         Ok(())
     }
@@ -244,7 +280,7 @@ impl MetalBackend {
             .context("Shader's device no longer valid")?;
 
         let bindless = logical_device.bindless_enabled;
-        let library = self.compile_shader_stage(
+        let (library, reflection) = self.compile_shader_stage_with_reflection(
             &logical_device.device,
             &slang_source,
             &search_paths,
@@ -255,6 +291,10 @@ impl MetalBackend {
 
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         shader.fragment_library = Some(library);
+        // Store reflection if not already set
+        if shader.reflection.is_none() {
+            shader.reflection = reflection;
+        }
 
         Ok(())
     }
@@ -280,7 +320,7 @@ impl MetalBackend {
             .context("Shader's device no longer valid")?;
 
         let bindless = logical_device.bindless_enabled;
-        let library = self.compile_shader_stage(
+        let (library, reflection) = self.compile_shader_stage_with_reflection(
             &logical_device.device,
             &slang_source,
             &search_paths,
@@ -291,6 +331,10 @@ impl MetalBackend {
 
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         shader.compute_library = Some(library);
+        // Store reflection if not already set
+        if shader.reflection.is_none() {
+            shader.reflection = reflection;
+        }
 
         Ok(())
     }
@@ -712,6 +756,7 @@ impl GpuBackend for MetalBackend {
                 vertex_library: None,
                 fragment_library: None,
                 compute_library: None,
+                reflection: None,
             },
         );
 
@@ -933,6 +978,49 @@ impl GpuBackend for MetalBackend {
             .new_render_pipeline_state(&descriptor)
             .map_err(|e| anyhow::anyhow!("Failed to create render pipeline: {}", e))?;
 
+        // Extract ParameterBlock layouts from shader reflection for bindless rendering
+        let parameter_block_layouts = vs_shader
+            .reflection
+            .as_ref()
+            .map(|r| r.parameter_blocks.clone())
+            .unwrap_or_default();
+
+        // Allocate argument buffer for ParameterBlocks if bindless is enabled
+        let bindless_arg_buffer = if logical_device.bindless_enabled && !parameter_block_layouts.is_empty() {
+            // Calculate total size needed for all ParameterBlock structs
+            // For simplicity, use the first ParameterBlock's size (most common case)
+            let total_size = parameter_block_layouts
+                .iter()
+                .map(|pb| pb.size as u64)
+                .max()
+                .unwrap_or(64)
+                .max(64); // Minimum 64 bytes for alignment
+
+            let arg_buffer = logical_device.device.new_buffer(
+                total_size,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            tracing::info!(
+                "Allocated bindless argument buffer ({} bytes) for pipeline with {} ParameterBlock(s)",
+                total_size,
+                parameter_block_layouts.len()
+            );
+            for pb in &parameter_block_layouts {
+                tracing::debug!(
+                    "  ParameterBlock '{}': slot={}, size={}, fields={}",
+                    pb.name,
+                    pb.binding_slot,
+                    pb.size,
+                    pb.fields.len()
+                );
+            }
+
+            Some(arg_buffer)
+        } else {
+            None
+        };
+
         let handle = self.next_pipeline_handle;
         self.next_pipeline_handle += 1;
 
@@ -943,6 +1031,8 @@ impl GpuBackend for MetalBackend {
                 pipeline,
                 depth_stencil: depth_stencil_state,
                 primitive_type: topology_to_mtl(topology),
+                bindless_arg_buffer,
+                parameter_block_layouts,
             },
         );
 
@@ -1105,9 +1195,14 @@ impl GpuBackend for MetalBackend {
             height: render_target.height as u64,
         });
 
+        // Cache bindless state for use in loop
+        let bindless_enabled = logical_device.bindless_enabled;
+        let argument_buffer = logical_device.argument_buffer.as_ref();
+
         // Process commands
         let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
         let mut current_primitive_type = MTLPrimitiveType::Triangle;
+        let mut current_pipeline: Option<&PipelineState> = None;
 
         for cmd in commands {
             match cmd {
@@ -1118,6 +1213,7 @@ impl GpuBackend for MetalBackend {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         encoder.set_render_pipeline_state(&pipeline.pipeline);
                         current_primitive_type = pipeline.primitive_type;
+                        current_pipeline = Some(pipeline);
                         if let Some(ds) = &pipeline.depth_stencil {
                             encoder.set_depth_stencil_state(ds);
                         }
@@ -1141,92 +1237,180 @@ impl GpuBackend for MetalBackend {
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
                     if let Some(bg) = self.bind_groups.get(bind_group) {
-                        // Collect bindless indices for push constants
-                        let mut bindless_indices = types::BindlessIndices::default();
-                        let mut has_bindless_resources = false;
+                        // Check if we should use ParameterBlock-based bindless
+                        let use_parameter_block = bindless_enabled
+                            && current_pipeline
+                                .map(|p| !p.parameter_block_layouts.is_empty())
+                                .unwrap_or(false);
 
-                        for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                            let buffer_index = (*index as usize * 16 + binding_idx) as u64;
-                            match binding {
-                                BindingState::Buffer { buffer, offset, .. } => {
-                                    if let Some(buf) = self.buffers.get(buffer) {
-                                        // Traditional binding (for backward compatibility)
+                        if use_parameter_block {
+                            // NEW: ParameterBlock-based bindless rendering
+                            // Write GPU addresses directly to the pipeline's argument buffer
+                            if let Some(pipeline) = current_pipeline {
+                                if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                    // For each binding, find corresponding field and write GPU address
+                                    for (binding_idx, binding) in bg.bindings.iter().enumerate() {
+                                        match binding {
+                                            BindingState::Buffer { buffer, offset, .. } => {
+                                                if let Some(buf) = self.buffers.get(buffer) {
+                                                    // Find the field offset from reflection
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            // Write GPU address to argument buffer at field offset
+                                                            let gpu_addr = buf.buffer.gpu_address() + *offset;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = gpu_addr;
+                                                            }
+                                                            tracing::trace!(
+                                                                "Wrote GPU address 0x{:x} at offset {} for field '{}'",
+                                                                gpu_addr,
+                                                                field.offset,
+                                                                field.name
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            BindingState::Texture(tex_handle) => {
+                                                if let Some(tex) = self.textures.get(tex_handle) {
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = resource_id;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            BindingState::Sampler(samp_handle) => {
+                                                if let Some(samp) = self.samplers.get(samp_handle) {
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = resource_id;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Bind the argument buffer at the slot from reflection
+                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
                                         encoder.set_vertex_buffer(
-                                            buffer_index,
-                                            Some(&buf.buffer),
-                                            *offset,
+                                            pb_layout.binding_slot as u64,
+                                            Some(arg_buffer),
+                                            0,
                                         );
                                         encoder.set_fragment_buffer(
-                                            buffer_index,
-                                            Some(&buf.buffer),
-                                            *offset,
+                                            pb_layout.binding_slot as u64,
+                                            Some(arg_buffer),
+                                            0,
                                         );
+                                        tracing::trace!(
+                                            "Bound ParameterBlock argument buffer at slot {}",
+                                            pb_layout.binding_slot
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            // LEGACY: Traditional binding or old-style bindless with push constants
+                            let mut bindless_indices = types::BindlessIndices::default();
+                            let mut has_bindless_resources = false;
 
-                                        // Collect bindless index if available
-                                        if let Some(arg_idx) = buf.arg_buffer_index {
-                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                bindless_indices.buffer_indices[binding_idx] =
-                                                    arg_idx;
-                                                has_bindless_resources = true;
+                            for (binding_idx, binding) in bg.bindings.iter().enumerate() {
+                                let buffer_index = (*index as usize * 16 + binding_idx) as u64;
+                                match binding {
+                                    BindingState::Buffer { buffer, offset, .. } => {
+                                        if let Some(buf) = self.buffers.get(buffer) {
+                                            // Traditional binding
+                                            encoder.set_vertex_buffer(
+                                                buffer_index,
+                                                Some(&buf.buffer),
+                                                *offset,
+                                            );
+                                            encoder.set_fragment_buffer(
+                                                buffer_index,
+                                                Some(&buf.buffer),
+                                                *offset,
+                                            );
+
+                                            if let Some(arg_idx) = buf.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.buffer_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                BindingState::Texture(tex_handle) => {
-                                    if let Some(tex) = self.textures.get(tex_handle) {
-                                        // Traditional binding
-                                        encoder
-                                            .set_fragment_texture(buffer_index, Some(&tex.texture));
+                                    BindingState::Texture(tex_handle) => {
+                                        if let Some(tex) = self.textures.get(tex_handle) {
+                                            encoder.set_fragment_texture(buffer_index, Some(&tex.texture));
 
-                                        // Collect bindless index if available
-                                        if let Some(arg_idx) = tex.arg_buffer_index {
-                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                bindless_indices.texture_indices[binding_idx] =
-                                                    arg_idx;
-                                                has_bindless_resources = true;
+                                            if let Some(arg_idx) = tex.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.texture_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                BindingState::Sampler(samp_handle) => {
-                                    if let Some(samp) = self.samplers.get(samp_handle) {
-                                        // Traditional binding
-                                        encoder.set_fragment_sampler_state(
-                                            buffer_index,
-                                            Some(&samp.sampler),
-                                        );
+                                    BindingState::Sampler(samp_handle) => {
+                                        if let Some(samp) = self.samplers.get(samp_handle) {
+                                            encoder.set_fragment_sampler_state(buffer_index, Some(&samp.sampler));
 
-                                        // Collect bindless index if available
-                                        if let Some(arg_idx) = samp.arg_buffer_index {
-                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                bindless_indices.sampler_indices[binding_idx] =
-                                                    arg_idx;
-                                                has_bindless_resources = true;
+                                            if let Some(arg_idx) = samp.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.sampler_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // If bindless resources exist, pass indices via push constants (slot 29)
-                        if has_bindless_resources {
-                            let indices_bytes: &[u8] = unsafe {
-                                std::slice::from_raw_parts(
-                                    &bindless_indices as *const _ as *const u8,
-                                    std::mem::size_of::<types::BindlessIndices>(),
-                                )
-                            };
-                            encoder.set_vertex_bytes(
-                                types::PUSH_CONSTANTS_SLOT,
-                                indices_bytes.len() as u64,
-                                indices_bytes.as_ptr() as *const _,
-                            );
-                            encoder.set_fragment_bytes(
-                                types::PUSH_CONSTANTS_SLOT,
-                                indices_bytes.len() as u64,
-                                indices_bytes.as_ptr() as *const _,
-                            );
+                            // Legacy bindless with global argument buffer
+                            if bindless_enabled {
+                                if let Some(arg_buffer) = argument_buffer {
+                                    encoder.set_vertex_buffer(
+                                        types::ARGUMENT_BUFFER_SLOT,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                    encoder.set_fragment_buffer(
+                                        types::ARGUMENT_BUFFER_SLOT,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                }
+                            }
+
+                            if has_bindless_resources {
+                                let indices_bytes: &[u8] = unsafe {
+                                    std::slice::from_raw_parts(
+                                        &bindless_indices as *const _ as *const u8,
+                                        std::mem::size_of::<types::BindlessIndices>(),
+                                    )
+                                };
+                                encoder.set_vertex_bytes(
+                                    types::PUSH_CONSTANTS_SLOT,
+                                    indices_bytes.len() as u64,
+                                    indices_bytes.as_ptr() as *const _,
+                                );
+                                encoder.set_fragment_bytes(
+                                    types::PUSH_CONSTANTS_SLOT,
+                                    indices_bytes.len() as u64,
+                                    indices_bytes.as_ptr() as *const _,
+                                );
+                            }
                         }
                     }
                 }
@@ -1769,9 +1953,14 @@ impl GpuBackend for MetalBackend {
             height: surface_state.height as u64,
         });
 
+        // Cache bindless state for use in loop
+        let bindless_enabled = logical_device.bindless_enabled;
+        let argument_buffer = logical_device.argument_buffer.as_ref();
+
         // Process commands (similar to render_to_target)
         let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
         let mut current_primitive_type = MTLPrimitiveType::Triangle;
+        let mut current_pipeline: Option<&PipelineState> = None;
 
         for cmd in commands {
             match cmd {
@@ -1780,6 +1969,7 @@ impl GpuBackend for MetalBackend {
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         encoder.set_render_pipeline_state(&pipeline.pipeline);
                         current_primitive_type = pipeline.primitive_type;
+                        current_pipeline = Some(pipeline);
                         if let Some(ds) = &pipeline.depth_stencil {
                             encoder.set_depth_stencil_state(ds);
                         }
@@ -1803,92 +1993,180 @@ impl GpuBackend for MetalBackend {
                 }
                 RenderCommand::SetBindGroup { index, bind_group } => {
                     if let Some(bg) = self.bind_groups.get(bind_group) {
-                        // Collect bindless indices for push constants
-                        let mut bindless_indices = types::BindlessIndices::default();
-                        let mut has_bindless_resources = false;
+                        // Check if we should use ParameterBlock-based bindless
+                        let use_parameter_block = bindless_enabled
+                            && current_pipeline
+                                .map(|p| !p.parameter_block_layouts.is_empty())
+                                .unwrap_or(false);
 
-                        for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                            let buffer_index = (*index as usize * 16 + binding_idx) as u64;
-                            match binding {
-                                BindingState::Buffer { buffer, offset, .. } => {
-                                    if let Some(buf) = self.buffers.get(buffer) {
-                                        // Traditional binding (for backward compatibility)
+                        if use_parameter_block {
+                            // NEW: ParameterBlock-based bindless rendering
+                            // Write GPU addresses directly to the pipeline's argument buffer
+                            if let Some(pipeline) = current_pipeline {
+                                if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                    // For each binding, find corresponding field and write GPU address
+                                    for (binding_idx, binding) in bg.bindings.iter().enumerate() {
+                                        match binding {
+                                            BindingState::Buffer { buffer, offset, .. } => {
+                                                if let Some(buf) = self.buffers.get(buffer) {
+                                                    // Find the field offset from reflection
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            // Write GPU address to argument buffer at field offset
+                                                            let gpu_addr = buf.buffer.gpu_address() + *offset;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = gpu_addr;
+                                                            }
+                                                            tracing::trace!(
+                                                                "Wrote GPU address 0x{:x} at offset {} for field '{}'",
+                                                                gpu_addr,
+                                                                field.offset,
+                                                                field.name
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            BindingState::Texture(tex_handle) => {
+                                                if let Some(tex) = self.textures.get(tex_handle) {
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = resource_id;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            BindingState::Sampler(samp_handle) => {
+                                                if let Some(samp) = self.samplers.get(samp_handle) {
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = resource_id;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Bind the argument buffer at the slot from reflection
+                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
                                         encoder.set_vertex_buffer(
-                                            buffer_index,
-                                            Some(&buf.buffer),
-                                            *offset,
+                                            pb_layout.binding_slot as u64,
+                                            Some(arg_buffer),
+                                            0,
                                         );
                                         encoder.set_fragment_buffer(
-                                            buffer_index,
-                                            Some(&buf.buffer),
-                                            *offset,
+                                            pb_layout.binding_slot as u64,
+                                            Some(arg_buffer),
+                                            0,
                                         );
+                                        tracing::trace!(
+                                            "Bound ParameterBlock argument buffer at slot {}",
+                                            pb_layout.binding_slot
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            // LEGACY: Traditional binding or old-style bindless with push constants
+                            let mut bindless_indices = types::BindlessIndices::default();
+                            let mut has_bindless_resources = false;
 
-                                        // Collect bindless index if available
-                                        if let Some(arg_idx) = buf.arg_buffer_index {
-                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                bindless_indices.buffer_indices[binding_idx] =
-                                                    arg_idx;
-                                                has_bindless_resources = true;
+                            for (binding_idx, binding) in bg.bindings.iter().enumerate() {
+                                let buffer_index = (*index as usize * 16 + binding_idx) as u64;
+                                match binding {
+                                    BindingState::Buffer { buffer, offset, .. } => {
+                                        if let Some(buf) = self.buffers.get(buffer) {
+                                            // Traditional binding
+                                            encoder.set_vertex_buffer(
+                                                buffer_index,
+                                                Some(&buf.buffer),
+                                                *offset,
+                                            );
+                                            encoder.set_fragment_buffer(
+                                                buffer_index,
+                                                Some(&buf.buffer),
+                                                *offset,
+                                            );
+
+                                            if let Some(arg_idx) = buf.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.buffer_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                BindingState::Texture(tex_handle) => {
-                                    if let Some(tex) = self.textures.get(tex_handle) {
-                                        // Traditional binding
-                                        encoder
-                                            .set_fragment_texture(buffer_index, Some(&tex.texture));
+                                    BindingState::Texture(tex_handle) => {
+                                        if let Some(tex) = self.textures.get(tex_handle) {
+                                            encoder.set_fragment_texture(buffer_index, Some(&tex.texture));
 
-                                        // Collect bindless index if available
-                                        if let Some(arg_idx) = tex.arg_buffer_index {
-                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                bindless_indices.texture_indices[binding_idx] =
-                                                    arg_idx;
-                                                has_bindless_resources = true;
+                                            if let Some(arg_idx) = tex.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.texture_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                BindingState::Sampler(samp_handle) => {
-                                    if let Some(samp) = self.samplers.get(samp_handle) {
-                                        // Traditional binding
-                                        encoder.set_fragment_sampler_state(
-                                            buffer_index,
-                                            Some(&samp.sampler),
-                                        );
+                                    BindingState::Sampler(samp_handle) => {
+                                        if let Some(samp) = self.samplers.get(samp_handle) {
+                                            encoder.set_fragment_sampler_state(buffer_index, Some(&samp.sampler));
 
-                                        // Collect bindless index if available
-                                        if let Some(arg_idx) = samp.arg_buffer_index {
-                                            if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                bindless_indices.sampler_indices[binding_idx] =
-                                                    arg_idx;
-                                                has_bindless_resources = true;
+                                            if let Some(arg_idx) = samp.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.sampler_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // If bindless resources exist, pass indices via push constants (slot 29)
-                        if has_bindless_resources {
-                            let indices_bytes: &[u8] = unsafe {
-                                std::slice::from_raw_parts(
-                                    &bindless_indices as *const _ as *const u8,
-                                    std::mem::size_of::<types::BindlessIndices>(),
-                                )
-                            };
-                            encoder.set_vertex_bytes(
-                                types::PUSH_CONSTANTS_SLOT,
-                                indices_bytes.len() as u64,
-                                indices_bytes.as_ptr() as *const _,
-                            );
-                            encoder.set_fragment_bytes(
-                                types::PUSH_CONSTANTS_SLOT,
-                                indices_bytes.len() as u64,
-                                indices_bytes.as_ptr() as *const _,
-                            );
+                            // Legacy bindless with global argument buffer
+                            if bindless_enabled {
+                                if let Some(arg_buffer) = argument_buffer {
+                                    encoder.set_vertex_buffer(
+                                        types::ARGUMENT_BUFFER_SLOT,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                    encoder.set_fragment_buffer(
+                                        types::ARGUMENT_BUFFER_SLOT,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                }
+                            }
+
+                            if has_bindless_resources {
+                                let indices_bytes: &[u8] = unsafe {
+                                    std::slice::from_raw_parts(
+                                        &bindless_indices as *const _ as *const u8,
+                                        std::mem::size_of::<types::BindlessIndices>(),
+                                    )
+                                };
+                                encoder.set_vertex_bytes(
+                                    types::PUSH_CONSTANTS_SLOT,
+                                    indices_bytes.len() as u64,
+                                    indices_bytes.as_ptr() as *const _,
+                                );
+                                encoder.set_fragment_bytes(
+                                    types::PUSH_CONSTANTS_SLOT,
+                                    indices_bytes.len() as u64,
+                                    indices_bytes.as_ptr() as *const _,
+                                );
+                            }
                         }
                     }
                 }
@@ -2025,6 +2303,48 @@ impl GpuBackend for MetalBackend {
             .new_compute_pipeline_state_with_function(&function)
             .map_err(|e| anyhow::anyhow!("Failed to create compute pipeline: {}", e))?;
 
+        // Extract ParameterBlock layouts from shader reflection for bindless rendering
+        let parameter_block_layouts = shader
+            .reflection
+            .as_ref()
+            .map(|r| r.parameter_blocks.clone())
+            .unwrap_or_default();
+
+        // Allocate argument buffer for ParameterBlocks if bindless is enabled
+        let bindless_arg_buffer = if logical_device.bindless_enabled && !parameter_block_layouts.is_empty() {
+            // Calculate total size needed for all ParameterBlock structs
+            let total_size = parameter_block_layouts
+                .iter()
+                .map(|pb| pb.size as u64)
+                .max()
+                .unwrap_or(64)
+                .max(64); // Minimum 64 bytes for alignment
+
+            let arg_buffer = logical_device.device.new_buffer(
+                total_size,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            tracing::info!(
+                "Allocated bindless argument buffer ({} bytes) for compute pipeline with {} ParameterBlock(s)",
+                total_size,
+                parameter_block_layouts.len()
+            );
+            for pb in &parameter_block_layouts {
+                tracing::debug!(
+                    "  ParameterBlock '{}': slot={}, size={}, fields={}",
+                    pb.name,
+                    pb.binding_slot,
+                    pb.size,
+                    pb.fields.len()
+                );
+            }
+
+            Some(arg_buffer)
+        } else {
+            None
+        };
+
         let handle = self.next_compute_pipeline_handle;
         self.next_compute_pipeline_handle += 1;
 
@@ -2034,6 +2354,8 @@ impl GpuBackend for MetalBackend {
                 device_handle,
                 pipeline,
                 workgroup_size,
+                bindless_arg_buffer,
+                parameter_block_layouts,
             },
         );
 
@@ -2077,6 +2399,10 @@ impl GpuBackend for MetalBackend {
             }
         }
 
+        // Cache bindless state for use in loop
+        let bindless_enabled = logical_device.bindless_enabled;
+        let argument_buffer = logical_device.argument_buffer.as_ref();
+
         let mut current_pipeline: Option<&ComputePipelineState> = None;
 
         for cmd in commands {
@@ -2089,29 +2415,163 @@ impl GpuBackend for MetalBackend {
                 }
                 ComputeCommand::SetBindGroup { index, bind_group } => {
                     if let Some(bg) = self.bind_groups.get(bind_group) {
-                        for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                            let buffer_index = (*index as usize * 16 + binding_idx) as u64;
-                            match binding {
-                                BindingState::Buffer { buffer, offset, .. } => {
-                                    if let Some(buf) = self.buffers.get(buffer) {
+                        // Check if we should use ParameterBlock-based bindless
+                        let use_parameter_block = bindless_enabled
+                            && current_pipeline
+                                .map(|p| !p.parameter_block_layouts.is_empty())
+                                .unwrap_or(false);
+
+                        if use_parameter_block {
+                            // NEW: ParameterBlock-based bindless rendering
+                            // Write GPU addresses directly to the pipeline's argument buffer
+                            if let Some(pipeline) = current_pipeline {
+                                if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                    // For each binding, find corresponding field and write GPU address
+                                    for (binding_idx, binding) in bg.bindings.iter().enumerate() {
+                                        match binding {
+                                            BindingState::Buffer { buffer, offset, .. } => {
+                                                if let Some(buf) = self.buffers.get(buffer) {
+                                                    // Find the field offset from reflection
+                                                    // Assume bind group index 0 maps to first ParameterBlock
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            // Write GPU address to argument buffer at field offset
+                                                            let gpu_addr = buf.buffer.gpu_address() + *offset;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = gpu_addr;
+                                                            }
+                                                            tracing::trace!(
+                                                                "Wrote GPU address 0x{:x} at offset {} for field '{}'",
+                                                                gpu_addr,
+                                                                field.offset,
+                                                                field.name
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            BindingState::Texture(tex_handle) => {
+                                                if let Some(tex) = self.textures.get(tex_handle) {
+                                                    // For textures, write the gpuResourceID
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = resource_id;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            BindingState::Sampler(samp_handle) => {
+                                                if let Some(samp) = self.samplers.get(samp_handle) {
+                                                    // For samplers, write the gpuResourceID
+                                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                                        if let Some(field) = pb_layout.fields.get(binding_idx) {
+                                                            let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                            unsafe {
+                                                                let ptr = arg_buffer.contents().add(field.offset);
+                                                                *(ptr as *mut u64) = resource_id;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Bind the argument buffer at the slot from reflection
+                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
                                         encoder.set_buffer(
-                                            buffer_index,
-                                            Some(&buf.buffer),
-                                            *offset,
+                                            pb_layout.binding_slot as u64,
+                                            Some(arg_buffer),
+                                            0,
+                                        );
+                                        tracing::trace!(
+                                            "Bound ParameterBlock argument buffer at slot {}",
+                                            pb_layout.binding_slot
                                         );
                                     }
                                 }
-                                BindingState::Texture(tex_handle) => {
-                                    if let Some(tex) = self.textures.get(tex_handle) {
-                                        encoder.set_texture(buffer_index, Some(&tex.texture));
+                            }
+                        } else {
+                            // LEGACY: Traditional binding or old-style bindless with push constants
+                            let mut bindless_indices = types::BindlessIndices::default();
+                            let mut has_bindless_resources = false;
+
+                            for (binding_idx, binding) in bg.bindings.iter().enumerate() {
+                                let buffer_index = (*index as usize * 16 + binding_idx) as u64;
+                                match binding {
+                                    BindingState::Buffer { buffer, offset, .. } => {
+                                        if let Some(buf) = self.buffers.get(buffer) {
+                                            // Traditional binding
+                                            encoder.set_buffer(
+                                                buffer_index,
+                                                Some(&buf.buffer),
+                                                *offset,
+                                            );
+
+                                            // Collect bindless index if available (legacy path)
+                                            if let Some(arg_idx) = buf.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.buffer_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    BindingState::Texture(tex_handle) => {
+                                        if let Some(tex) = self.textures.get(tex_handle) {
+                                            encoder.set_texture(buffer_index, Some(&tex.texture));
+
+                                            if let Some(arg_idx) = tex.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.texture_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    BindingState::Sampler(samp_handle) => {
+                                        if let Some(samp) = self.samplers.get(samp_handle) {
+                                            encoder.set_sampler_state(buffer_index, Some(&samp.sampler));
+
+                                            if let Some(arg_idx) = samp.arg_buffer_index {
+                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
+                                                    bindless_indices.sampler_indices[binding_idx] = arg_idx;
+                                                    has_bindless_resources = true;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                                BindingState::Sampler(samp_handle) => {
-                                    if let Some(samp) = self.samplers.get(samp_handle) {
-                                        encoder
-                                            .set_sampler_state(buffer_index, Some(&samp.sampler));
-                                    }
+                            }
+
+                            // Legacy bindless with global argument buffer
+                            if bindless_enabled {
+                                if let Some(arg_buffer) = argument_buffer {
+                                    encoder.set_buffer(
+                                        types::ARGUMENT_BUFFER_SLOT,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
                                 }
+                            }
+
+                            if has_bindless_resources {
+                                let indices_bytes: &[u8] = unsafe {
+                                    std::slice::from_raw_parts(
+                                        &bindless_indices as *const _ as *const u8,
+                                        std::mem::size_of::<types::BindlessIndices>(),
+                                    )
+                                };
+                                encoder.set_bytes(
+                                    types::PUSH_CONSTANTS_SLOT,
+                                    indices_bytes.len() as u64,
+                                    indices_bytes.as_ptr() as *const _,
+                                );
                             }
                         }
                     }

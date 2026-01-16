@@ -6,7 +6,23 @@ struct Particle {
     float2 velocity;
 };
 
+#ifdef __BINDLESS__
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+// The host must fill the argument buffer with GPU addresses at the correct offsets
+
+struct ComputeResources {
+    RWStructuredBuffer<Particle> particles;
+};
+
+ParameterBlock<ComputeResources> gResources;
+
+#define PARTICLES gResources.particles
+#else
+// Traditional binding mode
 [[vk::binding(0, 0)]] RWStructuredBuffer<Particle> particles;
+
+#define PARTICLES particles
+#endif
 
 // Use push constants or hardcoded values for simplicity
 static const float deltaTime = 0.016; // ~60fps
@@ -21,7 +37,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     // Bounds check (assume max 65536 particles)
     if (idx >= 65536) return;
     
-    Particle p = particles[idx];
+    Particle p = PARTICLES[idx];
     
     // Skip if particle is at origin with no velocity (uninitialized)
     if (p.position.x == 0.0 && p.position.y == 0.0 && 
@@ -56,5 +72,5 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         p.position.y = 0.95;
     }
     
-    particles[idx] = p;
+    PARTICLES[idx] = p;
 }

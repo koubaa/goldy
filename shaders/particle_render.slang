@@ -6,7 +6,23 @@ struct Particle {
     float2 velocity;
 };
 
+#ifdef __BINDLESS__
+// Bindless mode: Use ParameterBlock for Metal argument buffer support
+// The host must fill the argument buffer with GPU addresses at the correct offsets
+
+struct RenderResources {
+    StructuredBuffer<Particle> particles;
+};
+
+ParameterBlock<RenderResources> gResources;
+
+#define PARTICLES gResources.particles
+#else
+// Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<Particle> particles;
+
+#define PARTICLES particles
+#endif
 
 struct VSOutput {
     float4 position : SV_Position;
@@ -24,7 +40,7 @@ VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
     VSOutput output;
     
     // Read particle from buffer
-    Particle p = particles[instanceID];
+    Particle p = PARTICLES[instanceID];
     
     // Quad size (in clip space, -1 to 1 range)
     float size = 0.015;

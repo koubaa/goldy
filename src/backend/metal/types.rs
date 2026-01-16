@@ -159,6 +159,8 @@ pub(crate) struct ShaderState {
     pub fragment_library: Option<Library>,
     /// Compiled compute shader library
     pub compute_library: Option<Library>,
+    /// Reflection data for bindless rendering (ParameterBlock layouts)
+    pub reflection: Option<crate::slang::ShaderReflection>,
 }
 
 /// Graphics pipeline state.
@@ -167,6 +169,10 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
+    /// Argument buffer for ParameterBlock bindless rendering
+    pub bindless_arg_buffer: Option<MTLBuffer>,
+    /// ParameterBlock layouts from shader reflection (for filling arg buffer)
+    pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
 /// Compute pipeline state.
@@ -175,6 +181,10 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: MTLComputePipelineState,
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
+    /// Argument buffer for ParameterBlock bindless rendering
+    pub bindless_arg_buffer: Option<MTLBuffer>,
+    /// ParameterBlock layouts from shader reflection (for filling arg buffer)
+    pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
 /// Bind group layout state.
