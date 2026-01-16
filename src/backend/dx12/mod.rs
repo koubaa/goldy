@@ -1,7 +1,7 @@
 //! DirectX 12 backend implementation.
 //!
 //! Targets D3D12 Feature Level 12.0+ on Windows.
-//! Uses Slang for shader compilation (Slang -> HLSL -> DXIL via DXC).
+//! Uses Slang for shader compilation (Slang -> DXIL directly with SM 6.6).
 //!
 //! ## Module Structure
 //!
@@ -25,13 +25,11 @@ use super::*;
 use crate::types::Color;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::ffi::CString;
 use windows::{
     core::Interface,
     Win32::{
         Foundation::{CloseHandle, HWND},
         Graphics::{
-            Direct3D::Fxc::{D3DCompile, D3DCOMPILE_OPTIMIZATION_LEVEL3},
             Direct3D::*,
             Direct3D12::*,
             Dxgi::{Common::*, *},
@@ -202,6 +200,8 @@ impl Dx12Backend {
     }
 
     /// Compile a shader for a specific stage on demand.
+    ///
+    /// Uses Slang to compile directly to DXIL (SM 6.6) for bindless support.
     fn ensure_shader_stage_compiled(
         &mut self,
         shader_handle: ShaderHandle,
@@ -247,103 +247,52 @@ impl Dx12Backend {
             .map(|d| d.bindless_enabled)
             .unwrap_or(false);
 
-        // Compile Slang to HLSL (with bindless support if enabled)
-        let (hlsl_source, reflection) = if bindless_enabled {
+        // Compile Slang directly to DXIL (SM 6.6 for bindless support)
+        // This bypasses FXC entirely and uses Slang's built-in DXIL emission
+        let (bytecode, reflection) = if bindless_enabled {
             let result = self
                 .slang_compiler
                 .compile_bindless_with_reflection(
                     &slang_source,
-                    crate::slang::ShaderTarget::Hlsl,
+                    crate::slang::ShaderTarget::Dxil,
                     &[(entry_point_name, stage)],
                     &search_path_refs,
                 )
                 .with_context(|| {
                     format!(
-                        "Failed to compile {} shader to HLSL (bindless)",
+                        "Failed to compile {} shader to DXIL (bindless)",
                         entry_point_name
                     )
                 })?;
 
-            let hlsl = result
+            let dxil = result
                 .shader
-                .as_str()
-                .context("Invalid HLSL output")?
-                .to_string();
-            (hlsl, Some(result.reflection))
+                .as_dxil()
+                .context("Invalid DXIL output")?
+                .to_vec();
+            (dxil, Some(result.reflection))
         } else {
-            let hlsl_compiled = self
+            let dxil_compiled = self
                 .slang_compiler
                 .compile_with_options(
                     &slang_source,
-                    crate::slang::ShaderTarget::Hlsl,
+                    crate::slang::ShaderTarget::Dxil,
                     &[(entry_point_name, stage)],
                     &search_path_refs,
                 )
                 .with_context(|| {
-                    format!("Failed to compile {} shader to HLSL", entry_point_name)
+                    format!("Failed to compile {} shader to DXIL", entry_point_name)
                 })?;
 
-            let hlsl = hlsl_compiled
-                .as_str()
-                .context("Invalid HLSL output")?
-                .to_string();
-            (hlsl, None)
+            let dxil = dxil_compiled
+                .as_dxil()
+                .context("Invalid DXIL output")?
+                .to_vec();
+            (dxil, None)
         };
-
-        // Compile HLSL to DXIL using DXC (for now we'll use FXC as fallback)
-        let target_profile = match stage {
-            crate::slang::SlangStage::Vertex => c"vs_5_0",
-            crate::slang::SlangStage::Fragment => c"ps_5_0",
-            crate::slang::SlangStage::Compute => c"cs_5_0",
-            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-        };
-
-        // Use D3DCompile for shader compilation
-        // Slang preserves the original entry point names in generated HLSL
-        let mut shader_blob: Option<ID3DBlob> = None;
-        let mut error_blob: Option<ID3DBlob> = None;
-
-        let entry_point_cstr = CString::new(entry_point_name).unwrap();
-
-        let result = unsafe {
-            D3DCompile(
-                hlsl_source.as_ptr() as *const _,
-                hlsl_source.len(),
-                None,
-                None,
-                None,
-                windows::core::PCSTR(entry_point_cstr.as_ptr() as *const u8),
-                windows::core::PCSTR(target_profile.as_ptr() as *const u8),
-                D3DCOMPILE_OPTIMIZATION_LEVEL3,
-                0,
-                &mut shader_blob,
-                Some(&mut error_blob),
-            )
-        };
-
-        // Debug: log the HLSL source if compilation fails
-        if result.is_err() {
-            tracing::debug!("HLSL source that failed to compile:\n{}", hlsl_source);
-        }
-
-        if result.is_err() {
-            if let Some(error) = error_blob {
-                let error_ptr = unsafe { error.GetBufferPointer() } as *const u8;
-                let error_size = unsafe { error.GetBufferSize() };
-                let error_msg = unsafe { std::slice::from_raw_parts(error_ptr, error_size) };
-                let error_str = String::from_utf8_lossy(error_msg);
-                anyhow::bail!("Shader compilation failed: {}", error_str);
-            }
-            anyhow::bail!("Shader compilation failed with unknown error");
-        }
-
-        let blob = shader_blob.context("Shader compilation produced no output")?;
-        let bytecode_ptr = unsafe { blob.GetBufferPointer() } as *const u8;
-        let bytecode_size = unsafe { blob.GetBufferSize() };
-        let bytecode = unsafe { std::slice::from_raw_parts(bytecode_ptr, bytecode_size) }.to_vec();
 
         tracing::debug!(
-            "Compiled {} ({} bytes, bindless={})",
+            "Compiled {} to DXIL ({} bytes, bindless={})",
             entry_point_name,
             bytecode.len(),
             bindless_enabled
@@ -504,13 +453,10 @@ impl GpuBackend for Dx12Backend {
         let sampler_descriptor_size =
             unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) };
 
-        // Bindless is always enabled for DX12 since we have shader-visible heaps
+        // Bindless rendering enabled via Slang's direct DXIL output (SM 6.6)
+        // This allows shaders to use ResourceDescriptorHeap for bindless resource access
         let bindless_enabled = true;
-        tracing::info!(
-            "DX12 bindless enabled with {} CBV/SRV/UAV and {} sampler descriptors",
-            16384,
-            2048
-        );
+        tracing::info!("DX12 bindless enabled (SM 6.6 via Slang DXIL)");
 
         // Create fence
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
@@ -646,69 +592,115 @@ impl GpuBackend for Dx12Backend {
         size: u64,
         usage: BufferUsage,
     ) -> Result<BufferHandle> {
-        let logical_device = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        // First pass: create the resource (immutable borrow of device)
+        let (resource, is_storage, bindless_enabled) = {
+            let logical_device = self
+                .devices
+                .get(&device_handle)
+                .context("Invalid device handle")?;
 
-        // For simplicity, all buffers are created in UPLOAD heap to allow CPU writes.
-        // This matches the high-level Goldy API which assumes all buffers can be written to.
-        // A more sophisticated implementation would use DEFAULT heap for GPU-only buffers
-        // with staging buffer copies, but that's an optimization for later.
-        let heap_type = D3D12_HEAP_TYPE_UPLOAD;
-        let is_storage = usage.contains(BufferUsage::STORAGE);
+            // For simplicity, all buffers are created in UPLOAD heap to allow CPU writes.
+            // This matches the high-level Goldy API which assumes all buffers can be written to.
+            // A more sophisticated implementation would use DEFAULT heap for GPU-only buffers
+            // with staging buffer copies, but that's an optimization for later.
+            let heap_type = D3D12_HEAP_TYPE_UPLOAD;
+            let is_storage = usage.contains(BufferUsage::STORAGE);
 
-        let heap_properties = D3D12_HEAP_PROPERTIES {
-            Type: heap_type,
-            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-            CreationNodeMask: 0,
-            VisibleNodeMask: 0,
+            let heap_properties = D3D12_HEAP_PROPERTIES {
+                Type: heap_type,
+                CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+                MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+                CreationNodeMask: 0,
+                VisibleNodeMask: 0,
+            };
+
+            let resource_desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Alignment: 0,
+                Width: size,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: DXGI_FORMAT_UNKNOWN,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                Flags: D3D12_RESOURCE_FLAG_NONE,
+            };
+
+            let initial_state = if heap_type == D3D12_HEAP_TYPE_UPLOAD {
+                D3D12_RESOURCE_STATE_GENERIC_READ
+            } else {
+                D3D12_RESOURCE_STATE_COMMON
+            };
+
+            let mut resource: Option<ID3D12Resource> = None;
+            unsafe {
+                logical_device.device.CreateCommittedResource(
+                    &heap_properties,
+                    D3D12_HEAP_FLAG_NONE,
+                    &resource_desc,
+                    initial_state,
+                    None,
+                    &mut resource,
+                )
+            }
+            .context("Failed to create buffer resource")?;
+
+            let resource = resource.context("CreateCommittedResource returned null")?;
+            (resource, is_storage, logical_device.bindless_enabled)
         };
-
-        let resource_desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Alignment: 0,
-            Width: size,
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_NONE,
-        };
-
-        let initial_state = if heap_type == D3D12_HEAP_TYPE_UPLOAD {
-            D3D12_RESOURCE_STATE_GENERIC_READ
-        } else {
-            D3D12_RESOURCE_STATE_COMMON
-        };
-
-        let mut resource: Option<ID3D12Resource> = None;
-        unsafe {
-            logical_device.device.CreateCommittedResource(
-                &heap_properties,
-                D3D12_HEAP_FLAG_NONE,
-                &resource_desc,
-                initial_state,
-                None,
-                &mut resource,
-            )
-        }
-        .context("Failed to create buffer resource")?;
-
-        let resource = resource.context("CreateCommittedResource returned null")?;
 
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
 
-        // Register buffer in bindless descriptor heap if enabled
-        // For now, just track the bindless offset (we'll create descriptors on demand)
-        let bindless_offset = None; // Will be set when descriptor is needed
+        // Second pass: register in bindless heap if enabled (mutable borrow of device)
+        let bindless_offset = if bindless_enabled {
+            let logical_device = self
+                .devices
+                .get_mut(&device_handle)
+                .context("Invalid device handle")?;
+            
+            // Create an SRV for raw buffer access (ByteAddressBuffer)
+            // This works with Slang's DescriptorHandle<ByteAddressBuffer> pattern
+            let srv_offset = logical_device.resource_registry.register_buffer_srv(handle);
+            
+            // Create SRV descriptor for raw buffer (ByteAddressBuffer)
+            let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: DXGI_FORMAT_R32_TYPELESS,
+                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_SRV {
+                        FirstElement: 0,
+                        NumElements: (size / 4) as u32, // Number of 32-bit elements
+                        StructureByteStride: 0,
+                        Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                    },
+                },
+            };
+            
+            let srv_handle = unsafe {
+                let mut cpu_handle = logical_device
+                    .cbv_srv_uav_heap
+                    .GetCPUDescriptorHandleForHeapStart();
+                cpu_handle.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                cpu_handle
+            };
+            
+            unsafe {
+                logical_device
+                    .device
+                    .CreateShaderResourceView(&resource, Some(&srv_desc), srv_handle);
+            }
+            
+            tracing::debug!("Created SRV for buffer {} at heap offset {}", handle, srv_offset);
+            Some(srv_offset)
+        } else {
+            None
+        };
 
         self.buffers.insert(
             handle,
@@ -956,6 +948,7 @@ impl GpuBackend for Dx12Backend {
         
         let root_signature = if bindless_enabled {
             // Bindless mode: root constants at slot 0 for resource indices
+            // Slang's DescriptorHandle<T> uses ResourceDescriptorHeap[index] with HEAP_DIRECTLY_INDEXED
             let root_constants = D3D12_ROOT_PARAMETER {
                 ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
                 Anonymous: D3D12_ROOT_PARAMETER_0 {

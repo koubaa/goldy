@@ -3,9 +3,10 @@
 //
 // ## Bindless Support
 //
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Uniforms are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
+// When __BINDLESS__ is defined:
+// - Vulkan: Push constants + descriptor arrays
+// - DX12: Root constants + ResourceDescriptorHeap (SM 6.6)
+// - Metal: ParameterBlock for argument buffer support
 
 import goldy_exp;
 
@@ -17,13 +18,22 @@ struct ViewUniforms {
 };
 
 #ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
-struct MandelbrotResources {
-    ConstantBuffer<ViewUniforms> uniforms;
-};
-ParameterBlock<MandelbrotResources> gResources;
-#define CENTER gResources.uniforms.center
-#define ZOOM gResources.uniforms.zoom
+// Bindless mode: Use ByteAddressBuffer.Handle for raw buffer access 
+// ByteAddressBuffer works reliably with ResourceDescriptorHeap on DX12
+[[vk::push_constant]]
+uniform ByteAddressBuffer.Handle uniformsHandle : register(b0, space0);
+
+float2 getCenter() {
+    return asfloat(uniformsHandle.Load2(0));
+}
+
+float getZoom() {
+    return asfloat(uniformsHandle.Load(8));
+}
+
+#define CENTER getCenter()
+#define ZOOM getZoom()
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]]

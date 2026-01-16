@@ -197,6 +197,9 @@ pub enum SlangSourceLanguage {
     Spirv = 7,
 }
 
+/// Profile ID type (opaque integral type for shader profiles like sm_6_6)
+pub type SlangProfileID = c_int;
+
 /// Function pointer types for dynamic loading
 pub type FnSpCreateSession = unsafe extern "C" fn(deprecated: *const c_char) -> *mut SlangSession;
 pub type FnSpDestroySession = unsafe extern "C" fn(session: *mut SlangSession);
@@ -209,6 +212,9 @@ pub type FnSpAddCodeGenTarget =
     unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int) -> c_int;
 pub type FnSpSetTargetProfile =
     unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, profile: c_int);
+/// Find a profile by name (e.g., "sm_6_6") - uses the global session
+pub type FnSpFindProfile =
+    unsafe extern "C" fn(session: *mut SlangSession, name: *const c_char) -> SlangProfileID;
 pub type FnSpAddTranslationUnit = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     language: c_int,

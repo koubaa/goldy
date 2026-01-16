@@ -12,5 +12,6 @@ __include "goldy_exp/vertex";
 
 #ifdef __BINDLESS__
 __include "goldy_exp/bindless";
+__include "goldy_exp/bindless_indices";
 #endif
 
