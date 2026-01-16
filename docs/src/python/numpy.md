@@ -130,3 +130,4 @@ contiguous = np.ascontiguousarray(sliced)
 buffer = goldy.Buffer(device, contiguous, goldy.BufferUsage.VERTEX)
 ```
 
+
