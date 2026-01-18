@@ -238,7 +238,7 @@ impl SlangCompiler {
     /// Returns both the compiled shader and reflection information about
     /// ParameterBlocks, which is needed to properly set up argument buffers.
     ///
-    /// See [`compile_bindless`] for details on defines.
+    /// See [`Self::compile_bindless`] for details on defines.
     pub fn compile_bindless_with_reflection(
         &self,
         source: &str,
