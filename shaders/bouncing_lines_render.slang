@@ -13,22 +13,30 @@ struct Line {
 };
 
 #ifdef __BINDLESS__
-#ifdef __DX12__
-cbuffer BindlessIndices : register(b0, space0) {
-    uint lineBufferIndex;
-};
 
-#define LINES (*DescriptorHandle<StructuredBuffer<Line>>(uint2(lineBufferIndex, 0)))
-#else
-// Metal/Vulkan bindless
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct RenderResources {
     StructuredBuffer<Line> lines;
 };
-
 ParameterBlock<RenderResources> gResources;
-
 #define LINES gResources.lines
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.bindless_indices;
+[[vk::binding(0, 0)]] StructuredBuffer<Line> g_StorageBuffers[];
+#define LINES g_StorageBuffers[getBindlessIndex(0)]
+
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0, space0) {
+    uint lineBufferIndex;
+};
+#define LINES (*DescriptorHandle<StructuredBuffer<Line>>(uint2(lineBufferIndex, 0)))
+
 #endif
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<Line> lines;

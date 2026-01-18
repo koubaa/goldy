@@ -1,16 +1,16 @@
 //! Bouncing lines example - animated lines bouncing off walls.
 //!
-//! Demonstrates GPU compute + graphics integration with line primitives.
+//! Demonstrates FULLY BINDLESS GPU compute + graphics integration with line primitives.
 //! The compute shader updates line endpoint positions, the graphics shader renders them.
+//! Resource indices are passed directly via push constants instead of using bind groups.
 //!
 //! Run with: cargo run --example bouncing_lines
 
 use anyhow::Result;
 use goldy::{
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
-    BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
-    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    ShaderStages, Surface, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline,
+    ComputePipelineDesc, DeviceType, Instance, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -27,11 +27,11 @@ const NUM_LINES: u32 = 20;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Line {
-    p1: [f32; 2],        // First endpoint position
-    v1: [f32; 2],        // First endpoint velocity
-    p2: [f32; 2],        // Second endpoint position
-    v2: [f32; 2],        // Second endpoint velocity
-    color_index: u32,    // Color lookup index
+    p1: [f32; 2],     // First endpoint position
+    v1: [f32; 2],     // First endpoint velocity
+    p2: [f32; 2],     // Second endpoint position
+    v2: [f32; 2],     // Second endpoint velocity
+    color_index: u32, // Color lookup index
     _pad1: u32,
     _pad2: u32,
     _pad3: u32,
@@ -39,7 +39,7 @@ struct Line {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Bouncing Lines Example (GPU Compute)");
+    println!("Goldy Bouncing Lines Example (Fully Bindless GPU Compute)");
     println!("  Escape - Exit");
 
     let event_loop = EventLoop::new()?;
@@ -62,12 +62,10 @@ struct RenderState {
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
-    #[allow(dead_code)] // Kept alive for bind group reference
+    // Buffer (kept for bindless access)
     line_buffer: Buffer,
-    compute_bind_group: BindGroup,
     // Graphics resources
     render_pipeline: RenderPipeline,
-    render_bind_group: BindGroup,
     // Frame counter
     frame_count: u32,
 }
@@ -93,8 +91,7 @@ impl RenderState {
         // Create line buffer with initial positions matching the original example
         let mut lines = Vec::with_capacity(NUM_LINES as usize);
         for idx in 0..NUM_LINES {
-            let angle =
-                (idx as f32 / NUM_LINES as f32) * std::f32::consts::PI * 2.0;
+            let angle = (idx as f32 / NUM_LINES as f32) * std::f32::consts::PI * 2.0;
             lines.push(Line {
                 p1: [angle.cos() * 0.3, angle.sin() * 0.3],
                 v1: [
@@ -116,46 +113,16 @@ impl RenderState {
         let line_buffer =
             Buffer::with_data(&device, &lines, BufferUsage::STORAGE | BufferUsage::VERTEX)?;
 
-        // Compute bind group layout (lines RW)
-        let compute_bind_layout = BindGroupLayout::new(
-            &device,
-            &[BindGroupLayoutBinding {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::StorageBuffer { read_only: false },
-            }],
-        )?;
-
-        let compute_bind_group = BindGroup::new(
-            &device,
-            &compute_bind_layout,
-            &[BufferBinding::new(0, &line_buffer)],
-        )?;
-
+        // Create compute pipeline - fully bindless, no bind group layouts
         let compute_pipeline = ComputePipeline::new(
             &device,
             &compute_shader,
             &ComputePipelineDesc {
-                bind_group_layouts: &[&compute_bind_layout],
+                bind_group_layouts: &[],
             },
         )?;
 
-        // Render bind group layout (lines read-only for vertex shader)
-        let render_bind_layout = BindGroupLayout::new(
-            &device,
-            &[BindGroupLayoutBinding {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::StorageBuffer { read_only: true },
-            }],
-        )?;
-
-        let render_bind_group = BindGroup::new(
-            &device,
-            &render_bind_layout,
-            &[BufferBinding::new(0, &line_buffer)],
-        )?;
-
+        // Create render pipeline - fully bindless, no bind group layouts
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -164,12 +131,15 @@ impl RenderState {
                 vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::LineList,
                 target_format: surface.format(),
-                bind_group_layouts: &[&render_bind_layout],
+                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
 
-        println!("Created GPU bouncing lines with {} lines", NUM_LINES);
+        println!(
+            "Created fully bindless GPU bouncing lines with {} lines",
+            NUM_LINES
+        );
 
         Ok(Self {
             window,
@@ -177,9 +147,7 @@ impl RenderState {
             surface,
             compute_pipeline,
             line_buffer,
-            compute_bind_group,
             render_pipeline,
-            render_bind_group,
             frame_count: 0,
         })
     }
@@ -187,12 +155,13 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
-        // Run compute pass to update line positions
+        // Run compute pass to update line positions - fully bindless via push constants
         let mut compute_encoder = ComputeEncoder::new();
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            pass.set_bind_group(0, &self.compute_bind_group);
+            // Fully bindless: pass buffer indices directly via push constants
+            pass.set_push_constants(&[&self.line_buffer]);
             // Only 20 lines, but dispatch at least 1 workgroup
             let workgroups = (NUM_LINES + 63) / 64;
             pass.dispatch(workgroups.max(1), 1, 1);
@@ -214,7 +183,8 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            pass.set_bind_group(0, &self.render_bind_group);
+            // Fully bindless: pass buffer indices directly via push constants
+            pass.set_push_constants(&[&self.line_buffer]);
             // Draw 2 vertices (line) per instance
             pass.draw(0..2, 0..NUM_LINES);
         }
@@ -234,7 +204,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Bouncing Lines (GPU Compute)")
+                            .with_title("Goldy - Bouncing Lines (Fully Bindless GPU Compute)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
                     .expect("Failed to create window"),
