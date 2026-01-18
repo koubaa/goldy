@@ -3863,6 +3863,35 @@ impl GpuBackend for Dx12Backend {
                         }
                     }
                 }
+                ComputeCommand::SetPushConstants { buffers } => {
+                    // Fully bindless mode: push buffer indices directly (no bind groups needed)
+                    let bindless_enabled = self
+                        .devices
+                        .get(&device_handle)
+                        .map(|d| d.bindless_enabled)
+                        .unwrap_or(false);
+                    
+                    if bindless_enabled {
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, buffer_handle) in buffers.iter().enumerate() {
+                            if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                                break;
+                            }
+                            if let Some(buf_state) = self.buffers.get(buffer_handle) {
+                                indices.indices[i] = buf_state.bindless_offset.unwrap_or(0);
+                            }
+                        }
+                        
+                        unsafe {
+                            command_list.SetComputeRoot32BitConstants(
+                                0,  // Root parameter index
+                                types::MAX_ROOT_CONSTANT_INDICES as u32,
+                                indices.indices.as_ptr() as *const std::ffi::c_void,
+                                0,
+                            );
+                        }
+                    }
+                }
                 ComputeCommand::Dispatch {
                     workgroups_x,
                     workgroups_y,

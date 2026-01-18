@@ -135,6 +135,10 @@ pub enum ComputeCommand {
         index: u32,
         bind_group: BindGroupHandle,
     },
+    /// Set push constants (fully bindless mode - buffer indices passed directly).
+    SetPushConstants {
+        buffers: Vec<BufferHandle>,
+    },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,

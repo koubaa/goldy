@@ -3578,6 +3578,7 @@ impl GpuBackend for VulkanBackend {
             .context("Failed to begin command buffer")?;
 
         // Track current pipeline for bind group binding
+        let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_pipeline_layout: Option<vk::PipelineLayout> = None;
 
         // Process commands
@@ -3609,6 +3610,7 @@ impl GpuBackend for VulkanBackend {
                                 }
                             }
                         }
+                        current_pipeline = Some(*handle);
                         current_pipeline_layout = Some(pipeline_state.layout);
                     }
                 }
@@ -3663,6 +3665,29 @@ impl GpuBackend for VulkanBackend {
                                     *index,
                                     &[bg.descriptor_set],
                                     &[],
+                                );
+                            }
+                        }
+                    }
+                }
+                ComputeCommand::SetPushConstants { buffers } => {
+                    // Fully bindless mode: push buffer indices directly (no bind groups needed)
+                    if logical_device.bindless_enabled {
+                        if let Some(pipeline) = current_pipeline.and_then(|p| self.compute_pipelines.get(&p)) {
+                            let mut indices = types::BindlessIndices::default();
+                            for (i, buffer_handle) in buffers.iter().enumerate() {
+                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                                indices.indices[i] = self.buffers.get(buffer_handle)
+                                    .and_then(|b| b.bindless_index)
+                                    .unwrap_or(0);
+                            }
+                            unsafe {
+                                logical_device.device.cmd_push_constants(
+                                    cmd,
+                                    pipeline.layout,
+                                    vk::ShaderStageFlags::COMPUTE,
+                                    0,
+                                    bytemuck::bytes_of(&indices),
                                 );
                             }
                         }

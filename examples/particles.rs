@@ -1,16 +1,16 @@
 //! Particles example - rain/snow particle system.
 //!
-//! Demonstrates GPU compute + graphics integration using Surface API.
+//! Demonstrates FULLY BINDLESS GPU compute + graphics integration using Surface API.
 //! The compute shader updates particle positions, the graphics shader renders them.
+//! Resource indices are passed directly via push constants instead of using bind groups.
 //!
 //! Run with: cargo run --example particles
 
 use anyhow::Result;
 use goldy::{
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
-    BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
-    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    ShaderStages, Surface, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline,
+    ComputePipelineDesc, DeviceType, Instance, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -56,7 +56,7 @@ fn random() -> f32 {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Particles Example (GPU Compute)");
+    println!("Goldy Particles Example (Fully Bindless GPU Compute)");
     println!("  Space - Toggle rain/snow");
     println!("  Escape - Exit");
 
@@ -80,13 +80,11 @@ struct RenderState {
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
-    #[allow(dead_code)] // Kept alive for bind group reference
+    // Buffers (kept for bindless access)
     particle_buffer: Buffer,
     params_buffer: Buffer,
-    compute_bind_group: BindGroup,
     // Graphics resources
     render_pipeline: RenderPipeline,
-    render_bind_group: BindGroup,
     // State
     is_snow: bool,
     frame_count: f32,
@@ -120,66 +118,16 @@ impl RenderState {
         };
         let params_buffer = Buffer::with_data(&device, &[initial_params], BufferUsage::UNIFORM)?;
 
-        // Compute bind group layout (particles RW, params uniform)
-        let compute_bind_layout = BindGroupLayout::new(
-            &device,
-            &[
-                BindGroupLayoutBinding {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageBuffer { read_only: false },
-                },
-                BindGroupLayoutBinding {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::UniformBuffer,
-                },
-            ],
-        )?;
-
-        let compute_bind_group = BindGroup::new(
-            &device,
-            &compute_bind_layout,
-            &[
-                BufferBinding::new(0, &particle_buffer),
-                BufferBinding::new(1, &params_buffer),
-            ],
-        )?;
-
+        // Create compute pipeline - fully bindless, no bind group layouts
         let compute_pipeline = ComputePipeline::new(
             &device,
             &compute_shader,
             &ComputePipelineDesc {
-                bind_group_layouts: &[&compute_bind_layout],
+                bind_group_layouts: &[],
             },
         )?;
 
-        // Render bind group layout (particles + params read-only)
-        let render_bind_layout = BindGroupLayout::new(
-            &device,
-            &[
-                BindGroupLayoutBinding {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX,
-                    ty: BindingType::StorageBuffer { read_only: true },
-                },
-                BindGroupLayoutBinding {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX,
-                    ty: BindingType::UniformBuffer,
-                },
-            ],
-        )?;
-
-        let render_bind_group = BindGroup::new(
-            &device,
-            &render_bind_layout,
-            &[
-                BufferBinding::new(0, &particle_buffer),
-                BufferBinding::new(1, &params_buffer),
-            ],
-        )?;
-
+        // Create render pipeline - fully bindless, no bind group layouts
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -188,13 +136,13 @@ impl RenderState {
                 vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
-                bind_group_layouts: &[&render_bind_layout],
+                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
 
         println!(
-            "Created GPU rain/snow simulation with {} particles",
+            "Created fully bindless GPU rain/snow simulation with {} particles",
             NUM_PARTICLES
         );
 
@@ -205,9 +153,7 @@ impl RenderState {
             compute_pipeline,
             particle_buffer,
             params_buffer,
-            compute_bind_group,
             render_pipeline,
-            render_bind_group,
             is_snow: false,
             frame_count: 0.0,
         })
@@ -254,7 +200,7 @@ impl RenderState {
         self.particle_buffer.write_data(0, &particles)?;
 
         self.window.set_title(&format!(
-            "Goldy - {} (GPU Compute, Space to toggle)",
+            "Goldy - {} (Fully Bindless GPU Compute, Space to toggle)",
             if self.is_snow { "Snow" } else { "Rain" }
         ));
 
@@ -273,12 +219,13 @@ impl RenderState {
         };
         self.params_buffer.write_data(0, &[params])?;
 
-        // Run compute pass to update particles
+        // Run compute pass to update particles - fully bindless via push constants
         let mut compute_encoder = ComputeEncoder::new();
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            pass.set_bind_group(0, &self.compute_bind_group);
+            // Fully bindless: pass buffer indices directly via push constants
+            pass.set_push_constants(&[&self.particle_buffer, &self.params_buffer]);
             let workgroups = (NUM_PARTICLES + 63) / 64;
             pass.dispatch(workgroups, 1, 1);
         }
@@ -308,7 +255,8 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            pass.set_bind_group(0, &self.render_bind_group);
+            // Fully bindless: pass buffer indices directly via push constants
+            pass.set_push_constants(&[&self.particle_buffer, &self.params_buffer]);
             // Draw 6 vertices (quad) per particle instance
             pass.draw(0..6, 0..NUM_PARTICLES);
         }
@@ -328,7 +276,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Rain (GPU Compute, Space to toggle)")
+                            .with_title("Goldy - Rain (Fully Bindless GPU Compute, Space to toggle)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
                     .expect("Failed to create window"),
