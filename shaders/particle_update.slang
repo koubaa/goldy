@@ -7,26 +7,30 @@ struct Particle {
 };
 
 #ifdef __BINDLESS__
-#ifdef __DX12__
-// DX12 bindless: Use Slang's DescriptorHandle which lowers to ResourceDescriptorHeap[idx]
-// Root constants provide the descriptor index at b0
-cbuffer BindlessIndices : register(b0, space0) {
-    uint particleBufferIndex;
-};
 
-// Access via DescriptorHandle - Slang will lower to ResourceDescriptorHeap[idx] for DXIL
-// Dereference with * operator to get the buffer
-#define PARTICLES (*DescriptorHandle<RWStructuredBuffer<Particle>>(uint2(particleBufferIndex, 0)))
-#else
-// Metal/Vulkan bindless: Use ParameterBlock for argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct ComputeResources {
     RWStructuredBuffer<Particle> particles;
 };
-
 ParameterBlock<ComputeResources> gResources;
-
 #define PARTICLES gResources.particles
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.bindless_indices;
+[[vk::binding(0, 0)]] RWStructuredBuffer<Particle> g_StorageBuffers[];
+#define PARTICLES g_StorageBuffers[getBindlessIndex(0)]
+
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0, space0) {
+    uint particleBufferIndex;
+};
+#define PARTICLES (*DescriptorHandle<RWStructuredBuffer<Particle>>(uint2(particleBufferIndex, 0)))
+
 #endif
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] RWStructuredBuffer<Particle> particles;
