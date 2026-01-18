@@ -1,5 +1,21 @@
 # Debugging Tips
 
+## Metal Backend Issues
+
+### Shader Compiles but Uniforms Don't Update (Static Animation)
+
+If using `set_push_constants()` with a Metal shader that uses `ParameterBlock`:
+
+1. **Check pipeline has ParameterBlock layouts**: The Metal backend needs reflection data to populate the argument buffer. Enable debug logging:
+   ```bash
+   RUST_LOG=goldy::backend::metal=trace cargo run --example myexample
+   ```
+   Look for: `"Allocated bindless argument buffer"` and `"SetPushConstants: Wrote GPU address"`.
+
+2. **Verify argument buffer binding**: Check logs for `"SetPushConstants: Bound ParameterBlock argument buffer at slot X"`. If missing, the buffer isn't being bound to the shader.
+
+3. **Ensure buffer is heap-allocated**: Bindless buffers must be allocated from the Metal heap. Check for `"Encoded buffer N at arg buffer offset"` during buffer creation.
+
 ## Vulkan Backend Issues
 
 ### Shader Not Working (Static Output, No Animation)

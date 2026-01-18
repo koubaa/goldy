@@ -5,9 +5,9 @@
 //
 // This shader demonstrates cross-platform bindless resource access:
 //
-// - DX12 (__HLSL__): Root constants + ResourceDescriptorHeap
-// - Vulkan (__SPIRV__): Push constants + global descriptor arrays (binding 1 = uniforms)
-// - Metal: ParameterBlock for argument buffer
+// - Metal (__BINDLESS__ + __METAL__): ParameterBlock for argument buffer
+// - Vulkan (__BINDLESS__ + __SPIRV__): Push constants + global descriptor arrays (binding 1 = uniforms)
+// - DX12 (__BINDLESS__ + __HLSL__): Root constants + ResourceDescriptorHeap
 // - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 import goldy_exp;
@@ -19,8 +19,16 @@ struct TimeUniforms {
 
 #ifdef __BINDLESS__
 
-// NOTE: Check __SPIRV__ FIRST because Slang auto-defines __HLSL__ for all targets
-#if defined(__SPIRV__)
+// NOTE: Check __METAL__ FIRST, then __SPIRV__, because Slang auto-defines __HLSL__ for all targets
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
+struct TunnelResources {
+    ConstantBuffer<TimeUniforms> uniforms;
+};
+ParameterBlock<TunnelResources> gResources;
+#define TIME gResources.uniforms.time
+
+#elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
 // Must match backend layout: binding 1 = uniform buffers array
 import goldy_exp.bindless_indices;
@@ -36,13 +44,6 @@ cbuffer BindlessIndices : register(b0) {
 };
 #define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
 
-#else
-// Metal: Use ParameterBlock for argument buffer
-struct TunnelResources {
-    ConstantBuffer<TimeUniforms> uniforms;
-};
-ParameterBlock<TunnelResources> gResources;
-#define TIME gResources.uniforms.time
 #endif
 
 #else
