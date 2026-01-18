@@ -31,8 +31,19 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-// Bindless resource indices passed via root/push constants
-#ifdef __SPIRV__
+// Bindless resource access - cross-platform
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer support
+struct TexturedQuadResources {
+    Texture2D<float4> texture;
+    SamplerState sampler;
+};
+ParameterBlock<TexturedQuadResources> gResources;
+#define GET_TEXTURE() gResources.texture
+#define GET_SAMPLER() gResources.sampler
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
 [[vk::push_constant]]
 cbuffer BindlessIndices {
     uint g_TextureIndex;
@@ -46,6 +57,7 @@ cbuffer BindlessIndices {
 
 #define GET_TEXTURE() g_Textures[g_TextureIndex]
 #define GET_SAMPLER() g_Samplers[g_SamplerIndex]
+
 #else
 // DX12: root constants + DescriptorHandle (Slang lowers to ResourceDescriptorHeap)
 cbuffer BindlessIndices : register(b0, space0) {
