@@ -104,7 +104,7 @@ impl<'a> RenderPass<'a> {
     ///
     /// The `index` corresponds to the bind group set in the shader
     /// (e.g., `[[vk::binding(0, 0)]]` uses index 0).
-    /// 
+    ///
     /// This uses hybrid bindless mode where the API looks traditional but
     /// the backend translates it to bindless internally.
     pub fn set_bind_group(&mut self, index: u32, bind_group: &BindGroup) {
@@ -115,14 +115,14 @@ impl<'a> RenderPass<'a> {
     }
 
     /// Set push constants for fully bindless rendering.
-    /// 
+    ///
     /// Pass the buffers whose bindless indices should be pushed to the shader.
     /// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
     /// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
-    /// 
+    ///
     /// Use this instead of `set_bind_group()` for fully bindless shaders that
     /// access resources via global descriptor arrays.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// pass.set_push_constants(&[&uniform_buffer]);

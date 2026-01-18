@@ -143,7 +143,7 @@ pub unsafe extern "C" fn goldy_encoder_set_push_constants(
     if encoder.is_null() || (buffer_count > 0 && buffers.is_null()) {
         return;
     }
-    
+
     // Convert array of buffer pointers to slice of Buffer references
     let buffer_refs: Vec<&goldy::Buffer> = (0..buffer_count as usize)
         .filter_map(|i| {
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn goldy_encoder_set_push_constants(
             }
         })
         .collect();
-    
+
     let mut pass = (*encoder).inner.begin_render_pass();
     pass.set_push_constants(&buffer_refs);
 }

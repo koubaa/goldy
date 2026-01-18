@@ -1292,10 +1292,22 @@ mod tests {
             .unwrap();
 
         let texture1 = backend
-            .create_texture(device, 256, 256, TextureFormat::Rgba8Unorm, TextureUsage::SAMPLED)
+            .create_texture(
+                device,
+                256,
+                256,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::SAMPLED,
+            )
             .unwrap();
         let texture2 = backend
-            .create_texture(device, 512, 512, TextureFormat::Rgba8Unorm, TextureUsage::SAMPLED)
+            .create_texture(
+                device,
+                512,
+                512,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::SAMPLED,
+            )
             .unwrap();
 
         // Textures should continue from where buffers left off
@@ -1329,7 +1341,13 @@ mod tests {
             .create_buffer(device, 64, BufferUsage::UNIFORM, None)
             .unwrap();
         let texture1 = backend
-            .create_texture(device, 256, 256, TextureFormat::Rgba8Unorm, TextureUsage::SAMPLED)
+            .create_texture(
+                device,
+                256,
+                256,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::SAMPLED,
+            )
             .unwrap();
         let sampler1 = backend
             .create_sampler(device, &SamplerDesc::default())

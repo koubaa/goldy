@@ -3315,7 +3315,12 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer = backend
-            .create_buffer(device, 256, BufferUsage::VERTEX | BufferUsage::COPY_DST, None)
+            .create_buffer(
+                device,
+                256,
+                BufferUsage::VERTEX | BufferUsage::COPY_DST,
+                None,
+            )
             .unwrap();
 
         assert_eq!(backend.buffer_size(buffer), 256);
