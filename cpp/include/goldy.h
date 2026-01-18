@@ -557,6 +557,21 @@ void goldy_encoder_set_index_buffer(struct GoldyCommandEncoder *encoder,
 void goldy_encoder_set_pipeline(struct GoldyCommandEncoder *encoder,
                                 const struct GoldyRenderPipeline *pipeline);
 
+// Set push constants for fully bindless rendering.
+//
+// Pass the buffers whose bindless indices should be pushed to the shader.
+// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
+// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
+//
+// Use this instead of `goldy_encoder_set_bind_group()` for fully bindless shaders
+// that access resources via global descriptor arrays.
+//
+// # Safety
+// All pointers must be valid. The buffers array must contain buffer_count elements.
+void goldy_encoder_set_push_constants(struct GoldyCommandEncoder *encoder,
+                                      const struct GoldyBuffer *const *buffers,
+                                      uint32_t buffer_count);
+
 // Set a vertex buffer.
 //
 // # Safety

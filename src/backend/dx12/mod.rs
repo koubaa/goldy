@@ -1884,6 +1884,30 @@ impl GpuBackend for Dx12Backend {
                         }
                     }
                 }
+                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                    // Fully bindless mode: push raw indices directly (for textures/samplers)
+                    let bindless_enabled = self
+                        .devices
+                        .get(&device_handle)
+                        .map(|d| d.bindless_enabled)
+                        .unwrap_or(false);
+                    
+                    if bindless_enabled {
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, &idx) in raw_indices.iter().enumerate() {
+                            if i >= types::MAX_ROOT_CONSTANT_INDICES { break; }
+                            indices.indices[i] = idx;
+                        }
+                        unsafe {
+                            cmd.SetGraphicsRoot32BitConstants(
+                                0,
+                                types::MAX_ROOT_CONSTANT_INDICES as u32,
+                                indices.indices.as_ptr() as *const _,
+                                0,
+                            );
+                        }
+                    }
+                }
                 RenderCommand::Draw {
                     vertex_count,
                     instance_count,
@@ -2613,6 +2637,30 @@ impl GpuBackend for Dx12Backend {
                         }
                     }
                 }
+                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                    // Fully bindless mode: push raw indices directly (for textures/samplers)
+                    let bindless_enabled = self
+                        .devices
+                        .get(&device_handle)
+                        .map(|d| d.bindless_enabled)
+                        .unwrap_or(false);
+                    
+                    if bindless_enabled {
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, &idx) in raw_indices.iter().enumerate() {
+                            if i >= types::MAX_ROOT_CONSTANT_INDICES { break; }
+                            indices.indices[i] = idx;
+                        }
+                        unsafe {
+                            cmd.SetGraphicsRoot32BitConstants(
+                                0,
+                                types::MAX_ROOT_CONSTANT_INDICES as u32,
+                                indices.indices.as_ptr() as *const _,
+                                0,
+                            );
+                        }
+                    }
+                }
                 RenderCommand::Draw {
                     vertex_count,
                     instance_count,
@@ -3314,6 +3362,10 @@ impl GpuBackend for Dx12Backend {
         self.textures.remove(&texture_handle);
     }
 
+    fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
+        self.textures.get(&texture_handle).and_then(|t| t.bindless_offset)
+    }
+
     fn create_sampler(
         &mut self,
         device_handle: DeviceHandle,
@@ -3375,6 +3427,10 @@ impl GpuBackend for Dx12Backend {
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
         self.samplers.remove(&sampler_handle);
+    }
+
+    fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
+        self.samplers.get(&sampler_handle).and_then(|s| s.bindless_offset)
     }
 
     fn create_compute_pipeline(

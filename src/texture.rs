@@ -154,6 +154,18 @@ impl Texture {
     pub fn handle(&self) -> TextureHandle {
         self.handle
     }
+
+    /// Get the texture's index in the global bindless descriptor set.
+    ///
+    /// Returns `Some(index)` if bindless is enabled and this texture is registered.
+    /// Returns `None` otherwise.
+    ///
+    /// Use this for fully bindless rendering where you pass resource indices
+    /// directly via push constants instead of using bind groups.
+    pub fn bindless_index(&self) -> Option<u32> {
+        let backend = self.backend.lock().unwrap();
+        backend.texture_bindless_index(self.handle)
+    }
 }
 
 impl Drop for Texture {

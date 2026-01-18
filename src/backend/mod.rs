@@ -107,6 +107,11 @@ pub enum RenderCommand {
     SetPushConstants {
         buffers: Vec<BufferHandle>,
     },
+    /// Set push constants with raw u32 indices (fully bindless mode).
+    /// Use this for textures/samplers or when you already have the indices.
+    SetPushConstantsRaw {
+        indices: Vec<u32>,
+    },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -279,11 +284,17 @@ pub trait GpuBackend: Send + Sync {
         height: u32,
     ) -> Result<()>;
     fn destroy_texture(&mut self, texture: TextureHandle);
+    /// Get the texture's index in the global bindless descriptor set.
+    /// Returns None if bindless is not enabled or the texture is not registered.
+    fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
 
     // Sampler management
     fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc)
         -> Result<SamplerHandle>;
     fn destroy_sampler(&mut self, sampler: SamplerHandle);
+    /// Get the sampler's index in the global bindless descriptor set.
+    /// Returns None if bindless is not enabled or the sampler is not registered.
+    fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32>;
 
     // Surface API - zero-copy presentation to window
     /// Create a surface for presenting to a window.

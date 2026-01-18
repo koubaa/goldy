@@ -1270,6 +1270,24 @@ impl GpuBackend for VulkanBackend {
                         }
                     }
                 }
+                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                    // Fully bindless mode: push raw indices directly (for textures/samplers)
+                    if logical_device.bindless_enabled {
+                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
+                            let mut indices = types::BindlessIndices::default();
+                            for (i, &idx) in raw_indices.iter().enumerate() {
+                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                                indices.indices[i] = idx;
+                            }
+                            unsafe {
+                                logical_device.device.cmd_push_constants(
+                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
+                                    bytemuck::bytes_of(&indices),
+                                );
+                            }
+                        }
+                    }
+                }
                 RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                     if let Some(buf_state) = self.buffers.get(buffer) {
                         unsafe {
@@ -2402,6 +2420,24 @@ impl GpuBackend for VulkanBackend {
                         }
                     }
                 }
+                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                    // Fully bindless mode: push raw indices directly (for textures/samplers)
+                    if logical_device.bindless_enabled {
+                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
+                            let mut indices = types::BindlessIndices::default();
+                            for (i, &idx) in raw_indices.iter().enumerate() {
+                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                                indices.indices[i] = idx;
+                            }
+                            unsafe {
+                                logical_device.device.cmd_push_constants(
+                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
+                                    bytemuck::bytes_of(&indices),
+                                );
+                            }
+                        }
+                    }
+                }
                 RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                     if let Some(buf_state) = self.buffers.get(buffer) {
                         unsafe {
@@ -3388,6 +3424,10 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
+    fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
+        self.textures.get(&texture_handle).and_then(|t| t.bindless_index)
+    }
+
     fn create_sampler(&mut self, device_handle: DeviceHandle, desc: &crate::types::SamplerDesc) -> Result<SamplerHandle> {
         let logical_device = self.devices.get(&device_handle)
             .context("Invalid device handle")?;
@@ -3470,6 +3510,10 @@ impl GpuBackend for VulkanBackend {
                 }
             }
         }
+    }
+
+    fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
+        self.samplers.get(&sampler_handle).and_then(|s| s.bindless_index)
     }
 
     fn create_compute_pipeline(

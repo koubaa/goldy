@@ -1854,6 +1854,10 @@ impl GpuBackend for MetalBackend {
         }
     }
 
+    fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
+        self.textures.get(&texture_handle).and_then(|t| t.arg_buffer_index)
+    }
+
     fn create_sampler(
         &mut self,
         device_handle: DeviceHandle,
@@ -1938,6 +1942,10 @@ impl GpuBackend for MetalBackend {
                 device.resource_registry.unregister_sampler(sampler_handle);
             }
         }
+    }
+
+    fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
+        self.samplers.get(&sampler_handle).and_then(|s| s.arg_buffer_index)
     }
 
     fn create_surface(

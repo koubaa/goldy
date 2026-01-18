@@ -749,6 +749,11 @@ impl GpuBackend for MockBackend {
         self.textures.remove(&texture);
     }
 
+    fn texture_bindless_index(&self, _texture: TextureHandle) -> Option<u32> {
+        // Mock backend doesn't support bindless
+        None
+    }
+
     // Sampler management
     fn create_sampler(
         &mut self,
@@ -776,6 +781,11 @@ impl GpuBackend for MockBackend {
 
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         self.samplers.remove(&sampler);
+    }
+
+    fn sampler_bindless_index(&self, _sampler: SamplerHandle) -> Option<u32> {
+        // Mock backend doesn't support bindless
+        None
     }
 
     // Compute pipeline management

@@ -134,6 +134,26 @@ impl<'a> RenderPass<'a> {
         });
     }
 
+    /// Set push constants with raw u32 indices (fully bindless mode).
+    ///
+    /// Use this for textures and samplers, or when you already have the bindless indices.
+    /// The indices are pushed in order to the shader's push/root constants.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let tex_idx = texture.bindless_index().unwrap();
+    /// let samp_idx = sampler.bindless_index().unwrap();
+    /// pass.set_push_constants_raw(&[tex_idx, samp_idx]);
+    /// // In shader: GET_TEXTURE() and GET_SAMPLER() macros use these indices
+    /// ```
+    pub fn set_push_constants_raw(&mut self, indices: &[u32]) {
+        self.encoder
+            .commands
+            .push(RenderCommand::SetPushConstantsRaw {
+                indices: indices.to_vec(),
+            });
+    }
+
     /// Draw primitives.
     pub fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
         self.encoder.commands.push(RenderCommand::Draw {
