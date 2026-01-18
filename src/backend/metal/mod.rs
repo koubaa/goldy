@@ -2868,6 +2868,75 @@ impl GpuBackend for MetalBackend {
                         }
                     }
                 }
+                ComputeCommand::SetPushConstants { buffers } => {
+                    // Check if we should use ParameterBlock-based bindless (for Metal shaders using ParameterBlock)
+                    let use_parameter_block = bindless_enabled
+                        && current_pipeline
+                            .map(|p| !p.parameter_block_layouts.is_empty())
+                            .unwrap_or(false);
+
+                    if use_parameter_block {
+                        // ParameterBlock-based bindless: write GPU addresses to pipeline's argument buffer
+                        if let Some(pipeline) = current_pipeline {
+                            if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                // Write each buffer's GPU address at the corresponding field offset
+                                for (i, buffer_handle) in buffers.iter().enumerate() {
+                                    if let Some(buf) = self.buffers.get(buffer_handle) {
+                                        // Get field offset from reflection (field i corresponds to buffer i)
+                                        if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                            if let Some(field) = pb_layout.fields.get(i) {
+                                                let gpu_addr = buf.buffer.gpu_address();
+                                                unsafe {
+                                                    let ptr = arg_buffer.contents().add(field.offset);
+                                                    *(ptr as *mut u64) = gpu_addr;
+                                                }
+                                                tracing::trace!(
+                                                    "SetPushConstants (compute): Wrote GPU address 0x{:x} at offset {} for field '{}'",
+                                                    gpu_addr,
+                                                    field.offset,
+                                                    field.name
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Bind the argument buffer at the ParameterBlock's slot
+                                if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    encoder.set_buffer(
+                                        pb_layout.binding_slot as u64,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                    tracing::trace!(
+                                        "SetPushConstants (compute): Bound ParameterBlock argument buffer at slot {}",
+                                        pb_layout.binding_slot
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Legacy mode: push buffer indices directly via set_bytes
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, buffer_handle) in buffers.iter().enumerate() {
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                            if let Some(buf) = self.buffers.get(buffer_handle) {
+                                indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
+                            }
+                        }
+                        let indices_bytes: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                &indices as *const _ as *const u8,
+                                std::mem::size_of::<types::BindlessIndices>(),
+                            )
+                        };
+                        encoder.set_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
+                    }
+                }
                 ComputeCommand::Dispatch {
                     workgroups_x,
                     workgroups_y,
