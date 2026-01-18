@@ -585,6 +585,7 @@ impl GpuBackend for MetalBackend {
         device_handle: DeviceHandle,
         size: u64,
         _usage: BufferUsage,
+        _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         let _span = goldy_span!("resource.buffer.create", size = size).entered();
 
@@ -729,6 +730,10 @@ impl GpuBackend for MetalBackend {
             .get(&buffer_handle)
             .map(|b| b.size)
             .unwrap_or(0)
+    }
+
+    fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
+        self.buffers.get(&buffer_handle).and_then(|b| b.arg_buffer_index)
     }
 
     fn create_shader(
@@ -1466,6 +1471,32 @@ impl GpuBackend for MetalBackend {
                             }
                         }
                     }
+                }
+                RenderCommand::SetPushConstants { buffers } => {
+                    // Fully bindless mode: push buffer indices directly
+                    let mut indices = types::BindlessIndices::default();
+                    for (i, buffer_handle) in buffers.iter().enumerate() {
+                        if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                        if let Some(buf) = self.buffers.get(buffer_handle) {
+                            indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
+                        }
+                    }
+                    let indices_bytes: &[u8] = unsafe {
+                        std::slice::from_raw_parts(
+                            &indices as *const _ as *const u8,
+                            std::mem::size_of::<types::BindlessIndices>(),
+                        )
+                    };
+                    encoder.set_vertex_bytes(
+                        types::PUSH_CONSTANTS_SLOT,
+                        indices_bytes.len() as u64,
+                        indices_bytes.as_ptr() as *const _,
+                    );
+                    encoder.set_fragment_bytes(
+                        types::PUSH_CONSTANTS_SLOT,
+                        indices_bytes.len() as u64,
+                        indices_bytes.as_ptr() as *const _,
+                    );
                 }
                 RenderCommand::Draw {
                     vertex_count,
@@ -2264,6 +2295,32 @@ impl GpuBackend for MetalBackend {
                             }
                         }
                     }
+                }
+                RenderCommand::SetPushConstants { buffers } => {
+                    // Fully bindless mode: push buffer indices directly
+                    let mut indices = types::BindlessIndices::default();
+                    for (i, buffer_handle) in buffers.iter().enumerate() {
+                        if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                        if let Some(buf) = self.buffers.get(buffer_handle) {
+                            indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
+                        }
+                    }
+                    let indices_bytes: &[u8] = unsafe {
+                        std::slice::from_raw_parts(
+                            &indices as *const _ as *const u8,
+                            std::mem::size_of::<types::BindlessIndices>(),
+                        )
+                    };
+                    encoder.set_vertex_bytes(
+                        types::PUSH_CONSTANTS_SLOT,
+                        indices_bytes.len() as u64,
+                        indices_bytes.as_ptr() as *const _,
+                    );
+                    encoder.set_fragment_bytes(
+                        types::PUSH_CONSTANTS_SLOT,
+                        indices_bytes.len() as u64,
+                        indices_bytes.as_ptr() as *const _,
+                    );
                 }
                 RenderCommand::Draw {
                     vertex_count,

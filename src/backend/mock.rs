@@ -254,6 +254,7 @@ impl GpuBackend for MockBackend {
         device: DeviceHandle,
         size: u64,
         _usage: BufferUsage,
+        _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -296,6 +297,11 @@ impl GpuBackend for MockBackend {
 
     fn buffer_size(&self, buffer: BufferHandle) -> u64 {
         self.buffers.get(&buffer).map(|b| b.size).unwrap_or(0)
+    }
+
+    fn buffer_bindless_index(&self, _buffer: BufferHandle) -> Option<u32> {
+        // Mock backend doesn't support bindless
+        None
     }
 
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {

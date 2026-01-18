@@ -60,22 +60,46 @@ For image output in examples:
 pip install pillow
 ```
 
+## Backend Selection
+
+Goldy automatically selects the best backend for your platform:
+- **Windows**: DX12 (default)
+- **Linux**: Vulkan
+
+Override with the `GOLDY_BACKEND` environment variable:
+
+```python
+import os
+os.environ["GOLDY_BACKEND"] = "vulkan"  # Must be set before importing goldy
+
+import goldy
+instance = goldy.Instance()  # Will use Vulkan
+```
+
+Or from the command line:
+
+```bash
+GOLDY_BACKEND=vulkan python my_script.py
+```
+
 ## Troubleshooting
 
-### No Vulkan Driver Found
+### No GPU Backend Found
 
-Make sure you have:
-- Updated GPU drivers
-- Vulkan runtime installed (usually comes with GPU drivers)
+**On Windows (DX12 default):**
+- Ensure you have Windows 10/11 with updated GPU drivers
+- DX12 should work out of the box on modern systems
 
-On Linux, you may need:
+**On Linux (Vulkan default):**
 ```bash
 sudo apt install vulkan-tools mesa-vulkan-drivers
 vulkaninfo  # Verify Vulkan works
 ```
 
-### DX12 on Windows
+### Using Vulkan on Windows
 
-DX12 backend is automatically available on Windows 10/11 with compatible GPUs.
+If you want to use Vulkan instead of DX12:
+1. Install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
+2. Set `GOLDY_BACKEND=vulkan` before running
 
 

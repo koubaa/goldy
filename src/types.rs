@@ -182,6 +182,19 @@ pub struct VertexBufferLayout {
     pub attributes: Vec<VertexAttribute>,
 }
 
+impl VertexBufferLayout {
+    /// Create an empty vertex layout.
+    ///
+    /// Use this when the shader doesn't read from vertex buffers
+    /// (e.g., when using only `SV_VertexID` and storage buffers).
+    pub fn empty() -> Self {
+        Self {
+            stride: 0,
+            attributes: Vec::new(),
+        }
+    }
+}
+
 /// Primitive topology for drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PrimitiveTopology {

@@ -134,20 +134,56 @@ The backend maps these to native handles internally.
 
 ## Backend Selection
 
-Backend selection based on platform:
+### Default Selection
+
+By default, Goldy selects the platform-preferred backend:
+
+| Platform | Default Backend |
+|----------|-----------------|
+| Windows  | DX12            |
+| Linux    | Vulkan          |
+| macOS    | Metal (planned) |
+
+### Runtime Override
+
+You can override the backend at runtime using the `GOLDY_BACKEND` environment variable:
+
+```bash
+# Use Vulkan on Windows (instead of DX12)
+GOLDY_BACKEND=vulkan cargo run --example triangle
+
+# Use DX12 explicitly
+GOLDY_BACKEND=dx12 cargo run --example triangle
+
+# Valid values: vulkan (or vk), dx12 (or d3d12), metal (or mtl)
+```
+
+This is useful for:
+- Testing your app on different backends
+- Working around driver bugs
+- Debugging backend-specific issues
+
+### Compile-Time Selection
+
+You can also select backends at compile time using Cargo features:
+
+```bash
+# Build with only Vulkan backend (disables DX12 on Windows)
+cargo build --no-default-features --features vulkan
+
+# Build with only DX12 backend
+cargo build --no-default-features --features dx12
+```
+
+### Programmatic Selection
+
+The backend can be queried at runtime:
 
 ```rust
-impl Instance {
-    pub fn new() -> Result<Self> {
-        #[cfg(windows)]
-        let backend = Dx12Backend::new()?;  // DX12 on Windows
-        
-        #[cfg(not(windows))]
-        let backend = VulkanBackend::new()?; // Vulkan elsewhere
-        
-        Ok(Self { backend: Box::new(backend) })
-    }
-}
+let instance = Instance::new()?;
+println!("Backend: {:?}", instance.backend_type());
+// Prints: Backend: Dx12  (on Windows)
+// Prints: Backend: Vulkan  (on Linux)
 ```
 
 ## Adding a New Backend

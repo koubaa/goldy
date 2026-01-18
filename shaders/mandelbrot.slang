@@ -3,10 +3,12 @@
 //
 // ## Bindless Support
 //
-// When __BINDLESS__ is defined:
-// - Vulkan: Push constants + descriptor arrays
-// - DX12: Root constants + ResourceDescriptorHeap (SM 6.6)
-// - Metal: ParameterBlock for argument buffer support
+// This shader demonstrates cross-platform bindless resource access:
+//
+// - Metal (__BINDLESS__ + __METAL__): Uses ParameterBlock for argument buffers
+// - Vulkan (__BINDLESS__ + __SPIRV__): Uses push constants + descriptor arrays
+// - DX12 (__BINDLESS__ + __HLSL__): Uses root constants + ResourceDescriptorHeap
+// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 import goldy_exp;
 
@@ -18,21 +20,33 @@ struct ViewUniforms {
 };
 
 #ifdef __BINDLESS__
-// Bindless mode: Use ByteAddressBuffer.Handle for raw buffer access 
-// ByteAddressBuffer works reliably with ResourceDescriptorHeap on DX12
-[[vk::push_constant]]
-uniform ByteAddressBuffer.Handle uniformsHandle : register(b0, space0);
 
-float2 getCenter() {
-    return asfloat(uniformsHandle.Load2(0));
-}
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer support
+struct MandelbrotResources {
+    ConstantBuffer<ViewUniforms> uniforms;
+};
+ParameterBlock<MandelbrotResources> gResources;
+#define CENTER gResources.uniforms.center
+#define ZOOM gResources.uniforms.zoom
 
-float getZoom() {
-    return asfloat(uniformsHandle.Load(8));
-}
+#elif defined(__SPIRV__)
+// Vulkan: Use push constants for indices + descriptor array
+import goldy_exp.bindless_indices;
 
-#define CENTER getCenter()
-#define ZOOM getZoom()
+// Global descriptor array of uniform buffers
+[[vk::binding(1, 0)]] ConstantBuffer<ViewUniforms> g_UniformBuffers[];
+#define CENTER g_UniformBuffers[BINDLESS_INDEX(0)].center
+#define ZOOM g_UniformBuffers[BINDLESS_INDEX(0)].zoom
+
+#else
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0) {
+    uint uniformsIndex;
+};
+#define CENTER (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).center
+#define ZOOM (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).zoom
+#endif
 
 #else
 // Traditional binding mode

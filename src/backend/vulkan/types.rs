@@ -180,6 +180,8 @@ pub(crate) struct PipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
+    /// Whether this pipeline owns its layout (false when using bindless_pipeline_layout)
+    pub owns_layout: bool,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
@@ -190,6 +192,8 @@ pub(crate) struct ComputePipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
+    /// Whether this pipeline owns its layout (false when using bindless_pipeline_layout)
+    pub owns_layout: bool,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,

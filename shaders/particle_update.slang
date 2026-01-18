@@ -7,9 +7,18 @@ struct Particle {
 };
 
 #ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
-// The host must fill the argument buffer with GPU addresses at the correct offsets
+#ifdef __DX12__
+// DX12 bindless: Use Slang's DescriptorHandle which lowers to ResourceDescriptorHeap[idx]
+// Root constants provide the descriptor index at b0
+cbuffer BindlessIndices : register(b0, space0) {
+    uint particleBufferIndex;
+};
 
+// Access via DescriptorHandle - Slang will lower to ResourceDescriptorHeap[idx] for DXIL
+// Dereference with * operator to get the buffer
+#define PARTICLES (*DescriptorHandle<RWStructuredBuffer<Particle>>(uint2(particleBufferIndex, 0)))
+#else
+// Metal/Vulkan bindless: Use ParameterBlock for argument buffer support
 struct ComputeResources {
     RWStructuredBuffer<Particle> particles;
 };
@@ -17,6 +26,7 @@ struct ComputeResources {
 ParameterBlock<ComputeResources> gResources;
 
 #define PARTICLES gResources.particles
+#endif
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] RWStructuredBuffer<Particle> particles;

@@ -8,3 +8,5 @@ cargo clippy --no-default-features -- -D warnings
 cargo clippy --features vulkan -- -D warnings
 cargo test
 ```
+
+For debugging tips, see DEBUGGING.md

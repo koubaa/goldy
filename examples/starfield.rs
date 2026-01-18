@@ -1,12 +1,16 @@
 //! Starfield example - classic 3D starfield flying through space.
 //!
-//! Demonstrates particle-like rendering with depth simulation using Surface API.
+//! Demonstrates GPU compute + graphics integration using Surface API.
+//! The compute shader updates star positions, the graphics shader renders them.
 //!
 //! Run with: cargo run --example starfield
 
+use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
+    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
+    BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
+    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
+    ShaderStages, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -17,58 +21,35 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const NUM_STARS: usize = 500;
+const NUM_STARS: u32 = 500;
 
+/// Star types for different celestial objects
+const STAR_TYPE_NORMAL: f32 = 0.0;
+const STAR_TYPE_GALAXY: f32 = 1.0;
+const STAR_TYPE_QUASAR: f32 = 2.0;
+const STAR_TYPE_WHITE_DWARF: f32 = 3.0;
+
+/// Star structure matching the shader layout
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Star {
     x: f32,
     y: f32,
     z: f32,
+    star_type: f32, // 0=normal, 1=galaxy, 2=quasar, 3=white dwarf
 }
 
-impl Star {
-    fn new() -> Self {
-        Self {
-            x: (rand_f32() - 0.5) * 2.0,
-            y: (rand_f32() - 0.5) * 2.0,
-            z: rand_f32(),
-        }
-    }
-
-    fn update(&mut self, speed: f32) {
-        self.z -= speed;
-        if self.z <= 0.0 {
-            self.x = (rand_f32() - 0.5) * 2.0;
-            self.y = (rand_f32() - 0.5) * 2.0;
-            self.z = 1.0;
-        }
-    }
-
-    fn to_vertex(&self) -> [Vertex2D; 6] {
-        let size = 0.02 * (1.0 - self.z); // Bigger when closer
-        let brightness = 1.0 - self.z;
-        let color = Color {
-            r: brightness,
-            g: brightness,
-            b: brightness,
-            a: 1.0,
-        };
-
-        let x = self.x / self.z;
-        let y = self.y / self.z;
-
-        // Quad for the star
-        [
-            Vertex2D::new(x - size, y - size, color),
-            Vertex2D::new(x + size, y - size, color),
-            Vertex2D::new(x + size, y + size, color),
-            Vertex2D::new(x - size, y - size, color),
-            Vertex2D::new(x + size, y + size, color),
-            Vertex2D::new(x - size, y + size, color),
-        ]
-    }
+/// Uniform parameters for the compute shader
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct StarfieldParams {
+    speed: f32,
+    frame: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
-// Simple pseudo-random
+// Simple pseudo-random for initialization
 static mut SEED: u32 = 12345;
 fn rand_f32() -> f32 {
     unsafe {
@@ -77,163 +58,285 @@ fn rand_f32() -> f32 {
     }
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
+fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_env_filter("info").init();
+    println!("Goldy Starfield Example (GPU Compute)");
+    println!("  Up/Down - Change speed");
+    println!("  Escape - Exit");
 
-struct App {
-    instance: Instance,
-    device: Option<Arc<goldy::Device>>,
-    pipeline: Option<RenderPipeline>,
-    shader: Option<ShaderModule>,
-    window: Option<Arc<Window>>,
-    surface: Option<Surface>,
-    stars: Vec<Star>,
-    speed: f32,
-    vertex_buffers: Vec<Buffer>,
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = App::default();
+    event_loop.run_app(&mut app)?;
+
+    Ok(())
 }
 
-impl App {
-    fn new() -> anyhow::Result<Self> {
-        let stars: Vec<Star> = (0..NUM_STARS).map(|_| Star::new()).collect();
-        Ok(Self {
-            instance: Instance::new()?,
-            device: None,
-            pipeline: None,
-            shader: None,
-            window: None,
-            surface: None,
-            stars,
-            speed: 0.01,
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
-        })
-    }
+#[derive(Default)]
+struct App {
+    state: Option<RenderState>,
+}
 
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+struct RenderState {
+    window: Arc<Window>,
+    device: Arc<goldy::Device>,
+    surface: Surface,
+    // Compute resources
+    compute_pipeline: ComputePipeline,
+    #[allow(dead_code)] // Kept alive for bind group reference
+    star_buffer: Buffer,
+    params_buffer: Buffer,
+    compute_bind_group: BindGroup,
+    // Graphics resources
+    render_pipeline: RenderPipeline,
+    render_bind_group: BindGroup,
+    // State
+    speed: f32,
+    frame_count: f32,
+}
+
+impl RenderState {
+    fn new(window: Arc<Window>) -> Result<Self> {
+        let instance = Instance::new()?;
+        let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(
+
+        // Compute shader for star movement
+        let compute_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
+
+        // Render shader for visualization
+        let render_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
+
+        // Create star buffer with initial random positions and types
+        // Start with z close to 1.0 so stars are immediately visible (small projection)
+        let mut stars = Vec::with_capacity(NUM_STARS as usize);
+        for _ in 0..NUM_STARS {
+            // Assign star types with different probabilities:
+            // 70% normal stars, 15% galaxies, 5% quasars, 10% white dwarfs
+            let type_roll = rand_f32();
+            let star_type = if type_roll < 0.70 {
+                STAR_TYPE_NORMAL
+            } else if type_roll < 0.85 {
+                STAR_TYPE_GALAXY
+            } else if type_roll < 0.90 {
+                STAR_TYPE_QUASAR
+            } else {
+                STAR_TYPE_WHITE_DWARF
+            };
+
+            stars.push(Star {
+                x: (rand_f32() - 0.5) * 0.8, // Smaller spread so projection stays on screen
+                y: (rand_f32() - 0.5) * 0.8,
+                z: 0.5 + rand_f32() * 0.5, // z from 0.5 to 1.0 (closer to 1.0 = smaller projection)
+                star_type,
+            });
+        }
+
+        let star_buffer =
+            Buffer::with_data(&device, &stars, BufferUsage::STORAGE | BufferUsage::VERTEX)?;
+
+        // Create params buffer
+        let initial_params = StarfieldParams {
+            speed: 0.01, // Per-frame speed, same as original CPU version
+            frame: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+        let params_buffer = Buffer::with_data(&device, &[initial_params], BufferUsage::UNIFORM)?;
+
+        // Compute bind group layout (stars RW, params uniform)
+        let compute_bind_layout = BindGroupLayout::new(
             &device,
-            &shader,
-            &shader,
+            &[
+                BindGroupLayoutBinding {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageBuffer { read_only: false },
+                },
+                BindGroupLayoutBinding {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::UniformBuffer,
+                },
+            ],
+        )?;
+
+        let compute_bind_group = BindGroup::new(
+            &device,
+            &compute_bind_layout,
+            &[
+                BufferBinding::new(0, &star_buffer),
+                BufferBinding::new(1, &params_buffer),
+            ],
+        )?;
+
+        let compute_pipeline = ComputePipeline::new(
+            &device,
+            &compute_shader,
+            &ComputePipelineDesc {
+                bind_group_layouts: &[&compute_bind_layout],
+            },
+        )?;
+
+        // Render bind group layout (stars read-only for vertex shader)
+        let render_bind_layout = BindGroupLayout::new(
+            &device,
+            &[BindGroupLayoutBinding {
+                binding: 0,
+                visibility: ShaderStages::VERTEX,
+                ty: BindingType::StorageBuffer { read_only: true },
+            }],
+        )?;
+
+        let render_bind_group = BindGroup::new(
+            &device,
+            &render_bind_layout,
+            &[BufferBinding::new(0, &star_buffer)],
+        )?;
+
+        let render_pipeline = RenderPipeline::new(
+            &device,
+            &render_shader,
+            &render_shader,
             &RenderPipelineDesc {
-                vertex_layout: Vertex2D::layout(),
-                target_format: surface.format(),
+                vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::TriangleList,
+                target_format: surface.format(),
+                bind_group_layouts: &[&render_bind_layout],
                 ..Default::default()
             },
         )?;
-        self.device = Some(device);
-        self.shader = Some(shader);
-        self.pipeline = Some(pipeline);
-        self.surface = Some(surface);
-        Ok(())
+
+        println!("Created GPU starfield with {} stars", NUM_STARS);
+
+        Ok(Self {
+            window,
+            device,
+            surface,
+            compute_pipeline,
+            star_buffer,
+            params_buffer,
+            compute_bind_group,
+            render_pipeline,
+            render_bind_group,
+            speed: 0.01,
+            frame_count: 0.0,
+        })
     }
 
-    fn render_frame(&mut self) -> anyhow::Result<()> {
-        let window = self.window.as_ref().unwrap();
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
+    fn render(&mut self) -> Result<()> {
+        self.frame_count += 1.0;
 
-        // Update stars
-        for star in &mut self.stars {
-            star.update(self.speed);
-        }
+        // Update params buffer with current speed and frame
+        let params = StarfieldParams {
+            speed: self.speed,
+            frame: self.frame_count,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+        self.params_buffer.write_data(0, &[params])?;
 
-        // Generate vertices
-        let mut vertices: Vec<Vertex2D> = Vec::with_capacity(NUM_STARS * 6);
-        for star in &self.stars {
-            vertices.extend_from_slice(&star.to_vertex());
+        // Run compute pass to update stars
+        let mut compute_encoder = ComputeEncoder::new();
+        {
+            let mut pass = compute_encoder.begin_compute_pass();
+            pass.set_pipeline(&self.compute_pipeline);
+            pass.set_bind_group(0, &self.compute_bind_group);
+            let workgroups = (NUM_STARS + 63) / 64;
+            pass.dispatch(workgroups, 1, 1);
         }
+        compute_encoder.dispatch(&self.device)?;
 
-        let device = self.device.as_ref().unwrap();
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
-
-        let frame = surface.acquire()?;
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
+        // Render stars
+        let frame = self.surface.acquire()?;
 
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.draw(0..vertices.len() as u32, 0..1);
+            pass.set_pipeline(&self.render_pipeline);
+            pass.set_bind_group(0, &self.render_bind_group);
+            // Draw 6 vertices (quad) per star instance
+            pass.draw(0..6, 0..NUM_STARS);
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
-        self.vertex_buffers.push(vertex_buffer);
+        self.surface.present(frame)?;
+
+        self.window.request_redraw();
         Ok(())
     }
 
-    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
-            }
+    fn change_speed(&mut self, delta: f32) {
+        self.speed = (self.speed + delta).clamp(0.001, 0.1);
+        if let Some(w) = Some(&self.window) {
+            w.set_title(&format!(
+                "Goldy - Starfield (GPU Compute, speed: {:.1})",
+                self.speed
+            ));
         }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        if self.state.is_none() {
             let window = Arc::new(
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Starfield (Surface API, Up/Down to change speed)")
+                            .with_title("Goldy - Starfield (GPU Compute)")
                             .with_inner_size(winit::dpi::LogicalSize::new(1024, 768)),
                     )
-                    .unwrap(),
+                    .expect("Failed to create window"),
             );
-            self.window = Some(window.clone());
-            self.init_gpu(&window).unwrap();
-            window.request_redraw();
+
+            match RenderState::new(window.clone()) {
+                Ok(state) => {
+                    self.state = Some(state);
+                    window.request_redraw();
+                }
+                Err(e) => {
+                    eprintln!("Failed to create render state: {}", e);
+                    event_loop.exit();
+                }
+            }
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                match event.logical_key {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    Key::Named(NamedKey::ArrowUp) => self.speed = (self.speed + 0.005).min(0.1),
-                    Key::Named(NamedKey::ArrowDown) => self.speed = (self.speed - 0.005).max(0.001),
-                    _ => {}
+                if let Some(state) = &mut self.state {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Escape) => event_loop.exit(),
+                        Key::Named(NamedKey::ArrowUp) => state.change_speed(0.005),
+                        Key::Named(NamedKey::ArrowDown) => state.change_speed(-0.005),
+                        _ => {}
+                    }
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(state) = &mut self.state {
+                    if size.width > 0 && size.height > 0 {
+                        state.surface.resize(size.width, size.height).ok();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
-                }
-                self.window.as_ref().unwrap().request_redraw();
-            }
-            WindowEvent::Resized(new_size) => {
-                self.handle_resize(new_size);
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                if let Some(state) = &mut self.state {
+                    if let Err(e) = state.render() {
+                        eprintln!("Render error: {}", e);
+                    }
                 }
             }
             _ => {}
         }
     }
-}
-
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Starfield Example");
-    println!("  Up/Down - Change speed");
-    println!("  Escape - Exit");
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new()?)?;
-    Ok(())
 }

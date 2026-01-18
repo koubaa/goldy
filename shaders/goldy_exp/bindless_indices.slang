@@ -23,28 +23,31 @@
 //   float4 color = g_Textures[BINDLESS_INDEX(1)].Sample(g_Samplers[BINDLESS_INDEX(2)], uv);
 //   #endif
 
-implementing goldy_exp;
-
-#ifdef __BINDLESS__
+// This module is imported directly, not __included into goldy_exp
+// NOTE: No #ifdef __BINDLESS__ guard here - this module is ONLY imported when bindless is used
+// and preprocessor defines don't propagate to imported modules.
+module bindless_indices;
 
 // Maximum number of indices passed via push/root constants
 static const uint MAX_BINDLESS_INDICES = 16;
 
 #ifdef __SPIRV__
 // Vulkan: Use push constants
-[[vk::push_constant]]
-cbuffer BindlessIndices {
-    uint g_BindlessIndices[MAX_BINDLESS_INDICES];
+// Note: Must use struct + [[vk::push_constant]] ConstantBuffer syntax, NOT cbuffer
+struct BindlessIndicesBlock {
+    uint indices[MAX_BINDLESS_INDICES];
 };
+[[vk::push_constant]] ConstantBuffer<BindlessIndicesBlock> g_BindlessIndicesPC;
+#define g_BindlessIndices g_BindlessIndicesPC.indices
 #else
-// DX12: Use root constants at b0
+// DX12/HLSL: Use root constants at b0
 cbuffer BindlessIndices : register(b0, space0) {
     uint g_BindlessIndices[MAX_BINDLESS_INDICES];
 };
 #endif
 
 // Get bindless index at the specified slot
-uint getBindlessIndex(uint slot) {
+public uint getBindlessIndex(uint slot) {
     return g_BindlessIndices[slot];
 }
 
@@ -59,4 +62,3 @@ uint getBindlessIndex(uint slot) {
 #define BINDLESS_SAMPLER(slot) SamplerDescriptorHeap[BINDLESS_INDEX(slot)]
 #endif
 
-#endif // __BINDLESS__

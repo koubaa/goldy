@@ -152,7 +152,7 @@ impl RenderState {
             &render_shader,
             &render_shader,
             &RenderPipelineDesc {
-                vertex_layout: VertexBufferLayout::default(), // Not used, we read from storage buffer
+                vertex_layout: VertexBufferLayout::empty(), // Shader uses SV_VertexID, not vertex attributes
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
                 bind_group_layouts: &[&render_bind_layout],

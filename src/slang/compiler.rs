@@ -213,10 +213,15 @@ impl SlangCompiler {
         self.compile_with_entry_points(source, target, &entry_points)
     }
 
-    /// Compile for bindless rendering (adds __BINDLESS__ preprocessor define).
+    /// Compile for bindless rendering (adds __BINDLESS__ and target-specific defines).
     ///
     /// This is used by backends that support bindless resource access.
     /// Shaders can check for `#ifdef __BINDLESS__` to use bindless patterns.
+    ///
+    /// Target-specific defines are also added since Slang doesn't provide them automatically:
+    /// - SPIR-V (Vulkan): `__SPIRV__`
+    /// - HLSL/DXIL (DX12): `__HLSL__`  
+    /// - Metal: `__METAL__`
     pub fn compile_bindless(
         &self,
         source: &str,
@@ -224,19 +229,16 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
     ) -> Result<CompiledShader> {
-        self.compile_with_defines(
-            source,
-            target,
-            entry_points,
-            search_paths,
-            &[("__BINDLESS__", "1")],
-        )
+        let defines = Self::bindless_defines_for_target(target);
+        self.compile_with_defines(source, target, entry_points, search_paths, &defines)
     }
 
     /// Compile for bindless rendering with reflection data.
     ///
     /// Returns both the compiled shader and reflection information about
     /// ParameterBlocks, which is needed to properly set up argument buffers.
+    ///
+    /// See [`compile_bindless`] for details on defines.
     pub fn compile_bindless_with_reflection(
         &self,
         source: &str,
@@ -244,13 +246,21 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
     ) -> Result<CompiledShaderWithReflection> {
-        self.compile_with_reflection(
-            source,
-            target,
-            entry_points,
-            search_paths,
-            &[("__BINDLESS__", "1")],
-        )
+        let defines = Self::bindless_defines_for_target(target);
+        self.compile_with_reflection(source, target, entry_points, search_paths, &defines)
+    }
+
+    /// Get preprocessor defines for bindless compilation on a given target.
+    fn bindless_defines_for_target(target: ShaderTarget) -> Vec<(&'static str, &'static str)> {
+        let mut defines = vec![("__BINDLESS__", "1")];
+        match target {
+            ShaderTarget::Spirv => defines.push(("__SPIRV__", "1")),
+            ShaderTarget::Dxil | ShaderTarget::Hlsl => defines.push(("__HLSL__", "1")),
+            ShaderTarget::Metal => defines.push(("__METAL__", "1")),
+            ShaderTarget::Wgsl => defines.push(("__WGSL__", "1")),
+            ShaderTarget::Glsl => defines.push(("__GLSL__", "1")),
+        }
+        defines
     }
 
     /// Compile with reflection data.

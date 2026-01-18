@@ -33,14 +33,19 @@ pub struct BindlessIndices {
     pub indices: [u32; MAX_ROOT_CONSTANT_INDICES],
 }
 
-/// Registry for tracking bindless resource descriptor heap offsets
+/// Registry for tracking bindless resource descriptor heap offsets.
+/// 
+/// IMPORTANT: All CBV, SRV, and UAV descriptors share the same heap (cbv_srv_uav_heap),
+/// so we use a unified offset counter to avoid collisions.
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    next_cbv_offset: u32,
-    next_srv_offset: u32,
-    next_uav_offset: u32,
+    /// Unified offset counter for CBV/SRV/UAV heap (they all share the same heap!)
+    next_cbv_srv_uav_offset: u32,
     next_sampler_offset: u32,
+    /// Maps buffer handle to its primary descriptor offset
     pub buffer_offsets: HashMap<BufferHandle, u32>,
+    /// Maps buffer handle to its secondary SRV offset (for storage buffers that need read access)
+    pub buffer_srv_offsets: HashMap<BufferHandle, u32>,
     pub texture_offsets: HashMap<TextureHandle, u32>,
     pub sampler_offsets: HashMap<SamplerHandle, u32>,
 }
@@ -48,41 +53,42 @@ pub(crate) struct ResourceRegistry {
 impl ResourceRegistry {
     pub fn new() -> Self {
         Self {
-            // Partition the CBV/SRV/UAV heap into sections
-            next_cbv_offset: 0,    // CBVs start at 0
-            next_srv_offset: 4096, // SRVs start at 4096
-            next_uav_offset: 8192, // UAVs start at 8192
+            // All CBV/SRV/UAV descriptors use a single unified counter
+            // to avoid descriptor heap collisions
+            next_cbv_srv_uav_offset: 0,
             next_sampler_offset: 0,
             buffer_offsets: HashMap::new(),
+            buffer_srv_offsets: HashMap::new(),
             texture_offsets: HashMap::new(),
             sampler_offsets: HashMap::new(),
         }
     }
 
     pub fn register_buffer_cbv(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.next_cbv_offset;
-        self.next_cbv_offset += 1;
+        let offset = self.next_cbv_srv_uav_offset;
+        self.next_cbv_srv_uav_offset += 1;
         self.buffer_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_buffer_srv(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.next_srv_offset;
-        self.next_srv_offset += 1;
-        self.buffer_offsets.insert(handle, offset);
+        let offset = self.next_cbv_srv_uav_offset;
+        self.next_cbv_srv_uav_offset += 1;
+        // Store in secondary map since buffer may already have a UAV offset
+        self.buffer_srv_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_buffer_uav(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.next_uav_offset;
-        self.next_uav_offset += 1;
+        let offset = self.next_cbv_srv_uav_offset;
+        self.next_cbv_srv_uav_offset += 1;
         self.buffer_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
-        let offset = self.next_srv_offset;
-        self.next_srv_offset += 1;
+        let offset = self.next_cbv_srv_uav_offset;
+        self.next_cbv_srv_uav_offset += 1;
         self.texture_offsets.insert(handle, offset);
         offset
     }
@@ -94,8 +100,14 @@ impl ResourceRegistry {
         offset
     }
 
+    /// Get the SRV offset for a buffer (for read-only access to storage buffers)
+    pub fn get_buffer_srv_offset(&self, handle: BufferHandle) -> Option<u32> {
+        self.buffer_srv_offsets.get(&handle).copied()
+    }
+
     pub fn unregister_buffer(&mut self, handle: BufferHandle) {
         self.buffer_offsets.remove(&handle);
+        self.buffer_srv_offsets.remove(&handle);
     }
 
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
@@ -144,10 +156,14 @@ pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub resource: Direct3D12::ID3D12Resource,
     pub size: u64,
-    /// Descriptor heap offset for bindless access (if bindless enabled)
+    /// Primary descriptor heap offset for bindless access (UAV for storage, CBV for uniform)
     pub bindless_offset: Option<u32>,
+    /// Secondary SRV descriptor offset for storage buffers (for read-only graphics access)
+    pub bindless_srv_offset: Option<u32>,
     /// Whether this is a storage buffer (uses UAV instead of CBV/SRV)
     pub is_storage: bool,
+    /// Upload buffer for DEFAULT heap resources (needed for CPU writes)
+    pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
 }
 
 /// Shader module state with cached compiled bytecode.

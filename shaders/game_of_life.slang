@@ -3,16 +3,31 @@
 //
 // ## Bindless Support
 //
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Buffers are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
+// This shader demonstrates cross-platform bindless resource access for compute:
+//
+// - Metal (__BINDLESS__ + !__DX12__): Uses ParameterBlock for argument buffers
+// - Vulkan (__BINDLESS__ + !__DX12__): Uses ParameterBlock (same as Metal)
+// - DX12 (__BINDLESS__ + __DX12__): Uses DescriptorHandle + ResourceDescriptorHeap
+// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 // Grid dimensions (must match the example)
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
 #ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
+#ifdef __DX12__
+// DX12 bindless: Use Slang's DescriptorHandle which lowers to ResourceDescriptorHeap[idx]
+// Root constants provide the descriptor indices at b0
+cbuffer BindlessIndices : register(b0, space0) {
+    uint currentStateIndex;
+    uint nextStateIndex;
+};
+
+// Access via DescriptorHandle - Slang will lower to ResourceDescriptorHeap[idx] for DXIL
+#define CURRENT_STATE (*DescriptorHandle<StructuredBuffer<uint>>(uint2(currentStateIndex, 0)))
+#define NEXT_STATE (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(nextStateIndex, 0)))
+#else
+// Metal/Vulkan bindless: Use ParameterBlock for argument buffer support
 struct GameOfLifeResources {
     StructuredBuffer<uint> currentState;
     RWStructuredBuffer<uint> nextState;
@@ -20,6 +35,7 @@ struct GameOfLifeResources {
 ParameterBlock<GameOfLifeResources> gResources;
 #define CURRENT_STATE gResources.currentState
 #define NEXT_STATE gResources.nextState
+#endif
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<uint> currentState;

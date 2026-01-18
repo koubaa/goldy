@@ -20,6 +20,7 @@ use winit::{
 };
 
 // Simple shader that samples a texture
+// Uses Slang's DescriptorHandle for cross-platform bindless access
 const TEXTURED_SHADER: &str = r#"
 struct VertexInput {
     float2 position : POSITION;
@@ -31,8 +32,31 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-[[vk::binding(0, 0)]] Texture2D<float4> textureSampler;
-[[vk::binding(1, 0)]] SamplerState samplerState;
+// Bindless resource indices passed via root/push constants
+#ifdef __SPIRV__
+[[vk::push_constant]]
+cbuffer BindlessIndices {
+    uint g_TextureIndex;
+    uint g_SamplerIndex;
+};
+
+// Vulkan: unbounded descriptor arrays
+[[vk::binding(0, 0)]] Texture2D<float4> g_Textures[];
+[[vk::binding(1, 0)]] SamplerState g_Samplers[];
+
+#define GET_TEXTURE() g_Textures[g_TextureIndex]
+#define GET_SAMPLER() g_Samplers[g_SamplerIndex]
+#else
+// DX12: root constants + DescriptorHandle (Slang lowers to ResourceDescriptorHeap)
+cbuffer BindlessIndices : register(b0, space0) {
+    uint g_TextureIndex;
+    uint g_SamplerIndex;
+};
+
+// Slang's DescriptorHandle<T> compiles to ResourceDescriptorHeap[index]/SamplerDescriptorHeap[index]
+#define GET_TEXTURE() (*DescriptorHandle<Texture2D<float4>>(uint2(g_TextureIndex, 0)))
+#define GET_SAMPLER() (*DescriptorHandle<SamplerState>(uint2(g_SamplerIndex, 0)))
+#endif
 
 [shader("vertex")]
 VertexOutput vs_main(VertexInput input) {
@@ -44,7 +68,7 @@ VertexOutput vs_main(VertexInput input) {
 
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
-    return textureSampler.Sample(samplerState, input.uv);
+    return GET_TEXTURE().Sample(GET_SAMPLER(), input.uv);
 }
 "#;
 
@@ -69,30 +93,30 @@ fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> 
     data
 }
 
-// Fullscreen quad vertices (already defined in goldy::types but we define here for clarity)
+// Fullscreen quad vertices
 const QUAD_VERTICES: [Vertex2DUv; 6] = [
     Vertex2DUv {
-        position: [-0.8, -0.8],
+        position: [-1.0, -1.0],
         uv: [0.0, 1.0],
     },
     Vertex2DUv {
-        position: [0.8, -0.8],
+        position: [1.0, -1.0],
         uv: [1.0, 1.0],
     },
     Vertex2DUv {
-        position: [0.8, 0.8],
+        position: [1.0, 1.0],
         uv: [1.0, 0.0],
     },
     Vertex2DUv {
-        position: [-0.8, -0.8],
+        position: [-1.0, -1.0],
         uv: [0.0, 1.0],
     },
     Vertex2DUv {
-        position: [0.8, 0.8],
+        position: [1.0, 1.0],
         uv: [1.0, 0.0],
     },
     Vertex2DUv {
-        position: [-0.8, 0.8],
+        position: [-1.0, 1.0],
         uv: [0.0, 0.0],
     },
 ];

@@ -119,6 +119,55 @@ All shaders compile to:
 - **HLSL** (future) → DirectX 12
 - **MSL** (future) → Metal
 
+## Preprocessor Defines
+
+When compiling shaders, Goldy passes backend-specific preprocessor defines:
+
+| Define | When Set | Use For |
+|--------|----------|---------|
+| `__BINDLESS__` | Bindless mode enabled | Conditionally use bindless resource access |
+| `__SPIRV__` | Targeting Vulkan | Vulkan-specific code (push constants, descriptor arrays) |
+| `__HLSL__` | Targeting DX12 | DX12-specific code (root constants, ResourceDescriptorHeap) |
+
+### Important Caveats
+
+1. **Slang auto-defines `__HLSL__`** for all targets because it uses HLSL-like syntax internally. When writing cross-platform shaders, **always check `__SPIRV__` first**:
+
+   ```slang
+   #ifdef __BINDLESS__
+   // CORRECT: Check __SPIRV__ before __HLSL__
+   #if defined(__SPIRV__)
+       // Vulkan path
+   #elif defined(__HLSL__)
+       // DX12 path
+   #endif
+   #endif
+   ```
+
+2. **Preprocessor defines don't propagate to imported modules**. If you `import` a module that uses `#ifdef __BINDLESS__`, the define won't be visible inside that module. Solutions:
+   - Don't use guards in modules that are only imported when bindless is active
+   - Use functions instead of macros (functions export, macros don't)
+
+3. **Push constants require specific syntax** for Vulkan SPIR-V:
+   ```slang
+   // WRONG - cbuffer doesn't generate push constants
+   [[vk::push_constant]]
+   cbuffer MyData { ... };
+   
+   // CORRECT - struct + ConstantBuffer pattern
+   struct MyDataBlock { ... };
+   [[vk::push_constant]] ConstantBuffer<MyDataBlock> myData;
+   ```
+
+4. **Macros don't export from modules**. Use functions instead:
+   ```slang
+   // In module - this WON'T be visible to importers:
+   #define GET_INDEX(slot) indices[slot]
+   
+   // Use a function instead - this WILL be visible:
+   public uint getIndex(uint slot) { return indices[slot]; }
+   ```
+
 ## Module System
 
 Goldy uses Slang's module system for code sharing:
