@@ -1,19 +1,18 @@
-//! Conway's Game of Life - Compute + Graphics Example
+//! Conway's Game of Life - Fully Bindless Compute + Graphics Example
 //!
 //! This example demonstrates:
 //! 1. Compute shader running cellular automaton rules
 //! 2. Graphics shader rendering the grid
 //! 3. Ping-pong buffer technique for in-place updates
-//! 4. Using DX12 backend explicitly
+//! 4. Fully bindless resource access via push constants
 //!
 //! Run with: `cargo run --example game_of_life`
 
 use anyhow::Result;
 use goldy::{
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
-    BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
-    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    ShaderStages, Surface, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline,
+    ComputePipelineDesc, DeviceType, Instance, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -50,16 +49,12 @@ struct RenderState {
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
-    compute_bind_group_a: BindGroup, // A -> B
-    compute_bind_group_b: BindGroup, // B -> A
     // Graphics resources
     render_pipeline: RenderPipeline,
-    render_bind_group_a: BindGroup, // Read from A
-    render_bind_group_b: BindGroup, // Read from B
-    // Buffers
+    // Ping-pong buffers
     buffer_a: Buffer,
     buffer_b: Buffer,
-    // State
+    // State: true = A is current (read from A, write to B)
     use_buffer_a: bool,
     frame_count: u32,
     last_update: std::time::Instant,
@@ -140,7 +135,6 @@ impl RenderState {
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
 
-        // Try to use DX12 backend
         let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
 
@@ -158,73 +152,16 @@ impl RenderState {
         let buffer_a = Buffer::with_data(&device, &initial_state, BufferUsage::STORAGE)?;
         let buffer_b = Buffer::with_data(&device, &initial_state, BufferUsage::STORAGE)?;
 
-        // Compute bind group layouts (need two: read-only and read-write)
-        let compute_bind_layout = BindGroupLayout::new(
-            &device,
-            &[
-                BindGroupLayoutBinding {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageBuffer { read_only: true },
-                },
-                BindGroupLayoutBinding {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageBuffer { read_only: false },
-                },
-            ],
-        )?;
-
-        // A -> B: read from A, write to B
-        let compute_bind_group_a = BindGroup::new(
-            &device,
-            &compute_bind_layout,
-            &[
-                BufferBinding::new(0, &buffer_a),
-                BufferBinding::new(1, &buffer_b),
-            ],
-        )?;
-
-        // B -> A: read from B, write to A
-        let compute_bind_group_b = BindGroup::new(
-            &device,
-            &compute_bind_layout,
-            &[
-                BufferBinding::new(0, &buffer_b),
-                BufferBinding::new(1, &buffer_a),
-            ],
-        )?;
-
+        // Create compute pipeline - fully bindless, no bind group layouts
         let compute_pipeline = ComputePipeline::new(
             &device,
             &compute_shader,
             &ComputePipelineDesc {
-                bind_group_layouts: &[&compute_bind_layout],
+                bind_group_layouts: &[],
             },
         )?;
 
-        // Render bind group layout (read-only storage buffer)
-        let render_bind_layout = BindGroupLayout::new(
-            &device,
-            &[BindGroupLayoutBinding {
-                binding: 0,
-                visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::StorageBuffer { read_only: true },
-            }],
-        )?;
-
-        let render_bind_group_a = BindGroup::new(
-            &device,
-            &render_bind_layout,
-            &[BufferBinding::new(0, &buffer_a)],
-        )?;
-
-        let render_bind_group_b = BindGroup::new(
-            &device,
-            &render_bind_layout,
-            &[BufferBinding::new(0, &buffer_b)],
-        )?;
-
+        // Create render pipeline - fully bindless, no bind group layouts
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -233,13 +170,13 @@ impl RenderState {
                 vertex_layout: VertexBufferLayout::default(),
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
-                bind_group_layouts: &[&render_bind_layout],
+                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
 
         println!(
-            "Game of Life initialized: {}x{} grid",
+            "Game of Life initialized (fully bindless): {}x{} grid",
             GRID_WIDTH, GRID_HEIGHT
         );
         println!("Features Gosper Glider Gun + random cells");
@@ -249,11 +186,7 @@ impl RenderState {
             device,
             surface,
             compute_pipeline,
-            compute_bind_group_a,
-            compute_bind_group_b,
             render_pipeline,
-            render_bind_group_a,
-            render_bind_group_b,
             buffer_a,
             buffer_b,
             use_buffer_a: true,
@@ -272,17 +205,20 @@ impl RenderState {
         if should_update {
             self.last_update = now;
 
-            // Run compute pass
+            // Run compute pass with ping-pong buffers
             let mut compute_encoder = ComputeEncoder::new();
             {
                 let mut pass = compute_encoder.begin_compute_pass();
                 pass.set_pipeline(&self.compute_pipeline);
 
-                // Choose which bind group based on current buffer
+                // Fully bindless: pass buffer indices via push constants
+                // Order matters: [current_state, next_state] matching shader slots
                 if self.use_buffer_a {
-                    pass.set_bind_group(0, &self.compute_bind_group_a); // A -> B
+                    // A -> B: read from A, write to B
+                    pass.set_push_constants(&[&self.buffer_a, &self.buffer_b]);
                 } else {
-                    pass.set_bind_group(0, &self.compute_bind_group_b); // B -> A
+                    // B -> A: read from B, write to A
+                    pass.set_push_constants(&[&self.buffer_b, &self.buffer_a]);
                 }
 
                 // Dispatch workgroups (8x8 threads per group)
@@ -305,11 +241,12 @@ impl RenderState {
             pass.clear(Color::BLACK);
             pass.set_pipeline(&self.render_pipeline);
 
-            // Read from the buffer that was just written to
+            // Fully bindless: read from the buffer that is now "current"
+            // After the swap, use_buffer_a points to the newly computed buffer
             if self.use_buffer_a {
-                pass.set_bind_group(0, &self.render_bind_group_a);
+                pass.set_push_constants(&[&self.buffer_a]);
             } else {
-                pass.set_bind_group(0, &self.render_bind_group_b);
+                pass.set_push_constants(&[&self.buffer_b]);
             }
 
             // Draw fullscreen triangle
@@ -332,7 +269,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Game of Life (Compute + Graphics)")
+                            .with_title("Game of Life (Fully Bindless)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .expect("Failed to create window"),

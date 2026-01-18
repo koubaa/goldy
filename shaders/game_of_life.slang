@@ -15,19 +15,9 @@ static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
 #ifdef __BINDLESS__
-#ifdef __DX12__
-// DX12 bindless: Use Slang's DescriptorHandle which lowers to ResourceDescriptorHeap[idx]
-// Root constants provide the descriptor indices at b0
-cbuffer BindlessIndices : register(b0, space0) {
-    uint currentStateIndex;
-    uint nextStateIndex;
-};
 
-// Access via DescriptorHandle - Slang will lower to ResourceDescriptorHeap[idx] for DXIL
-#define CURRENT_STATE (*DescriptorHandle<StructuredBuffer<uint>>(uint2(currentStateIndex, 0)))
-#define NEXT_STATE (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(nextStateIndex, 0)))
-#else
-// Metal/Vulkan bindless: Use ParameterBlock for argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct GameOfLifeResources {
     StructuredBuffer<uint> currentState;
     RWStructuredBuffer<uint> nextState;
@@ -35,7 +25,26 @@ struct GameOfLifeResources {
 ParameterBlock<GameOfLifeResources> gResources;
 #define CURRENT_STATE gResources.currentState
 #define NEXT_STATE gResources.nextState
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.bindless_indices;
+// Binding 0 = RW storage buffers, but we access read-only from currentState
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
+#define CURRENT_STATE g_StorageBuffers[getBindlessIndex(0)]
+#define NEXT_STATE g_StorageBuffers[getBindlessIndex(1)]
+
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0, space0) {
+    uint currentStateIndex;
+    uint nextStateIndex;
+};
+#define CURRENT_STATE (*DescriptorHandle<StructuredBuffer<uint>>(uint2(currentStateIndex, 0)))
+#define NEXT_STATE (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(nextStateIndex, 0)))
+
 #endif
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<uint> currentState;

@@ -14,23 +14,30 @@ static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
 #ifdef __BINDLESS__
-#ifdef __DX12__
-// DX12 bindless: Use Slang's DescriptorHandle which lowers to ResourceDescriptorHeap[idx]
-// Root constants provide the descriptor index at b0
-cbuffer BindlessIndices : register(b0, space0) {
-    uint cellsBufferIndex;
-};
 
-// Access via DescriptorHandle - Slang will lower to ResourceDescriptorHeap[idx] for DXIL
-#define CELLS (*DescriptorHandle<StructuredBuffer<uint>>(uint2(cellsBufferIndex, 0)))
-#else
-// Metal/Vulkan bindless: Use ParameterBlock for argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct GameOfLifeRenderResources {
     StructuredBuffer<uint> cells;
 };
 ParameterBlock<GameOfLifeRenderResources> gResources;
 #define CELLS gResources.cells
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.bindless_indices;
+[[vk::binding(0, 0)]] StructuredBuffer<uint> g_StorageBuffers[];
+#define CELLS g_StorageBuffers[getBindlessIndex(0)]
+
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0, space0) {
+    uint cellsBufferIndex;
+};
+#define CELLS (*DescriptorHandle<StructuredBuffer<uint>>(uint2(cellsBufferIndex, 0)))
+
 #endif
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<uint> cells;
