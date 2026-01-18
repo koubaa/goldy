@@ -16,9 +16,11 @@ use std::collections::HashMap;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
 
 /// Maximum number of descriptors in the CBV/SRV/UAV heap for bindless rendering
+#[allow(dead_code)]
 pub const MAX_BINDLESS_CBV_SRV_UAV: u32 = 16384;
 
 /// Maximum number of descriptors in the sampler heap for bindless rendering
+#[allow(dead_code)]
 pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
 
 /// Maximum number of resource indices in root constants
@@ -34,7 +36,7 @@ pub struct BindlessIndices {
 }
 
 /// Registry for tracking bindless resource descriptor heap offsets.
-/// 
+///
 /// IMPORTANT: All CBV, SRV, and UAV descriptors share the same heap (cbv_srv_uav_heap),
 /// so we use a unified offset counter to avoid collisions.
 #[derive(Default)]
@@ -50,6 +52,7 @@ pub(crate) struct ResourceRegistry {
     pub sampler_offsets: HashMap<SamplerHandle, u32>,
 }
 
+#[allow(dead_code)]
 impl ResourceRegistry {
     pub fn new() -> Self {
         Self {
@@ -121,6 +124,7 @@ impl ResourceRegistry {
 
 /// Information about a physical DXGI adapter.
 /// Named DxgiAdapterInfo to avoid conflict with super::AdapterInfo.
+#[allow(dead_code)]
 pub(crate) struct DxgiAdapterInfo {
     pub adapter: Dxgi::IDXGIAdapter1,
     pub desc: Dxgi::DXGI_ADAPTER_DESC1,
@@ -128,6 +132,7 @@ pub(crate) struct DxgiAdapterInfo {
 }
 
 /// A logical D3D12 device with associated resources.
+#[allow(dead_code)]
 pub(crate) struct LogicalDevice {
     pub device: Direct3D12::ID3D12Device,
     pub adapter_id: u32,
@@ -152,6 +157,7 @@ pub(crate) struct LogicalDevice {
 }
 
 /// GPU buffer state.
+#[allow(dead_code)]
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub resource: Direct3D12::ID3D12Resource,
@@ -183,6 +189,7 @@ pub(crate) struct ShaderState {
 }
 
 /// Graphics pipeline state.
+#[allow(dead_code)]
 pub(crate) struct PipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline_state: Direct3D12::ID3D12PipelineState,
@@ -196,6 +203,7 @@ pub(crate) struct PipelineState {
 }
 
 /// Compute pipeline state.
+#[allow(dead_code)]
 pub(crate) struct ComputePipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline_state: Direct3D12::ID3D12PipelineState,
@@ -207,21 +215,24 @@ pub(crate) struct ComputePipelineState {
 }
 
 /// Bind group layout (root signature descriptor table layout) state.
+#[allow(dead_code)]
 pub(crate) struct BindGroupLayoutState {
     pub device_handle: DeviceHandle,
     pub entries: Vec<super::super::BindGroupLayoutEntry>,
 }
 
 /// Bind group state.
+#[allow(dead_code)]
 pub(crate) struct BindGroupState {
     pub device_handle: DeviceHandle,
     pub layout_handle: super::super::BindGroupLayoutHandle,
     pub buffer_bindings: Vec<(u32, BufferHandle, u64, u64)>, // binding, buffer, offset, size
-    pub texture_bindings: Vec<(u32, TextureHandle)>,          // binding, texture
-    pub sampler_bindings: Vec<(u32, SamplerHandle)>,          // binding, sampler
+    pub texture_bindings: Vec<(u32, TextureHandle)>,         // binding, texture
+    pub sampler_bindings: Vec<(u32, SamplerHandle)>,         // binding, sampler
 }
 
 /// GPU render target state with optional staging for CPU readback.
+#[allow(dead_code)]
 pub(crate) struct RenderTargetState {
     pub device_handle: DeviceHandle,
     pub width: u32,
@@ -244,6 +255,7 @@ pub(crate) struct RenderTargetState {
 }
 
 /// GPU texture state.
+#[allow(dead_code)]
 pub(crate) struct TextureState {
     pub device_handle: DeviceHandle,
     pub width: u32,
@@ -257,11 +269,11 @@ pub(crate) struct TextureState {
 }
 
 /// GPU sampler state.
+#[allow(dead_code)]
 pub(crate) struct SamplerState {
     pub device_handle: DeviceHandle,
     /// Sampler descriptor offset in sampler heap
     pub sampler_offset: u32,
-    #[allow(dead_code)]
     pub desc: SamplerDesc,
     /// Bindless descriptor heap offset (same as sampler_offset when bindless is enabled)
     pub bindless_offset: Option<u32>,
@@ -271,6 +283,7 @@ pub(crate) struct SamplerState {
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 /// Per-frame synchronization resources for proper swapchain pipelining.
+#[allow(dead_code)]
 pub(crate) struct FrameSync {
     pub command_list: Direct3D12::ID3D12GraphicsCommandList,
     pub command_allocator: Direct3D12::ID3D12CommandAllocator,

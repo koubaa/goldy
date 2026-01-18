@@ -1778,7 +1778,7 @@ impl GpuBackend for VulkanBackend {
             .context("Invalid device handle")?;
 
         // Determine if we use bindless layout or traditional layouts
-        let (use_bindless_layout, bindless_pipeline_layout) = if logical_device.bindless_enabled {
+        let (use_bindless_layout, _bindless_pipeline_layout) = if logical_device.bindless_enabled {
             (true, logical_device.bindless_pipeline_layout)
         } else {
             (false, None)
@@ -2723,7 +2723,7 @@ impl GpuBackend for VulkanBackend {
             .context("Invalid device handle")?;
 
         // Determine if we use bindless layout or traditional layouts
-        let (use_bindless_layout, bindless_pipeline_layout) = if logical_device.bindless_enabled {
+        let (use_bindless_layout, _bindless_pipeline_layout) = if logical_device.bindless_enabled {
             (true, logical_device.bindless_pipeline_layout)
         } else {
             (false, None)

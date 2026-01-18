@@ -104,14 +104,10 @@ pub enum RenderCommand {
     },
     /// Set push constants directly with buffer handles (fully bindless mode).
     /// The backend will look up each buffer's bindless index and push them.
-    SetPushConstants {
-        buffers: Vec<BufferHandle>,
-    },
+    SetPushConstants { buffers: Vec<BufferHandle> },
     /// Set push constants with raw u32 indices (fully bindless mode).
     /// Use this for textures/samplers or when you already have the indices.
-    SetPushConstantsRaw {
-        indices: Vec<u32>,
-    },
+    SetPushConstantsRaw { indices: Vec<u32> },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -141,9 +137,7 @@ pub enum ComputeCommand {
         bind_group: BindGroupHandle,
     },
     /// Set push constants (fully bindless mode - buffer indices passed directly).
-    SetPushConstants {
-        buffers: Vec<BufferHandle>,
-    },
+    SetPushConstants { buffers: Vec<BufferHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,
@@ -429,7 +423,10 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
                 other
             ),
         };
-        tracing::info!("Using backend from GOLDY_BACKEND env var: {:?}", backend_type);
+        tracing::info!(
+            "Using backend from GOLDY_BACKEND env var: {:?}",
+            backend_type
+        );
         return create_backend(backend_type);
     }
 

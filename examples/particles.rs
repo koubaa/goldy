@@ -106,8 +106,11 @@ impl RenderState {
 
         // Create particle buffer with initial rain particles
         let particles = Self::create_particles(false);
-        let particle_buffer =
-            Buffer::with_data(&device, &particles, BufferUsage::STORAGE | BufferUsage::VERTEX)?;
+        let particle_buffer = Buffer::with_data(
+            &device,
+            &particles,
+            BufferUsage::STORAGE | BufferUsage::VERTEX,
+        )?;
 
         // Create params buffer
         let initial_params = ParticleParams {
@@ -276,7 +279,9 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Rain (Fully Bindless GPU Compute, Space to toggle)")
+                            .with_title(
+                                "Goldy - Rain (Fully Bindless GPU Compute, Space to toggle)",
+                            )
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
                     .expect("Failed to create window"),

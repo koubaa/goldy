@@ -37,7 +37,12 @@ impl Buffer {
         let bytes = bytemuck::cast_slice(data);
         let element_stride = std::mem::size_of::<T>() as u32;
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_buffer(device.handle, bytes.len() as u64, usage, Some(element_stride))?;
+        let handle = backend.create_buffer(
+            device.handle,
+            bytes.len() as u64,
+            usage,
+            Some(element_stride),
+        )?;
         drop(backend);
 
         let buffer = Self {
@@ -89,10 +94,10 @@ impl Buffer {
     }
 
     /// Get the buffer's index in the global bindless descriptor set.
-    /// 
+    ///
     /// Returns `Some(index)` if bindless is enabled and this buffer is registered
     /// (i.e., has UNIFORM or STORAGE usage). Returns `None` otherwise.
-    /// 
+    ///
     /// Use this for fully bindless rendering where you pass resource indices
     /// directly via push constants instead of using bind groups.
     pub fn bindless_index(&self) -> Option<u32> {

@@ -319,6 +319,7 @@ pub(crate) struct PendingBuffer {
 
 /// Resource pending deferred deletion.
 /// Resources are kept alive until the frame they were last used in completes.
+#[allow(dead_code)]
 pub(crate) enum PendingDeletion {
     Buffer {
         buffer: vk::Buffer,
@@ -367,7 +368,8 @@ impl DeletionQueue {
     /// `completed_frame` is the frame number that has finished executing on the GPU.
     pub fn process_deletions(&mut self, device: &ash::Device, completed_frame: u64) {
         // Keep resources from frames that haven't completed yet
-        let (to_delete, to_keep): (Vec<_>, Vec<_>) = self.pending
+        let (to_delete, to_keep): (Vec<_>, Vec<_>) = self
+            .pending
             .drain(..)
             .partition(|(frame, _)| *frame <= completed_frame);
 

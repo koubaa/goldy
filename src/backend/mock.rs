@@ -966,7 +966,7 @@ mod tests {
 
         // Create an index buffer
         let index_buffer = backend
-            .create_buffer(device, 12, BufferUsage::INDEX)
+            .create_buffer(device, 12, BufferUsage::INDEX, None)
             .unwrap();
 
         // Write some indices (6 u16 indices for 2 triangles)
@@ -1041,7 +1041,7 @@ mod tests {
             .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
             .unwrap();
         let index_buffer = backend
-            .create_buffer(device, 24, BufferUsage::INDEX)
+            .create_buffer(device, 24, BufferUsage::INDEX, None)
             .unwrap();
 
         // Test with offset and base_vertex

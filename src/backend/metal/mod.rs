@@ -733,7 +733,9 @@ impl GpuBackend for MetalBackend {
     }
 
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
-        self.buffers.get(&buffer_handle).and_then(|b| b.arg_buffer_index)
+        self.buffers
+            .get(&buffer_handle)
+            .and_then(|b| b.arg_buffer_index)
     }
 
     fn create_shader(
@@ -1487,11 +1489,14 @@ impl GpuBackend for MetalBackend {
                                 for (i, buffer_handle) in buffers.iter().enumerate() {
                                     if let Some(buf) = self.buffers.get(buffer_handle) {
                                         // Get field offset from reflection (field i corresponds to buffer i)
-                                        if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                        if let Some(pb_layout) =
+                                            pipeline.parameter_block_layouts.first()
+                                        {
                                             if let Some(field) = pb_layout.fields.get(i) {
                                                 let gpu_addr = buf.buffer.gpu_address();
                                                 unsafe {
-                                                    let ptr = arg_buffer.contents().add(field.offset);
+                                                    let ptr =
+                                                        arg_buffer.contents().add(field.offset);
                                                     *(ptr as *mut u64) = gpu_addr;
                                                 }
                                                 tracing::trace!(
@@ -1528,7 +1533,9 @@ impl GpuBackend for MetalBackend {
                         // Legacy mode: push buffer indices directly via set_*_bytes
                         let mut indices = types::BindlessIndices::default();
                         for (i, buffer_handle) in buffers.iter().enumerate() {
-                            if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
                             if let Some(buf) = self.buffers.get(buffer_handle) {
                                 indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
                             }
@@ -1551,7 +1558,9 @@ impl GpuBackend for MetalBackend {
                         );
                     }
                 }
-                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                RenderCommand::SetPushConstantsRaw {
+                    indices: raw_indices,
+                } => {
                     // Check if we should use ParameterBlock-based bindless
                     let use_parameter_block = bindless_enabled
                         && current_pipeline
@@ -1567,15 +1576,24 @@ impl GpuBackend for MetalBackend {
 
                                 // For each index, determine if it's a texture or sampler and write its GPU resource ID
                                 for (i, &idx) in raw_indices.iter().enumerate() {
-                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    if let Some(pb_layout) =
+                                        pipeline.parameter_block_layouts.first()
+                                    {
                                         if let Some(field) = pb_layout.fields.get(i) {
                                             if registry.is_texture_index(idx) {
                                                 // It's a texture - find it and write its GPU resource ID
-                                                if let Some(tex_handle) = registry.texture_handle_by_index(idx) {
-                                                    if let Some(tex) = self.textures.get(&tex_handle) {
-                                                        let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                if let Some(tex_handle) =
+                                                    registry.texture_handle_by_index(idx)
+                                                {
+                                                    if let Some(tex) =
+                                                        self.textures.get(&tex_handle)
+                                                    {
+                                                        let resource_id =
+                                                            tex.texture.gpu_resource_id()._impl;
                                                         unsafe {
-                                                            let ptr = arg_buffer.contents().add(field.offset);
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
                                                             *(ptr as *mut u64) = resource_id;
                                                         }
                                                         tracing::trace!(
@@ -1586,11 +1604,18 @@ impl GpuBackend for MetalBackend {
                                                 }
                                             } else if registry.is_sampler_index(idx) {
                                                 // It's a sampler - find it and write its GPU resource ID
-                                                if let Some(samp_handle) = registry.sampler_handle_by_index(idx) {
-                                                    if let Some(samp) = self.samplers.get(&samp_handle) {
-                                                        let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                if let Some(samp_handle) =
+                                                    registry.sampler_handle_by_index(idx)
+                                                {
+                                                    if let Some(samp) =
+                                                        self.samplers.get(&samp_handle)
+                                                    {
+                                                        let resource_id =
+                                                            samp.sampler.gpu_resource_id()._impl;
                                                         unsafe {
-                                                            let ptr = arg_buffer.contents().add(field.offset);
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
                                                             *(ptr as *mut u64) = resource_id;
                                                         }
                                                         tracing::trace!(
@@ -1603,9 +1628,12 @@ impl GpuBackend for MetalBackend {
                                                 // It's a buffer index - find buffer and write GPU address
                                                 for (_buf_handle, buf_state) in &self.buffers {
                                                     if buf_state.arg_buffer_index == Some(idx) {
-                                                        let gpu_addr = buf_state.buffer.gpu_address();
+                                                        let gpu_addr =
+                                                            buf_state.buffer.gpu_address();
                                                         unsafe {
-                                                            let ptr = arg_buffer.contents().add(field.offset);
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
                                                             *(ptr as *mut u64) = gpu_addr;
                                                         }
                                                         tracing::trace!(
@@ -1643,7 +1671,9 @@ impl GpuBackend for MetalBackend {
                         // Legacy mode: push raw indices directly via set_*_bytes
                         let mut indices_data = [0u32; types::MAX_PUSH_CONSTANT_INDICES];
                         for (i, &idx) in raw_indices.iter().enumerate() {
-                            if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
                             indices_data[i] = idx;
                         }
                         let indices_bytes: &[u8] = unsafe {
@@ -1968,7 +1998,9 @@ impl GpuBackend for MetalBackend {
     }
 
     fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
-        self.textures.get(&texture_handle).and_then(|t| t.arg_buffer_index)
+        self.textures
+            .get(&texture_handle)
+            .and_then(|t| t.arg_buffer_index)
     }
 
     fn create_sampler(
@@ -2058,7 +2090,9 @@ impl GpuBackend for MetalBackend {
     }
 
     fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
-        self.samplers.get(&sampler_handle).and_then(|s| s.arg_buffer_index)
+        self.samplers
+            .get(&sampler_handle)
+            .and_then(|s| s.arg_buffer_index)
     }
 
     fn create_surface(
@@ -2485,11 +2519,14 @@ impl GpuBackend for MetalBackend {
                                 for (i, buffer_handle) in buffers.iter().enumerate() {
                                     if let Some(buf) = self.buffers.get(buffer_handle) {
                                         // Get field offset from reflection (field i corresponds to buffer i)
-                                        if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                        if let Some(pb_layout) =
+                                            pipeline.parameter_block_layouts.first()
+                                        {
                                             if let Some(field) = pb_layout.fields.get(i) {
                                                 let gpu_addr = buf.buffer.gpu_address();
                                                 unsafe {
-                                                    let ptr = arg_buffer.contents().add(field.offset);
+                                                    let ptr =
+                                                        arg_buffer.contents().add(field.offset);
                                                     *(ptr as *mut u64) = gpu_addr;
                                                 }
                                                 tracing::trace!(
@@ -2526,7 +2563,9 @@ impl GpuBackend for MetalBackend {
                         // Legacy mode: push buffer indices directly via set_*_bytes
                         let mut indices = types::BindlessIndices::default();
                         for (i, buffer_handle) in buffers.iter().enumerate() {
-                            if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
                             if let Some(buf) = self.buffers.get(buffer_handle) {
                                 indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
                             }
@@ -2549,7 +2588,9 @@ impl GpuBackend for MetalBackend {
                         );
                     }
                 }
-                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                RenderCommand::SetPushConstantsRaw {
+                    indices: raw_indices,
+                } => {
                     // Check if we should use ParameterBlock-based bindless
                     let use_parameter_block = bindless_enabled
                         && current_pipeline
@@ -2565,15 +2606,24 @@ impl GpuBackend for MetalBackend {
 
                                 // For each index, determine if it's a texture or sampler and write its GPU resource ID
                                 for (i, &idx) in raw_indices.iter().enumerate() {
-                                    if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    if let Some(pb_layout) =
+                                        pipeline.parameter_block_layouts.first()
+                                    {
                                         if let Some(field) = pb_layout.fields.get(i) {
                                             if registry.is_texture_index(idx) {
                                                 // It's a texture - find it and write its GPU resource ID
-                                                if let Some(tex_handle) = registry.texture_handle_by_index(idx) {
-                                                    if let Some(tex) = self.textures.get(&tex_handle) {
-                                                        let resource_id = tex.texture.gpu_resource_id()._impl;
+                                                if let Some(tex_handle) =
+                                                    registry.texture_handle_by_index(idx)
+                                                {
+                                                    if let Some(tex) =
+                                                        self.textures.get(&tex_handle)
+                                                    {
+                                                        let resource_id =
+                                                            tex.texture.gpu_resource_id()._impl;
                                                         unsafe {
-                                                            let ptr = arg_buffer.contents().add(field.offset);
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
                                                             *(ptr as *mut u64) = resource_id;
                                                         }
                                                         tracing::trace!(
@@ -2584,11 +2634,18 @@ impl GpuBackend for MetalBackend {
                                                 }
                                             } else if registry.is_sampler_index(idx) {
                                                 // It's a sampler - find it and write its GPU resource ID
-                                                if let Some(samp_handle) = registry.sampler_handle_by_index(idx) {
-                                                    if let Some(samp) = self.samplers.get(&samp_handle) {
-                                                        let resource_id = samp.sampler.gpu_resource_id()._impl;
+                                                if let Some(samp_handle) =
+                                                    registry.sampler_handle_by_index(idx)
+                                                {
+                                                    if let Some(samp) =
+                                                        self.samplers.get(&samp_handle)
+                                                    {
+                                                        let resource_id =
+                                                            samp.sampler.gpu_resource_id()._impl;
                                                         unsafe {
-                                                            let ptr = arg_buffer.contents().add(field.offset);
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
                                                             *(ptr as *mut u64) = resource_id;
                                                         }
                                                         tracing::trace!(
@@ -2601,9 +2658,12 @@ impl GpuBackend for MetalBackend {
                                                 // It's a buffer index - find buffer and write GPU address
                                                 for (_buf_handle, buf_state) in &self.buffers {
                                                     if buf_state.arg_buffer_index == Some(idx) {
-                                                        let gpu_addr = buf_state.buffer.gpu_address();
+                                                        let gpu_addr =
+                                                            buf_state.buffer.gpu_address();
                                                         unsafe {
-                                                            let ptr = arg_buffer.contents().add(field.offset);
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
                                                             *(ptr as *mut u64) = gpu_addr;
                                                         }
                                                         tracing::trace!(
@@ -2641,7 +2701,9 @@ impl GpuBackend for MetalBackend {
                         // Legacy mode: push raw indices directly via set_*_bytes
                         let mut indices_data = [0u32; types::MAX_PUSH_CONSTANT_INDICES];
                         for (i, &idx) in raw_indices.iter().enumerate() {
-                            if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
                             indices_data[i] = idx;
                         }
                         let indices_bytes: &[u8] = unsafe {
@@ -3117,11 +3179,14 @@ impl GpuBackend for MetalBackend {
                                 for (i, buffer_handle) in buffers.iter().enumerate() {
                                     if let Some(buf) = self.buffers.get(buffer_handle) {
                                         // Get field offset from reflection (field i corresponds to buffer i)
-                                        if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                        if let Some(pb_layout) =
+                                            pipeline.parameter_block_layouts.first()
+                                        {
                                             if let Some(field) = pb_layout.fields.get(i) {
                                                 let gpu_addr = buf.buffer.gpu_address();
                                                 unsafe {
-                                                    let ptr = arg_buffer.contents().add(field.offset);
+                                                    let ptr =
+                                                        arg_buffer.contents().add(field.offset);
                                                     *(ptr as *mut u64) = gpu_addr;
                                                 }
                                                 tracing::trace!(
@@ -3153,7 +3218,9 @@ impl GpuBackend for MetalBackend {
                         // Legacy mode: push buffer indices directly via set_bytes
                         let mut indices = types::BindlessIndices::default();
                         for (i, buffer_handle) in buffers.iter().enumerate() {
-                            if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
                             if let Some(buf) = self.buffers.get(buffer_handle) {
                                 indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
                             }
