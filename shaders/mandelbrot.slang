@@ -36,8 +36,9 @@ import goldy_exp.bindless_indices;
 
 // Global descriptor array of uniform buffers
 [[vk::binding(1, 0)]] ConstantBuffer<ViewUniforms> g_UniformBuffers[];
-#define CENTER g_UniformBuffers[BINDLESS_INDEX(0)].center
-#define ZOOM g_UniformBuffers[BINDLESS_INDEX(0)].zoom
+// Note: Use getBindlessIndex() function, not BINDLESS_INDEX macro (macros don't export from modules)
+#define CENTER g_UniformBuffers[getBindlessIndex(0)].center
+#define ZOOM g_UniformBuffers[getBindlessIndex(0)].zoom
 
 #else
 // DX12: Bindless via root constants + ResourceDescriptorHeap

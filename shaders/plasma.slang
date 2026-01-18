@@ -33,15 +33,16 @@ import goldy_exp.bindless_indices;
 
 // Global descriptor array of uniform buffers
 [[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-#define TIME g_UniformBuffers[BINDLESS_INDEX(0)].time
+// Note: Use getBindlessIndex() function, not BINDLESS_INDEX macro (macros don't export from modules)
+#define TIME g_UniformBuffers[getBindlessIndex(0)].time
 
-#else
-// DX12: Use root constants for indices (ResourceDescriptorHeap for SM 6.6+)
-// For simplicity, fall back to traditional binding in this example
-// Full DX12 SM 6.6 bindless would use ResourceDescriptorHeap[index]
-[[vk::binding(0, 0)]]
-ConstantBuffer<TimeUniforms> uniforms;
-#define TIME uniforms.time
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0) {
+    uint uniformsIndex;
+};
+#define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
+
 #endif
 
 #else

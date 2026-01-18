@@ -70,7 +70,7 @@ impl App {
             &RenderPipelineDesc {
                 vertex_layout: Vertex2DUv::layout(),
                 target_format: surface.format(),
-                bind_group_layouts: &[], // No bind groups needed for fully bindless
+                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
@@ -85,11 +85,6 @@ impl App {
             std::mem::size_of::<Uniforms>() as u64,
             BufferUsage::UNIFORM | BufferUsage::COPY_DST,
         )?;
-
-        // Log the bindless index for debugging
-        if let Some(idx) = uniform_buffer.bindless_index() {
-            tracing::info!("Uniform buffer bindless index: {}", idx);
-        }
 
         self.device = Some(device);
         self.shader = Some(shader);

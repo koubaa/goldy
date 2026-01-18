@@ -38,8 +38,9 @@ import goldy_exp.bindless_indices;
 
 // Global descriptor array of uniform buffers
 [[vk::binding(1, 0)]] ConstantBuffer<ParticleParams> g_ParamBuffers[];
-#define TIME g_ParamBuffers[BINDLESS_INDEX(0)].time
-#define IS_SNOW g_ParamBuffers[BINDLESS_INDEX(0)].is_snow
+// Note: Use getBindlessIndex() function, not BINDLESS_INDEX macro (macros don't export from modules)
+#define TIME g_ParamBuffers[getBindlessIndex(0)].time
+#define IS_SNOW g_ParamBuffers[getBindlessIndex(0)].is_snow
 
 #else
 // DX12: Bindless via root constants + ResourceDescriptorHeap
