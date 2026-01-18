@@ -14,50 +14,46 @@ struct Star {
     float star_type; // 0=normal, 1=galaxy, 2=quasar, 3=white dwarf
 };
 
+struct StarfieldParams {
+    float speed;
+    float frame;
+    float _pad1;
+    float _pad2;
+};
+
 #ifdef __BINDLESS__
-#ifdef __DX12__
-cbuffer BindlessIndices : register(b0, space0) {
-    uint starBufferIndex;
-    uint paramsBufferIndex;
-};
 
-struct StarfieldParams {
-    float speed;
-    float frame;
-    float _pad1;
-    float _pad2;
-};
-
-#define STARS (*DescriptorHandle<RWStructuredBuffer<Star>>(uint2(starBufferIndex, 0)))
-#define PARAMS (*DescriptorHandle<ConstantBuffer<StarfieldParams>>(uint2(paramsBufferIndex, 0)))
-#else
-// Metal/Vulkan bindless
-struct StarfieldParams {
-    float speed;
-    float frame;
-    float _pad1;
-    float _pad2;
-};
-
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct ComputeResources {
     RWStructuredBuffer<Star> stars;
     ConstantBuffer<StarfieldParams> params;
 };
-
 ParameterBlock<ComputeResources> gResources;
-
 #define STARS gResources.stars
 #define PARAMS gResources.params
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.bindless_indices;
+[[vk::binding(0, 0)]] RWStructuredBuffer<Star> g_StorageBuffers[];
+[[vk::binding(1, 0)]] ConstantBuffer<StarfieldParams> g_UniformBuffers[];
+#define STARS g_StorageBuffers[getBindlessIndex(0)]
+#define PARAMS g_UniformBuffers[getBindlessIndex(1)]
+
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0, space0) {
+    uint starBufferIndex;
+    uint paramsBufferIndex;
+};
+#define STARS (*DescriptorHandle<RWStructuredBuffer<Star>>(uint2(starBufferIndex, 0)))
+#define PARAMS (*DescriptorHandle<ConstantBuffer<StarfieldParams>>(uint2(paramsBufferIndex, 0)))
+
 #endif
+
 #else
 // Traditional binding mode
-struct StarfieldParams {
-    float speed;
-    float frame;
-    float _pad1;
-    float _pad2;
-};
-
 [[vk::binding(0, 0)]] RWStructuredBuffer<Star> stars;
 [[vk::binding(1, 0)]] ConstantBuffer<StarfieldParams> params;
 

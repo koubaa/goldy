@@ -15,22 +15,30 @@ struct Star {
 };
 
 #ifdef __BINDLESS__
-#ifdef __DX12__
-cbuffer BindlessIndices : register(b0, space0) {
-    uint starBufferIndex;
-};
 
-#define STARS (*DescriptorHandle<StructuredBuffer<Star>>(uint2(starBufferIndex, 0)))
-#else
-// Metal/Vulkan bindless
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct RenderResources {
     StructuredBuffer<Star> stars;
 };
-
 ParameterBlock<RenderResources> gResources;
-
 #define STARS gResources.stars
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.bindless_indices;
+[[vk::binding(0, 0)]] StructuredBuffer<Star> g_StorageBuffers[];
+#define STARS g_StorageBuffers[getBindlessIndex(0)]
+
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0, space0) {
+    uint starBufferIndex;
+};
+#define STARS (*DescriptorHandle<StructuredBuffer<Star>>(uint2(starBufferIndex, 0)))
+
 #endif
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] StructuredBuffer<Star> stars;
