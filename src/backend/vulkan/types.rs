@@ -143,6 +143,8 @@ pub(crate) struct LogicalDevice {
     pub bindless_pipeline_layout: Option<vk::PipelineLayout>,
     /// Registry tracking resource indices in the global descriptor set
     pub resource_registry: ResourceRegistry,
+    /// Deferred deletion queue for resources that are still in-flight
+    pub deletion_queue: DeletionQueue,
 }
 
 /// GPU buffer state.
@@ -313,4 +315,128 @@ pub(crate) struct PendingBuffer {
     pub buffer: BufferHandle,
     pub slot: u32,
     pub offset: u64,
+}
+
+/// Resource pending deferred deletion.
+/// Resources are kept alive until the frame they were last used in completes.
+pub(crate) enum PendingDeletion {
+    Buffer {
+        buffer: vk::Buffer,
+        memory: vk::DeviceMemory,
+    },
+    Texture {
+        image: vk::Image,
+        view: vk::ImageView,
+        memory: vk::DeviceMemory,
+        staging_buffer: Option<vk::Buffer>,
+        staging_memory: Option<vk::DeviceMemory>,
+    },
+    Sampler {
+        sampler: vk::Sampler,
+    },
+}
+
+/// Deferred deletion queue for a device.
+/// Tracks resources waiting to be deleted after GPU work completes.
+pub(crate) struct DeletionQueue {
+    /// Resources pending deletion, tagged with the frame they were queued on
+    pub pending: Vec<(u64, PendingDeletion)>,
+    /// Current frame counter (incremented each present)
+    pub current_frame: u64,
+}
+
+impl DeletionQueue {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            current_frame: 0,
+        }
+    }
+
+    /// Queue a resource for deferred deletion
+    pub fn queue(&mut self, resource: PendingDeletion) {
+        self.pending.push((self.current_frame, resource));
+    }
+
+    /// Advance the frame counter (called after present)
+    pub fn advance_frame(&mut self) {
+        self.current_frame += 1;
+    }
+
+    /// Process deletions for frames that have completed.
+    /// `completed_frame` is the frame number that has finished executing on the GPU.
+    pub fn process_deletions(&mut self, device: &ash::Device, completed_frame: u64) {
+        // Keep resources from frames that haven't completed yet
+        let (to_delete, to_keep): (Vec<_>, Vec<_>) = self.pending
+            .drain(..)
+            .partition(|(frame, _)| *frame <= completed_frame);
+
+        self.pending = to_keep;
+
+        // Delete resources from completed frames
+        for (_, resource) in to_delete {
+            unsafe {
+                match resource {
+                    PendingDeletion::Buffer { buffer, memory } => {
+                        device.destroy_buffer(buffer, None);
+                        device.free_memory(memory, None);
+                    }
+                    PendingDeletion::Texture {
+                        image,
+                        view,
+                        memory,
+                        staging_buffer,
+                        staging_memory,
+                    } => {
+                        device.destroy_image_view(view, None);
+                        device.destroy_image(image, None);
+                        device.free_memory(memory, None);
+                        if let Some(buf) = staging_buffer {
+                            device.destroy_buffer(buf, None);
+                        }
+                        if let Some(mem) = staging_memory {
+                            device.free_memory(mem, None);
+                        }
+                    }
+                    PendingDeletion::Sampler { sampler } => {
+                        device.destroy_sampler(sampler, None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flush all pending deletions immediately (used when destroying the device)
+    pub fn flush_all(&mut self, device: &ash::Device) {
+        for (_, resource) in self.pending.drain(..) {
+            unsafe {
+                match resource {
+                    PendingDeletion::Buffer { buffer, memory } => {
+                        device.destroy_buffer(buffer, None);
+                        device.free_memory(memory, None);
+                    }
+                    PendingDeletion::Texture {
+                        image,
+                        view,
+                        memory,
+                        staging_buffer,
+                        staging_memory,
+                    } => {
+                        device.destroy_image_view(view, None);
+                        device.destroy_image(image, None);
+                        device.free_memory(memory, None);
+                        if let Some(buf) = staging_buffer {
+                            device.destroy_buffer(buf, None);
+                        }
+                        if let Some(mem) = staging_memory {
+                            device.free_memory(mem, None);
+                        }
+                    }
+                    PendingDeletion::Sampler { sampler } => {
+                        device.destroy_sampler(sampler, None);
+                    }
+                }
+            }
+        }
+    }
 }

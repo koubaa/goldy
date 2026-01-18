@@ -284,6 +284,7 @@ impl GpuBackend for VulkanBackend {
                 bindless_descriptor_set,
                 bindless_pipeline_layout,
                 resource_registry: types::ResourceRegistry::new(),
+                deletion_queue: types::DeletionQueue::new(),
             },
         );
 
@@ -297,9 +298,12 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
-        if let Some(logical_device) = self.devices.remove(&device_handle) {
+        if let Some(mut logical_device) = self.devices.remove(&device_handle) {
             unsafe {
                 logical_device.device.device_wait_idle().ok();
+
+                // Flush any pending deferred deletions
+                logical_device.deletion_queue.flush_all(&logical_device.device);
 
                 // Destroy buffers owned by this device
                 let buffer_handles: Vec<_> = self.buffers
@@ -590,10 +594,11 @@ impl GpuBackend for VulkanBackend {
                 // Unregister from bindless registry
                 device.resource_registry.unregister_buffer(buffer_handle);
 
-                unsafe {
-                    device.device.destroy_buffer(buffer.buffer, None);
-                    device.device.free_memory(buffer.memory, None);
-                }
+                // Queue for deferred deletion - the buffer may still be in use by in-flight commands
+                device.deletion_queue.queue(types::PendingDeletion::Buffer {
+                    buffer: buffer.buffer,
+                    memory: buffer.memory,
+                });
             }
         }
     }
@@ -2126,6 +2131,21 @@ impl GpuBackend for VulkanBackend {
             )
         }.context("Failed to wait for frame fence")?;
 
+        // Process deferred deletions - resources from frames that have now completed
+        // Since we just waited for the fence, frame (current_deletion_frame - MAX_FRAMES_IN_FLIGHT) has completed
+        {
+            let logical_device = self.devices.get_mut(&device_handle)
+                .context("Surface's device is invalid")?;
+            let current_frame = logical_device.deletion_queue.current_frame;
+            if current_frame >= types::MAX_FRAMES_IN_FLIGHT as u64 {
+                let completed_frame = current_frame - types::MAX_FRAMES_IN_FLIGHT as u64;
+                logical_device.deletion_queue.process_deletions(&logical_device.device, completed_frame);
+            }
+        }
+
+        let logical_device = self.devices.get(&device_handle)
+            .context("Surface's device is invalid")?;
+
         // Reset fence for this frame
         unsafe {
             logical_device.device.reset_fences(&[in_flight_fence])
@@ -2511,9 +2531,15 @@ impl GpuBackend for VulkanBackend {
         let result = unsafe { swapchain_loader.queue_present(logical_device.queue, &present_info) };
 
         // Clear the current image and advance frame counter
+        let device_handle = surface_state.device_handle;
         let surface_state = self.surfaces.get_mut(&surface_handle).unwrap();
         surface_state.current_image_index = None;
         surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+        // Advance the deletion queue's frame counter
+        if let Some(device) = self.devices.get_mut(&device_handle) {
+            device.deletion_queue.advance_frame();
+        }
 
         // Handle suboptimal or out of date
         match result {
