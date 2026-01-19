@@ -1,12 +1,17 @@
 //! Instancing example - render many objects efficiently.
 //!
-//! Demonstrates instanced rendering with many rotating quads using Surface API.
+//! Demonstrates the Goldy-native compute+graphics pattern:
+//! 1. Compute shader updates instance transforms/colors each frame
+//! 2. Graphics shader renders quads from the instance buffer
+//! 3. No CPU vertex generation, no vertex buffer - all GPU-driven
 //!
 //! Run with: cargo run --example instancing
 
+use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Instance, Instance2D, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
+    Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,231 +23,246 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const GRID_SIZE: i32 = 20;
+const GRID_SIZE: u32 = 20;
 const QUAD_SIZE: f32 = 0.03;
+const NUM_QUADS: u32 = GRID_SIZE * GRID_SIZE;
 
-fn rotate_point(x: f32, y: f32, angle: f32, cx: f32, cy: f32) -> (f32, f32) {
-    let dx = x - cx;
-    let dy = y - cy;
-    let (s, c) = (angle.sin(), angle.cos());
-    (cx + dx * c - dy * s, cy + dx * s + dy * c)
+/// Animation parameters for compute shader
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AnimParams {
+    time: f32,
+    delta_time: f32,
+    total_instances: u32,
+    _pad: u32,
 }
 
-fn create_rotating_quad(cx: f32, cy: f32, size: f32, angle: f32, color: Color) -> [Vertex2D; 6] {
-    let half = size / 2.0;
-    let corners = [
-        rotate_point(cx - half, cy - half, angle, cx, cy),
-        rotate_point(cx + half, cy - half, angle, cx, cy),
-        rotate_point(cx + half, cy + half, angle, cx, cy),
-        rotate_point(cx - half, cy + half, angle, cx, cy),
-    ];
+fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    println!("Goldy Instancing Example - {} quads (GPU-driven)", NUM_QUADS);
+    println!("Press Escape to exit");
 
-    [
-        Vertex2D::new(corners[0].0, corners[0].1, color),
-        Vertex2D::new(corners[1].0, corners[1].1, color),
-        Vertex2D::new(corners[2].0, corners[2].1, color),
-        Vertex2D::new(corners[0].0, corners[0].1, color),
-        Vertex2D::new(corners[2].0, corners[2].1, color),
-        Vertex2D::new(corners[3].0, corners[3].1, color),
-    ]
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = App::default();
+    event_loop.run_app(&mut app)?;
+
+    Ok(())
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
-
+#[derive(Default)]
 struct App {
-    instance: Instance,
-    device: Option<Arc<goldy::Device>>,
-    pipeline: Option<RenderPipeline>,
-    shader: Option<ShaderModule>,
-    window: Option<Arc<Window>>,
-    surface: Option<Surface>,
-    start_time: Instant,
-    vertex_buffers: Vec<Buffer>,
+    state: Option<RenderState>,
 }
 
-impl App {
-    fn new() -> anyhow::Result<Self> {
-        Ok(Self {
-            instance: Instance::new()?,
-            device: None,
-            pipeline: None,
-            shader: None,
-            window: None,
-            surface: None,
-            start_time: Instant::now(),
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
-        })
-    }
+struct RenderState {
+    window: Arc<Window>,
+    device: Arc<goldy::Device>,
+    surface: Surface,
+    // Compute resources
+    compute_pipeline: ComputePipeline,
+    // Graphics resources
+    render_pipeline: RenderPipeline,
+    // Buffers
+    instance_buffer: Buffer,
+    params_buffer: Buffer,
+    // State
+    start_time: Instant,
+    last_time: f32,
+}
 
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+impl RenderState {
+    fn new(window: Arc<Window>) -> Result<Self> {
+        let instance = Instance::new()?;
+        let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(
+
+        // Load shaders
+        let compute_shader = ShaderModule::from_slang(
             &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                vertex_layout: Vertex2D::layout(),
-                target_format: surface.format(),
-                ..Default::default()
-            },
+            include_str!("../shaders/instancing_update.slang"),
         )?;
-        self.device = Some(device);
-        self.shader = Some(shader);
-        self.pipeline = Some(pipeline);
-        self.surface = Some(surface);
-        Ok(())
-    }
+        let render_shader = ShaderModule::from_slang(
+            &device,
+            include_str!("../shaders/instancing_render.slang"),
+        )?;
 
-    fn render_frame(&mut self) -> anyhow::Result<()> {
-        let window = self.window.as_ref().unwrap();
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
-
-        let time = self.start_time.elapsed().as_secs_f32();
-
-        // Generate all quads
-        let mut vertices: Vec<Vertex2D> = Vec::new();
-        let total = GRID_SIZE * GRID_SIZE;
-
+        // Create instance buffer with initial positions
+        // Positions are static, compute shader updates rotation and color
+        let mut instances = Vec::with_capacity(NUM_QUADS as usize);
         for i in 0..GRID_SIZE {
             for j in 0..GRID_SIZE {
-                let idx = i * GRID_SIZE + j;
-
-                // Position in grid
+                // Position in grid (static)
                 let nx = (i as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
                 let ny = (j as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
                 let cx = nx * 0.85;
                 let cy = ny * 0.85;
 
-                // Individual rotation based on position and time
-                let phase = (idx as f32 / total as f32) * std::f32::consts::PI * 2.0;
-                let angle = time * 2.0 + phase;
-
-                // Color based on position
-                let hue = (idx as f32 / total as f32 + time * 0.1) % 1.0;
-                let color = hsv_to_rgb(hue, 0.8, 0.9);
-
-                vertices.extend_from_slice(&create_rotating_quad(cx, cy, QUAD_SIZE, angle, color));
+                instances.push(Instance2D::new(
+                    cx,
+                    cy,
+                    0.0,      // rotation - will be updated by compute
+                    QUAD_SIZE,
+                    [1.0, 1.0, 1.0, 1.0], // color - will be updated by compute
+                ));
             }
         }
 
-        let device = self.device.as_ref().unwrap();
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
+        let instance_buffer =
+            Buffer::with_data(&device, &instances, BufferUsage::STORAGE | BufferUsage::VERTEX)?;
 
-        let frame = surface.acquire()?;
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
+        // Create params buffer
+        let params = AnimParams {
+            time: 0.0,
+            delta_time: 0.016,
+            total_instances: NUM_QUADS,
+            _pad: 0,
+        };
+        let params_buffer = Buffer::with_data(&device, &[params], BufferUsage::UNIFORM)?;
+
+        // Create compute pipeline
+        let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
+
+        // Create render pipeline - no vertex buffer needed
+        let render_pipeline = RenderPipeline::new(
+            &device,
+            &render_shader,
+            &render_shader,
+            &RenderPipelineDesc {
+                vertex_layout: VertexBufferLayout::empty(),
+                topology: PrimitiveTopology::TriangleList,
+                target_format: surface.format(),
+                ..Default::default()
+            },
+        )?;
+
+        println!(
+            "Created instancing example with {} quads (GPU compute + graphics)",
+            NUM_QUADS
+        );
+
+        Ok(Self {
+            window,
+            device,
+            surface,
+            compute_pipeline,
+            render_pipeline,
+            instance_buffer,
+            params_buffer,
+            start_time: Instant::now(),
+            last_time: 0.0,
+        })
+    }
+
+    fn render(&mut self) -> Result<()> {
+        let time = self.start_time.elapsed().as_secs_f32();
+        let delta_time = time - self.last_time;
+        self.last_time = time;
+
+        // Update params buffer
+        let params = AnimParams {
+            time,
+            delta_time,
+            total_instances: NUM_QUADS,
+            _pad: 0,
+        };
+        self.params_buffer.write_data(0, &[params])?;
+
+        // Run compute pass to update instance transforms and colors
+        let mut compute_encoder = ComputeEncoder::new();
+        {
+            let mut pass = compute_encoder.begin_compute_pass();
+            pass.set_pipeline(&self.compute_pipeline);
+            pass.set_push_constants(&[&self.instance_buffer, &self.params_buffer]);
+            // Dispatch enough workgroups for all instances (64 threads per group)
+            let workgroups = (NUM_QUADS + 63) / 64;
+            pass.dispatch(workgroups, 1, 1);
         }
+        compute_encoder.dispatch(&self.device)?;
+
+        // Render quads from instance buffer
+        let frame = self.surface.acquire()?;
+
+        let bg_color = Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.04,
+            a: 1.0,
+        };
 
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color {
-                r: 0.02,
-                g: 0.02,
-                b: 0.04,
-                a: 1.0,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.draw(0..vertices.len() as u32, 0..1);
+            pass.clear(bg_color);
+            pass.set_pipeline(&self.render_pipeline);
+            pass.set_push_constants(&[&self.instance_buffer]);
+            // Draw 6 vertices (quad) per instance - no vertex buffer!
+            pass.draw_quads(NUM_QUADS);
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
-        self.vertex_buffers.push(vertex_buffer);
+        self.surface.present(frame)?;
+
+        self.window.request_redraw();
         Ok(())
-    }
-
-    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
-            }
-        }
-    }
-}
-
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
-    let c = v * s;
-    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-
-    let (r, g, b) = match (h * 6.0) as i32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-
-    Color {
-        r: r + m,
-        g: g + m,
-        b: b + m,
-        a: 1.0,
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        if self.state.is_none() {
             let window = Arc::new(
                 event_loop
                     .create_window(
                         Window::default_attributes()
                             .with_title(&format!(
-                                "Goldy - Instancing ({} quads, Surface API)",
-                                GRID_SIZE * GRID_SIZE
+                                "Goldy - Instancing ({} quads, GPU-driven)",
+                                NUM_QUADS
                             ))
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
-                    .unwrap(),
+                    .expect("Failed to create window"),
             );
-            self.window = Some(window.clone());
-            self.init_gpu(&window).unwrap();
-            window.request_redraw();
+
+            match RenderState::new(window.clone()) {
+                Ok(state) => {
+                    self.state = Some(state);
+                    window.request_redraw();
+                }
+                Err(e) => {
+                    eprintln!("Failed to create render state: {}", e);
+                    event_loop.exit();
+                }
+            }
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     event_loop.exit();
                 }
             }
-            WindowEvent::RedrawRequested => {
-                if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
+            WindowEvent::Resized(size) => {
+                if let Some(state) = &mut self.state {
+                    if size.width > 0 && size.height > 0 {
+                        state.surface.resize(size.width, size.height).ok();
+                    }
                 }
-                self.window.as_ref().unwrap().request_redraw();
             }
-            WindowEvent::Resized(new_size) => {
-                self.handle_resize(new_size);
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+            WindowEvent::RedrawRequested => {
+                if let Some(state) = &mut self.state {
+                    if let Err(e) = state.render() {
+                        eprintln!("Render error: {}", e);
+                    }
                 }
             }
             _ => {}
         }
     }
-}
-
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Instancing Example - {} quads", GRID_SIZE * GRID_SIZE);
-    println!("Press Escape to exit");
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new()?)?;
-    Ok(())
 }

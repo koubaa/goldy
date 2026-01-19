@@ -1,9 +1,10 @@
 /**
  * Goldy C++ Example: Plasma
  *
- * Demonstrates bindless rendering:
+ * Demonstrates bindless rendering with vertex-less fullscreen triangle:
  * - Using set_push_constants() to pass buffer indices to shaders
  * - Time-based animation with uniform buffer updates
+ * - No vertex buffer needed - geometry generated in vertex shader
  *
  * This is the C++ equivalent of goldy/examples/plasma.rs
  */
@@ -13,78 +14,31 @@
 #include <cstdint>
 #include <array>
 #include <fstream>
+#include <sstream>
 #include <cstring>
-
-// Vertex data: position (x, y) + UV (u, v)
-struct Vertex2DUv {
-    float x, y;
-    float u, v;
-};
 
 // Uniform buffer data (must match shader cbuffer layout)
 struct Uniforms {
     float time;
 };
 
-// Plasma shader
-constexpr const char* PLASMA_SHADER = R"(
-import goldy_exp;
-
-// Uniform structure  
-struct TimeUniforms {
-    float time;
-};
-
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer support
-struct PlasmaResources {
-    ConstantBuffer<TimeUniforms> uniforms;
-};
-ParameterBlock<PlasmaResources> gResources;
-#define TIME gResources.uniforms.time
-
-#elif defined(__SPIRV__)
-// Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.buffer_indices;
-
-// Global descriptor array of uniform buffers
-[[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-#define TIME g_UniformBuffers[getBufferIndex(0)].time
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0) {
-    uint uniformsIndex;
-};
-#define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
-
-#endif
-
-[shader("vertex")]
-FullscreenVarying vs_main(FullscreenVertex input) {
-    return vs_fullscreen(input);
+// Load shader from file
+std::string load_shader(const char* name) {
+    // Shaders are in ../../shaders/ relative to this example
+    std::string path = std::string("../../shaders/") + name;
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        // Try from build directory (shaders may be in different relative path)
+        path = std::string("../../../shaders/") + name;
+        file.open(path);
+    }
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open shader file: " + std::string(name));
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
 }
-
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    float2 uv = scale_uv(input.uv, 4.0);
-    float t = TIME;
-    
-    // Classic plasma formula
-    float v = sin(uv.x + t);
-    v += sin(uv.y + t);
-    v += sin(uv.x + uv.y + t);
-    
-    float cx = uv.x + 0.5 * sin(t / 3.0);
-    float cy = uv.y + 0.5 * cos(t / 2.0);
-    v += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
-    
-    v = v / 2.0;
-    
-    // Use rainbow palette from goldy module
-    return float4(rainbow(v), 1.0);
-}
-)";
 
 // Simple PPM image writer (no external dependencies)
 void write_ppm(const char* filename, uint32_t width, uint32_t height,
@@ -121,51 +75,27 @@ int main() {
         std::cout << "Created device on adapter " << device.adapter_id() << "\n";
         std::cout << "Has goldy_exp library: " << (device.has_library("goldy_exp") ? "yes" : "no") << "\n\n";
 
-        // Fullscreen quad vertices (position + uv)
-        std::array<Vertex2DUv, 6> vertices = {{
-            // Triangle 1
-            {-1.0f, -1.0f,  0.0f, 1.0f},  // Bottom-left
-            { 1.0f, -1.0f,  1.0f, 1.0f},  // Bottom-right
-            { 1.0f,  1.0f,  1.0f, 0.0f},  // Top-right
-            // Triangle 2
-            {-1.0f, -1.0f,  0.0f, 1.0f},  // Bottom-left
-            { 1.0f,  1.0f,  1.0f, 0.0f},  // Top-right
-            {-1.0f,  1.0f,  0.0f, 0.0f},  // Top-left
-        }};
-
-        // Create vertex buffer
-        auto vertex_usage = goldy::BufferUsage::Vertex | goldy::BufferUsage::CopyDst;
-        goldy::Buffer vertex_buffer(device,
-            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(vertices.data()),
-                                     vertices.size() * sizeof(Vertex2DUv)),
-            vertex_usage);
-        std::cout << "Created vertex buffer: " << vertex_buffer.size() << " bytes\n";
-
         // Create uniform buffer for time
         auto uniform_usage = goldy::BufferUsage::Uniform | goldy::BufferUsage::CopyDst;
         goldy::Buffer uniform_buffer(device, sizeof(Uniforms), uniform_usage);
         std::cout << "Created uniform buffer: " << uniform_buffer.size() << " bytes\n";
 
-        // Compile shader
-        goldy::ShaderModule shader(device, PLASMA_SHADER);
-        std::cout << "Compiled plasma shader\n";
+        // Load and compile shader from shared shaders directory
+        std::string shader_src = load_shader("plasma.slang");
+        goldy::ShaderModule shader(device, shader_src.c_str());
+        std::cout << "Compiled plasma shader (from shaders/plasma.slang)\n";
 
-        // Create pipeline
-        std::array<GoldyVertexAttribute, 2> attributes = {{
-            { 0, GOLDY_VERTEX_FORMAT_FLOAT32X2, 0 },                    // position
-            { 1, GOLDY_VERTEX_FORMAT_FLOAT32X2, sizeof(float) * 2 },    // uv
-        }};
-
+        // Create pipeline - vertex-less (no vertex buffer needed)
         GoldyRenderPipelineDesc pipeline_desc{};
-        pipeline_desc.vertex_attributes = attributes.data();
-        pipeline_desc.vertex_attribute_count = static_cast<uint32_t>(attributes.size());
-        pipeline_desc.vertex_stride = sizeof(Vertex2DUv);
+        pipeline_desc.vertex_attributes = nullptr;
+        pipeline_desc.vertex_attribute_count = 0;
+        pipeline_desc.vertex_stride = 0;
         pipeline_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         pipeline_desc.target_format = GOLDY_TEXTURE_FORMAT_RGBA8_UNORM;
         pipeline_desc.depth_enabled = false;
 
         goldy::RenderPipeline pipeline(device, shader, shader, pipeline_desc);
-        std::cout << "Created render pipeline\n";
+        std::cout << "Created render pipeline (vertex-less)\n";
 
         // Create render target
         constexpr uint32_t WIDTH = 800;
@@ -190,8 +120,8 @@ int main() {
             encoder.set_pipeline(pipeline);
             // Pass buffer indices via push constants
             encoder.set_push_constants(uniform_buffer);
-            encoder.set_vertex_buffer(0, vertex_buffer);
-            encoder.draw(6);  // 6 vertices = 2 triangles = fullscreen quad
+            // Vertex-less fullscreen triangle: 3 vertices, no vertex buffer
+            encoder.draw(3);
 
             target.render(std::move(encoder));
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gradient example - animated color gradient.
 
-Demonstrates fragment shader with time-based animation using the Surface API.
+Uses vertex-less fullscreen triangle rendering (no vertex buffer needed).
 
 Usage:
     python gradient.py
@@ -23,20 +23,6 @@ def load_shader(name):
         return f.read()
 
 
-def create_fullscreen_quad(time_offset):
-    """Create fullscreen quad vertices with animated UV offset."""
-    offset = time_offset * 0.1
-    return np.array([
-        # Position      UV
-        -1.0, -1.0,    0.0 + offset, 1.0,
-         1.0, -1.0,    1.0 + offset, 1.0,
-         1.0,  1.0,    1.0 + offset, 0.0,
-        -1.0, -1.0,    0.0 + offset, 1.0,
-         1.0,  1.0,    1.0 + offset, 0.0,
-        -1.0,  1.0,    0.0 + offset, 0.0,
-    ], dtype=np.float32)
-
-
 def main():
     print("Goldy Gradient Example - Press Escape to exit")
 
@@ -50,7 +36,7 @@ def main():
 
     # Create window
     width, height = 800, 600
-    window = glfw.create_window(width, height, "Goldy - Animated Gradient (Surface API)", None, None)
+    window = glfw.create_window(width, height, "Goldy - Animated Gradient", None, None)
     if not window:
         glfw.terminate()
         raise RuntimeError("Failed to create GLFW window")
@@ -61,22 +47,23 @@ def main():
 
     surface = goldy.Surface.from_glfw(device, window)
 
-    # Load and compile shader
+    # Create uniform buffer for time
+    uniform_buffer = goldy.Buffer.empty(
+        device, 4, goldy.BufferUsage.UNIFORM | goldy.BufferUsage.COPY_DST
+    )
+
+    # Load and compile shader from shared shaders directory
     gradient_shader_src = load_shader("gradient.slang")
     shader = goldy.ShaderModule.from_slang(device, gradient_shader_src)
 
-    # Create pipeline with custom vertex layout (position + uv)
+    # Create pipeline - vertex-less (no vertex buffer needed)
     pipeline = goldy.RenderPipeline(
         device, shader, shader,
         goldy.RenderPipelineDesc(
-            vertex_layout=goldy.VertexBufferLayout.vertex_2d_uv(),
+            vertex_layout=goldy.VertexBufferLayout.empty(),
             target_format=surface.format,
         )
     )
-
-    # Create initial vertex buffer
-    vertices = create_fullscreen_quad(0.0)
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
 
     start_time = time.time()
 
@@ -100,10 +87,10 @@ def main():
     while not glfw.window_should_close(window):
         glfw.poll_events()
 
-        # Update vertices with animated UV offset
+        # Update uniform buffer with current time
         t = time.time() - start_time
-        vertices = create_fullscreen_quad(t)
-        vertex_buffer.write(0, vertices)
+        time_data = np.array([t], dtype=np.float32)
+        uniform_buffer.write(0, time_data)
 
         # Acquire frame
         frame = surface.acquire()
@@ -113,8 +100,10 @@ def main():
         with encoder.begin_render_pass() as rp:
             rp.clear(goldy.Color.BLACK)
             rp.set_pipeline(pipeline)
-            rp.set_vertex_buffer(0, vertex_buffer)
-            rp.draw(range(6))
+            # Pass buffer indices via push constants
+            rp.set_push_constants([uniform_buffer])
+            # Vertex-less fullscreen triangle: 3 vertices, no vertex buffer
+            rp.draw(range(3))
 
         # Render and present
         frame.render(encoder)

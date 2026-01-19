@@ -2,6 +2,68 @@
 
 Slang shader sources shared between native (Vulkan) and web (WebGPU) platforms.
 
+## Goldy Idioms
+
+Goldy encourages specific patterns that leverage modern GPU capabilities:
+
+### 1. Vertex-less Fullscreen Rendering
+
+For fullscreen effects (plasma, mandelbrot, etc.), use `vs_fullscreen_triangle()` instead of vertex buffers:
+
+```slang
+import goldy_exp;
+
+[shader("vertex")]
+FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
+    return vs_fullscreen_triangle(vertex_id);  // No vertex buffer needed!
+}
+```
+
+```rust
+// Rust side - no vertex buffer
+pass.draw_fullscreen();  // Draws 3 vertices using SV_VertexID
+```
+
+This is more efficient than a fullscreen quad (3 verts vs 6) and eliminates buffer creation overhead.
+
+### 2. Compute + Graphics Buffer Sharing
+
+For particle systems and instancing, let compute shaders update data that graphics shaders read:
+
+```slang
+// Compute shader updates instances
+[shader("compute")]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    Instance inst = INSTANCES[id.x];
+    inst.rotation += delta_time;
+    INSTANCES[id.x] = inst;
+}
+
+// Graphics shader reads instances, generates geometry
+[shader("vertex")]
+VSOutput vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+    Instance inst = INSTANCES[instance_id];
+    float2 pos = quad_position_rotated(vertex_id, inst.position, inst.size, inst.rotation);
+    // ...
+}
+```
+
+```rust
+// Rust side
+compute_pass.dispatch(workgroups, 1, 1);
+render_pass.draw_quads(num_instances);  // 6 vertices per quad
+```
+
+### 3. Everything is a Buffer
+
+Goldy's bindless architecture treats all GPU data as indexed buffers:
+
+- **Uniforms**: `ConstantBuffer<T>` arrays with push constants for indices
+- **Instance data**: `StructuredBuffer<T>` indexed by `SV_InstanceID`
+- **Geometry**: Generated from `SV_VertexID` + `quad_position()` helpers
+
+This minimizes CPU-GPU synchronization and enables GPU-driven rendering.
+
 ## Goldy Module (Experimental)
 
 > ⚠️ **EXPERIMENTAL**: This library's API is unstable and may change significantly
@@ -13,8 +75,8 @@ The `goldy_exp` module provides shared utilities that shaders can import:
 import goldy_exp;
 
 [shader("vertex")]
-FullscreenVarying vs_main(FullscreenVertex input) {
-    return vs_fullscreen(input);
+FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
+    return vs_fullscreen_triangle(vertex_id);
 }
 
 [shader("fragment")]
@@ -32,14 +94,22 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | `goldy_exp/math.slang` | Math utilities: `PI`, `TAU`, `hash()`, `hash2()`, `center_uv()`, `scale_uv()`, `to_polar()`, `smootherstep()` |
 | `goldy_exp/color.slang` | Color utilities: `rainbow()`, `palette()`, `heat()`, `hsv_to_rgb()`, `luminance()`, `gamma_correct()` |
 | `goldy_exp/vertex.slang` | Vertex formats and shaders (see below) |
+| `goldy_exp/types.slang` | Common data types: `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `Instance2D` |
+| `goldy_exp/primitives.slang` | Procedural geometry: `quad_local()`, `quad_position()`, `quad_position_rotated()`, `billboard_position()`, `fullscreen_position()`, `fullscreen_uv()` |
 
 ### Vertex Formats
 
-**Fullscreen Quad** (position + UV):
+**Fullscreen Triangle** (vertex-less, recommended):
+```slang
+FullscreenVarying          // Output: float4 position, float2 uv
+vs_fullscreen_triangle()   // Generates fullscreen triangle from SV_VertexID (no buffer needed!)
+```
+
+**Fullscreen Quad** (position + UV, legacy):
 ```slang
 FullscreenVertex   // Input: float2 position, float2 uv
 FullscreenVarying  // Output: float4 position, float2 uv
-vs_fullscreen()    // Standard vertex shader
+vs_fullscreen()    // Standard vertex shader (requires vertex buffer)
 ```
 
 **Colored Vertices** (position + color):
@@ -50,11 +120,37 @@ vs_colored()       // Standard vertex shader
 fs_colored()       // Pass-through fragment shader
 ```
 
-**Fullscreen with Time** (position + UV + time):
+**Fullscreen with Time** (position + UV + time, legacy):
 ```slang
 FullscreenTimeVertex   // Input: float2 position, float2 uv, float time
 FullscreenTimeVarying  // Output: float4 position, float2 uv, float time
 vs_fullscreen_time()   // Standard vertex shader
+```
+
+### Procedural Geometry (from goldy_exp.primitives)
+
+For instanced rendering, use these helpers instead of vertex buffers:
+
+```slang
+quad_local(vertex_id)                                  // Get quad vertex [-1,1]
+quad_uv(vertex_id)                                     // Get quad UV [0,1]
+quad_position(vertex_id, center, size)                 // Quad at position
+quad_position_rotated(vertex_id, center, size, rot)    // Rotated quad
+billboard_position(vertex_id, center, size, cam_right, cam_up)  // 3D billboard
+fullscreen_position(vertex_id)                         // Fullscreen clip-space
+fullscreen_uv(vertex_id)                               // Fullscreen UV
+```
+
+### Common Types (from goldy_exp.types)
+
+These types have matching Rust structs in `goldy::common_types`:
+
+```slang
+Particle2D     // float2 position, float2 velocity
+Particle3D     // float3 position, float3 velocity, float age, float lifetime
+FrameUniforms  // float time, float delta_time, uint frame, uint _pad
+Transform2D    // float2 position, float rotation, float2 scale, float _pad
+Instance2D     // float2 position, float rotation, float scale, float4 color
 ```
 
 ## Usage
@@ -177,7 +273,23 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
    [[vk::push_constant]] ConstantBuffer<MyDataBlock> myData;
    ```
 
-3. **Macros don't export from modules**. Use functions instead:
+3. **DX12: Use named indices, not arrays** in cbuffers for buffer indices:
+   ```slang
+   // WORKS - direct named indices
+   cbuffer BufferIndices : register(b0, space0) {
+       uint instanceBufferIndex;
+       uint paramsBufferIndex;
+   };
+   #define DATA (*DescriptorHandle<StructuredBuffer<T>>(uint2(instanceBufferIndex, 0)))
+   
+   // MAY NOT WORK - array access has issues on some DX12 configurations
+   cbuffer BufferIndices : register(b0, space0) {
+       uint indices[16];
+   };
+   #define DATA (*DescriptorHandle<StructuredBuffer<T>>(uint2(indices[0], 0)))
+   ```
+
+4. **Macros don't export from modules**. Use functions instead:
    ```slang
    // In module - this WON'T be visible to importers:
    #define GET_INDEX(slot) indices[slot]

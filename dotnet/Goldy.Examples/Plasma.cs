@@ -9,79 +9,19 @@ using Silk.NET.Windowing;
 /// Demonstrates:
 /// - Using SetPushConstants() to pass buffer indices to shaders
 /// - Time-based animation with uniform buffer updates
-/// - Windowed rendering via Surface API
+/// - Vertex-less fullscreen triangle rendering (no vertex buffer needed)
+/// - Loading shaders from shared shaders directory
 ///
 /// Run with: dotnet run -- plasma
 /// </summary>
 static class Plasma
 {
-    // Plasma shader
-    const string PlasmaShader = """
-        import goldy_exp;
-
-        // Uniform structure  
-        struct TimeUniforms {
-            float time;
-        };
-
-        #if defined(__METAL__)
-        // Metal: Use ParameterBlock for argument buffer support
-        struct PlasmaResources {
-            ConstantBuffer<TimeUniforms> uniforms;
-        };
-        ParameterBlock<PlasmaResources> gResources;
-        #define TIME gResources.uniforms.time
-
-        #elif defined(__SPIRV__)
-        // Vulkan: Use push constants for indices + descriptor array
-        import goldy_exp.buffer_indices;
-
-        // Global descriptor array of uniform buffers
-        [[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-        #define TIME g_UniformBuffers[getBufferIndex(0)].time
-
-        #elif defined(__DX12__)
-        // DX12: Root constants + ResourceDescriptorHeap
-        cbuffer BufferIndices : register(b0) {
-            uint uniformsIndex;
-        };
-        #define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
-
-        #endif
-
-        [shader("vertex")]
-        FullscreenVarying vs_main(FullscreenVertex input) {
-            return vs_fullscreen(input);
-        }
-
-        [shader("fragment")]
-        float4 fs_main(FullscreenVarying input) : SV_Target {
-            float2 uv = scale_uv(input.uv, 4.0);
-            float t = TIME;
-            
-            // Classic plasma formula
-            float v = sin(uv.x + t);
-            v += sin(uv.y + t);
-            v += sin(uv.x + uv.y + t);
-            
-            float cx = uv.x + 0.5 * sin(t / 3.0);
-            float cy = uv.y + 0.5 * cos(t / 2.0);
-            v += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
-            
-            v = v / 2.0;
-            
-            // Use rainbow palette from goldy module
-            return float4(rainbow(v), 1.0);
-        }
-        """;
-
     // Window reference
     static IWindow? _window;
     
     // Goldy resources
     static Instance? _instance;
     static Device? _device;
-    static Goldy.Buffer? _vertexBuffer;
     static Goldy.Buffer? _uniformBuffer;
     static RenderPipeline? _pipeline;
     static ShaderModule? _shader;
@@ -89,6 +29,32 @@ static class Plasma
     
     // Animation
     static Stopwatch _stopwatch = new();
+
+    /// <summary>
+    /// Load shader from shared shaders directory.
+    /// </summary>
+    static string LoadShader(string name)
+    {
+        // Try various relative paths to find the shaders directory
+        // From bin/Debug/net8.0, we need to go up to dotnet, then up to goldy root
+        string[] searchPaths = [
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "shaders", name),
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "shaders", name),
+            Path.Combine("..", "..", "shaders", name),
+            Path.Combine("shaders", name),
+        ];
+
+        foreach (var searchPath in searchPaths)
+        {
+            var fullPath = Path.GetFullPath(searchPath);
+            if (File.Exists(fullPath))
+            {
+                return File.ReadAllText(fullPath);
+            }
+        }
+
+        throw new FileNotFoundException($"Could not find shader: {name}. Searched in: {string.Join(", ", searchPaths)}");
+    }
 
     public static void Run()
     {
@@ -155,38 +121,23 @@ static class Plasma
         
         Console.WriteLine($"Surface: {_surface.Width}x{_surface.Height}, format: {_surface.Format}");
 
-        // Create fullscreen quad vertices (position + uv)
-        // Using Vertex2DUv layout: x, y, u, v
-        float[] vertices = [
-            // Triangle 1
-            -1.0f, -1.0f,  0.0f, 1.0f,  // Bottom-left
-             1.0f, -1.0f,  1.0f, 1.0f,  // Bottom-right
-             1.0f,  1.0f,  1.0f, 0.0f,  // Top-right
-            // Triangle 2
-            -1.0f, -1.0f,  0.0f, 1.0f,  // Bottom-left
-             1.0f,  1.0f,  1.0f, 0.0f,  // Top-right
-            -1.0f,  1.0f,  0.0f, 0.0f,  // Top-left
-        ];
-
-        _vertexBuffer = Goldy.Buffer.WithData<float>(_device, vertices, BufferUsage.Vertex);
-        Console.WriteLine($"Created vertex buffer: {_vertexBuffer.Size} bytes");
-
         // Create uniform buffer for time (4 bytes = 1 float)
         _uniformBuffer = new Goldy.Buffer(_device, 4, BufferUsage.Uniform | BufferUsage.CopyDst);
         Console.WriteLine($"Created uniform buffer: {_uniformBuffer.Size} bytes");
 
-        // Compile shader
-        _shader = new ShaderModule(_device, PlasmaShader);
-        Console.WriteLine("Compiled plasma shader");
+        // Load and compile shader from shared shaders directory
+        var shaderSrc = LoadShader("plasma.slang");
+        _shader = new ShaderModule(_device, shaderSrc);
+        Console.WriteLine("Compiled plasma shader (from shaders/plasma.slang)");
 
-        // Create pipeline
+        // Create pipeline - vertex-less (no vertex buffer needed)
         _pipeline = new RenderPipeline(_device, _shader, _shader,
             new RenderPipelineDesc
             {
                 TargetFormat = _surface.Format,
-                VertexStride = 16, // Vertex2DUv layout: 4 floats * 4 bytes
+                VertexStride = 0,  // No vertex buffer
             });
-        Console.WriteLine("Created render pipeline");
+        Console.WriteLine("Created render pipeline (vertex-less)");
         
         Console.WriteLine();
         Console.WriteLine("Window ready! Close or press Escape to exit.");
@@ -197,8 +148,7 @@ static class Plasma
 
     static void OnRender(double delta)
     {
-        if (_surface == null || _pipeline == null || _vertexBuffer == null || 
-            _uniformBuffer == null || _window == null)
+        if (_surface == null || _pipeline == null || _uniformBuffer == null || _window == null)
             return;
             
         var size = _window.Size;
@@ -221,8 +171,8 @@ static class Plasma
             encoder.SetPipeline(_pipeline);
             // Pass buffer indices via push constants
             encoder.SetPushConstants(_uniformBuffer);
-            encoder.SetVertexBuffer(0, _vertexBuffer);
-            encoder.Draw(6);  // 6 vertices = 2 triangles = fullscreen quad
+            // Vertex-less fullscreen triangle: 3 vertices, no vertex buffer
+            encoder.Draw(3);
 
             // Render to swapchain image (zero-copy - no CPU readback!)
             frame.Render(encoder);
@@ -250,7 +200,6 @@ static class Plasma
         _pipeline?.Dispose();
         _shader?.Dispose();
         _uniformBuffer?.Dispose();
-        _vertexBuffer?.Dispose();
         _surface?.Dispose();
         _device?.Dispose();
         _instance?.Dispose();

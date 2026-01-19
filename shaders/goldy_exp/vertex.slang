@@ -34,8 +34,7 @@ public FullscreenVarying vs_fullscreen(FullscreenVertex input) {
 // UV convention: (0,0) at bottom-left, (1,1) at top-right
 // This matches standard mathematical convention and Metal's Y-up NDC.
 // Vulkan backend will flip Y via negative viewport height when implemented.
-[shader("vertex")]
-public FullscreenVarying vs_fullscreen_triangle(uint vertex_id : SV_VertexID) {
+public FullscreenVarying vs_fullscreen_triangle(uint vertex_id) {
     FullscreenVarying output;
     
     // Generate UV coords from vertex index using bit manipulation:

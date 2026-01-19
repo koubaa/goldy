@@ -60,17 +60,13 @@ impl App {
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::MANDELBROT)?;
 
-        // Create pipeline
-        // Empty vertex layout - vertex shader generates geometry from SV_VertexID
+        // Create pipeline - no vertex buffer needed, shader uses SV_VertexID
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
             &shader,
             &RenderPipelineDesc {
-                vertex_layout: goldy::VertexBufferLayout {
-                    stride: 0,
-                    attributes: vec![],
-                },
+                vertex_layout: goldy::VertexBufferLayout::empty(),
                 target_format: surface.format(),
                 ..Default::default()
             },
@@ -121,8 +117,8 @@ impl App {
             pass.set_pipeline(pipeline);
             // Pass buffer indices via push constants
             pass.set_push_constants(&[uniform_buffer]);
-            // No vertex buffer needed - vertex shader generates fullscreen triangle from SV_VertexID
-            pass.draw(0..3, 0..1);
+            // No vertex buffer needed - shader uses SV_VertexID
+            pass.draw_fullscreen();
         }
 
         frame.render(encoder)?;

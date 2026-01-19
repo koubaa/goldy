@@ -77,7 +77,10 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
 
     // Build vertex layout
     let attributes: Vec<goldy::VertexAttribute> =
-        if desc.vertex_attribute_count > 0 && !desc.vertex_attributes.is_null() {
+        if desc.vertex_stride == 0 {
+            // Vertex-less rendering (procedural geometry from SV_VertexID)
+            vec![]
+        } else if desc.vertex_attribute_count > 0 && !desc.vertex_attributes.is_null() {
             slice::from_raw_parts(desc.vertex_attributes, desc.vertex_attribute_count as usize)
                 .iter()
                 .map(|a| (*a).into())

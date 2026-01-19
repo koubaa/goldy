@@ -1,12 +1,13 @@
 //! Checkerboard example - procedural texture with animation.
 //!
 //! Demonstrates procedural texturing in fragment shader using Surface API.
+//! Uses vertex-less fullscreen triangle (Goldy-native pattern).
 //!
 //! Run with: cargo run --example checkerboard
 
 use goldy::{
     shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
+    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,85 +19,22 @@ use winit::{
     window::{Window, WindowId},
 };
 
+/// Uniform buffer data (must match shader cbuffer layout)
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct CheckerVertex {
-    position: [f32; 2],
-    uv: [f32; 2],
+struct Uniforms {
     time: f32,
 }
-
-impl CheckerVertex {
-    fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                },
-                VertexAttribute {
-                    location: 2,
-                    format: VertexFormat::Float32,
-                    offset: 16,
-                },
-            ],
-        }
-    }
-}
-
-fn create_quad(time: f32) -> [CheckerVertex; 6] {
-    [
-        CheckerVertex {
-            position: [-1.0, -1.0],
-            uv: [0.0, 1.0],
-            time,
-        },
-        CheckerVertex {
-            position: [1.0, -1.0],
-            uv: [1.0, 1.0],
-            time,
-        },
-        CheckerVertex {
-            position: [1.0, 1.0],
-            uv: [1.0, 0.0],
-            time,
-        },
-        CheckerVertex {
-            position: [-1.0, -1.0],
-            uv: [0.0, 1.0],
-            time,
-        },
-        CheckerVertex {
-            position: [1.0, 1.0],
-            uv: [1.0, 0.0],
-            time,
-        },
-        CheckerVertex {
-            position: [-1.0, 1.0],
-            uv: [0.0, 0.0],
-            time,
-        },
-    ]
-}
-
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
+    uniform_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     start_time: Instant,
-    vertex_buffers: Vec<Buffer>,
 }
 
 impl App {
@@ -106,10 +44,10 @@ impl App {
             device: None,
             pipeline: None,
             shader: None,
+            uniform_buffer: None,
             window: None,
             surface: None,
             start_time: Instant::now(),
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
@@ -117,19 +55,30 @@ impl App {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang(&device, shaders::CHECKERBOARD)?;
+
+        // Create pipeline - no vertex buffer needed, shader uses SV_VertexID
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
             &shader,
             &RenderPipelineDesc {
-                vertex_layout: CheckerVertex::layout(),
+                vertex_layout: VertexBufferLayout::empty(),
                 target_format: surface.format(),
                 ..Default::default()
             },
         )?;
+
+        // Create uniform buffer for time
+        let uniform_buffer = Buffer::new(
+            device.as_ref(),
+            std::mem::size_of::<Uniforms>() as u64,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+        )?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
+        self.uniform_buffer = Some(uniform_buffer);
         self.surface = Some(surface);
         Ok(())
     }
@@ -141,31 +90,29 @@ impl App {
             return Ok(());
         }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let time = self.start_time.elapsed().as_secs_f32();
+        let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
 
-        let vertices = create_quad(time);
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
+        // Update uniform buffer with current time
+        let time = self.start_time.elapsed().as_secs_f32();
+        let uniforms = Uniforms { time };
+        uniform_buffer.write_data(0, &[uniforms])?;
 
         let frame = surface.acquire()?;
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
 
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.draw(0..6, 0..1);
+            pass.set_push_constants(&[uniform_buffer]);
+            // No vertex buffer needed - shader uses SV_VertexID
+            pass.draw_fullscreen();
         }
 
         frame.render(encoder)?;
         surface.present(frame)?;
-        self.vertex_buffers.push(vertex_buffer);
         Ok(())
     }
 

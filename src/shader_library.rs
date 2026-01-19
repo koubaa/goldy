@@ -252,6 +252,18 @@ impl ShaderLibrary {
                     include_str!("../shaders/goldy_exp/vertex.slang"),
                 ),
                 (
+                    "goldy_exp/types",
+                    include_str!("../shaders/goldy_exp/types.slang"),
+                ),
+                (
+                    "goldy_exp/primitives",
+                    include_str!("../shaders/goldy_exp/primitives.slang"),
+                ),
+                (
+                    "goldy_exp/resources",
+                    include_str!("../shaders/goldy_exp/resources.slang"),
+                ),
+                (
                     "goldy_exp/bindless",
                     include_str!("../shaders/goldy_exp/bindless.slang"),
                 ),
@@ -318,6 +330,9 @@ mod tests {
         assert!(lib.has_module("goldy_exp/math"));
         assert!(lib.has_module("goldy_exp/color"));
         assert!(lib.has_module("goldy_exp/vertex"));
+        assert!(lib.has_module("goldy_exp/types"));
+        assert!(lib.has_module("goldy_exp/primitives"));
+        assert!(lib.has_module("goldy_exp/resources"));
         assert!(lib.has_module("goldy_exp/bindless"));
         assert!(lib.has_module("goldy_exp/buffer_indices"));
     }

@@ -33,8 +33,9 @@ cbuffer BufferIndices : register(b0) {
 #endif
 
 [shader("vertex")]
-FullscreenVarying vs_main(FullscreenVertex input) {
-    return vs_fullscreen(input);
+FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
+    // Use vertex-less fullscreen triangle - no vertex buffer needed
+    return vs_fullscreen_triangle(vertex_id);
 }
 
 float metaball(float2 p, float2 center, float radius) {

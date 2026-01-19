@@ -13,6 +13,8 @@ module goldy_exp;
 __include "goldy_exp/math";
 __include "goldy_exp/color";
 __include "goldy_exp/vertex";
+__include "goldy_exp/types";
+__include "goldy_exp/primitives";
 
 // Note: bindless and buffer_indices are NOT auto-included.
 // Shaders should import them explicitly when needed to avoid b0 register conflicts.
