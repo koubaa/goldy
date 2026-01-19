@@ -252,8 +252,8 @@ impl RenderState {
             pass.set_pipeline(&self.render_pipeline);
             // Pass buffer indices via push constants
             pass.set_push_constants(&[&self.particle_buffer, &self.params_buffer]);
-            // Draw 6 vertices (quad) per particle instance
-            pass.draw(0..6, 0..NUM_PARTICLES);
+            // Draw quads for each particle instance
+            pass.draw_quads(NUM_PARTICLES);
         }
 
         frame.render(encoder)?;

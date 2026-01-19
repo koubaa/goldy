@@ -322,34 +322,6 @@ impl Vertex2DUv {
     }
 }
 
-/// Fullscreen quad vertices using Vertex2DUv (position + UV)
-pub const FULLSCREEN_QUAD: [Vertex2DUv; 6] = [
-    Vertex2DUv {
-        position: [-1.0, -1.0],
-        uv: [0.0, 1.0],
-    },
-    Vertex2DUv {
-        position: [1.0, -1.0],
-        uv: [1.0, 1.0],
-    },
-    Vertex2DUv {
-        position: [1.0, 1.0],
-        uv: [1.0, 0.0],
-    },
-    Vertex2DUv {
-        position: [-1.0, -1.0],
-        uv: [0.0, 1.0],
-    },
-    Vertex2DUv {
-        position: [1.0, 1.0],
-        uv: [1.0, 0.0],
-    },
-    Vertex2DUv {
-        position: [-1.0, 1.0],
-        uv: [0.0, 0.0],
-    },
-];
-
 // ============================================================================
 // Depth Buffer Types
 // ============================================================================
@@ -572,24 +544,6 @@ mod tests {
         let layout = Vertex2DUv::layout();
         assert_eq!(layout.stride, 16); // 2 floats + 2 floats = 4 * 4 = 16
         assert_eq!(layout.attributes.len(), 2);
-    }
-
-    #[test]
-    fn test_fullscreen_quad_vertices() {
-        // Check we have 6 vertices (2 triangles)
-        assert_eq!(FULLSCREEN_QUAD.len(), 6);
-
-        // Check positions span -1 to 1
-        for v in &FULLSCREEN_QUAD {
-            assert!(v.position[0] >= -1.0 && v.position[0] <= 1.0);
-            assert!(v.position[1] >= -1.0 && v.position[1] <= 1.0);
-        }
-
-        // Check UVs span 0 to 1
-        for v in &FULLSCREEN_QUAD {
-            assert!(v.uv[0] >= 0.0 && v.uv[0] <= 1.0);
-            assert!(v.uv[1] >= 0.0 && v.uv[1] <= 1.0);
-        }
     }
 
     #[test]
