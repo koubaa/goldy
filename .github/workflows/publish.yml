@@ -23,6 +23,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Download and bundle Slang
+        run: |
+          cd slang && chmod +x download.sh && ./download.sh
+          cd ../python && python build-slang.py
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -50,6 +55,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Download and bundle Slang
+        run: |
+          cd slang
+          bash download.sh
+          cd ../python
+          python build-slang.py
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -73,6 +85,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Download and bundle Slang
+        run: |
+          cd slang && chmod +x download.sh && ./download.sh
+          cd ../python && python build-slang.py
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -95,6 +112,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
+      - name: Download and bundle Slang
+        run: |
+          cd slang && chmod +x download.sh && ./download.sh
+          cd ../python && python build-slang.py
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
