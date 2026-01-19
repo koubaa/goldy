@@ -12,8 +12,8 @@ name = "_goldy"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Core goldy library
-goldy = { path = ".." }
+# Core goldy library - default-features = false allows feature passthrough
+goldy = { path = "..", default-features = false }
 
 # Python bindings
 pyo3 = { version = "0.23", features = ["extension-module"] }
@@ -33,3 +33,11 @@ raw-window-handle = "0.6"
 # macOS Objective-C runtime for NSWindow -> NSView conversion
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+
+[features]
+# Default enables all platform-appropriate backends (same as goldy)
+default = ["vulkan", "dx12", "metal"]
+# Backend features pass through to goldy - only selected backends are compiled
+vulkan = ["goldy/vulkan"]
+dx12 = ["goldy/dx12"]
+metal = ["goldy/metal"]

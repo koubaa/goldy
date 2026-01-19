@@ -6,9 +6,9 @@ Goldy uses a backend abstraction that allows different GPU APIs while maintainin
 
 | Backend | Status | Platforms |
 |---------|--------|-----------|
-| Vulkan | ✅ Implemented | Windows, Linux, (macOS via MoltenVK) |
-| DX12 | ✅ Implemented | Windows |
-| Metal | 🔜 Stub (planned) | macOS, iOS |
+| Vulkan |  Implemented | Windows, Linux |
+| DX12 |  Implemented | Windows |
+| Metal | Implemented | macOS, iOS |
 
 ## Backend Independence
 
@@ -34,8 +34,6 @@ Each backend uses **native idioms**, not translation:
 │   device addr │    │               │    │               │
 └───────────────┘    └───────────────┘    └───────────────┘
 ```
-
-**Key point**: MoltenVK must translate Vulkan → Metal, adding complexity. Goldy's Metal backend would use Metal directly.
 
 ## Vulkan Backend
 
@@ -142,11 +140,11 @@ By default, Goldy selects the platform-preferred backend:
 |----------|-----------------|
 | Windows  | DX12            |
 | Linux    | Vulkan          |
-| macOS    | Metal (planned) |
+| macOS    | Metal           |
 
 ### Runtime Override
 
-You can override the backend at runtime using the `GOLDY_BACKEND` environment variable:
+You can override the default backend at runtime using the `GOLDY_BACKEND` environment variable:
 
 ```bash
 # Use Vulkan on Windows (instead of DX12)
@@ -165,15 +163,14 @@ This is useful for:
 
 ### Compile-Time Selection
 
-You can also select backends at compile time using Cargo features:
+You can also select backends at compile time using Cargo features. This excludes both the code and dependencies for unselected backends:
 
 ```bash
-# Build with only Vulkan backend (disables DX12 on Windows)
+# Build with only Vulkan backend (excludes DX12 code and dependencies)
 cargo build --no-default-features --features vulkan
-
-# Build with only DX12 backend
-cargo build --no-default-features --features dx12
 ```
+
+For detailed information on feature flags, dependency exclusion, and CI setup, see [Conditional Compilation](conditional-compilation.md).
 
 ### Programmatic Selection
 
