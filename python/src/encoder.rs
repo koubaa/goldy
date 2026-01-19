@@ -244,7 +244,7 @@ impl PyRenderPass {
 /// Extract a range from a Python range object or tuple.
 fn extract_range(obj: &Bound<'_, PyAny>) -> PyResult<Range<u32>> {
     // Try Python range object
-    if let Ok(range) = obj.downcast::<pyo3::types::PySlice>() {
+    if let Ok(range) = obj.cast::<pyo3::types::PySlice>() {
         let indices = range.indices(i32::MAX as isize)?;
         return Ok(indices.start as u32..indices.stop as u32);
     }
@@ -257,7 +257,7 @@ fn extract_range(obj: &Bound<'_, PyAny>) -> PyResult<Range<u32>> {
     }
 
     // Try as tuple (start, stop)
-    if let Ok(tuple) = obj.downcast::<pyo3::types::PyTuple>() {
+    if let Ok(tuple) = obj.cast::<pyo3::types::PyTuple>() {
         if tuple.len() == 2 {
             let start: u32 = tuple.get_item(0)?.extract()?;
             let stop: u32 = tuple.get_item(1)?.extract()?;
