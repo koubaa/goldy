@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.jpeg" alt="Goldy Logo" width="600">
+</p>
+
 # Goldy: Modern GPU Library
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -44,6 +48,15 @@ fn main() -> anyhow::Result<()> {
 goldy = "0.1"
 ```
 
+### Slang Compiler
+
+Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation. The build script automatically downloads Slang 2025.24.3 during compilation. You can also:
+
+- Set `GOLDY_SLANG_PATH` to use a custom Slang installation
+- Run `slang/download.sh` to manually download vendored binaries
+
+For FFI bindings (Python, .NET, C++), Slang libraries are bundled automatically by the respective build scripts. See [PACKAGING.md](PACKAGING.md) for architecture details and [DEBUGGING.md](DEBUGGING.md) for troubleshooting.
+
 ## Documentation
 
 📖 **[Full Documentation](https://koubaa.github.io/goldy/)**
@@ -64,6 +77,18 @@ cargo run --example plasma --release        # Demoscene plasma
 cargo run --example mandelbrot --release    # Fractal explorer
 cargo run --example starfield --release     # 3D starfield
 cargo run --example particles --release     # Rain/snow
+```
+
+### Selecting a Backend
+
+By default, Goldy uses DX12 on Windows and Vulkan on Linux. Override with `GOLDY_BACKEND`:
+
+```bash
+# Run with Vulkan backend (on Windows)
+GOLDY_BACKEND=vulkan cargo run --example triangle --release
+
+# Run with DX12 backend
+GOLDY_BACKEND=dx12 cargo run --example triangle --release
 ```
 
 See [all examples](https://koubaa.github.io/goldy/examples/overview.html).

@@ -150,6 +150,32 @@ impl PyRenderPass {
         });
     }
 
+    /// Set push constants for fully bindless rendering.
+    ///
+    /// Pass the buffers whose bindless indices should be pushed to the shader.
+    /// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
+    /// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
+    ///
+    /// Use this instead of `set_bind_group()` for fully bindless shaders that
+    /// access resources via global descriptor arrays.
+    ///
+    /// Args:
+    ///     buffers: List of buffers to pass to the shader via push constants.
+    ///
+    /// Example:
+    ///     >>> rp.set_push_constants([uniform_buffer])
+    ///     # In shader: g_UniformBuffers[BINDLESS_INDEX(0)].time
+    fn set_push_constants(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
+        self.encoder.borrow(py).with_encoder(|enc| {
+            // Collect buffer references - deref the Arc to get &Buffer
+            let buffer_refs: Vec<&goldy::Buffer> =
+                buffers.iter().map(|b| b.inner.as_ref()).collect();
+
+            let mut pass = enc.begin_render_pass();
+            pass.set_push_constants(&buffer_refs);
+        });
+    }
+
     /// Draw primitives.
     ///
     /// Args:

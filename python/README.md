@@ -11,9 +11,15 @@ pip install goldy
 Or build from source:
 
 ```bash
-cd goldy-py
+cd goldy/python
 pip install maturin
+
+# For development (editable install)
 maturin develop
+
+# For wheel building (includes Slang libraries)
+python build-slang.py  # Copy Slang libs to package
+maturin build --release
 ```
 
 ## Quick Start
@@ -163,7 +169,27 @@ Tests are organized into:
 
 - Python 3.9+
 - NumPy 1.20+
-- Vulkan 1.4+ compatible GPU
+- A compatible GPU (DX12 on Windows, Vulkan 1.4+ on Linux)
+
+## Backend Selection
+
+Goldy uses DX12 on Windows and Vulkan on Linux by default. Override with `GOLDY_BACKEND`:
+
+```bash
+# Use Vulkan on Windows
+GOLDY_BACKEND=vulkan python examples/hello_triangle.py
+
+# Use DX12 explicitly  
+GOLDY_BACKEND=dx12 python examples/hello_triangle.py
+```
+
+Or set it in Python before importing goldy:
+
+```python
+import os
+os.environ["GOLDY_BACKEND"] = "vulkan"
+import goldy
+```
 
 ## Publishing to PyPI
 

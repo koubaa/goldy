@@ -104,7 +104,7 @@ const module = device.createShaderModule({ code: wgsl });
 | `digital_clock.slang` | 7-segment display shader | — |
 | `triangle.slang` | Procedural triangle from vertex ID | — |
 | `gradient.slang` | Animated color gradient | — |
-| `tunnel.slang` | Demoscene tunnel effect | — |
+| `tunnel.slang` | Demoscene tunnel effect (bindless) | ✓ `import goldy_exp` |
 | `checkerboard.slang` | Animated checker pattern | — |
 | `metaballs.slang` | Blending distance fields | — |
 | `starfield.slang` | 3D starfield flying forward | — |
@@ -118,6 +118,86 @@ All shaders compile to:
 - **WGSL** (via slang-wasm) → WebGPU
 - **HLSL** (future) → DirectX 12
 - **MSL** (future) → Metal
+
+## Preprocessor Defines
+
+When compiling shaders, Goldy passes backend-specific preprocessor defines:
+
+| Define | When Set | Use For |
+|--------|----------|---------|
+| `__BINDLESS__` | Bindless mode enabled | Conditionally use bindless resource access |
+| `__METAL__` | Targeting Metal | Metal-specific code (ParameterBlock for argument buffers) |
+| `__SPIRV__` | Targeting Vulkan | Vulkan-specific code (push constants, descriptor arrays) |
+| `__HLSL__` | Targeting DX12 | DX12-specific code (root constants, ResourceDescriptorHeap) |
+
+### Important Caveats
+
+1. **Slang auto-defines `__HLSL__`** for all targets because it uses HLSL-like syntax internally. When writing cross-platform shaders, **always check `__METAL__` first, then `__SPIRV__`, then `__HLSL__`**:
+
+   ```slang
+   #ifdef __BINDLESS__
+   // CORRECT: Check __METAL__ first, then __SPIRV__, then __HLSL__
+   #if defined(__METAL__)
+       // Metal path - use ParameterBlock for argument buffers
+       struct MyResources {
+           ConstantBuffer<MyUniforms> uniforms;
+       };
+       ParameterBlock<MyResources> gResources;
+       #define TIME gResources.uniforms.time
+   #elif defined(__SPIRV__)
+       // Vulkan path - use push constants + descriptor arrays
+       [[vk::binding(1, 0)]] ConstantBuffer<MyUniforms> g_UniformBuffers[];
+       #define TIME g_UniformBuffers[getBindlessIndex(0)].time
+   #elif defined(__HLSL__)
+       // DX12 path - use root constants + ResourceDescriptorHeap
+       cbuffer BindlessIndices : register(b0) { uint uniformsIndex; };
+       #define TIME (*DescriptorHandle<ConstantBuffer<MyUniforms>>(uint2(uniformsIndex, 0))).time
+   #endif
+   #endif
+   ```
+   
+   **Why this order matters:** If you check `__HLSL__` before `__METAL__`, Metal shaders will incorrectly use DX12-specific features like `DescriptorHandle` which cause compilation errors like:
+   ```
+   error 36107: entrypoint uses features that are not available in 'fragment' stage for 'metal' compilation target
+   ```
+
+2. **Preprocessor defines don't propagate to imported modules**. If you `import` a module that uses `#ifdef __BINDLESS__`, the define won't be visible inside that module. Solutions:
+   - Don't use guards in modules that are only imported when bindless is active
+   - Use functions instead of macros (functions export, macros don't)
+
+3. **Push constants require specific syntax** for Vulkan SPIR-V:
+   ```slang
+   // WRONG - cbuffer doesn't generate push constants
+   [[vk::push_constant]]
+   cbuffer MyData { ... };
+   
+   // CORRECT - struct + ConstantBuffer pattern
+   struct MyDataBlock { ... };
+   [[vk::push_constant]] ConstantBuffer<MyDataBlock> myData;
+   ```
+
+4. **Macros don't export from modules**. Use functions instead:
+   ```slang
+   // In module - this WON'T be visible to importers:
+   #define GET_INDEX(slot) indices[slot]
+   
+   // Use a function instead - this WILL be visible:
+   public uint getIndex(uint slot) { return indices[slot]; }
+   ```
+
+5. **Metal bindless uses `ParameterBlock`, not push constants**. Unlike Vulkan/DX12 which use push/root constants to pass buffer indices, Metal uses `ParameterBlock` which Slang compiles to argument buffers:
+   ```slang
+   // Metal bindless pattern
+   struct MyResources {
+       ConstantBuffer<MyUniforms> uniforms;
+       Texture2D myTexture;
+   };
+   ParameterBlock<MyResources> gResources;
+   
+   // Access via: gResources.uniforms.time, gResources.myTexture
+   ```
+   
+   The Goldy backend writes GPU addresses directly to the argument buffer and binds it at the slot specified by Slang reflection. When using `set_push_constants()` in Rust with a Metal ParameterBlock shader, the backend automatically handles this translation.
 
 ## Module System
 

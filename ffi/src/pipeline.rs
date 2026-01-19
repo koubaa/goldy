@@ -90,16 +90,17 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
                 .map(|a| (*a).into())
                 .collect()
         } else {
-            // Default Vertex2D layout
+            // Default Vertex2DUv layout (position + uv)
+            // This matches goldy::types::Vertex2DUv and FullscreenVertex shader input
             vec![
                 goldy::VertexAttribute {
                     location: 0,
-                    format: goldy::VertexFormat::Float32x2,
+                    format: goldy::VertexFormat::Float32x2, // POSITION
                     offset: 0,
                 },
                 goldy::VertexAttribute {
                     location: 1,
-                    format: goldy::VertexFormat::Float32x4,
+                    format: goldy::VertexFormat::Float32x2, // TEXCOORD0 (UV)
                     offset: 8,
                 },
             ]

@@ -6,13 +6,14 @@ This directory contains vendored [Slang](https://github.com/shader-slang/slang) 
 
 ```
 slang/
+├── manifest.json      # Version and file list (source of truth)
 ├── bin/
 │   ├── windows-x86_64/
-│   │   └── slang-compiler.dll
+│   │   └── slang-compiler.dll, slang.dll, slang-rt.dll, ...
 │   ├── linux-x86_64/
-│   │   └── libslang-compiler.so
+│   │   └── libslang-compiler.so, libslang.so, ...
 │   ├── macos-aarch64/
-│   │   └── libslang-compiler.dylib
+│   │   └── libslang-compiler.dylib, libslang.dylib, ...
 │   └── ...
 ├── include/
 │   └── slang.h

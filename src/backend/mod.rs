@@ -2,6 +2,22 @@
 //!
 //! This module defines the `GpuBackend` trait that each graphics API
 //! (Vulkan, Metal, DX12, WebGPU) must implement.
+//!
+//! ## Backend Selection
+//!
+//! By default, goldy selects the platform-preferred backend:
+//! - **macOS**: Metal
+//! - **Windows**: DX12
+//! - **Linux**: Vulkan
+//!
+//! You can override this at runtime by setting the `GOLDY_BACKEND` environment variable:
+//!
+//! ```bash
+//! # Use Vulkan on Windows (instead of DX12)
+//! GOLDY_BACKEND=vulkan cargo run --example triangle
+//!
+//! # Valid values: vulkan, dx12, metal
+//! ```
 
 #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
 pub mod vulkan;
@@ -81,11 +97,17 @@ pub enum RenderCommand {
         offset: u64,
         format: IndexFormat,
     },
-    /// Set a bind group.
+    /// Set a bind group (hybrid bindless mode).
     SetBindGroup {
         index: u32,
         bind_group: BindGroupHandle,
     },
+    /// Set push constants directly with buffer handles (fully bindless mode).
+    /// The backend will look up each buffer's bindless index and push them.
+    SetPushConstants { buffers: Vec<BufferHandle> },
+    /// Set push constants with raw u32 indices (fully bindless mode).
+    /// Use this for textures/samplers or when you already have the indices.
+    SetPushConstantsRaw { indices: Vec<u32> },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -114,6 +136,8 @@ pub enum ComputeCommand {
         index: u32,
         bind_group: BindGroupHandle,
     },
+    /// Set push constants (fully bindless mode - buffer indices passed directly).
+    SetPushConstants { buffers: Vec<BufferHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,
@@ -141,10 +165,14 @@ pub trait GpuBackend: Send + Sync {
         device: DeviceHandle,
         size: u64,
         usage: BufferUsage,
+        element_stride: Option<u32>,
     ) -> Result<BufferHandle>;
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
+    /// Get the buffer's index in the global bindless descriptor set.
+    /// Returns None if bindless is not enabled or the buffer is not registered.
+    fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32>;
 
     // Shader management
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
@@ -250,11 +278,17 @@ pub trait GpuBackend: Send + Sync {
         height: u32,
     ) -> Result<()>;
     fn destroy_texture(&mut self, texture: TextureHandle);
+    /// Get the texture's index in the global bindless descriptor set.
+    /// Returns None if bindless is not enabled or the texture is not registered.
+    fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
 
     // Sampler management
     fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc)
         -> Result<SamplerHandle>;
     fn destroy_sampler(&mut self, sampler: SamplerHandle);
+    /// Get the sampler's index in the global bindless descriptor set.
+    /// Returns None if bindless is not enabled or the sampler is not registered.
+    fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32>;
 
     // Surface API - zero-copy presentation to window
     /// Create a surface for presenting to a window.
@@ -369,7 +403,33 @@ pub enum BindingResource {
 }
 
 /// Create the default backend for the current platform.
+///
+/// The backend can be overridden at runtime by setting the `GOLDY_BACKEND`
+/// environment variable to one of: `vulkan`, `dx12`, `metal`.
+///
+/// Without the override, the platform default is used:
+/// - macOS: Metal
+/// - Windows: DX12  
+/// - Linux: Vulkan
 pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
+    // Check for runtime override via environment variable
+    if let Ok(backend_str) = std::env::var("GOLDY_BACKEND") {
+        let backend_type = match backend_str.to_lowercase().as_str() {
+            "vulkan" | "vk" => BackendType::Vulkan,
+            "dx12" | "d3d12" | "directx" => BackendType::Dx12,
+            "metal" | "mtl" => BackendType::Metal,
+            other => anyhow::bail!(
+                "Unknown GOLDY_BACKEND value '{}'. Valid options: vulkan, dx12, metal",
+                other
+            ),
+        };
+        tracing::info!(
+            "Using backend from GOLDY_BACKEND env var: {:?}",
+            backend_type
+        );
+        return create_backend(backend_type);
+    }
+
     // On macOS with metal feature, prefer Metal
     #[cfg(all(feature = "metal", target_os = "macos"))]
     {

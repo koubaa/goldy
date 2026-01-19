@@ -36,6 +36,8 @@ pub struct MockBackend {
     next_texture_handle: TextureHandle,
     samplers: HashMap<SamplerHandle, MockSampler>,
     next_sampler_handle: SamplerHandle,
+    /// Next bindless index to assign (shared across buffers, textures, samplers)
+    next_bindless_index: u32,
     /// Render commands recorded during render operations
     pub recorded_commands: Vec<Vec<RenderCommand>>,
     /// Compute commands recorded during dispatch operations
@@ -68,6 +70,7 @@ struct MockBuffer {
     device_handle: DeviceHandle,
     size: u64,
     data: Vec<u8>,
+    bindless_index: u32,
 }
 
 #[allow(dead_code)]
@@ -115,6 +118,7 @@ struct MockTexture {
     height: u32,
     format: TextureFormat,
     data: Vec<u8>,
+    bindless_index: u32,
 }
 
 #[allow(dead_code)]
@@ -122,6 +126,7 @@ struct MockSampler {
     device_handle: DeviceHandle,
     #[allow(dead_code)]
     desc: SamplerDesc,
+    bindless_index: u32,
 }
 
 #[allow(dead_code)]
@@ -166,6 +171,7 @@ impl MockBackend {
             next_texture_handle: 1,
             samplers: HashMap::new(),
             next_sampler_handle: 1,
+            next_bindless_index: 0,
             recorded_commands: Vec::new(),
             recorded_compute_commands: Vec::new(),
             targets_created: Vec::new(),
@@ -254,6 +260,7 @@ impl GpuBackend for MockBackend {
         device: DeviceHandle,
         size: u64,
         _usage: BufferUsage,
+        _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -262,12 +269,16 @@ impl GpuBackend for MockBackend {
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
 
+        let bindless_index = self.next_bindless_index;
+        self.next_bindless_index += 1;
+
         self.buffers.insert(
             handle,
             MockBuffer {
                 device_handle: device,
                 size,
                 data: vec![0u8; size as usize],
+                bindless_index,
             },
         );
 
@@ -296,6 +307,10 @@ impl GpuBackend for MockBackend {
 
     fn buffer_size(&self, buffer: BufferHandle) -> u64 {
         self.buffers.get(&buffer).map(|b| b.size).unwrap_or(0)
+    }
+
+    fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32> {
+        self.buffers.get(&buffer).map(|b| b.bindless_index)
     }
 
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
@@ -688,6 +703,9 @@ impl GpuBackend for MockBackend {
         let handle = self.next_texture_handle;
         self.next_texture_handle += 1;
 
+        let bindless_index = self.next_bindless_index;
+        self.next_bindless_index += 1;
+
         let size = (width * height * format.bytes_per_pixel()) as usize;
         self.textures.insert(
             handle,
@@ -697,6 +715,7 @@ impl GpuBackend for MockBackend {
                 height,
                 format,
                 data: vec![0u8; size],
+                bindless_index,
             },
         );
 
@@ -743,6 +762,10 @@ impl GpuBackend for MockBackend {
         self.textures.remove(&texture);
     }
 
+    fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32> {
+        self.textures.get(&texture).map(|t| t.bindless_index)
+    }
+
     // Sampler management
     fn create_sampler(
         &mut self,
@@ -756,11 +779,15 @@ impl GpuBackend for MockBackend {
         let handle = self.next_sampler_handle;
         self.next_sampler_handle += 1;
 
+        let bindless_index = self.next_bindless_index;
+        self.next_bindless_index += 1;
+
         self.samplers.insert(
             handle,
             MockSampler {
                 device_handle: device,
                 desc: desc.clone(),
+                bindless_index,
             },
         );
 
@@ -770,6 +797,10 @@ impl GpuBackend for MockBackend {
 
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         self.samplers.remove(&sampler);
+    }
+
+    fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32> {
+        self.samplers.get(&sampler).map(|s| s.bindless_index)
     }
 
     // Compute pipeline management
@@ -950,7 +981,7 @@ mod tests {
 
         // Create an index buffer
         let index_buffer = backend
-            .create_buffer(device, 12, BufferUsage::INDEX)
+            .create_buffer(device, 12, BufferUsage::INDEX, None)
             .unwrap();
 
         // Write some indices (6 u16 indices for 2 triangles)
@@ -1025,7 +1056,7 @@ mod tests {
             .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
             .unwrap();
         let index_buffer = backend
-            .create_buffer(device, 24, BufferUsage::INDEX)
+            .create_buffer(device, 24, BufferUsage::INDEX, None)
             .unwrap();
 
         // Test with offset and base_vertex
@@ -1227,5 +1258,227 @@ mod tests {
             backend.surface_format(surface2),
             TextureFormat::Rgba8UnormSrgb
         );
+    }
+
+    #[test]
+    fn test_buffer_bindless_index() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+
+        // Create multiple buffers and verify they get sequential bindless indices
+        let buffer1 = backend
+            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .unwrap();
+        let buffer2 = backend
+            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .unwrap();
+        let buffer3 = backend
+            .create_buffer(device, 256, BufferUsage::VERTEX, None)
+            .unwrap();
+
+        assert_eq!(backend.buffer_bindless_index(buffer1), Some(0));
+        assert_eq!(backend.buffer_bindless_index(buffer2), Some(1));
+        assert_eq!(backend.buffer_bindless_index(buffer3), Some(2));
+    }
+
+    #[test]
+    fn test_texture_bindless_index() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+
+        // Create a buffer first to verify textures share the same index namespace
+        let _buffer = backend
+            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .unwrap();
+
+        let texture1 = backend
+            .create_texture(
+                device,
+                256,
+                256,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::SAMPLED,
+            )
+            .unwrap();
+        let texture2 = backend
+            .create_texture(
+                device,
+                512,
+                512,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::SAMPLED,
+            )
+            .unwrap();
+
+        // Textures should continue from where buffers left off
+        assert_eq!(backend.texture_bindless_index(texture1), Some(1));
+        assert_eq!(backend.texture_bindless_index(texture2), Some(2));
+    }
+
+    #[test]
+    fn test_sampler_bindless_index() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+
+        let sampler1 = backend
+            .create_sampler(device, &SamplerDesc::default())
+            .unwrap();
+        let sampler2 = backend
+            .create_sampler(device, &SamplerDesc::default())
+            .unwrap();
+
+        assert_eq!(backend.sampler_bindless_index(sampler1), Some(0));
+        assert_eq!(backend.sampler_bindless_index(sampler2), Some(1));
+    }
+
+    #[test]
+    fn test_bindless_indices_shared_namespace() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+
+        // Create resources in interleaved order to verify shared namespace
+        let buffer1 = backend
+            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .unwrap();
+        let texture1 = backend
+            .create_texture(
+                device,
+                256,
+                256,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::SAMPLED,
+            )
+            .unwrap();
+        let sampler1 = backend
+            .create_sampler(device, &SamplerDesc::default())
+            .unwrap();
+        let buffer2 = backend
+            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .unwrap();
+
+        // All resources share a single incrementing index
+        assert_eq!(backend.buffer_bindless_index(buffer1), Some(0));
+        assert_eq!(backend.texture_bindless_index(texture1), Some(1));
+        assert_eq!(backend.sampler_bindless_index(sampler1), Some(2));
+        assert_eq!(backend.buffer_bindless_index(buffer2), Some(3));
+    }
+
+    #[test]
+    fn test_bindless_index_invalid_handle() {
+        let backend = MockBackend::new();
+
+        // Invalid handles should return None
+        assert_eq!(backend.buffer_bindless_index(999), None);
+        assert_eq!(backend.texture_bindless_index(999), None);
+        assert_eq!(backend.sampler_bindless_index(999), None);
+    }
+
+    #[test]
+    fn test_push_constants_command_recording() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let target = backend
+            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
+        let buffer1 = backend
+            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .unwrap();
+        let buffer2 = backend
+            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .unwrap();
+
+        // Record render commands with push constants (bindless path)
+        let commands = vec![
+            RenderCommand::Clear(Color::BLACK),
+            RenderCommand::SetPushConstants {
+                buffers: vec![buffer1, buffer2],
+            },
+        ];
+
+        backend.render_to_target(device, target, &commands).unwrap();
+
+        // Verify commands were recorded correctly
+        assert_eq!(backend.recorded_commands.len(), 1);
+        assert_eq!(backend.recorded_commands[0].len(), 2);
+
+        match &backend.recorded_commands[0][1] {
+            RenderCommand::SetPushConstants { buffers } => {
+                assert_eq!(buffers.len(), 2);
+                assert_eq!(buffers[0], buffer1);
+                assert_eq!(buffers[1], buffer2);
+            }
+            _ => panic!("Expected SetPushConstants command"),
+        }
+    }
+
+    #[test]
+    fn test_push_constants_raw_command_recording() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let target = backend
+            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
+        // Record render commands with raw push constants
+        let commands = vec![
+            RenderCommand::Clear(Color::BLACK),
+            RenderCommand::SetPushConstantsRaw {
+                indices: vec![0, 1, 2, 3],
+            },
+        ];
+
+        backend.render_to_target(device, target, &commands).unwrap();
+
+        // Verify commands were recorded correctly
+        assert_eq!(backend.recorded_commands.len(), 1);
+        assert_eq!(backend.recorded_commands[0].len(), 2);
+
+        match &backend.recorded_commands[0][1] {
+            RenderCommand::SetPushConstantsRaw { indices } => {
+                assert_eq!(*indices, vec![0, 1, 2, 3]);
+            }
+            _ => panic!("Expected SetPushConstantsRaw command"),
+        }
+    }
+
+    #[test]
+    fn test_compute_push_constants_recording() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+
+        let buffer1 = backend
+            .create_buffer(device, 64, BufferUsage::STORAGE, None)
+            .unwrap();
+        let buffer2 = backend
+            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .unwrap();
+
+        // Record compute commands with push constants (bindless path)
+        let commands = vec![
+            ComputeCommand::SetPushConstants {
+                buffers: vec![buffer1, buffer2],
+            },
+            ComputeCommand::Dispatch {
+                workgroups_x: 8,
+                workgroups_y: 8,
+                workgroups_z: 1,
+            },
+        ];
+
+        backend.dispatch_compute(device, &commands).unwrap();
+
+        // Verify commands were recorded correctly
+        assert_eq!(backend.recorded_compute_commands.len(), 1);
+        assert_eq!(backend.recorded_compute_commands[0].len(), 2);
+
+        match &backend.recorded_compute_commands[0][0] {
+            ComputeCommand::SetPushConstants { buffers } => {
+                assert_eq!(buffers.len(), 2);
+                assert_eq!(buffers[0], buffer1);
+                assert_eq!(buffers[1], buffer2);
+            }
+            _ => panic!("Expected SetPushConstants command"),
+        }
     }
 }

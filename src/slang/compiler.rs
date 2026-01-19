@@ -91,8 +91,10 @@ pub enum ShaderTarget {
     Spirv,
     /// WGSL source for WebGPU
     Wgsl,
-    /// HLSL source for DirectX
+    /// HLSL source for DirectX (text, requires FXC/DXC to compile)
     Hlsl,
+    /// DXIL bytecode for DirectX 12 (binary, SM 6.6 for bindless)
+    Dxil,
     /// Metal Shading Language
     Metal,
     /// GLSL source
@@ -105,9 +107,15 @@ impl ShaderTarget {
             ShaderTarget::Spirv => SlangCompileTarget::Spirv,
             ShaderTarget::Wgsl => SlangCompileTarget::Wgsl,
             ShaderTarget::Hlsl => SlangCompileTarget::Hlsl,
+            ShaderTarget::Dxil => SlangCompileTarget::Dxil,
             ShaderTarget::Metal => SlangCompileTarget::Metal,
             ShaderTarget::Glsl => SlangCompileTarget::Glsl,
         }
+    }
+
+    /// Returns true if this target produces binary bytecode (not text).
+    pub fn is_binary(self) -> bool {
+        matches!(self, ShaderTarget::Spirv | ShaderTarget::Dxil)
     }
 }
 
@@ -127,7 +135,7 @@ impl CompiledShader {
             ShaderTarget::Wgsl | ShaderTarget::Hlsl | ShaderTarget::Metal | ShaderTarget::Glsl => {
                 std::str::from_utf8(&self.data).ok()
             }
-            ShaderTarget::Spirv => None,
+            ShaderTarget::Spirv | ShaderTarget::Dxil => None,
         }
     }
 
@@ -135,6 +143,15 @@ impl CompiledShader {
     pub fn as_spirv(&self) -> Option<&[u32]> {
         if self.target == ShaderTarget::Spirv && self.data.len().is_multiple_of(4) {
             Some(bytemuck::cast_slice(&self.data))
+        } else {
+            None
+        }
+    }
+
+    /// Get the data as DXIL bytecode (for DirectX 12).
+    pub fn as_dxil(&self) -> Option<&[u8]> {
+        if self.target == ShaderTarget::Dxil {
+            Some(&self.data)
         } else {
             None
         }
@@ -196,10 +213,15 @@ impl SlangCompiler {
         self.compile_with_entry_points(source, target, &entry_points)
     }
 
-    /// Compile for bindless rendering (adds __BINDLESS__ preprocessor define).
+    /// Compile for bindless rendering (adds __BINDLESS__ and target-specific defines).
     ///
     /// This is used by backends that support bindless resource access.
     /// Shaders can check for `#ifdef __BINDLESS__` to use bindless patterns.
+    ///
+    /// Target-specific defines are also added since Slang doesn't provide them automatically:
+    /// - SPIR-V (Vulkan): `__SPIRV__`
+    /// - HLSL/DXIL (DX12): `__HLSL__`  
+    /// - Metal: `__METAL__`
     pub fn compile_bindless(
         &self,
         source: &str,
@@ -207,19 +229,16 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
     ) -> Result<CompiledShader> {
-        self.compile_with_defines(
-            source,
-            target,
-            entry_points,
-            search_paths,
-            &[("__BINDLESS__", "1")],
-        )
+        let defines = Self::bindless_defines_for_target(target);
+        self.compile_with_defines(source, target, entry_points, search_paths, &defines)
     }
 
     /// Compile for bindless rendering with reflection data.
     ///
     /// Returns both the compiled shader and reflection information about
     /// ParameterBlocks, which is needed to properly set up argument buffers.
+    ///
+    /// See [`Self::compile_bindless`] for details on defines.
     pub fn compile_bindless_with_reflection(
         &self,
         source: &str,
@@ -227,13 +246,21 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
     ) -> Result<CompiledShaderWithReflection> {
-        self.compile_with_reflection(
-            source,
-            target,
-            entry_points,
-            search_paths,
-            &[("__BINDLESS__", "1")],
-        )
+        let defines = Self::bindless_defines_for_target(target);
+        self.compile_with_reflection(source, target, entry_points, search_paths, &defines)
+    }
+
+    /// Get preprocessor defines for bindless compilation on a given target.
+    fn bindless_defines_for_target(target: ShaderTarget) -> Vec<(&'static str, &'static str)> {
+        let mut defines = vec![("__BINDLESS__", "1")];
+        match target {
+            ShaderTarget::Spirv => defines.push(("__SPIRV__", "1")),
+            ShaderTarget::Dxil | ShaderTarget::Hlsl => defines.push(("__HLSL__", "1")),
+            ShaderTarget::Metal => defines.push(("__METAL__", "1")),
+            ShaderTarget::Wgsl => defines.push(("__WGSL__", "1")),
+            ShaderTarget::Glsl => defines.push(("__GLSL__", "1")),
+        }
+        defines
     }
 
     /// Compile with reflection data.
@@ -286,6 +313,21 @@ impl SlangCompiler {
             unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
         if target_index < 0 {
             anyhow::bail!("Failed to add code generation target");
+        }
+
+        // Set profile for DXIL target (SM 6.6 for bindless support)
+        if target == ShaderTarget::Dxil {
+            let profile_name = CString::new("sm_6_6").unwrap();
+            let profile_id =
+                unsafe { (self.library.find_profile)(self.session, profile_name.as_ptr()) };
+            if profile_id > 0 {
+                unsafe {
+                    (self.library.set_target_profile)(request, target_index, profile_id);
+                }
+                tracing::debug!("Set DXIL target profile to sm_6_6 (id={})", profile_id);
+            } else {
+                tracing::warn!("Could not find sm_6_6 profile, using default");
+            }
         }
 
         // Add translation unit (the source file)
@@ -778,6 +820,21 @@ impl SlangCompiler {
             unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
         if target_index < 0 {
             anyhow::bail!("Failed to add code generation target");
+        }
+
+        // Set profile for DXIL target (SM 6.6 for bindless support)
+        if target == ShaderTarget::Dxil {
+            let profile_name = CString::new("sm_6_6").unwrap();
+            let profile_id =
+                unsafe { (self.library.find_profile)(self.session, profile_name.as_ptr()) };
+            if profile_id > 0 {
+                unsafe {
+                    (self.library.set_target_profile)(request, target_index, profile_id);
+                }
+                tracing::debug!("Set DXIL target profile to sm_6_6 (id={})", profile_id);
+            } else {
+                tracing::warn!("Could not find sm_6_6 profile, using default");
+            }
         }
 
         // Add translation unit (the source file)

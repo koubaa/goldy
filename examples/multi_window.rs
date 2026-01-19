@@ -11,6 +11,122 @@ use goldy::{
     shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
     RenderPipelineDesc, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+
+// Plasma shader that reads time from vertex attribute (compatible with QuadVertex)
+const PLASMA_VERTEX_TIME: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.time = input.time;
+    return output;
+}
+
+float3 rainbow(float t) {
+    float3 c = float3(
+        sin(t * 6.28318 + 0.0) * 0.5 + 0.5,
+        sin(t * 6.28318 + 2.094) * 0.5 + 0.5,
+        sin(t * 6.28318 + 4.189) * 0.5 + 0.5
+    );
+    return c;
+}
+
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float2 uv = input.uv * 4.0;
+    float t = input.time;
+    
+    // Classic plasma formula
+    float v = sin(uv.x + t);
+    v += sin(uv.y + t);
+    v += sin(uv.x + uv.y + t);
+    
+    float cx = uv.x + 0.5 * sin(t / 3.0);
+    float cy = uv.y + 0.5 * cos(t / 2.0);
+    v += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
+    
+    v = v / 2.0;
+    
+    return float4(rainbow(v), 1.0);
+}
+"#;
+
+// Tunnel shader that reads time from vertex attribute (compatible with QuadVertex)
+const TUNNEL_VERTEX_TIME: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float time : TEXCOORD1;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.time = input.time;
+    return output;
+}
+
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    float2 uv = (input.uv - 0.5) * 2.0;
+    float t = input.time;
+    
+    // Polar coordinates
+    float dist = length(uv);
+    float angle = atan2(uv.y, uv.x);
+    
+    // Tunnel coordinates
+    float tunnel_depth = 1.0 / (dist + 0.1);
+    float tunnel_angle = angle / 3.14159 + t * 0.2;
+    
+    // Animated texture coordinates
+    float tx = tunnel_angle * 4.0;
+    float ty = tunnel_depth - t * 2.0;
+    
+    // Checkerboard pattern
+    float checker = floor(tx) + floor(ty);
+    bool is_white = fmod(checker, 2.0) == 0.0;
+    
+    // Color based on depth and checker
+    float depth_color = 1.0 - dist * 0.5;
+    float3 color;
+    
+    if (is_white) {
+        color = float3(0.8, 0.2, 0.4) * depth_color;
+    } else {
+        color = float3(0.2, 0.4, 0.8) * depth_color;
+    }
+    
+    // Add glow at center
+    color += float3(0.3, 0.5, 1.0) * (1.0 - dist) * (1.0 - dist);
+    
+    // Fog at edges
+    color *= 1.0 - dist * 0.3;
+    
+    return float4(color, 1.0);
+}
+"#;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -117,8 +233,9 @@ impl EffectType {
 
     fn shader_source(&self) -> &'static str {
         match self {
-            EffectType::Plasma => shaders::PLASMA,
-            EffectType::Tunnel => shaders::TUNNEL,
+            // Use vertex-time shaders that read time from vertex attribute
+            EffectType::Plasma => PLASMA_VERTEX_TIME,
+            EffectType::Tunnel => TUNNEL_VERTEX_TIME,
             EffectType::Starfield => shaders::STARFIELD,
         }
     }

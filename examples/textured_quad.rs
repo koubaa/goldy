@@ -1,14 +1,14 @@
-//! Textured quad example - demonstrates texture sampling.
+//! Textured quad example - demonstrates fully bindless texture sampling.
 //!
 //! Creates a procedural checkerboard texture and displays it on a quad.
+//! Resource indices are passed directly via push constants instead of using bind groups.
 //!
 //! Run with: cargo run --example textured_quad
 
 use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFormat, TextureUsage},
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferUsage, Color, CommandEncoder,
-    DeviceType, Instance, RenderPipeline, RenderPipelineDesc, Sampler, SamplerBinding,
-    ShaderModule, Surface, Texture, TextureBinding, Vertex2DUv,
+    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, Sampler, ShaderModule, Surface, Texture, Vertex2DUv,
 };
 use std::sync::Arc;
 use winit::{
@@ -19,7 +19,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-// Simple shader that samples a texture
+// Simple shader that samples a texture using fully bindless resources
 const TEXTURED_SHADER: &str = r#"
 struct VertexInput {
     float2 position : POSITION;
@@ -31,8 +31,44 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-[[vk::binding(0, 0)]] Texture2D<float4> textureSampler;
-[[vk::binding(1, 0)]] SamplerState samplerState;
+// Bindless resource access - cross-platform
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer support
+struct TexturedQuadResources {
+    Texture2D<float4> texture;
+    SamplerState sampler;
+};
+ParameterBlock<TexturedQuadResources> gResources;
+#define GET_TEXTURE() gResources.texture
+#define GET_SAMPLER() gResources.sampler
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+[[vk::push_constant]]
+cbuffer BindlessIndices {
+    uint g_TextureIndex;
+    uint g_SamplerIndex;
+};
+
+// Vulkan: unbounded descriptor arrays matching goldy's bindless layout
+// Binding 0: storage buffers, 1: uniform buffers, 2: sampled images, 3: samplers
+[[vk::binding(2, 0)]] Texture2D<float4> g_Textures[];
+[[vk::binding(3, 0)]] SamplerState g_Samplers[];
+
+#define GET_TEXTURE() g_Textures[g_TextureIndex]
+#define GET_SAMPLER() g_Samplers[g_SamplerIndex]
+
+#else
+// DX12: root constants + DescriptorHandle (Slang lowers to ResourceDescriptorHeap)
+cbuffer BindlessIndices : register(b0, space0) {
+    uint g_TextureIndex;
+    uint g_SamplerIndex;
+};
+
+// Slang's DescriptorHandle<T> compiles to ResourceDescriptorHeap[index]/SamplerDescriptorHeap[index]
+#define GET_TEXTURE() (*DescriptorHandle<Texture2D<float4>>(uint2(g_TextureIndex, 0)))
+#define GET_SAMPLER() (*DescriptorHandle<SamplerState>(uint2(g_SamplerIndex, 0)))
+#endif
 
 [shader("vertex")]
 VertexOutput vs_main(VertexInput input) {
@@ -44,7 +80,7 @@ VertexOutput vs_main(VertexInput input) {
 
 [shader("fragment")]
 float4 fs_main(VertexOutput input) : SV_Target {
-    return textureSampler.Sample(samplerState, input.uv);
+    return GET_TEXTURE().Sample(GET_SAMPLER(), input.uv);
 }
 "#;
 
@@ -69,30 +105,30 @@ fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> 
     data
 }
 
-// Fullscreen quad vertices (already defined in goldy::types but we define here for clarity)
+// Fullscreen quad vertices
 const QUAD_VERTICES: [Vertex2DUv; 6] = [
     Vertex2DUv {
-        position: [-0.8, -0.8],
+        position: [-1.0, -1.0],
         uv: [0.0, 1.0],
     },
     Vertex2DUv {
-        position: [0.8, -0.8],
+        position: [1.0, -1.0],
         uv: [1.0, 1.0],
     },
     Vertex2DUv {
-        position: [0.8, 0.8],
+        position: [1.0, 1.0],
         uv: [1.0, 0.0],
     },
     Vertex2DUv {
-        position: [-0.8, -0.8],
+        position: [-1.0, -1.0],
         uv: [0.0, 1.0],
     },
     Vertex2DUv {
-        position: [0.8, 0.8],
+        position: [1.0, 1.0],
         uv: [1.0, 0.0],
     },
     Vertex2DUv {
-        position: [-0.8, 0.8],
+        position: [-1.0, 1.0],
         uv: [0.0, 0.0],
     },
 ];
@@ -107,8 +143,6 @@ struct App {
     vertex_buffer: Option<Buffer>,
     texture: Option<Texture>,
     sampler: Option<Sampler>,
-    bind_group: Option<BindGroup>,
-    bind_group_layout: Option<BindGroupLayout>,
 }
 
 impl App {
@@ -123,8 +157,6 @@ impl App {
             vertex_buffer: None,
             texture: None,
             sampler: None,
-            bind_group: None,
-            bind_group_layout: None,
         })
     }
 
@@ -165,24 +197,7 @@ impl App {
             },
         )?;
 
-        // Create bind group layout and bind group
-        let bind_group_layout = BindGroupLayout::new(
-            &device,
-            &[
-                BindGroupLayoutBinding::texture(0),
-                BindGroupLayoutBinding::sampler(1),
-            ],
-        )?;
-
-        let bind_group = BindGroup::with_resources(
-            &device,
-            &bind_group_layout,
-            &[], // No buffer bindings
-            &[TextureBinding::new(0, &texture)],
-            &[SamplerBinding::new(1, &sampler)],
-        )?;
-
-        // Create pipeline
+        // Create pipeline - fully bindless, no bind group layouts!
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -190,7 +205,7 @@ impl App {
             &RenderPipelineDesc {
                 vertex_layout: Vertex2DUv::layout(),
                 target_format: surface.format(),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
@@ -205,8 +220,6 @@ impl App {
         self.vertex_buffer = Some(vertex_buffer);
         self.texture = Some(texture);
         self.sampler = Some(sampler);
-        self.bind_group = Some(bind_group);
-        self.bind_group_layout = Some(bind_group_layout);
 
         Ok(())
     }
@@ -221,7 +234,12 @@ impl App {
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
-        let bind_group = self.bind_group.as_ref().unwrap();
+        let texture = self.texture.as_ref().unwrap();
+        let sampler = self.sampler.as_ref().unwrap();
+
+        // Get bindless indices
+        let tex_idx = texture.bindless_index().unwrap_or(0);
+        let samp_idx = sampler.bindless_index().unwrap_or(0);
 
         let frame = surface.acquire()?;
 
@@ -235,7 +253,8 @@ impl App {
                 a: 1.0,
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group);
+            // Fully bindless: pass texture and sampler indices directly via push constants
+            pass.set_push_constants_raw(&[tex_idx, samp_idx]);
             pass.set_vertex_buffer(0, vertex_buffer);
             pass.draw(0..6, 0..1);
         }
@@ -261,7 +280,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Textured Quad Example")
+                            .with_title("Goldy - Textured Quad (Fully Bindless)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -299,8 +318,9 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Textured Quad Example - Press Escape to exit");
+    println!("Goldy Textured Quad Example (Fully Bindless)");
     println!("Demonstrates texture sampling with a checkerboard pattern");
+    println!("Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;

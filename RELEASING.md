@@ -222,6 +222,14 @@ See [dotnet/PUBLISHING.md](dotnet/PUBLISHING.md) for detailed instructions.
 
 ---
 
+## Slang Bundling
+
+All packages bundle the Slang shader compiler libraries automatically. See [PACKAGING.md](PACKAGING.md) for details on:
+
+- How the manifest-driven bundling works
+- Platform-specific file lists
+- How to update Slang version
+
 ## Version Synchronization
 
 When releasing a new version, update these files:

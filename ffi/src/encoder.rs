@@ -123,6 +123,43 @@ pub unsafe extern "C" fn goldy_encoder_set_bind_group(
     pass.set_bind_group(index, &(*bind_group).inner);
 }
 
+/// Set push constants for fully bindless rendering.
+///
+/// Pass the buffers whose bindless indices should be pushed to the shader.
+/// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
+/// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
+///
+/// Use this instead of `goldy_encoder_set_bind_group()` for fully bindless shaders
+/// that access resources via global descriptor arrays.
+///
+/// # Safety
+/// All pointers must be valid. The buffers array must contain buffer_count elements.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_encoder_set_push_constants(
+    encoder: *mut GoldyCommandEncoder,
+    buffers: *const *const GoldyBuffer,
+    buffer_count: u32,
+) {
+    if encoder.is_null() || (buffer_count > 0 && buffers.is_null()) {
+        return;
+    }
+
+    // Convert array of buffer pointers to slice of Buffer references
+    let buffer_refs: Vec<&goldy::Buffer> = (0..buffer_count as usize)
+        .filter_map(|i| {
+            let buf_ptr = *buffers.add(i);
+            if buf_ptr.is_null() {
+                None
+            } else {
+                Some(&(*buf_ptr).inner)
+            }
+        })
+        .collect();
+
+    let mut pass = (*encoder).inner.begin_render_pass();
+    pass.set_push_constants(&buffer_refs);
+}
+
 /// Set an index buffer.
 ///
 /// # Safety

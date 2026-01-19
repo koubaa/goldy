@@ -104,11 +104,54 @@ impl<'a> RenderPass<'a> {
     ///
     /// The `index` corresponds to the bind group set in the shader
     /// (e.g., `[[vk::binding(0, 0)]]` uses index 0).
+    ///
+    /// This uses hybrid bindless mode where the API looks traditional but
+    /// the backend translates it to bindless internally.
     pub fn set_bind_group(&mut self, index: u32, bind_group: &BindGroup) {
         self.encoder.commands.push(RenderCommand::SetBindGroup {
             index,
             bind_group: bind_group.handle,
         });
+    }
+
+    /// Set push constants for fully bindless rendering.
+    ///
+    /// Pass the buffers whose bindless indices should be pushed to the shader.
+    /// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
+    /// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
+    ///
+    /// Use this instead of `set_bind_group()` for fully bindless shaders that
+    /// access resources via global descriptor arrays.
+    ///
+    /// # Example
+    /// ```ignore
+    /// pass.set_push_constants(&[&uniform_buffer]);
+    /// // In shader: g_UniformBuffers[BINDLESS_INDEX(0)].time
+    /// ```
+    pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
+        self.encoder.commands.push(RenderCommand::SetPushConstants {
+            buffers: buffers.iter().map(|b| b.handle).collect(),
+        });
+    }
+
+    /// Set push constants with raw u32 indices (fully bindless mode).
+    ///
+    /// Use this for textures and samplers, or when you already have the bindless indices.
+    /// The indices are pushed in order to the shader's push/root constants.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let tex_idx = texture.bindless_index().unwrap();
+    /// let samp_idx = sampler.bindless_index().unwrap();
+    /// pass.set_push_constants_raw(&[tex_idx, samp_idx]);
+    /// // In shader: GET_TEXTURE() and GET_SAMPLER() macros use these indices
+    /// ```
+    pub fn set_push_constants_raw(&mut self, indices: &[u32]) {
+        self.encoder
+            .commands
+            .push(RenderCommand::SetPushConstantsRaw {
+                indices: indices.to_vec(),
+            });
     }
 
     /// Draw primitives.

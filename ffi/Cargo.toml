@@ -23,6 +23,9 @@ libc = "0.2"
 # Thread-local storage for error messages
 once_cell = "1.19"
 
+# Raw window handles for surface creation
+raw-window-handle = "0.6"
+
 [build-dependencies]
 # C header generation
 cbindgen = "0.28"

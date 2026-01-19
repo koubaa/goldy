@@ -63,6 +63,21 @@ vcpkg_extract_source_archive(
 file(INSTALL "${SOURCE_PATH}/cpp/include/goldy.h" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
 file(INSTALL "${SOURCE_PATH}/cpp/include/goldy.hpp" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
 
+# Determine Slang platform directory
+if(VCPKG_TARGET_IS_WINDOWS AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    set(SLANG_PLATFORM "windows-x86_64")
+elseif(VCPKG_TARGET_IS_LINUX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    set(SLANG_PLATFORM "linux-x86_64")
+elseif(VCPKG_TARGET_IS_LINUX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
+    set(SLANG_PLATFORM "linux-aarch64")
+elseif(VCPKG_TARGET_IS_OSX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    set(SLANG_PLATFORM "macos-x86_64")
+elseif(VCPKG_TARGET_IS_OSX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
+    set(SLANG_PLATFORM "macos-aarch64")
+endif()
+
+set(SLANG_BIN_DIR "${SOURCE_PATH}/slang/bin/${SLANG_PLATFORM}")
+
 # Install native library from pre-built archive
 if(VCPKG_TARGET_IS_WINDOWS)
     file(INSTALL "${BINARY_PATH}/lib/goldy_ffi.dll"
@@ -70,6 +85,12 @@ if(VCPKG_TARGET_IS_WINDOWS)
     file(INSTALL "${BINARY_PATH}/lib/goldy_ffi.dll.lib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/lib"
          RENAME "goldy_ffi.lib")
+    
+    # Install Slang libraries
+    if(EXISTS "${SLANG_BIN_DIR}")
+        file(GLOB SLANG_DLLS "${SLANG_BIN_DIR}/*.dll")
+        file(INSTALL ${SLANG_DLLS} DESTINATION "${CURRENT_PACKAGES_DIR}/bin")
+    endif()
     
     # vcpkg expects debug libraries - use release for both since we don't ship debug builds
     file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/bin")
@@ -79,20 +100,41 @@ if(VCPKG_TARGET_IS_WINDOWS)
     file(INSTALL "${BINARY_PATH}/lib/goldy_ffi.dll.lib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib"
          RENAME "goldy_ffi.lib")
+    if(EXISTS "${SLANG_BIN_DIR}")
+        file(INSTALL ${SLANG_DLLS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/bin")
+    endif()
 elseif(VCPKG_TARGET_IS_LINUX)
     file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.so"
          DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
     
+    # Install Slang libraries
+    if(EXISTS "${SLANG_BIN_DIR}")
+        file(GLOB SLANG_LIBS "${SLANG_BIN_DIR}/*.so")
+        file(INSTALL ${SLANG_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
+    endif()
+    
     file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/lib")
     file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.so"
          DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
+    if(EXISTS "${SLANG_BIN_DIR}")
+        file(INSTALL ${SLANG_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
+    endif()
 elseif(VCPKG_TARGET_IS_OSX)
     file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.dylib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
     
+    # Install Slang libraries
+    if(EXISTS "${SLANG_BIN_DIR}")
+        file(GLOB SLANG_LIBS "${SLANG_BIN_DIR}/*.dylib")
+        file(INSTALL ${SLANG_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
+    endif()
+    
     file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/lib")
     file(INSTALL "${BINARY_PATH}/lib/libgoldy_ffi.dylib"
          DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
+    if(EXISTS "${SLANG_BIN_DIR}")
+        file(INSTALL ${SLANG_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
+    endif()
 endif()
 
 # Create CMake config
@@ -135,6 +177,7 @@ Include the headers:
     #include <goldy.hpp>  // C++ RAII wrapper
     #include <goldy.h>    // C API
 
-Note: goldy_ffi.dll must be in your PATH or next to your executable at runtime.
-The Slang compiler (slang.dll) is also required at runtime (from Vulkan SDK).
+Note: goldy_ffi.dll and Slang libraries (slang-compiler.dll, etc.) must be
+in your PATH or next to your executable at runtime. Both are included in
+the vcpkg bin directory.
 ]])

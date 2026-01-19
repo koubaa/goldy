@@ -133,6 +133,32 @@ impl ResourceRegistry {
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
         self.sampler_indices.remove(&handle);
     }
+
+    /// Check if an index is in the texture range (4096-8191)
+    pub fn is_texture_index(&self, index: u32) -> bool {
+        index >= 4096 && index < 8192
+    }
+
+    /// Check if an index is in the sampler range (8192+)
+    pub fn is_sampler_index(&self, index: u32) -> bool {
+        index >= 8192
+    }
+
+    /// Reverse lookup: find texture handle by its bindless index
+    pub fn texture_handle_by_index(&self, index: u32) -> Option<TextureHandle> {
+        self.texture_indices
+            .iter()
+            .find(|(_, &idx)| idx == index)
+            .map(|(&handle, _)| handle)
+    }
+
+    /// Reverse lookup: find sampler handle by its bindless index
+    pub fn sampler_handle_by_index(&self, index: u32) -> Option<SamplerHandle> {
+        self.sampler_indices
+            .iter()
+            .find(|(_, &idx)| idx == index)
+            .map(|(&handle, _)| handle)
+    }
 }
 
 /// GPU buffer state.

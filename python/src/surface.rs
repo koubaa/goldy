@@ -88,13 +88,22 @@ impl PySurface {
 
         #[cfg(target_os = "macos")]
         let surface = {
-            // On macOS, get the Cocoa window
+            // On macOS, get the Cocoa window and then its contentView
+            // GLFW returns NSWindow, but raw_window_handle needs NSView
             let get_cocoa_window = glfw.getattr("get_cocoa_window")?;
-            let cocoa_window: isize = get_cocoa_window.call1((glfw_window,))?.extract()?;
+            let ns_window: isize = get_cocoa_window.call1((glfw_window,))?.extract()?;
 
-            let window_wrapper = CocoaWindowWrapper {
-                ns_window: cocoa_window as *mut std::ffi::c_void,
+            // Get contentView from NSWindow using Objective-C runtime
+            let ns_view = unsafe {
+                use objc2::runtime::AnyObject;
+
+                let window = ns_window as *mut AnyObject;
+                // Call [window contentView] to get the NSView
+                let content_view: *mut AnyObject = objc2::msg_send![window, contentView];
+                content_view as *mut std::ffi::c_void
             };
+
+            let window_wrapper = CocoaWindowWrapper { ns_view };
             goldy::Surface::new(&device.inner, &window_wrapper).into_py_result()?
         };
 
@@ -251,7 +260,7 @@ impl raw_window_handle::HasDisplayHandle for X11WindowWrapper {
 
 #[cfg(target_os = "macos")]
 struct CocoaWindowWrapper {
-    ns_window: *mut std::ffi::c_void,
+    ns_view: *mut std::ffi::c_void,
 }
 
 #[cfg(target_os = "macos")]
@@ -265,7 +274,7 @@ impl raw_window_handle::HasWindowHandle for CocoaWindowWrapper {
         &self,
     ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         let handle = raw_window_handle::AppKitWindowHandle::new(
-            std::ptr::NonNull::new(self.ns_window).unwrap(),
+            std::ptr::NonNull::new(self.ns_view).unwrap(),
         );
         let raw = raw_window_handle::RawWindowHandle::AppKit(handle);
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })

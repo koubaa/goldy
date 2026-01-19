@@ -256,7 +256,7 @@ impl GpuBackend for WebGpuBackend {
         self.devices.contains_key(&device)
     }
 
-    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, usage: BufferUsage) -> Result<BufferHandle> {
+    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, usage: BufferUsage, _element_stride: Option<u32>) -> Result<BufferHandle> {
         let device = self
             .devices
             .get(&device_handle)

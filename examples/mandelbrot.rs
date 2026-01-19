@@ -1,13 +1,13 @@
 //! Mandelbrot example - interactive fractal explorer.
 //!
-//! Demonstrates uniform buffers with bind groups for dynamic parameters.
+//! Demonstrates FULLY BINDLESS rendering where resource indices are passed
+//! directly via push constants instead of using bind groups.
 //!
 //! Run with: cargo run --example mandelbrot
 
 use goldy::{
-    shaders, BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding,
-    BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline, RenderPipelineDesc,
-    ShaderModule, Surface,
+    shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface,
 };
 use std::sync::Arc;
 use winit::{
@@ -32,8 +32,6 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    bind_group_layout: Option<BindGroupLayout>,
-    bind_group: Option<BindGroup>,
     uniform_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
@@ -48,8 +46,6 @@ impl App {
             device: None,
             pipeline: None,
             shader: None,
-            bind_group_layout: None,
-            bind_group: None,
             uniform_buffer: None,
             window: None,
             surface: None,
@@ -64,14 +60,10 @@ impl App {
         // Create surface first to get the correct format
         let surface = Surface::new(&device, window.as_ref())?;
 
-        // Create shader - goldy library is automatically available for import
+        // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::MANDELBROT)?;
 
-        // Create bind group layout for uniforms (binding 0)
-        let bind_group_layout =
-            BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform_fragment(0)])?;
-
-        // Create pipeline with bind group layout
+        // Create pipeline WITHOUT bind group layouts - fully bindless!
         // Empty vertex layout - vertex shader generates geometry from SV_VertexID
         let pipeline = RenderPipeline::new(
             &device,
@@ -83,7 +75,7 @@ impl App {
                     attributes: vec![],
                 },
                 target_format: surface.format(),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
@@ -95,19 +87,10 @@ impl App {
             BufferUsage::UNIFORM | BufferUsage::COPY_DST,
         )?;
 
-        // Create bind group
-        let bind_group = BindGroup::new(
-            &device,
-            &bind_group_layout,
-            &[BufferBinding::new(0, &uniform_buffer)],
-        )?;
-
         self.device = Some(device);
         self.shader = Some(shader);
-        self.bind_group_layout = Some(bind_group_layout);
         self.pipeline = Some(pipeline);
         self.uniform_buffer = Some(uniform_buffer);
-        self.bind_group = Some(bind_group);
         self.surface = Some(surface);
 
         Ok(())
@@ -123,7 +106,6 @@ impl App {
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
-        let bind_group = self.bind_group.as_ref().unwrap();
 
         // Update uniform buffer with current view parameters
         let uniforms = Uniforms {
@@ -141,7 +123,8 @@ impl App {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group);
+            // Fully bindless: pass buffer indices directly via push constants
+            pass.set_push_constants(&[uniform_buffer]);
             // No vertex buffer needed - vertex shader generates fullscreen triangle from SV_VertexID
             pass.draw(0..3, 0..1);
         }
@@ -168,7 +151,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Mandelbrot (Uniform Buffers, Arrows=pan, +/-=zoom, R=reset)")
+                            .with_title("Goldy - Mandelbrot (Fully Bindless, Arrows=pan, +/-=zoom, R=reset)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -220,7 +203,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Mandelbrot Example (Uniform Buffers)");
+    println!("Goldy Mandelbrot Example (Fully Bindless)");
     println!("  Arrows - Pan");
     println!("  +/- - Zoom in/out");
     println!("  R - Reset view");

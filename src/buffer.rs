@@ -18,7 +18,7 @@ impl Buffer {
     /// Create a new buffer.
     pub fn new(device: &Device, size: u64, usage: BufferUsage) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_buffer(device.handle, size, usage)?;
+        let handle = backend.create_buffer(device.handle, size, usage, None)?;
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
@@ -35,14 +35,58 @@ impl Buffer {
         usage: BufferUsage,
     ) -> Result<Self> {
         let bytes = bytemuck::cast_slice(data);
-        let buffer = Self::new(device, bytes.len() as u64, usage)?;
+        let element_stride = std::mem::size_of::<T>() as u32;
+        let mut backend = device.backend.lock().unwrap();
+        let handle = backend.create_buffer(
+            device.handle,
+            bytes.len() as u64,
+            usage,
+            Some(element_stride),
+        )?;
+        drop(backend);
+
+        let buffer = Self {
+            backend: Arc::clone(&device.backend),
+            handle,
+            size: bytes.len() as u64,
+            usage,
+        };
         buffer.write(0, bytes)?;
         Ok(buffer)
     }
 
     /// Create a buffer initialized with raw bytes.
     pub fn with_bytes(device: &Device, data: &[u8], usage: BufferUsage) -> Result<Self> {
-        let buffer = Self::new(device, data.len() as u64, usage)?;
+        // For raw bytes, use stride of 1 (byte-addressable)
+        Self::with_bytes_stride(device, data, usage, 1)
+    }
+
+    /// Create a buffer initialized with raw bytes and a custom element stride.
+    ///
+    /// The stride is used for creating StructuredBuffer views on DX12. For example,
+    /// if the data contains u32 values, use stride=4 so the GPU can correctly
+    /// interpret the buffer as `StructuredBuffer<uint>`.
+    pub fn with_bytes_stride(
+        device: &Device,
+        data: &[u8],
+        usage: BufferUsage,
+        element_stride: u32,
+    ) -> Result<Self> {
+        let mut backend = device.backend.lock().unwrap();
+        let handle = backend.create_buffer(
+            device.handle,
+            data.len() as u64,
+            usage,
+            Some(element_stride),
+        )?;
+        drop(backend);
+
+        let buffer = Self {
+            backend: Arc::clone(&device.backend),
+            handle,
+            size: data.len() as u64,
+            usage,
+        };
         buffer.write(0, data)?;
         Ok(buffer)
     }
@@ -66,6 +110,18 @@ impl Buffer {
     /// Get the buffer usage flags.
     pub fn usage(&self) -> BufferUsage {
         self.usage
+    }
+
+    /// Get the buffer's index in the global bindless descriptor set.
+    ///
+    /// Returns `Some(index)` if bindless is enabled and this buffer is registered
+    /// (i.e., has UNIFORM or STORAGE usage). Returns `None` otherwise.
+    ///
+    /// Use this for fully bindless rendering where you pass resource indices
+    /// directly via push constants instead of using bind groups.
+    pub fn bindless_index(&self) -> Option<u32> {
+        let backend = self.backend.lock().unwrap();
+        backend.buffer_bindless_index(self.handle)
     }
 }
 

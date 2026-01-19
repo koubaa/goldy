@@ -326,18 +326,43 @@ impl VulkanBackend {
         let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
         let device_handle = shader.device_handle;
 
-        // Compile with per-backend Slang compiler (avoids global state issues)
-        let compiled = self
-            .slang_compiler
-            .compile_with_options(
-                &slang_source,
-                crate::slang::ShaderTarget::Spirv,
-                &[(entry_point_name, stage)],
-                &search_paths,
-            )
-            .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
+        // Check if bindless is enabled on the device
+        let bindless_enabled = self
+            .devices
+            .get(&device_handle)
+            .map(|d| d.bindless_enabled)
+            .unwrap_or(false);
 
-        let spirv = compiled.as_spirv().context("Invalid SPIR-V output")?;
+        // Compile shader with bindless if enabled (to get reflection data)
+        let (spirv_data, reflection) = if bindless_enabled {
+            let result = self
+                .slang_compiler
+                .compile_bindless_with_reflection(
+                    &slang_source,
+                    crate::slang::ShaderTarget::Spirv,
+                    &[(entry_point_name, stage)],
+                    &search_paths,
+                )
+                .with_context(|| {
+                    format!("Failed to compile {} shader (bindless)", entry_point_name)
+                })?;
+
+            let spirv = result.shader.as_spirv().context("Invalid SPIR-V output")?;
+            (spirv.to_vec(), Some(result.reflection))
+        } else {
+            let compiled = self
+                .slang_compiler
+                .compile_with_options(
+                    &slang_source,
+                    crate::slang::ShaderTarget::Spirv,
+                    &[(entry_point_name, stage)],
+                    &search_paths,
+                )
+                .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
+
+            let spirv = compiled.as_spirv().context("Invalid SPIR-V output")?;
+            (spirv.to_vec(), None)
+        };
 
         // Get device
         let logical_device = self
@@ -346,7 +371,9 @@ impl VulkanBackend {
             .context("Shader's device no longer valid")?;
 
         // Create Vulkan shader module
-        let create_info = vk::ShaderModuleCreateInfo::default().code(spirv);
+        // Convert Vec<u8> to &[u32] for SPIR-V
+        let spirv_u32: &[u32] = bytemuck::cast_slice(&spirv_data);
+        let create_info = vk::ShaderModuleCreateInfo::default().code(spirv_u32);
         let module = unsafe {
             logical_device
                 .device
@@ -355,18 +382,33 @@ impl VulkanBackend {
         .context("Failed to create Vulkan shader module")?;
 
         tracing::debug!(
-            "Compiled {} ({} SPIR-V words)",
+            "Compiled {} ({} SPIR-V words, bindless={})",
             entry_point_name,
-            spirv.len()
+            spirv_u32.len(),
+            bindless_enabled
         );
 
-        // Cache the module - need to re-get shader as mutable
+        // Cache the module and reflection data
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         match stage {
             crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
             crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
             crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
             _ => {} // Already validated above, shouldn't reach here
+        }
+
+        // Store reflection data (merge with existing if any)
+        if let Some(ref new_reflection) = reflection {
+            if let Some(ref mut existing) = shader.reflection {
+                // Merge parameter blocks
+                for pb in &new_reflection.parameter_blocks {
+                    if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                        existing.parameter_blocks.push(pb.clone());
+                    }
+                }
+            } else {
+                shader.reflection = reflection;
+            }
         }
 
         Ok(module)

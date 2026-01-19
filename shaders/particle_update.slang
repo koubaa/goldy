@@ -7,16 +7,30 @@ struct Particle {
 };
 
 #ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
-// The host must fill the argument buffer with GPU addresses at the correct offsets
 
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct ComputeResources {
     RWStructuredBuffer<Particle> particles;
 };
-
 ParameterBlock<ComputeResources> gResources;
-
 #define PARTICLES gResources.particles
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.bindless_indices;
+[[vk::binding(0, 0)]] RWStructuredBuffer<Particle> g_StorageBuffers[];
+#define PARTICLES g_StorageBuffers[getBindlessIndex(0)]
+
+#elif defined(__HLSL__) || defined(__DX12__)
+// DX12: Bindless via root constants + ResourceDescriptorHeap
+cbuffer BindlessIndices : register(b0, space0) {
+    uint particleBufferIndex;
+};
+#define PARTICLES (*DescriptorHandle<RWStructuredBuffer<Particle>>(uint2(particleBufferIndex, 0)))
+
+#endif
+
 #else
 // Traditional binding mode
 [[vk::binding(0, 0)]] RWStructuredBuffer<Particle> particles;

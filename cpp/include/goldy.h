@@ -557,6 +557,21 @@ void goldy_encoder_set_index_buffer(struct GoldyCommandEncoder *encoder,
 void goldy_encoder_set_pipeline(struct GoldyCommandEncoder *encoder,
                                 const struct GoldyRenderPipeline *pipeline);
 
+// Set push constants for fully bindless rendering.
+//
+// Pass the buffers whose bindless indices should be pushed to the shader.
+// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
+// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
+//
+// Use this instead of `goldy_encoder_set_bind_group()` for fully bindless shaders
+// that access resources via global descriptor arrays.
+//
+// # Safety
+// All pointers must be valid. The buffers array must contain buffer_count elements.
+void goldy_encoder_set_push_constants(struct GoldyCommandEncoder *encoder,
+                                      const struct GoldyBuffer *const *buffers,
+                                      uint32_t buffer_count);
+
 // Set a vertex buffer.
 //
 // # Safety
@@ -781,9 +796,19 @@ struct GoldySurfaceFrame *goldy_surface_acquire(const struct GoldySurface *surfa
 
 // Create a surface from a Win32 HWND.
 //
+// # Arguments
+// * `device` - A valid Goldy device pointer
+// * `hwnd` - A Win32 HWND (window handle)
+//
+// # Returns
+// A pointer to the created surface, or null on failure.
+// Call `goldy_get_last_error()` for error details on failure.
+//
 // # Safety
-// The device pointer and hwnd must be valid.
-struct GoldySurface *goldy_surface_create_win32(const struct GoldyDevice *_device, void *_hwnd);
+// - The device pointer must be valid and not null.
+// - The hwnd must be a valid Win32 window handle.
+// - The window must remain valid for the lifetime of the surface.
+struct GoldySurface *goldy_surface_create_win32(const struct GoldyDevice *device, void *hwnd);
 
 // Destroy a surface.
 //

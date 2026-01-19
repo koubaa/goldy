@@ -1,13 +1,13 @@
 //! Tunnel example - classic demoscene tunnel effect.
 //!
-//! Demonstrates uniform buffers with bind groups for time animation.
+//! Demonstrates FULLY BINDLESS rendering where resource indices are passed
+//! directly via push constants instead of using bind groups.
 //!
 //! Run with: cargo run --example tunnel
 
 use goldy::{
-    shaders, BindGroup, BindGroupLayout, BindGroupLayoutBinding, Buffer, BufferBinding,
-    BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline, RenderPipelineDesc,
-    ShaderModule, Surface, Vertex2DUv, FULLSCREEN_QUAD,
+    shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, Vertex2DUv, FULLSCREEN_QUAD,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,8 +31,6 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    bind_group_layout: Option<BindGroupLayout>,
-    bind_group: Option<BindGroup>,
     uniform_buffer: Option<Buffer>,
     vertex_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
@@ -47,8 +45,6 @@ impl App {
             device: None,
             pipeline: None,
             shader: None,
-            bind_group_layout: None,
-            bind_group: None,
             uniform_buffer: None,
             vertex_buffer: None,
             window: None,
@@ -66,11 +62,7 @@ impl App {
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::TUNNEL)?;
 
-        // Create bind group layout for uniforms (binding 0)
-        let bind_group_layout =
-            BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform_fragment(0)])?;
-
-        // Create pipeline with bind group layout
+        // Create pipeline WITHOUT bind group layouts - fully bindless!
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -78,7 +70,7 @@ impl App {
             &RenderPipelineDesc {
                 vertex_layout: Vertex2DUv::layout(),
                 target_format: surface.format(),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
@@ -94,20 +86,11 @@ impl App {
             BufferUsage::UNIFORM | BufferUsage::COPY_DST,
         )?;
 
-        // Create bind group
-        let bind_group = BindGroup::new(
-            &device,
-            &bind_group_layout,
-            &[BufferBinding::new(0, &uniform_buffer)],
-        )?;
-
         self.device = Some(device);
         self.shader = Some(shader);
-        self.bind_group_layout = Some(bind_group_layout);
         self.pipeline = Some(pipeline);
         self.vertex_buffer = Some(vertex_buffer);
         self.uniform_buffer = Some(uniform_buffer);
-        self.bind_group = Some(bind_group);
         self.surface = Some(surface);
 
         Ok(())
@@ -124,7 +107,6 @@ impl App {
         let surface = self.surface.as_ref().unwrap();
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
-        let bind_group = self.bind_group.as_ref().unwrap();
 
         // Update uniform buffer with current time
         let time = self.start_time.elapsed().as_secs_f32();
@@ -139,7 +121,9 @@ impl App {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group);
+            // Fully bindless: pass buffer indices directly via push constants
+            // The shader accesses g_UniformBuffers[BINDLESS_INDEX(0)].time
+            pass.set_push_constants(&[uniform_buffer]);
             pass.set_vertex_buffer(0, vertex_buffer);
             pass.draw(0..6, 0..1);
         }
@@ -166,7 +150,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Tunnel Effect (Uniform Buffers)")
+                            .with_title("Goldy - Tunnel Effect (Fully Bindless)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -204,7 +188,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Tunnel Example (Uniform Buffers) - Press Escape to exit");
+    println!("Goldy Tunnel Example (Fully Bindless) - Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;

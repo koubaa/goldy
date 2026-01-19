@@ -2,6 +2,7 @@
 
 use crate::backend::{BindGroupLayoutHandle, ComputeCommand, ComputePipelineHandle, GpuBackend};
 use crate::bind_group::{BindGroup, BindGroupLayout};
+use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::shader::ShaderModule;
 use anyhow::Result;
@@ -169,6 +170,26 @@ impl<'a> ComputePass<'a> {
             index,
             bind_group: bind_group.handle,
         });
+    }
+
+    /// Set push constants for fully bindless resource access (compute shaders).
+    ///
+    /// In fully bindless mode, buffer indices are passed directly via push/root constants
+    /// instead of through bind groups. The shader accesses resources through
+    /// global descriptor arrays indexed by these values.
+    ///
+    /// # Example
+    /// ```ignore
+    /// pass.set_push_constants(&[&particle_buffer, &params_buffer]);
+    /// // In shader: g_StorageBuffers[getBindlessIndex(0)] for particles
+    /// // In shader: g_UniformBuffers[getBindlessIndex(1)] for params
+    /// ```
+    pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
+        self.encoder
+            .commands
+            .push(ComputeCommand::SetPushConstants {
+                buffers: buffers.iter().map(|b| b.handle).collect(),
+            });
     }
 
     /// Dispatch compute workgroups.
