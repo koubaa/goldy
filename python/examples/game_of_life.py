@@ -1,49 +1,46 @@
 #!/usr/bin/env python3
-"""Conway's Game of Life - Compute + Graphics Example.
+"""Conway's Game of Life - Fully Bindless Compute + Graphics Example
 
 This example demonstrates:
 1. Compute shader running cellular automaton rules
 2. Graphics shader rendering the grid
 3. Ping-pong buffer technique for in-place updates
-4. Using both compute and graphics pipelines together
+4. Fully bindless resource access via push constants
 
 Usage:
+    pip install glfw
     python game_of_life.py
-
-The simulation runs for a set number of generations and saves frames as images.
 """
 
 import goldy
 import numpy as np
 import time
-from pathlib import Path
+import os
 
 try:
-    from PIL import Image
-    HAS_PIL = True
+    import glfw
 except ImportError:
-    HAS_PIL = False
-    print("Note: Install Pillow for image output: pip install pillow")
+    print("This example requires GLFW. Install with: pip install glfw")
+    exit(1)
 
-# Grid dimensions (must match shader constants)
+
 GRID_WIDTH = 128
 GRID_HEIGHT = 128
 CELL_COUNT = GRID_WIDTH * GRID_HEIGHT
 
-# Path to shader files (shared with Rust examples)
-SHADER_DIR = Path(__file__).parent.parent.parent / "shaders"
 
-
-def load_shader(name: str) -> str:
-    """Load a shader from the shared shaders directory."""
-    path = SHADER_DIR / name
-    return path.read_text()
+def load_shader(name):
+    """Load shader from shared shaders directory."""
+    shader_dir = os.path.join(os.path.dirname(__file__), "..", "..", "shaders")
+    shader_path = os.path.join(shader_dir, name)
+    with open(shader_path, "r") as f:
+        return f.read()
 
 
 def create_initial_state():
-    """Create initial pattern with Gosper Glider Gun + random cells."""
+    """Create initial pattern (glider gun + some random cells)."""
     cells = np.zeros(CELL_COUNT, dtype=np.uint32)
-    
+
     # Gosper Glider Gun (creates infinite gliders)
     gun = [
         (1, 5), (1, 6), (2, 5), (2, 6),
@@ -62,192 +59,152 @@ def create_initial_state():
         (35, 3), (35, 4),
         (36, 3), (36, 4),
     ]
-    
+
     # Place glider gun
     offset_x, offset_y = 10, 10
     for x, y in gun:
-        px = x + offset_x
-        py = y + offset_y
+        px, py = x + offset_x, y + offset_y
         if px < GRID_WIDTH and py < GRID_HEIGHT:
             cells[py * GRID_WIDTH + px] = 1
-    
+
     # Add some random cells in the lower right
     np.random.seed(42)
     for y in range(60, 100):
         for x in range(60, 100):
             if np.random.randint(4) == 0:
-                if x < GRID_WIDTH and y < GRID_HEIGHT:
-                    cells[y * GRID_WIDTH + x] = 1
-    
+                cells[y * GRID_WIDTH + x] = 1
+
     return cells
 
 
 def main():
-    print("Conway's Game of Life (Compute + Graphics)")
-    print("=" * 50)
-    
-    # Create device
+    print("Game of Life (Fully Bindless) - Press Escape to exit")
+
+    # Initialize GLFW
+    if not glfw.init():
+        raise RuntimeError("Failed to initialize GLFW")
+
+    glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
+    glfw.window_hint(glfw.RESIZABLE, True)
+
+    window = glfw.create_window(800, 800, "Game of Life (Fully Bindless)", None, None)
+    if not window:
+        glfw.terminate()
+        raise RuntimeError("Failed to create GLFW window")
+
+    # Create Goldy device and surface
     instance = goldy.Instance()
     device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
-    print(f"Backend: {instance.backend_type}")
-    print(f"Grid: {GRID_WIDTH}x{GRID_HEIGHT} = {CELL_COUNT} cells")
-    print()
-    
-    # Create initial state
+    surface = goldy.Surface.from_glfw(device, window)
+
+    # Load shaders
+    compute_shader = goldy.ShaderModule.from_slang(device, load_shader("game_of_life.slang"))
+    render_shader = goldy.ShaderModule.from_slang(device, load_shader("game_of_life_render.slang"))
+
+    # Create ping-pong buffers
     initial_state = create_initial_state()
     alive_count = np.sum(initial_state)
-    print(f"Initial state: {alive_count} living cells")
-    
-    # Create ping-pong buffers
+    print(f"Initial alive cells: {alive_count} / {len(initial_state)}")
     buffer_a = goldy.Buffer(device, initial_state, goldy.BufferUsage.STORAGE)
     buffer_b = goldy.Buffer(device, initial_state, goldy.BufferUsage.STORAGE)
-    print(f"Created buffers: {buffer_a.size} bytes each")
-    
-    # === COMPUTE PIPELINE ===
-    
-    # Compute bind group layout: read-only input, read-write output
-    compute_bind_layout = goldy.BindGroupLayout(device, [
-        goldy.BindGroupLayoutBinding(
-            0, goldy.ShaderStages.COMPUTE,
-            goldy.BindingType.storage_buffer(read_only=True)
-        ),
-        goldy.BindGroupLayoutBinding(
-            1, goldy.ShaderStages.COMPUTE,
-            goldy.BindingType.storage_buffer(read_only=False)
-        ),
-    ])
-    
-    # A -> B: read from A, write to B
-    compute_bind_group_a = goldy.BindGroup(device, compute_bind_layout, [
-        goldy.BufferBinding(0, buffer_a),
-        goldy.BufferBinding(1, buffer_b),
-    ])
-    
-    # B -> A: read from B, write to A
-    compute_bind_group_b = goldy.BindGroup(device, compute_bind_layout, [
-        goldy.BufferBinding(0, buffer_b),
-        goldy.BufferBinding(1, buffer_a),
-    ])
-    
-    # Load and compile compute shader from shared file
-    compute_shader_src = load_shader("game_of_life.slang")
-    compute_shader = goldy.ShaderModule.from_slang(device, compute_shader_src)
-    print("Compiled compute shader (game_of_life.slang)")
-    
+
+    # Create compute pipeline - fully bindless, no bind group layouts
     compute_pipeline = goldy.ComputePipeline(
         device, compute_shader,
-        goldy.ComputePipelineDesc([compute_bind_layout])
+        goldy.ComputePipelineDesc()  # Empty = bindless
     )
-    print("Created compute pipeline")
-    
-    # === RENDER PIPELINE ===
-    
-    # Render bind group layout: read-only storage buffer
-    render_bind_layout = goldy.BindGroupLayout(device, [
-        goldy.BindGroupLayoutBinding(
-            0, goldy.ShaderStages.FRAGMENT,
-            goldy.BindingType.storage_buffer(read_only=True)
-        ),
-    ])
-    
-    # Bind groups for reading from A or B
-    render_bind_group_a = goldy.BindGroup(device, render_bind_layout, [
-        goldy.BufferBinding(0, buffer_a),
-    ])
-    render_bind_group_b = goldy.BindGroup(device, render_bind_layout, [
-        goldy.BufferBinding(0, buffer_b),
-    ])
-    
-    # Load and compile render shader from shared file
-    render_shader_src = load_shader("game_of_life_render.slang")
-    render_shader = goldy.ShaderModule.from_slang(device, render_shader_src)
-    print("Compiled render shader (game_of_life_render.slang)")
-    
+
+    # Create render pipeline - fully bindless, no bind group layouts
+    # Use empty vertex layout since the shader generates vertices via SV_VertexID
     render_pipeline = goldy.RenderPipeline(
         device, render_shader, render_shader,
         goldy.RenderPipelineDesc(
-            target_format=goldy.TextureFormat.RGBA8_UNORM,
-            bind_group_layouts=[render_bind_layout],
+            vertex_layout=goldy.VertexBufferLayout.empty(),
+            topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
+            target_format=surface.format,
         )
     )
-    print("Created render pipeline")
-    
-    # Create render target
-    target = goldy.RenderTarget(device, 512, 512, goldy.TextureFormat.RGBA8_UNORM)
-    print(f"Created render target: {target.width}x{target.height}")
-    print()
-    
-    # === SIMULATION LOOP ===
-    
-    num_generations = 100
+
+    print(f"Initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid")
+    print("Features Gosper Glider Gun + random cells")
+
     use_buffer_a = True
-    save_every = 10
-    
-    print(f"Running {num_generations} generations...")
-    start_time = time.time()
-    
-    for gen in range(num_generations):
-        # === COMPUTE PASS: Update simulation ===
-        compute_encoder = goldy.ComputeEncoder()
-        with compute_encoder.begin_compute_pass() as cp:
-            cp.set_pipeline(compute_pipeline)
-            
-            # Choose which bind group based on current buffer
-            if use_buffer_a:
-                cp.set_bind_group(0, compute_bind_group_a)  # A -> B
-            else:
-                cp.set_bind_group(0, compute_bind_group_b)  # B -> A
-            
-            # Dispatch workgroups (8x8 threads per group)
-            workgroups_x = (GRID_WIDTH + 7) // 8
-            workgroups_y = (GRID_HEIGHT + 7) // 8
-            cp.dispatch(workgroups_x, workgroups_y, 1)
-        
-        compute_encoder.dispatch(device)
-        
-        # Toggle buffer for next frame
-        use_buffer_a = not use_buffer_a
-        
-        # === RENDER PASS: Visualize the grid ===
+    last_update = time.time()
+    frame_count = 0
+
+    # Handle window resize
+    def on_resize(win, w, h):
+        if w > 0 and h > 0:
+            surface.resize(w, h)
+
+    glfw.set_framebuffer_size_callback(window, on_resize)
+
+    def on_key(win, key, scancode, action, mods):
+        if action == glfw.PRESS and key == glfw.KEY_ESCAPE:
+            glfw.set_window_should_close(window, True)
+
+    glfw.set_key_callback(window, on_key)
+
+    # Main render loop
+    while not glfw.window_should_close(window):
+        glfw.poll_events()
+
+        # Update simulation ~30 times per second
+        now = time.time()
+        should_update = (now - last_update) > 0.033
+
+        if should_update:
+            last_update = now
+
+            # Run compute pass with ping-pong buffers
+            compute_encoder = goldy.ComputeEncoder()
+            with compute_encoder.begin_compute_pass() as cp:
+                cp.set_pipeline(compute_pipeline)
+
+                # Fully bindless: pass buffer indices via push constants
+                # Order matters: [current_state, next_state] matching shader slots
+                if use_buffer_a:
+                    # A -> B: read from A, write to B
+                    cp.set_push_constants([buffer_a, buffer_b])
+                else:
+                    # B -> A: read from B, write to A
+                    cp.set_push_constants([buffer_b, buffer_a])
+
+                # Dispatch workgroups (8x8 threads per group)
+                workgroups_x = (GRID_WIDTH + 7) // 8
+                workgroups_y = (GRID_HEIGHT + 7) // 8
+                cp.dispatch(workgroups_x, workgroups_y, 1)
+
+            compute_encoder.dispatch(device)
+
+            # Toggle buffer for next frame
+            use_buffer_a = not use_buffer_a
+
+        # Render
+        frame = surface.acquire()
+
         encoder = goldy.CommandEncoder()
         with encoder.begin_render_pass() as rp:
             rp.clear(goldy.Color.BLACK)
             rp.set_pipeline(render_pipeline)
-            
-            # Read from the buffer that was just written to
+
+            # Fully bindless: read from the buffer that is now "current"
             if use_buffer_a:
-                rp.set_bind_group(0, render_bind_group_a)
+                rp.set_push_constants([buffer_a])
             else:
-                rp.set_bind_group(0, render_bind_group_b)
-            
+                rp.set_push_constants([buffer_b])
+
             # Draw fullscreen triangle
             rp.draw(range(3))
+
+        frame.render(encoder)
+        surface.present(frame)
         
-        target.render(encoder)
-        
-        # Save frames periodically
-        if HAS_PIL and gen % save_every == 0:
-            pixels = target.read_to_cpu()
-            img = Image.fromarray(pixels, mode='RGBA')
-            filename = f'game_of_life_gen_{gen:04d}.png'
-            img.save(filename)
-            print(f"  Generation {gen}: saved {filename}")
-    
-    elapsed = time.time() - start_time
-    fps = num_generations / elapsed
-    
-    print()
-    print(f"Completed {num_generations} generations in {elapsed:.2f}s")
-    print(f"Performance: {fps:.1f} generations/second")
-    
-    # Save final frame
-    if HAS_PIL:
-        pixels = target.read_to_cpu()
-        img = Image.fromarray(pixels, mode='RGBA')
-        img.save('game_of_life_final.png')
-        print("Saved: game_of_life_final.png")
-    
-    print("\nDone!")
+        frame_count += 1
+        if frame_count == 1 or frame_count % 60 == 0:
+            print(f"Frame {frame_count}, use_buffer_a={use_buffer_a}, should_update={should_update}")
+
+    glfw.terminate()
 
 
 if __name__ == '__main__':

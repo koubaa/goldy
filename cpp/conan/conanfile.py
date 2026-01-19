@@ -91,6 +91,15 @@ class GoldyConan(ConanFile):
             with tarfile.open(filename, 'r:gz') as tar_ref:
                 tar_ref.extractall("binary")
     
+    # Slang platform directory mapping
+    _slang_platform = {
+        ("Windows", "x86_64"): "windows-x86_64",
+        ("Linux", "x86_64"): "linux-x86_64",
+        ("Linux", "armv8"): "linux-aarch64",
+        ("Macos", "x86_64"): "macos-x86_64",
+        ("Macos", "armv8"): "macos-aarch64",
+    }
+    
     def package(self):
         # Copy license
         copy(self, "LICENSE", src=self.source_folder,
@@ -105,6 +114,11 @@ class GoldyConan(ConanFile):
         # Copy native library from pre-built binary
         binary_dir = os.path.join(self.build_folder, "binary")
         
+        # Determine Slang platform directory
+        key = (str(self.settings.os), str(self.settings.arch))
+        slang_platform = self._slang_platform.get(key)
+        slang_src_dir = os.path.join(self.source_folder, "slang", "bin", slang_platform) if slang_platform else None
+        
         if self.settings.os == "Windows":
             copy(self, "goldy_ffi.dll", src=os.path.join(binary_dir, "lib"),
                  dst=os.path.join(self.package_folder, "bin"))
@@ -115,12 +129,24 @@ class GoldyConan(ConanFile):
             new_path = os.path.join(self.package_folder, "lib", "goldy_ffi.lib")
             if os.path.exists(old_path):
                 os.rename(old_path, new_path)
+            # Copy Slang libraries
+            if slang_src_dir and os.path.exists(slang_src_dir):
+                copy(self, "*.dll", src=slang_src_dir,
+                     dst=os.path.join(self.package_folder, "bin"))
         elif self.settings.os == "Linux":
             copy(self, "libgoldy_ffi.so", src=os.path.join(binary_dir, "lib"),
                  dst=os.path.join(self.package_folder, "lib"))
+            # Copy Slang libraries
+            if slang_src_dir and os.path.exists(slang_src_dir):
+                copy(self, "*.so", src=slang_src_dir,
+                     dst=os.path.join(self.package_folder, "lib"))
         elif self.settings.os == "Macos":
             copy(self, "libgoldy_ffi.dylib", src=os.path.join(binary_dir, "lib"),
                  dst=os.path.join(self.package_folder, "lib"))
+            # Copy Slang libraries
+            if slang_src_dir and os.path.exists(slang_src_dir):
+                copy(self, "*.dylib", src=slang_src_dir,
+                     dst=os.path.join(self.package_folder, "lib"))
     
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "goldy")

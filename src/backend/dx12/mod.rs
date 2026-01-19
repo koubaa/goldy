@@ -991,6 +991,12 @@ impl GpuBackend for Dx12Backend {
                 .context("Failed to set fence event")?;
             unsafe { WaitForSingleObject(wait_event, INFINITE) };
             unsafe { CloseHandle(wait_event) }.ok();
+
+            // Update fence value for next operation (must be done after wait completes)
+            // Note: device_handle is captured before this block, so we can use get_mut here
+            if let Some(dev) = self.devices.get_mut(&device_handle) {
+                dev.fence_value = fence_value + 1;
+            }
         }
 
         Ok(())
@@ -1031,12 +1037,14 @@ impl GpuBackend for Dx12Backend {
         let handle = self.next_shader_handle;
         self.next_shader_handle += 1;
 
+        let stored_paths: Vec<String> = search_paths.iter().map(|s| s.to_string()).collect();
+
         self.shaders.insert(
             handle,
             ShaderState {
                 device_handle,
                 slang_source: slang_source.to_string(),
-                search_paths: search_paths.iter().map(|s| s.to_string()).collect(),
+                search_paths: stored_paths,
                 vertex_bytecode: None,
                 fragment_bytecode: None,
                 compute_bytecode: None,
@@ -1182,9 +1190,10 @@ impl GpuBackend for Dx12Backend {
         let root_signature = if bindless_enabled {
             // Bindless mode: root constants at slot 0 for resource indices
             // Slang's DescriptorHandle<T> uses ResourceDescriptorHeap[index] with HEAP_DIRECTLY_INDEXED
-            let root_constants = D3D12_ROOT_PARAMETER {
+            // NOTE: The HEAP_DIRECTLY_INDEXED flags require Root Signature version 1.1
+            let root_constants = D3D12_ROOT_PARAMETER1 {
                 ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-                Anonymous: D3D12_ROOT_PARAMETER_0 {
+                Anonymous: D3D12_ROOT_PARAMETER1_0 {
                     Constants: D3D12_ROOT_CONSTANTS {
                         ShaderRegister: 0,
                         RegisterSpace: 0,
@@ -1196,7 +1205,7 @@ impl GpuBackend for Dx12Backend {
 
             let root_params = [root_constants];
 
-            let desc = D3D12_ROOT_SIGNATURE_DESC {
+            let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
                 NumParameters: 1,
                 pParameters: root_params.as_ptr(),
                 NumStaticSamplers: 0,
@@ -1206,19 +1215,24 @@ impl GpuBackend for Dx12Backend {
                     | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
             };
 
+            let versioned_desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
+                Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
+                Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
+            };
+
             let mut signature_blob: Option<ID3DBlob> = None;
             let mut error_blob: Option<ID3DBlob> = None;
 
             let serialize_result = unsafe {
-                D3D12SerializeRootSignature(
-                    &desc,
-                    D3D_ROOT_SIGNATURE_VERSION_1,
+                D3D12SerializeVersionedRootSignature(
+                    &versioned_desc,
                     &mut signature_blob,
                     Some(&mut error_blob),
                 )
             };
 
-            serialize_result.context("Failed to serialize bindless root signature")?;
+            serialize_result
+                .context("Failed to serialize bindless root signature (requires RS 1.1)")?;
 
             let blob = signature_blob.context("Root signature serialization produced no output")?;
             let signature: ID3D12RootSignature = unsafe {
@@ -1921,7 +1935,13 @@ impl GpuBackend for Dx12Backend {
                                 break;
                             }
                             if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                indices.indices[i] = buf_state.bindless_offset.unwrap_or(0);
+                                // Use SRV offset for render shaders (StructuredBuffer read-only access)
+                                // Render shaders only READ from buffers, so they use StructuredBuffer (SRV)
+                                // not RWStructuredBuffer (UAV). Fall back to bindless_offset for non-storage buffers.
+                                let offset = buf_state
+                                    .bindless_srv_offset
+                                    .unwrap_or_else(|| buf_state.bindless_offset.unwrap_or(0));
+                                indices.indices[i] = offset;
                             }
                         }
                         unsafe {
@@ -2697,7 +2717,13 @@ impl GpuBackend for Dx12Backend {
                                 break;
                             }
                             if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                indices.indices[i] = buf_state.bindless_offset.unwrap_or(0);
+                                // Use SRV offset for render shaders (StructuredBuffer read-only access)
+                                // Render shaders only READ from buffers, so they use StructuredBuffer (SRV)
+                                // not RWStructuredBuffer (UAV). Fall back to bindless_offset for non-storage buffers.
+                                let offset = buf_state
+                                    .bindless_srv_offset
+                                    .unwrap_or_else(|| buf_state.bindless_offset.unwrap_or(0));
+                                indices.indices[i] = offset;
                             }
                         }
                         unsafe {
@@ -4035,7 +4061,20 @@ impl GpuBackend for Dx12Backend {
                                 break;
                             }
                             if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                indices.indices[i] = buf_state.bindless_offset.unwrap_or(0);
+                                // For compute shaders with ping-pong pattern:
+                                // - First buffer (index 0) is read-only input → use SRV
+                                // - Subsequent buffers are write outputs → use UAV
+                                // This matches the common pattern: read from current, write to next
+                                let offset = if i == 0 {
+                                    // First buffer: read-only access via StructuredBuffer (SRV)
+                                    buf_state
+                                        .bindless_srv_offset
+                                        .unwrap_or_else(|| buf_state.bindless_offset.unwrap_or(0))
+                                } else {
+                                    // Subsequent buffers: read-write access via RWStructuredBuffer (UAV)
+                                    buf_state.bindless_offset.unwrap_or(0)
+                                };
+                                indices.indices[i] = offset;
                             }
                         }
 

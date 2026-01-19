@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Goldy.Native;
 
 namespace Goldy;
@@ -74,6 +75,35 @@ public sealed class CommandEncoder
     {
         EnsureNotConsumed();
         NativeMethods.EncoderSetBindGroup(_handle, index, bindGroup.Handle);
+    }
+
+    /// <summary>
+    /// Set push constants for fully bindless rendering.
+    /// Pass the buffers whose bindless indices should be pushed to the shader.
+    /// The indices are pushed in order, so buffers[0] becomes BINDLESS_INDEX(0),
+    /// buffers[1] becomes BINDLESS_INDEX(1), etc.
+    /// Use this instead of SetBindGroup() for fully bindless shaders that
+    /// access resources via global descriptor arrays.
+    /// </summary>
+    /// <param name="buffers">Buffers to pass to the shader via push constants.</param>
+    public void SetPushConstants(params Buffer[] buffers)
+    {
+        EnsureNotConsumed();
+        if (buffers.Length == 0)
+            return;
+
+        // Collect buffer handles into an array
+        Span<nint> handles = stackalloc nint[buffers.Length];
+        for (int i = 0; i < buffers.Length; i++)
+            handles[i] = buffers[i].Handle;
+
+        unsafe
+        {
+            fixed (nint* ptr = handles)
+            {
+                NativeMethods.EncoderSetPushConstants(_handle, (nint)ptr, (uint)buffers.Length);
+            }
+        }
     }
 
     /// <summary>

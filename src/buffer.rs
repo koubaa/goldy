@@ -58,8 +58,27 @@ impl Buffer {
     /// Create a buffer initialized with raw bytes.
     pub fn with_bytes(device: &Device, data: &[u8], usage: BufferUsage) -> Result<Self> {
         // For raw bytes, use stride of 1 (byte-addressable)
+        Self::with_bytes_stride(device, data, usage, 1)
+    }
+
+    /// Create a buffer initialized with raw bytes and a custom element stride.
+    ///
+    /// The stride is used for creating StructuredBuffer views on DX12. For example,
+    /// if the data contains u32 values, use stride=4 so the GPU can correctly
+    /// interpret the buffer as `StructuredBuffer<uint>`.
+    pub fn with_bytes_stride(
+        device: &Device,
+        data: &[u8],
+        usage: BufferUsage,
+        element_stride: u32,
+    ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_buffer(device.handle, data.len() as u64, usage, Some(1))?;
+        let handle = backend.create_buffer(
+            device.handle,
+            data.len() as u64,
+            usage,
+            Some(element_stride),
+        )?;
         drop(backend);
 
         let buffer = Self {

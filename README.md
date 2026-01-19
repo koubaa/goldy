@@ -48,6 +48,15 @@ fn main() -> anyhow::Result<()> {
 goldy = "0.1"
 ```
 
+### Slang Compiler
+
+Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation. The build script automatically downloads Slang 2025.24.3 during compilation. You can also:
+
+- Set `GOLDY_SLANG_PATH` to use a custom Slang installation
+- Run `slang/download.sh` to manually download vendored binaries
+
+For FFI bindings (Python, .NET, C++), Slang libraries are bundled automatically by the respective build scripts. See [PACKAGING.md](PACKAGING.md) for architecture details and [DEBUGGING.md](DEBUGGING.md) for troubleshooting.
+
 ## Documentation
 
 📖 **[Full Documentation](https://koubaa.github.io/goldy/)**

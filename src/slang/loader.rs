@@ -320,6 +320,13 @@ impl SlangLibrary {
         // Try relative to executable
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
+                // Check directly in exe directory (for FFI deployments where slang-compiler.dll
+                // is copied alongside the FFI DLL, e.g., .NET runtimes)
+                let path = exe_dir.join(lib_name);
+                if path.exists() {
+                    return Some(path);
+                }
+
                 // Check in slang/bin/{platform}/ relative to exe
                 let path = exe_dir
                     .join("slang")
@@ -344,7 +351,7 @@ impl SlangLibrary {
             }
         }
 
-        // Try relative to current directory
+        // Try relative to current directory (for development)
         let path = PathBuf::from("slang")
             .join("bin")
             .join(platform_dir)

@@ -11,9 +11,15 @@ pip install goldy
 Or build from source:
 
 ```bash
-cd goldy-py
+cd goldy/python
 pip install maturin
+
+# For development (editable install)
 maturin develop
+
+# For wheel building (includes Slang libraries)
+python build-slang.py  # Copy Slang libs to package
+maturin build --release
 ```
 
 ## Quick Start

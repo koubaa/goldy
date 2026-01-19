@@ -687,6 +687,44 @@ public:
     }
 
     /**
+     * @brief Set push constants for fully bindless rendering.
+     *
+     * Pass the buffers whose bindless indices should be pushed to the shader.
+     * The indices are pushed in order, so buffers[0] becomes BINDLESS_INDEX(0),
+     * buffers[1] becomes BINDLESS_INDEX(1), etc.
+     *
+     * Use this instead of set_bind_group() for fully bindless shaders that
+     * access resources via global descriptor arrays.
+     *
+     * @param buffers Span of buffer pointers to pass to the shader.
+     */
+    void set_push_constants(std::span<const Buffer* const> buffers) {
+        if (buffers.empty()) return;
+        
+        std::vector<const GoldyBuffer*> ptrs;
+        ptrs.reserve(buffers.size());
+        for (const auto* buf : buffers) {
+            ptrs.push_back(buf->get());
+        }
+        goldy_encoder_set_push_constants(ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size()));
+    }
+
+    /**
+     * @brief Set push constants for a single buffer (convenience overload).
+     */
+    void set_push_constants(const Buffer& buffer) {
+        const GoldyBuffer* ptr = buffer.get();
+        goldy_encoder_set_push_constants(ptr_.get(), &ptr, 1);
+    }
+
+    /**
+     * @brief Set push constants from an initializer list (convenience overload).
+     */
+    void set_push_constants(std::initializer_list<const Buffer*> buffers) {
+        set_push_constants(std::span<const Buffer* const>{buffers.begin(), buffers.size()});
+    }
+
+    /**
      * @brief Draw primitives.
      */
     void draw(uint32_t vertex_count, uint32_t instance_count = 1,

@@ -186,6 +186,9 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_encoder_draw_indexed")]
     internal static partial void EncoderDrawIndexed(nint encoder, uint indexStart, uint indexCount, int baseVertex, uint instanceStart, uint instanceCount);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_push_constants")]
+    internal static partial void EncoderSetPushConstants(nint encoder, nint buffers, uint bufferCount);
+
     // ========================================================================
     // BindGroup
     // ========================================================================
@@ -230,6 +233,9 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_bind_group")]
     internal static partial void ComputeEncoderSetBindGroup(nint encoder, uint index, nint bindGroup);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_push_constants")]
+    internal static partial void ComputeEncoderSetPushConstants(nint encoder, nint buffers, uint bufferCount);
 
     [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_dispatch")]
     internal static partial void ComputeEncoderDispatch(nint encoder, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
@@ -302,6 +308,16 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_surface_frame_height")]
     internal static partial uint SurfaceFrameHeight(nint frame);
+
+    // ========================================================================
+    // Surface - Platform-specific creation
+    // ========================================================================
+
+    /// <summary>
+    /// Create a surface from a Win32 HWND.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_create_win32")]
+    internal static partial nint SurfaceCreateWin32(nint device, nint hwnd);
 }
 
 /// <summary>

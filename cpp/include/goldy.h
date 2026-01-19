@@ -796,9 +796,19 @@ struct GoldySurfaceFrame *goldy_surface_acquire(const struct GoldySurface *surfa
 
 // Create a surface from a Win32 HWND.
 //
+// # Arguments
+// * `device` - A valid Goldy device pointer
+// * `hwnd` - A Win32 HWND (window handle)
+//
+// # Returns
+// A pointer to the created surface, or null on failure.
+// Call `goldy_get_last_error()` for error details on failure.
+//
 // # Safety
-// The device pointer and hwnd must be valid.
-struct GoldySurface *goldy_surface_create_win32(const struct GoldyDevice *_device, void *_hwnd);
+// - The device pointer must be valid and not null.
+// - The hwnd must be a valid Win32 window handle.
+// - The window must remain valid for the lifetime of the surface.
+struct GoldySurface *goldy_surface_create_win32(const struct GoldyDevice *device, void *hwnd);
 
 // Destroy a surface.
 //

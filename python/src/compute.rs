@@ -1,6 +1,7 @@
 //! Python wrappers for Compute pipeline and encoder.
 
 use crate::bind_group::{PyBindGroup, PyBindGroupLayout};
+use crate::buffer::PyBuffer;
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
 use crate::shader::PyShaderModule;
@@ -187,6 +188,29 @@ impl PyComputePass {
         self.encoder.borrow(py).with_encoder(|enc| {
             let mut pass = enc.begin_compute_pass();
             pass.set_bind_group(index, &bind_group.inner);
+        });
+    }
+
+    /// Set push constants for fully bindless compute (no bind groups needed).
+    ///
+    /// This is the preferred way to pass buffer indices to shaders that use
+    /// bindless resources. The buffers' descriptor indices are pushed directly
+    /// to the GPU, and shaders can use BINDLESS_INDEX(n) to access them.
+    ///
+    /// Args:
+    ///     buffers: List of buffers to pass to the shader via push constants.
+    ///
+    /// Example:
+    ///     >>> cp.set_push_constants([buffer_a, buffer_b])
+    ///     # In shader: g_StorageBuffers[BINDLESS_INDEX(0)] and [BINDLESS_INDEX(1)]
+    fn set_push_constants(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
+        self.encoder.borrow(py).with_encoder(|enc| {
+            // Collect buffer references - deref the Arc to get &Buffer
+            let buffer_refs: Vec<&goldy::Buffer> =
+                buffers.iter().map(|b| b.inner.as_ref()).collect();
+
+            let mut pass = enc.begin_compute_pass();
+            pass.set_push_constants(&buffer_refs);
         });
     }
 
