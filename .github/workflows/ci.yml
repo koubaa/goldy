@@ -385,6 +385,7 @@ jobs:
           VK_LAYER_PATH: ""
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          PYTHONUNBUFFERED: "1"
         run: |
           python examples/adapter_info.py
           python examples/compute_demo.py
@@ -451,6 +452,7 @@ jobs:
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          PYTHONUNBUFFERED: "1"
         run: |
           python examples/adapter_info.py
           python examples/compute_demo.py

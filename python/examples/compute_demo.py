@@ -7,9 +7,16 @@ This example doubles all values in a buffer using a compute shader.
 Usage:
     python compute_demo.py
 """
+import sys
+print("[compute_demo] Script starting...", flush=True)
 
+print("[compute_demo] Importing goldy...", flush=True)
 import goldy
+print("[compute_demo] Goldy imported successfully", flush=True)
+
+print("[compute_demo] Importing numpy...", flush=True)
 import numpy as np
+print("[compute_demo] Numpy imported successfully", flush=True)
 
 
 # Simple compute shader that doubles each value
@@ -88,3 +95,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    print("[compute_demo] Script completed successfully", flush=True)
