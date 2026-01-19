@@ -65,8 +65,22 @@ impl GpuBackend for VulkanBackend {
             .dynamic_rendering(true)
             .synchronization2(true);
 
+        // Enable Vulkan 1.2 descriptor indexing features.
+        // Goldy requires these features - they've been core since Vulkan 1.2 (2020)
+        // and are supported by all modern GPUs and software implementations (lavapipe).
+        let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .descriptor_binding_storage_buffer_update_after_bind(true)
+            .descriptor_binding_uniform_buffer_update_after_bind(true)
+            .runtime_descriptor_array(true)
+            .shader_storage_buffer_array_non_uniform_indexing(true)
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .shader_uniform_buffer_array_non_uniform_indexing(true);
+
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut vulkan_13_features);
+            .push_next(&mut vulkan_13_features)
+            .push_next(&mut descriptor_indexing_features);
 
         // Create logical device with swapchain extension
         let queue_priorities = [1.0f32];
@@ -98,6 +112,139 @@ impl GpuBackend for VulkanBackend {
         let command_pool = unsafe { device.create_command_pool(&pool_info, None) }
             .context("Failed to create command pool")?;
 
+        // Create descriptor infrastructure for resource binding
+        let (
+            bindless_descriptor_pool,
+            bindless_descriptor_set_layout,
+            bindless_descriptor_set,
+            bindless_pipeline_layout,
+        ) = {
+            // Create descriptor set layout with update-after-bind flag
+            let binding_flags = [
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+            ];
+
+            let mut binding_flags_info =
+                vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
+                    .binding_flags(&binding_flags);
+
+            let bindings = [
+                // Storage buffers (binding 0)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::STORAGE_BUFFERS)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Uniform buffers (binding 1)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::UNIFORM_BUFFERS)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Sampled images (binding 2)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::SAMPLED_IMAGES)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Samplers (binding 3)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::SAMPLERS)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+            ];
+
+            let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+                .bindings(&bindings)
+                .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                .push_next(&mut binding_flags_info);
+
+            let descriptor_set_layout =
+                unsafe { device.create_descriptor_set_layout(&layout_info, None) }
+                    .context("Failed to create bindless descriptor set layout")?;
+
+            // Create descriptor pool with update-after-bind flag
+            let pool_sizes = [
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLER,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+            ];
+
+            let pool_info = vk::DescriptorPoolCreateInfo::default()
+                .pool_sizes(&pool_sizes)
+                .max_sets(1)
+                .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND);
+
+            let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+                .context("Failed to create bindless descriptor pool")?;
+
+            // Allocate the global descriptor set
+            let set_layouts = [descriptor_set_layout];
+            let alloc_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&set_layouts);
+
+            let descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }
+                .context("Failed to allocate bindless descriptor set")?;
+
+            let descriptor_set = descriptor_sets[0];
+
+            // Create a pipeline layout that includes the bindless set and push constants
+            let layouts = [descriptor_set_layout];
+            
+            // Push constant range for resource indices (16 x u32 = 64 bytes)
+            let push_constant_range = vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::ALL,
+                offset: 0,
+                size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+            };
+            
+            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&layouts)
+                .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+
+            let pipeline_layout =
+                unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
+                    .context("Failed to create bindless pipeline layout")?;
+            
+            tracing::info!(
+                "Pipeline layout includes {} bytes of push constants for resource indices",
+                push_constant_range.size
+            );
+
+            tracing::info!(
+                "Created descriptor infrastructure: pool, layout, set, pipeline layout"
+            );
+
+            (
+                Some(descriptor_pool),
+                Some(descriptor_set_layout),
+                Some(descriptor_set),
+                Some(pipeline_layout),
+            )
+        };
+
         let handle = self.next_device_handle;
         self.next_device_handle += 1;
 
@@ -110,6 +257,13 @@ impl GpuBackend for VulkanBackend {
                 queue,
                 queue_family: queue_family_index,
                 command_pool,
+                bindless_enabled: true,
+                bindless_descriptor_pool,
+                bindless_descriptor_set_layout,
+                bindless_descriptor_set,
+                bindless_pipeline_layout,
+                resource_registry: types::ResourceRegistry::new(),
+                deletion_queue: types::DeletionQueue::new(),
             },
         );
 
@@ -118,9 +272,12 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
-        if let Some(logical_device) = self.devices.remove(&device_handle) {
+        if let Some(mut logical_device) = self.devices.remove(&device_handle) {
             unsafe {
                 logical_device.device.device_wait_idle().ok();
+
+                // Flush any pending deferred deletions
+                logical_device.deletion_queue.flush_all(&logical_device.device);
 
                 // Destroy buffers owned by this device
                 let buffer_handles: Vec<_> = self.buffers
@@ -152,7 +309,7 @@ impl GpuBackend for VulkanBackend {
                     }
                 }
 
-                // Destroy pipelines owned by this device
+                // Destroy graphics pipelines owned by this device
                 let pipeline_handles: Vec<_> = self.pipelines
                     .iter()
                     .filter(|(_, p)| p.device_handle == device_handle)
@@ -163,7 +320,26 @@ impl GpuBackend for VulkanBackend {
                         if pipeline.pipeline != vk::Pipeline::null() {
                             logical_device.device.destroy_pipeline(pipeline.pipeline, None);
                         }
-                        if pipeline.layout != vk::PipelineLayout::null() {
+                        // Only destroy layout if we own it (not the global bindless layout)
+                        if pipeline.owns_layout && pipeline.layout != vk::PipelineLayout::null() {
+                            logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
+                        }
+                    }
+                }
+
+                // Destroy compute pipelines owned by this device
+                let compute_pipeline_handles: Vec<_> = self.compute_pipelines
+                    .iter()
+                    .filter(|(_, p)| p.device_handle == device_handle)
+                    .map(|(h, _)| *h)
+                    .collect();
+                for handle in compute_pipeline_handles {
+                    if let Some(pipeline) = self.compute_pipelines.remove(&handle) {
+                        if pipeline.pipeline != vk::Pipeline::null() {
+                            logical_device.device.destroy_pipeline(pipeline.pipeline, None);
+                        }
+                        // Only destroy layout if we own it (not the global bindless layout)
+                        if pipeline.owns_layout && pipeline.layout != vk::PipelineLayout::null() {
                             logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
                         }
                     }
@@ -231,6 +407,21 @@ impl GpuBackend for VulkanBackend {
                     }
                 }
 
+                // Destroy bindless infrastructure
+                if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {
+                    logical_device
+                        .device
+                        .destroy_pipeline_layout(pipeline_layout, None);
+                }
+                if let Some(pool) = logical_device.bindless_descriptor_pool {
+                    logical_device.device.destroy_descriptor_pool(pool, None);
+                }
+                if let Some(layout) = logical_device.bindless_descriptor_set_layout {
+                    logical_device
+                        .device
+                        .destroy_descriptor_set_layout(layout, None);
+                }
+
                 logical_device.device.destroy_command_pool(logical_device.command_pool, None);
                 logical_device.device.destroy_device(None);
             }
@@ -242,7 +433,7 @@ impl GpuBackend for VulkanBackend {
         self.devices.contains_key(&device)
     }
 
-    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, usage: BufferUsage) -> Result<BufferHandle> {
+    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, usage: BufferUsage, _element_stride: Option<u32>) -> Result<BufferHandle> {
         let logical_device = self
             .devices
             .get(&device_handle)
@@ -267,6 +458,12 @@ impl GpuBackend for VulkanBackend {
         if usage.contains(BufferUsage::COPY_DST) {
             vk_usage |= vk::BufferUsageFlags::TRANSFER_DST;
         }
+
+        let is_storage = usage.contains(BufferUsage::STORAGE);
+        let is_uniform = usage.contains(BufferUsage::UNIFORM);
+        let should_register_bindless = is_storage || is_uniform; // Only register UNIFORM/STORAGE buffers
+        let bindless_enabled = logical_device.bindless_enabled;
+        let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
@@ -299,6 +496,57 @@ impl GpuBackend for VulkanBackend {
         let handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
 
+        // Register buffer in bindless descriptor set if enabled AND buffer is UNIFORM or STORAGE
+        // (VERTEX/INDEX buffers should not be in the uniform/storage descriptor arrays)
+        let bindless_index = if bindless_enabled && should_register_bindless {
+            let logical_device = self.devices.get_mut(&device_handle).unwrap();
+            let index = logical_device.resource_registry.register_buffer(handle, is_storage);
+
+            // Update the global descriptor set with this buffer
+            if let Some(descriptor_set) = bindless_descriptor_set {
+                let buffer_info = vk::DescriptorBufferInfo::default()
+                    .buffer(buffer)
+                    .offset(0)
+                    .range(size);
+
+                let binding = if is_storage {
+                    types::bindless_bindings::STORAGE_BUFFERS
+                } else {
+                    types::bindless_bindings::UNIFORM_BUFFERS
+                };
+
+                let descriptor_type = if is_storage {
+                    vk::DescriptorType::STORAGE_BUFFER
+                } else {
+                    vk::DescriptorType::UNIFORM_BUFFER
+                };
+
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(binding)
+                    .dst_array_element(index)
+                    .descriptor_type(descriptor_type)
+                    .buffer_info(std::slice::from_ref(&buffer_info));
+
+                unsafe {
+                    logical_device
+                        .device
+                        .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                }
+
+                tracing::trace!(
+                    "Registered buffer {} at bindless index {} (storage={})",
+                    handle,
+                    index,
+                    is_storage
+                );
+            }
+
+            Some(index)
+        } else {
+            None
+        };
+
         self.buffers.insert(
             handle,
             BufferState {
@@ -306,6 +554,8 @@ impl GpuBackend for VulkanBackend {
                 buffer,
                 memory,
                 size,
+                bindless_index,
+                is_storage,
             },
         );
 
@@ -314,11 +564,15 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
         if let Some(buffer) = self.buffers.remove(&buffer_handle) {
-            if let Some(device) = self.devices.get(&buffer.device_handle) {
-                unsafe {
-                    device.device.destroy_buffer(buffer.buffer, None);
-                    device.device.free_memory(buffer.memory, None);
-                }
+            if let Some(device) = self.devices.get_mut(&buffer.device_handle) {
+                // Unregister from bindless registry
+                device.resource_registry.unregister_buffer(buffer_handle);
+
+                // Queue for deferred deletion - the buffer may still be in use by in-flight commands
+                device.deletion_queue.queue(types::PendingDeletion::Buffer {
+                    buffer: buffer.buffer,
+                    memory: buffer.memory,
+                });
             }
         }
     }
@@ -356,6 +610,10 @@ impl GpuBackend for VulkanBackend {
         self.buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
     }
 
+    fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
+        self.buffers.get(&buffer_handle).and_then(|b| b.bindless_index)
+    }
+
     fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
         self.create_shader_with_paths(device_handle, slang_source, &[])
     }
@@ -379,6 +637,7 @@ impl GpuBackend for VulkanBackend {
                 vertex_module: None,
                 fragment_module: None,
                 compute_module: None,
+                reflection: None,
             },
         );
 
@@ -493,10 +752,32 @@ impl GpuBackend for VulkanBackend {
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
             .dynamic_states(&dynamic_states);
 
-        // Pipeline layout (empty for now)
-        let layout_info = vk::PipelineLayoutCreateInfo::default();
-        let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-            .context("Failed to create pipeline layout")?;
+        // Pipeline layout - includes bindless descriptor set if enabled
+        let layout = if logical_device.bindless_enabled {
+            // Bindless mode: include the bindless descriptor set layout and push constants
+            let bindless_set_layout = logical_device.bindless_descriptor_set_layout
+                .context("Bindless enabled but no descriptor set layout")?;
+            let layouts = [bindless_set_layout];
+            
+            // Push constant range for resource indices (16 x u32 = 64 bytes)
+            let push_constant_range = vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::ALL,
+                offset: 0,
+                size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+            };
+            
+            let layout_info = vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&layouts)
+                .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+            
+            unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+                .context("Failed to create bindless pipeline layout")?
+        } else {
+            // Traditional mode: empty layout
+            let layout_info = vk::PipelineLayoutCreateInfo::default();
+            unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+                .context("Failed to create pipeline layout")?
+        };
 
         // Dynamic rendering info (Vulkan 1.4)
         let color_format = format_to_vk(target_format);
@@ -534,6 +815,8 @@ impl GpuBackend for VulkanBackend {
                 device_handle,
                 pipeline: pipelines[0],
                 layout,
+                owns_layout: true, // Simple create_pipeline always owns its layout
+                parameter_block_layouts: Vec::new(),
             },
         );
 
@@ -548,7 +831,8 @@ impl GpuBackend for VulkanBackend {
                     if pipeline.pipeline != vk::Pipeline::null() {
                         device.device.destroy_pipeline(pipeline.pipeline, None);
                     }
-                    if pipeline.layout != vk::PipelineLayout::null() {
+                    // Only destroy layout if we own it (not the global bindless layout)
+                    if pipeline.owns_layout && pipeline.layout != vk::PipelineLayout::null() {
                         device.device.destroy_pipeline_layout(pipeline.layout, None);
                     }
                 }
@@ -820,11 +1104,13 @@ impl GpuBackend for VulkanBackend {
         unsafe { logical_device.device.cmd_begin_rendering(cmd, &rendering_info) };
 
         // Set viewport and scissor
+        // Use negative height to flip Y axis - makes Vulkan coordinate system match DX12
+        // This requires VK_KHR_maintenance1 (core in Vulkan 1.1+)
         let viewport = vk::Viewport {
             x: 0.0,
-            y: 0.0,
+            y: height as f32,          // Start from bottom
             width: width as f32,
-            height: height as f32,
+            height: -(height as f32),  // Negative height flips Y
             min_depth: 0.0,
             max_depth: 1.0,
         };
@@ -836,7 +1122,10 @@ impl GpuBackend for VulkanBackend {
         };
         unsafe { logical_device.device.cmd_set_scissor(cmd, 0, std::slice::from_ref(&scissor)) };
 
-        // Execute render commands
+        // Track current pipeline for bind group binding
+        let mut current_pipeline: Option<PipelineHandle> = None;
+
+        // Execute render commands (render_to_target)
         for command in commands {
             match command {
                 RenderCommand::Clear(_) => {
@@ -846,6 +1135,7 @@ impl GpuBackend for VulkanBackend {
                     // TODO: Implement depth clear when depth buffer is supported
                 }
                 RenderCommand::SetPipeline(pipeline_handle) => {
+                    current_pipeline = Some(*pipeline_handle);
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         unsafe {
                             logical_device.device.cmd_bind_pipeline(
@@ -853,6 +1143,22 @@ impl GpuBackend for VulkanBackend {
                                 vk::PipelineBindPoint::GRAPHICS,
                                 pipeline.pipeline,
                             );
+
+                            // Bind the global bindless descriptor set if enabled
+                            // Use the PIPELINE's layout (not the global bindless_pipeline_layout)
+                            // because the pipeline has a hybrid layout with both bindless + user sets
+                            if logical_device.bindless_enabled {
+                                if let Some(bindless_set) = logical_device.bindless_descriptor_set {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        pipeline.layout,  // Use pipeline's own layout
+                                        0,
+                                        std::slice::from_ref(&bindless_set),
+                                        &[],
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -868,20 +1174,39 @@ impl GpuBackend for VulkanBackend {
                         }
                     }
                 }
-                RenderCommand::SetBindGroup { index, bind_group } => {
-                    if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        // Find the pipeline layout for this bind group
-                        // For now, we need to iterate pipelines to find one with a layout
-                        // This is a simplification - in production we'd track the current pipeline
-                        if let Some(pipeline) = self.pipelines.values().next() {
+                RenderCommand::SetPushConstants { buffers } => {
+                    // Fully bindless mode: push buffer indices directly (no bind groups needed)
+                    if logical_device.bindless_enabled {
+                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
+                            let mut indices = types::BindlessIndices::default();
+                            for (i, buffer_handle) in buffers.iter().enumerate() {
+                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                                indices.indices[i] = self.buffers.get(buffer_handle)
+                                    .and_then(|b| b.bindless_index)
+                                    .unwrap_or(0);
+                            }
                             unsafe {
-                                logical_device.device.cmd_bind_descriptor_sets(
-                                    cmd,
-                                    vk::PipelineBindPoint::GRAPHICS,
-                                    pipeline.layout,
-                                    *index,
-                                    std::slice::from_ref(&bg_state.descriptor_set),
-                                    &[],
+                                logical_device.device.cmd_push_constants(
+                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
+                                    bytemuck::bytes_of(&indices),
+                                );
+                            }
+                        }
+                    }
+                }
+                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                    // Fully bindless mode: push raw indices directly (for textures/samplers)
+                    if logical_device.bindless_enabled {
+                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
+                            let mut indices = types::BindlessIndices::default();
+                            for (i, &idx) in raw_indices.iter().enumerate() {
+                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                                indices.indices[i] = idx;
+                            }
+                            unsafe {
+                                logical_device.device.cmd_push_constants(
+                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
+                                    bytemuck::bytes_of(&indices),
                                 );
                             }
                         }
@@ -1167,330 +1492,6 @@ impl GpuBackend for VulkanBackend {
         Ok(())
     }
 
-    fn create_bind_group_layout(&mut self, device_handle: DeviceHandle, entries: &[BindGroupLayoutEntry]) -> Result<BindGroupLayoutHandle> {
-        let logical_device = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-
-        // Build binding types map and layout bindings
-        let mut binding_types = std::collections::HashMap::new();
-        let bindings: Vec<_> = entries
-            .iter()
-            .map(|e| {
-                let stage_flags = if e.visibility.0 & ShaderStages::VERTEX.0 != 0 && e.visibility.0 & ShaderStages::FRAGMENT.0 != 0 {
-                    vk::ShaderStageFlags::ALL_GRAPHICS
-                } else if e.visibility.0 & ShaderStages::VERTEX.0 != 0 {
-                    vk::ShaderStageFlags::VERTEX
-                } else if e.visibility.0 & ShaderStages::COMPUTE.0 != 0 {
-                    vk::ShaderStageFlags::COMPUTE
-                } else {
-                    vk::ShaderStageFlags::FRAGMENT
-                };
-
-                let descriptor_type = match &e.ty {
-                    BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
-                    BindingType::StorageBuffer { .. } => vk::DescriptorType::STORAGE_BUFFER,
-                    BindingType::Texture => vk::DescriptorType::SAMPLED_IMAGE,
-                    BindingType::Sampler => vk::DescriptorType::SAMPLER,
-                    BindingType::StorageTexture => vk::DescriptorType::STORAGE_IMAGE,
-                };
-
-                // Store the descriptor type for use in create_bind_group
-                binding_types.insert(e.binding, descriptor_type);
-
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(e.binding)
-                    .descriptor_type(descriptor_type)
-                    .descriptor_count(1)
-                    .stage_flags(stage_flags)
-            })
-            .collect();
-
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&bindings);
-
-        let layout = unsafe { logical_device.device.create_descriptor_set_layout(&layout_info, None) }
-            .context("Failed to create descriptor set layout")?;
-
-        let handle = self.next_bind_group_layout_handle;
-        self.next_bind_group_layout_handle += 1;
-
-        self.bind_group_layouts.insert(handle, BindGroupLayoutState {
-            device_handle,
-            layout,
-            binding_types,
-        });
-
-        Ok(handle)
-    }
-
-    fn create_bind_group(&mut self, device_handle: DeviceHandle, layout_handle: BindGroupLayoutHandle, entries: &[BindGroupEntry]) -> Result<BindGroupHandle> {
-        let logical_device = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-
-        let layout_state = self
-            .bind_group_layouts
-            .get(&layout_handle)
-            .context("Invalid bind group layout handle")?;
-
-        // Clone what we need before the borrow ends
-        let layout = layout_state.layout;
-        let binding_types = layout_state.binding_types.clone();
-
-        // Create a descriptor pool for this bind group
-        let pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(entries.len() as u32),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(entries.len() as u32),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(entries.len() as u32),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(entries.len() as u32),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(entries.len() as u32),
-        ];
-
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .pool_sizes(&pool_sizes)
-            .max_sets(1);
-
-        let pool = unsafe { logical_device.device.create_descriptor_pool(&pool_info, None) }
-            .context("Failed to create descriptor pool")?;
-
-        // Allocate descriptor set
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(pool)
-            .set_layouts(std::slice::from_ref(&layout));
-
-        let descriptor_sets = unsafe { logical_device.device.allocate_descriptor_sets(&alloc_info) }
-            .context("Failed to allocate descriptor set")?;
-
-        let descriptor_set = descriptor_sets[0];
-
-        // Write buffer descriptors
-        let buffer_infos: Vec<_> = entries
-            .iter()
-            .filter_map(|e| match &e.resource {
-                BindingResource::Buffer { buffer, offset, size } => {
-                    self.buffers.get(buffer).map(|b| (e.binding, b.buffer, *offset, *size))
-                }
-                _ => None,
-            })
-            .collect();
-
-        let vk_buffer_infos: Vec<_> = buffer_infos
-            .iter()
-            .map(|(_, buf, offset, size)| {
-                vk::DescriptorBufferInfo::default()
-                    .buffer(*buf)
-                    .offset(*offset)
-                    .range(*size)
-            })
-            .collect();
-
-        let writes: Vec<_> = buffer_infos
-            .iter()
-            .enumerate()
-            .map(|(idx, (binding, _, _, _))| {
-                // Look up the correct descriptor type from the layout
-                let descriptor_type = binding_types
-                    .get(binding)
-                    .copied()
-                    .unwrap_or(vk::DescriptorType::UNIFORM_BUFFER);
-                
-                vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_set)
-                    .dst_binding(*binding)
-                    .dst_array_element(0)
-                    .descriptor_type(descriptor_type)
-                    .buffer_info(std::slice::from_ref(&vk_buffer_infos[idx]))
-            })
-            .collect();
-
-        // TODO: Handle texture and sampler bindings
-        // For now, only buffer bindings are supported
-
-        unsafe { logical_device.device.update_descriptor_sets(&writes, &[]) };
-
-        let handle = self.next_bind_group_handle;
-        self.next_bind_group_handle += 1;
-
-        self.bind_groups.insert(handle, BindGroupState {
-            device_handle,
-            descriptor_set,
-            pool,
-        });
-
-        Ok(handle)
-    }
-
-    fn destroy_bind_group(&mut self, bind_group_handle: BindGroupHandle) {
-        if let Some(bg) = self.bind_groups.remove(&bind_group_handle) {
-            if let Some(device) = self.devices.get(&bg.device_handle) {
-                unsafe {
-                    device.device.destroy_descriptor_pool(bg.pool, None);
-                }
-            }
-        }
-    }
-
-    fn create_pipeline_with_layout(
-        &mut self,
-        device_handle: DeviceHandle,
-        vertex_shader: ShaderHandle,
-        fragment_shader: ShaderHandle,
-        vertex_layout: &VertexBufferLayout,
-        topology: PrimitiveTopology,
-        target_format: TextureFormat,
-        bind_group_layouts: &[BindGroupLayoutHandle],
-    ) -> Result<PipelineHandle> {
-        // Compile shaders on-demand
-        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
-        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
-
-        let logical_device = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-
-        // Collect descriptor set layouts
-        let vk_layouts: Vec<_> = bind_group_layouts
-            .iter()
-            .filter_map(|h| self.bind_group_layouts.get(h).map(|s| s.layout))
-            .collect();
-
-        // Shader stages - Slang outputs "main" as the entry point name in SPIR-V
-        let vs_stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vs_module)
-            .name(c"main");
-
-        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(fs_module)
-            .name(c"main");
-
-        let shader_stages = [vs_stage, fs_stage];
-
-        // Vertex input
-        let binding_desc = vk::VertexInputBindingDescription::default()
-            .binding(0)
-            .stride(vertex_layout.stride)
-            .input_rate(vk::VertexInputRate::VERTEX);
-
-        let attribute_descs: Vec<_> = vertex_layout
-            .attributes
-            .iter()
-            .map(|attr| {
-                vk::VertexInputAttributeDescription::default()
-                    .binding(0)
-                    .location(attr.location)
-                    .format(vertex_format_to_vk(attr.format))
-                    .offset(attr.offset)
-            })
-            .collect();
-
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
-            .vertex_attribute_descriptions(&attribute_descs);
-
-        // Input assembly
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(topology_to_vk(topology))
-            .primitive_restart_enable(false);
-
-        // Viewport/scissor (dynamic)
-        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
-
-        // Rasterization
-        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-            .depth_clamp_enable(false)
-            .rasterizer_discard_enable(false)
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-            .depth_bias_enable(false);
-
-        // Multisampling
-        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-            .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
-        // Color blending
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(false);
-
-        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
-            .logic_op_enable(false)
-            .attachments(std::slice::from_ref(&color_blend_attachment));
-
-        // Dynamic state
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
-            .dynamic_states(&dynamic_states);
-
-        // Pipeline layout with descriptor set layouts
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&vk_layouts);
-        let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-            .context("Failed to create pipeline layout")?;
-
-        // Dynamic rendering info (Vulkan 1.4)
-        let color_format = format_to_vk(target_format);
-        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(std::slice::from_ref(&color_format));
-
-        // Create pipeline
-        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&shader_stages)
-            .vertex_input_state(&vertex_input)
-            .input_assembly_state(&input_assembly)
-            .viewport_state(&viewport_state)
-            .rasterization_state(&rasterization)
-            .multisample_state(&multisampling)
-            .color_blend_state(&color_blending)
-            .dynamic_state(&dynamic_state)
-            .layout(layout)
-            .push_next(&mut rendering_info);
-
-        let pipelines = unsafe {
-            logical_device.device.create_graphics_pipelines(
-                vk::PipelineCache::null(),
-                std::slice::from_ref(&pipeline_info),
-                None,
-            )
-        }
-        .map_err(|e| anyhow::anyhow!("Failed to create pipeline: {:?}", e.1))?;
-
-        let handle = self.next_pipeline_handle;
-        self.next_pipeline_handle += 1;
-
-        self.pipelines.insert(
-            handle,
-            PipelineState {
-                device_handle,
-                pipeline: pipelines[0],
-                layout,
-            },
-        );
-
-        tracing::debug!("Created render pipeline with layout {}", handle);
-        Ok(handle)
-    }
-
     // Surface API implementation
     fn create_surface(
         &mut self,
@@ -1696,6 +1697,21 @@ impl GpuBackend for VulkanBackend {
             )
         }.context("Failed to wait for frame fence")?;
 
+        // Process deferred deletions - resources from frames that have now completed
+        // Since we just waited for the fence, frame (current_deletion_frame - MAX_FRAMES_IN_FLIGHT) has completed
+        {
+            let logical_device = self.devices.get_mut(&device_handle)
+                .context("Surface's device is invalid")?;
+            let current_frame = logical_device.deletion_queue.current_frame;
+            if current_frame >= types::MAX_FRAMES_IN_FLIGHT as u64 {
+                let completed_frame = current_frame - types::MAX_FRAMES_IN_FLIGHT as u64;
+                logical_device.deletion_queue.process_deletions(&logical_device.device, completed_frame);
+            }
+        }
+
+        let logical_device = self.devices.get(&device_handle)
+            .context("Surface's device is invalid")?;
+
         // Reset fence for this frame
         unsafe {
             logical_device.device.reset_fences(&[in_flight_fence])
@@ -1816,11 +1832,13 @@ impl GpuBackend for VulkanBackend {
         unsafe { logical_device.device.cmd_begin_rendering(cmd, &rendering_info) };
 
         // Set viewport and scissor
+        // Use negative height to flip Y axis - makes Vulkan coordinate system match DX12
+        // This requires VK_KHR_maintenance1 (core in Vulkan 1.1+)
         let viewport = vk::Viewport {
             x: 0.0,
-            y: 0.0,
+            y: height as f32,          // Start from bottom
             width: width as f32,
-            height: height as f32,
+            height: -(height as f32),  // Negative height flips Y
             min_depth: 0.0,
             max_depth: 1.0,
         };
@@ -1832,12 +1850,16 @@ impl GpuBackend for VulkanBackend {
         };
         unsafe { logical_device.device.cmd_set_scissor(cmd, 0, std::slice::from_ref(&scissor)) };
 
+        // Track current pipeline for bind group binding
+        let mut current_pipeline: Option<PipelineHandle> = None;
+
         // Execute render commands
         for command in commands {
             match command {
                 RenderCommand::Clear(_) => { /* Already handled */ }
                 RenderCommand::ClearDepth(_) => { /* TODO: Implement depth clear */ }
                 RenderCommand::SetPipeline(pipeline_handle) => {
+                    current_pipeline = Some(*pipeline_handle);
                     if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
                         unsafe {
                             logical_device.device.cmd_bind_pipeline(
@@ -1845,6 +1867,22 @@ impl GpuBackend for VulkanBackend {
                                 vk::PipelineBindPoint::GRAPHICS,
                                 pipeline.pipeline,
                             );
+
+                            // Bind the global bindless descriptor set if enabled
+                            // Use the PIPELINE's layout (not the global bindless_pipeline_layout)
+                            // because the pipeline has a hybrid layout with both bindless + user sets
+                            if logical_device.bindless_enabled {
+                                if let Some(bindless_set) = logical_device.bindless_descriptor_set {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        pipeline.layout,  // Use pipeline's own layout
+                                        0,
+                                        std::slice::from_ref(&bindless_set),
+                                        &[],
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1860,17 +1898,39 @@ impl GpuBackend for VulkanBackend {
                         }
                     }
                 }
-                RenderCommand::SetBindGroup { index, bind_group } => {
-                    if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        if let Some(pipeline) = self.pipelines.values().next() {
+                RenderCommand::SetPushConstants { buffers } => {
+                    // Fully bindless mode: push buffer indices directly (no bind groups needed)
+                    if logical_device.bindless_enabled {
+                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
+                            let mut indices = types::BindlessIndices::default();
+                            for (i, buffer_handle) in buffers.iter().enumerate() {
+                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                                indices.indices[i] = self.buffers.get(buffer_handle)
+                                    .and_then(|b| b.bindless_index)
+                                    .unwrap_or(0);
+                            }
                             unsafe {
-                                logical_device.device.cmd_bind_descriptor_sets(
-                                    cmd,
-                                    vk::PipelineBindPoint::GRAPHICS,
-                                    pipeline.layout,
-                                    *index,
-                                    std::slice::from_ref(&bg_state.descriptor_set),
-                                    &[],
+                                logical_device.device.cmd_push_constants(
+                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
+                                    bytemuck::bytes_of(&indices),
+                                );
+                            }
+                        }
+                    }
+                }
+                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+                    // Fully bindless mode: push raw indices directly (for textures/samplers)
+                    if logical_device.bindless_enabled {
+                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
+                            let mut indices = types::BindlessIndices::default();
+                            for (i, &idx) in raw_indices.iter().enumerate() {
+                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                                indices.indices[i] = idx;
+                            }
+                            unsafe {
+                                logical_device.device.cmd_push_constants(
+                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
+                                    bytemuck::bytes_of(&indices),
                                 );
                             }
                         }
@@ -2005,9 +2065,15 @@ impl GpuBackend for VulkanBackend {
         let result = unsafe { swapchain_loader.queue_present(logical_device.queue, &present_info) };
 
         // Clear the current image and advance frame counter
+        let device_handle = surface_state.device_handle;
         let surface_state = self.surfaces.get_mut(&surface_handle).unwrap();
         surface_state.current_image_index = None;
         surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+        // Advance the deletion queue's frame counter
+        if let Some(device) = self.devices.get_mut(&device_handle) {
+            device.deletion_queue.advance_frame();
+        }
 
         // Handle suboptimal or out of date
         match result {
@@ -2142,7 +2208,6 @@ impl GpuBackend for VulkanBackend {
         vertex_layout: &VertexBufferLayout,
         topology: PrimitiveTopology,
         target_format: TextureFormat,
-        bind_group_layouts: &[BindGroupLayoutHandle],
         depth_stencil: Option<&crate::types::DepthStencilState>,
     ) -> Result<PipelineHandle> {
         // Compile shaders on-demand
@@ -2153,12 +2218,6 @@ impl GpuBackend for VulkanBackend {
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-
-        // Collect descriptor set layouts
-        let vk_layouts: Vec<_> = bind_group_layouts
-            .iter()
-            .filter_map(|h| self.bind_group_layouts.get(h).map(|s| s.layout))
-            .collect();
 
         // Shader stages
         let vs_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -2249,11 +2308,26 @@ impl GpuBackend for VulkanBackend {
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
             .dynamic_states(&dynamic_states);
 
-        // Pipeline layout with descriptor set layouts
+        // Pipeline layout - always use bindless with push constants
+        let bindless_set_layout = logical_device.bindless_descriptor_set_layout
+            .context("Bindless descriptor set layout required")?;
+        
+        let all_layouts = vec![bindless_set_layout];
+        
+        // Push constant range for resource indices (16 x u32 = 64 bytes)
+        let push_constant_range = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::ALL,
+            offset: 0,
+            size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+        };
+        
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&vk_layouts);
+            .set_layouts(&all_layouts)
+            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+        
         let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-            .context("Failed to create pipeline layout")?;
+            .context("Failed to create bindless pipeline layout")?;
+        let owns_layout = true;
 
         // Dynamic rendering info (Vulkan 1.4)
         let color_format = format_to_vk(target_format);
@@ -2297,10 +2371,12 @@ impl GpuBackend for VulkanBackend {
                 device_handle,
                 pipeline: pipelines[0],
                 layout,
+                owns_layout,
+                parameter_block_layouts: Vec::new(),
             },
         );
 
-        tracing::debug!("Created pipeline with depth stencil (handle={})", handle);
+        tracing::debug!("Created pipeline with depth stencil (handle={}, bindless={})", handle, !owns_layout);
         Ok(handle)
     }
 
@@ -2561,8 +2637,47 @@ impl GpuBackend for VulkanBackend {
         let view = unsafe { logical_device.device.create_image_view(&view_info, None) }
             .context("Failed to create texture view")?;
 
+        let bindless_enabled = logical_device.bindless_enabled;
+        let bindless_descriptor_set = logical_device.bindless_descriptor_set;
+
         let handle = self.next_texture_handle;
         self.next_texture_handle += 1;
+
+        // Register texture in bindless descriptor set if enabled
+        let bindless_index = if bindless_enabled {
+            let logical_device = self.devices.get_mut(&device_handle).unwrap();
+            let index = logical_device.resource_registry.register_texture(handle);
+
+            // Update the global descriptor set with this texture
+            if let Some(descriptor_set) = bindless_descriptor_set {
+                let image_info = vk::DescriptorImageInfo::default()
+                    .image_view(view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(types::bindless_bindings::SAMPLED_IMAGES)
+                    .dst_array_element(index)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(std::slice::from_ref(&image_info));
+
+                unsafe {
+                    logical_device
+                        .device
+                        .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                }
+
+                tracing::trace!(
+                    "Registered texture {} at bindless index {}",
+                    handle,
+                    index
+                );
+            }
+
+            Some(index)
+        } else {
+            None
+        };
 
         self.textures.insert(handle, TextureState {
             device_handle,
@@ -2574,6 +2689,7 @@ impl GpuBackend for VulkanBackend {
             view,
             staging_buffer: None,
             staging_memory: None,
+            bindless_index,
         });
 
         tracing::debug!("Created texture {}x{} (handle={})", width, height, handle);
@@ -2758,7 +2874,10 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
         if let Some(texture) = self.textures.remove(&texture_handle) {
-            if let Some(logical_device) = self.devices.get(&texture.device_handle) {
+            if let Some(logical_device) = self.devices.get_mut(&texture.device_handle) {
+                // Unregister from bindless registry
+                logical_device.resource_registry.unregister_texture(texture_handle);
+
                 unsafe {
                     logical_device.device.device_wait_idle().ok();
                     logical_device.device.destroy_image_view(texture.view, None);
@@ -2773,6 +2892,10 @@ impl GpuBackend for VulkanBackend {
                 }
             }
         }
+    }
+
+    fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
+        self.textures.get(&texture_handle).and_then(|t| t.bindless_index)
     }
 
     fn create_sampler(&mut self, device_handle: DeviceHandle, desc: &crate::types::SamplerDesc) -> Result<SamplerHandle> {
@@ -2799,12 +2922,46 @@ impl GpuBackend for VulkanBackend {
         let sampler = unsafe { logical_device.device.create_sampler(&sampler_info, None) }
             .context("Failed to create sampler")?;
 
+        let bindless_enabled = logical_device.bindless_enabled;
+        let bindless_descriptor_set = logical_device.bindless_descriptor_set;
+
         let handle = self.next_sampler_handle;
         self.next_sampler_handle += 1;
+
+        // Register sampler in bindless descriptor set if enabled
+        let bindless_index = if bindless_enabled {
+            let logical_device = self.devices.get_mut(&device_handle).unwrap();
+            let index = logical_device.resource_registry.register_sampler(handle);
+
+            // Update the global descriptor set with this sampler
+            if let Some(descriptor_set) = bindless_descriptor_set {
+                let sampler_info = vk::DescriptorImageInfo::default().sampler(sampler);
+
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(types::bindless_bindings::SAMPLERS)
+                    .dst_array_element(index)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(std::slice::from_ref(&sampler_info));
+
+                unsafe {
+                    logical_device
+                        .device
+                        .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                }
+
+                tracing::trace!("Registered sampler {} at bindless index {}", handle, index);
+            }
+
+            Some(index)
+        } else {
+            None
+        };
 
         self.samplers.insert(handle, SamplerState {
             device_handle,
             sampler,
+            bindless_index,
         });
 
         tracing::debug!("Created sampler (handle={})", handle);
@@ -2813,7 +2970,10 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
         if let Some(sampler) = self.samplers.remove(&sampler_handle) {
-            if let Some(logical_device) = self.devices.get(&sampler.device_handle) {
+            if let Some(logical_device) = self.devices.get_mut(&sampler.device_handle) {
+                // Unregister from bindless registry
+                logical_device.resource_registry.unregister_sampler(sampler_handle);
+
                 unsafe {
                     logical_device.device.device_wait_idle().ok();
                     logical_device.device.destroy_sampler(sampler.sampler, None);
@@ -2822,11 +2982,14 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
+    fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
+        self.samplers.get(&sampler_handle).and_then(|s| s.bindless_index)
+    }
+
     fn create_compute_pipeline(
         &mut self,
         device_handle: DeviceHandle,
         compute_shader: ShaderHandle,
-        bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<ComputePipelineHandle> {
         // Compile shader on-demand
         let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
@@ -2836,18 +2999,10 @@ impl GpuBackend for VulkanBackend {
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        // Collect descriptor set layouts
-        let vk_layouts: Vec<_> = bind_group_layouts
-            .iter()
-            .filter_map(|h| self.bind_group_layouts.get(h).map(|s| s.layout))
-            .collect();
-
-        // Create pipeline layout
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&vk_layouts);
-
-        let pipeline_layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-            .context("Failed to create compute pipeline layout")?;
+        // Always use bindless pipeline layout
+        let pipeline_layout = logical_device.bindless_pipeline_layout
+            .context("Bindless pipeline layout required")?;
+        let owns_layout = false; // Don't own - global bindless layout
 
         // Compute shader stage
         let cs_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -2875,9 +3030,11 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             pipeline: pipelines[0],
             layout: pipeline_layout,
+            owns_layout,
+            parameter_block_layouts: Vec::new(),
         });
 
-        tracing::debug!("Created compute pipeline (handle={})", handle);
+        tracing::debug!("Created compute pipeline (handle={}, bindless={})", handle, !owns_layout);
         Ok(handle)
     }
 
@@ -2887,7 +3044,10 @@ impl GpuBackend for VulkanBackend {
                 unsafe {
                     logical_device.device.device_wait_idle().ok();
                     logical_device.device.destroy_pipeline(pipeline.pipeline, None);
-                    logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
+                    // Only destroy layout if we own it (not the global bindless layout)
+                    if pipeline.owns_layout {
+                        logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
+                    }
                 }
             }
         }
@@ -2914,8 +3074,8 @@ impl GpuBackend for VulkanBackend {
         unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
             .context("Failed to begin command buffer")?;
 
-        // Track current pipeline for bind group binding
-        let mut current_pipeline_layout: Option<vk::PipelineLayout> = None;
+        // Track current pipeline for push constants
+        let mut current_pipeline: Option<ComputePipelineHandle> = None;
 
         // Process commands
         for command in commands {
@@ -2928,20 +3088,44 @@ impl GpuBackend for VulkanBackend {
                                 vk::PipelineBindPoint::COMPUTE,
                                 pipeline_state.pipeline,
                             );
+
+                            // Bind the global bindless descriptor set if enabled
+                            if logical_device.bindless_enabled {
+                                if let (Some(bindless_set), Some(bindless_layout)) = (
+                                    logical_device.bindless_descriptor_set,
+                                    logical_device.bindless_pipeline_layout,
+                                ) {
+                                    logical_device.device.cmd_bind_descriptor_sets(
+                                        cmd,
+                                        vk::PipelineBindPoint::COMPUTE,
+                                        bindless_layout,
+                                        0,
+                                        std::slice::from_ref(&bindless_set),
+                                        &[],
+                                    );
+                                }
+                            }
                         }
-                        current_pipeline_layout = Some(pipeline_state.layout);
+                        current_pipeline = Some(*handle);
                     }
                 }
-                ComputeCommand::SetBindGroup { index, bind_group } => {
-                    if let (Some(layout), Some(bg)) = (current_pipeline_layout, self.bind_groups.get(bind_group)) {
+                ComputeCommand::SetPushConstants { buffers } => {
+                    // Fully bindless mode: push buffer indices directly
+                    if let Some(pipeline) = current_pipeline.and_then(|p| self.compute_pipelines.get(&p)) {
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, buffer_handle) in buffers.iter().enumerate() {
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
+                            indices.indices[i] = self.buffers.get(buffer_handle)
+                                .and_then(|b| b.bindless_index)
+                                .unwrap_or(0);
+                        }
                         unsafe {
-                            logical_device.device.cmd_bind_descriptor_sets(
+                            logical_device.device.cmd_push_constants(
                                 cmd,
-                                vk::PipelineBindPoint::COMPUTE,
-                                layout,
-                                *index,
-                                &[bg.descriptor_set],
-                                &[],
+                                pipeline.layout,
+                                vk::ShaderStageFlags::COMPUTE,
+                                0,
+                                bytemuck::bytes_of(&indices),
                             );
                         }
                     }

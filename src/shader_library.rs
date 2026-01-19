@@ -255,6 +255,10 @@ impl ShaderLibrary {
                     "goldy_exp/bindless",
                     include_str!("../shaders/goldy_exp/bindless.slang"),
                 ),
+                (
+                    "goldy_exp/buffer_indices",
+                    include_str!("../shaders/goldy_exp/buffer_indices.slang"),
+                ),
             ],
         )
     }
@@ -315,6 +319,7 @@ mod tests {
         assert!(lib.has_module("goldy_exp/color"));
         assert!(lib.has_module("goldy_exp/vertex"));
         assert!(lib.has_module("goldy_exp/bindless"));
+        assert!(lib.has_module("goldy_exp/buffer_indices"));
     }
 
     #[test]

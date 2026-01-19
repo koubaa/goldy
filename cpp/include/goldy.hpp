@@ -66,8 +66,6 @@ class ShaderModule;
 class RenderPipeline;
 class RenderTarget;
 class CommandEncoder;
-class BindGroupLayout;
-class BindGroup;
 class ComputePipeline;
 class ComputeEncoder;
 class Texture;
@@ -131,13 +129,6 @@ namespace TextureUsage {
     inline constexpr GoldyTextureUsage RenderTarget = { 1 << 4 };
 }
 
-namespace ShaderStages {
-    inline constexpr GoldyShaderStages Vertex   = { 1 };
-    inline constexpr GoldyShaderStages Fragment = { 2 };
-    inline constexpr GoldyShaderStages Compute  = { 4 };
-    inline constexpr GoldyShaderStages All      = { 7 };
-}
-
 } // namespace goldy
 
 // Operators for flag types (at global scope for ADL)
@@ -146,10 +137,6 @@ inline constexpr GoldyBufferUsage operator|(GoldyBufferUsage a, GoldyBufferUsage
 }
 
 inline constexpr GoldyTextureUsage operator|(GoldyTextureUsage a, GoldyTextureUsage b) {
-    return { a._0 | b._0 };
-}
-
-inline constexpr GoldyShaderStages operator|(GoldyShaderStages a, GoldyShaderStages b) {
     return { a._0 | b._0 };
 }
 
@@ -187,14 +174,6 @@ struct RenderTargetDeleter {
 
 struct CommandEncoderDeleter {
     void operator()(GoldyCommandEncoder* p) const { if (p) goldy_encoder_destroy(p); }
-};
-
-struct BindGroupLayoutDeleter {
-    void operator()(GoldyBindGroupLayout* p) const { if (p) goldy_bind_group_layout_destroy(p); }
-};
-
-struct BindGroupDeleter {
-    void operator()(GoldyBindGroup* p) const { if (p) goldy_bind_group_destroy(p); }
 };
 
 struct ComputePipelineDeleter {
@@ -495,85 +474,6 @@ private:
 };
 
 // =============================================================================
-// BindGroupLayout
-// =============================================================================
-
-/**
- * @brief Describes the layout of a bind group.
- */
-class BindGroupLayout {
-public:
-    /**
-     * @brief Create a bind group layout.
-     * @param device The device.
-     * @param bindings Array of binding descriptors.
-     * @throws Exception if creation fails.
-     */
-    BindGroupLayout(const Device& device, std::span<const GoldyBindGroupLayoutBinding> bindings) {
-        GoldyBindGroupLayout* ptr = goldy_bind_group_layout_create(
-            device.get(), bindings.data(), static_cast<uint32_t>(bindings.size()));
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-
-    BindGroupLayout(const BindGroupLayout&) = delete;
-    BindGroupLayout& operator=(const BindGroupLayout&) = delete;
-    BindGroupLayout(BindGroupLayout&&) = default;
-    BindGroupLayout& operator=(BindGroupLayout&&) = default;
-
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyBindGroupLayout* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyBindGroupLayout, detail::BindGroupLayoutDeleter> ptr_;
-};
-
-// =============================================================================
-// BindGroup
-// =============================================================================
-
-/**
- * @brief A group of resources bound to a shader.
- */
-class BindGroup {
-public:
-    /**
-     * @brief Create a bind group with buffer bindings.
-     * @param device The device.
-     * @param layout The bind group layout.
-     * @param buffer_bindings Array of buffer binding descriptors.
-     * @throws Exception if creation fails.
-     */
-    BindGroup(const Device& device, const BindGroupLayout& layout,
-              std::span<const GoldyBufferBinding> buffer_bindings) {
-        GoldyBindGroup* ptr = goldy_bind_group_create(
-            device.get(), layout.get(),
-            buffer_bindings.data(), static_cast<uint32_t>(buffer_bindings.size()));
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-
-    BindGroup(const BindGroup&) = delete;
-    BindGroup& operator=(const BindGroup&) = delete;
-    BindGroup(BindGroup&&) = default;
-    BindGroup& operator=(BindGroup&&) = default;
-
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyBindGroup* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyBindGroup, detail::BindGroupDeleter> ptr_;
-};
-
-// =============================================================================
 // RenderPipeline
 // =============================================================================
 
@@ -680,10 +580,38 @@ public:
     }
 
     /**
-     * @brief Set a bind group.
+     * @brief Set push constants for resource binding.
+     *
+     * Pass the buffers whose indices should be pushed to the shader.
+     * The indices are pushed in order, so buffers[0] becomes index 0,
+     * buffers[1] becomes index 1, etc.
+     *
+     * @param buffers Span of buffer pointers to pass to the shader.
      */
-    void set_bind_group(uint32_t index, const BindGroup& bind_group) {
-        goldy_encoder_set_bind_group(ptr_.get(), index, bind_group.get());
+    void set_push_constants(std::span<const Buffer* const> buffers) {
+        if (buffers.empty()) return;
+        
+        std::vector<const GoldyBuffer*> ptrs;
+        ptrs.reserve(buffers.size());
+        for (const auto* buf : buffers) {
+            ptrs.push_back(buf->get());
+        }
+        goldy_encoder_set_push_constants(ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size()));
+    }
+
+    /**
+     * @brief Set push constants for a single buffer (convenience overload).
+     */
+    void set_push_constants(const Buffer& buffer) {
+        const GoldyBuffer* ptr = buffer.get();
+        goldy_encoder_set_push_constants(ptr_.get(), &ptr, 1);
+    }
+
+    /**
+     * @brief Set push constants from an initializer list (convenience overload).
+     */
+    void set_push_constants(std::initializer_list<const Buffer*> buffers) {
+        set_push_constants(std::span<const Buffer* const>{buffers.begin(), buffers.size()});
     }
 
     /**
@@ -851,13 +779,10 @@ public:
      * @brief Create a compute pipeline.
      * @param device The device.
      * @param shader The compute shader.
-     * @param layouts Bind group layouts.
      * @throws Exception if creation fails.
      */
-    ComputePipeline(const Device& device, const ShaderModule& shader,
-                    std::span<const GoldyBindGroupLayout*> layouts = {}) {
-        GoldyComputePipeline* ptr = goldy_compute_pipeline_create(
-            device.get(), shader.get(), layouts.data(), static_cast<uint32_t>(layouts.size()));
+    ComputePipeline(const Device& device, const ShaderModule& shader) {
+        GoldyComputePipeline* ptr = goldy_compute_pipeline_create(device.get(), shader.get());
         if (!ptr) {
             throw Exception::from_last_error();
         }
@@ -904,13 +829,6 @@ public:
      */
     void set_pipeline(const ComputePipeline& pipeline) {
         goldy_compute_encoder_set_pipeline(ptr_.get(), pipeline.get());
-    }
-
-    /**
-     * @brief Set a bind group.
-     */
-    void set_bind_group(uint32_t index, const BindGroup& bind_group) {
-        goldy_compute_encoder_set_bind_group(ptr_.get(), index, bind_group.get());
     }
 
     /**

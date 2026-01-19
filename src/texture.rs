@@ -149,10 +149,17 @@ impl Texture {
     }
 
     /// Get the backend handle for this texture.
-    ///
-    /// This is used for binding the texture to shaders via bind groups.
     pub fn handle(&self) -> TextureHandle {
         self.handle
+    }
+
+    /// Get the texture's index in the global descriptor set.
+    ///
+    /// Returns `Some(index)` if this texture is registered.
+    /// Returns `None` otherwise.
+    pub fn bindless_index(&self) -> Option<u32> {
+        let backend = self.backend.lock().unwrap();
+        backend.texture_bindless_index(self.handle)
     }
 }
 

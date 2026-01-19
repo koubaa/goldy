@@ -1,12 +1,15 @@
 //! Bouncing lines example - animated lines bouncing off walls.
 //!
-//! Demonstrates line primitive rendering using Surface API.
+//! Demonstrates GPU compute + graphics integration with line primitives.
+//! The compute shader updates line endpoint positions, the graphics shader renders them.
 //!
 //! Run with: cargo run --example bouncing_lines
 
+use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -17,247 +20,223 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const NUM_LINES: usize = 20;
+const NUM_LINES: u32 = 20;
 
+/// Line structure matching the shader layout
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Line {
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-    vx1: f32,
-    vy1: f32,
-    vx2: f32,
-    vy2: f32,
-    color: Color,
+    p1: [f32; 2],     // First endpoint position
+    v1: [f32; 2],     // First endpoint velocity
+    p2: [f32; 2],     // Second endpoint position
+    v2: [f32; 2],     // Second endpoint velocity
+    color_index: u32, // Color lookup index
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
-impl Line {
-    fn new(idx: usize) -> Self {
-        let angle = (idx as f32 / NUM_LINES as f32) * std::f32::consts::PI * 2.0;
-        let colors = [
-            Color::RED,
-            Color::GREEN,
-            Color::BLUE,
-            Color {
-                r: 1.0,
-                g: 1.0,
-                b: 0.0,
-                a: 1.0,
-            },
-            Color {
-                r: 1.0,
-                g: 0.0,
-                b: 1.0,
-                a: 1.0,
-            },
-            Color {
-                r: 0.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            },
-        ];
-        Self {
-            x1: angle.cos() * 0.3,
-            y1: angle.sin() * 0.3,
-            x2: -angle.cos() * 0.3,
-            y2: -angle.sin() * 0.3,
-            vx1: 0.01 * (idx as f32 * 0.7).cos(),
-            vy1: 0.012 * (idx as f32 * 0.9).sin(),
-            vx2: -0.011 * (idx as f32 * 1.1).cos(),
-            vy2: 0.009 * (idx as f32 * 1.3).sin(),
-            color: colors[idx % colors.len()],
-        }
-    }
+fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_env_filter("info").init();
+    println!("Goldy Bouncing Lines Example");
+    println!("  Escape - Exit");
 
-    fn update(&mut self) {
-        self.x1 += self.vx1;
-        self.y1 += self.vy1;
-        self.x2 += self.vx2;
-        self.y2 += self.vy2;
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
 
-        if self.x1 < -1.0 || self.x1 > 1.0 {
-            self.vx1 = -self.vx1;
-        }
-        if self.y1 < -1.0 || self.y1 > 1.0 {
-            self.vy1 = -self.vy1;
-        }
-        if self.x2 < -1.0 || self.x2 > 1.0 {
-            self.vx2 = -self.vx2;
-        }
-        if self.y2 < -1.0 || self.y2 > 1.0 {
-            self.vy2 = -self.vy2;
-        }
+    let mut app = App::default();
+    event_loop.run_app(&mut app)?;
 
-        self.x1 = self.x1.clamp(-1.0, 1.0);
-        self.y1 = self.y1.clamp(-1.0, 1.0);
-        self.x2 = self.x2.clamp(-1.0, 1.0);
-        self.y2 = self.y2.clamp(-1.0, 1.0);
-    }
-
-    fn vertices(&self) -> [Vertex2D; 2] {
-        [
-            Vertex2D::new(self.x1, self.y1, self.color),
-            Vertex2D::new(self.x2, self.y2, self.color),
-        ]
-    }
+    Ok(())
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
-
+#[derive(Default)]
 struct App {
-    instance: Instance,
-    device: Option<Arc<goldy::Device>>,
-    pipeline: Option<RenderPipeline>,
-    shader: Option<ShaderModule>,
-    window: Option<Arc<Window>>,
-    surface: Option<Surface>,
-    lines: Vec<Line>,
-    vertex_buffers: Vec<Buffer>,
+    state: Option<RenderState>,
 }
 
-impl App {
-    fn new() -> anyhow::Result<Self> {
-        let lines: Vec<Line> = (0..NUM_LINES).map(Line::new).collect();
-        Ok(Self {
-            instance: Instance::new()?,
-            device: None,
-            pipeline: None,
-            shader: None,
-            window: None,
-            surface: None,
-            lines,
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
-        })
-    }
+struct RenderState {
+    window: Arc<Window>,
+    device: Arc<goldy::Device>,
+    surface: Surface,
+    // Compute resources
+    compute_pipeline: ComputePipeline,
+    // Buffer
+    line_buffer: Buffer,
+    // Graphics resources
+    render_pipeline: RenderPipeline,
+    // Frame counter
+    frame_count: u32,
+}
 
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+impl RenderState {
+    fn new(window: Arc<Window>) -> Result<Self> {
+        let instance = Instance::new()?;
+        let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(
+
+        // Compute shader for line physics
+        let compute_shader = ShaderModule::from_slang(
             &device,
-            &shader,
-            &shader,
+            include_str!("../shaders/bouncing_lines_update.slang"),
+        )?;
+
+        // Render shader for visualization
+        let render_shader = ShaderModule::from_slang(
+            &device,
+            include_str!("../shaders/bouncing_lines_render.slang"),
+        )?;
+
+        // Create line buffer with initial positions matching the original example
+        let mut lines = Vec::with_capacity(NUM_LINES as usize);
+        for idx in 0..NUM_LINES {
+            let angle = (idx as f32 / NUM_LINES as f32) * std::f32::consts::PI * 2.0;
+            lines.push(Line {
+                p1: [angle.cos() * 0.3, angle.sin() * 0.3],
+                v1: [
+                    0.01 * (idx as f32 * 0.7).cos(),
+                    0.012 * (idx as f32 * 0.9).sin(),
+                ],
+                p2: [-angle.cos() * 0.3, -angle.sin() * 0.3],
+                v2: [
+                    -0.011 * (idx as f32 * 1.1).cos(),
+                    0.009 * (idx as f32 * 1.3).sin(),
+                ],
+                color_index: idx,
+                _pad1: 0,
+                _pad2: 0,
+                _pad3: 0,
+            });
+        }
+
+        let line_buffer =
+            Buffer::with_data(&device, &lines, BufferUsage::STORAGE | BufferUsage::VERTEX)?;
+
+        // Create compute pipeline
+        let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
+
+        // Create render pipeline
+        let render_pipeline = RenderPipeline::new(
+            &device,
+            &render_shader,
+            &render_shader,
             &RenderPipelineDesc {
-                vertex_layout: Vertex2D::layout(),
-                target_format: surface.format(),
+                vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::LineList,
+                target_format: surface.format(),
                 ..Default::default()
             },
         )?;
-        self.device = Some(device);
-        self.shader = Some(shader);
-        self.pipeline = Some(pipeline);
-        self.surface = Some(surface);
-        Ok(())
+
+        println!("Created bouncing lines with {} lines", NUM_LINES);
+
+        Ok(Self {
+            window,
+            device,
+            surface,
+            compute_pipeline,
+            line_buffer,
+            render_pipeline,
+            frame_count: 0,
+        })
     }
 
-    fn render_frame(&mut self) -> anyhow::Result<()> {
-        let window = self.window.as_ref().unwrap();
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
+    fn render(&mut self) -> Result<()> {
+        self.frame_count += 1;
 
-        // Update lines
-        for line in &mut self.lines {
-            line.update();
+        // Run compute pass to update line positions
+        let mut compute_encoder = ComputeEncoder::new();
+        {
+            let mut pass = compute_encoder.begin_compute_pass();
+            pass.set_pipeline(&self.compute_pipeline);
+            // Pass buffer indices via push constants
+            pass.set_push_constants(&[&self.line_buffer]);
+            // Only 20 lines, but dispatch at least 1 workgroup
+            let workgroups = (NUM_LINES + 63) / 64;
+            pass.dispatch(workgroups.max(1), 1, 1);
         }
+        compute_encoder.dispatch(&self.device)?;
 
-        // Generate vertices
-        let mut vertices: Vec<Vertex2D> = Vec::with_capacity(NUM_LINES * 2);
-        for line in &self.lines {
-            vertices.extend_from_slice(&line.vertices());
-        }
+        // Render lines
+        let frame = self.surface.acquire()?;
 
-        let device = self.device.as_ref().unwrap();
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
-
-        let frame = surface.acquire()?;
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
+        let bg_color = Color {
+            r: 0.05,
+            g: 0.05,
+            b: 0.1,
+            a: 1.0,
+        };
 
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(Color {
-                r: 0.05,
-                g: 0.05,
-                b: 0.1,
-                a: 1.0,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.draw(0..vertices.len() as u32, 0..1);
+            pass.clear(bg_color);
+            pass.set_pipeline(&self.render_pipeline);
+            // Pass buffer indices via push constants
+            pass.set_push_constants(&[&self.line_buffer]);
+            // Draw 2 vertices (line) per instance
+            pass.draw(0..2, 0..NUM_LINES);
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
-        self.vertex_buffers.push(vertex_buffer);
-        Ok(())
-    }
+        self.surface.present(frame)?;
 
-    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
-            }
-        }
+        self.window.request_redraw();
+        Ok(())
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        if self.state.is_none() {
             let window = Arc::new(
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Bouncing Lines (Surface API)")
+                            .with_title("Goldy - Bouncing Lines")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
-                    .unwrap(),
+                    .expect("Failed to create window"),
             );
-            self.window = Some(window.clone());
-            self.init_gpu(&window).unwrap();
-            window.request_redraw();
+
+            match RenderState::new(window.clone()) {
+                Ok(state) => {
+                    self.state = Some(state);
+                    window.request_redraw();
+                }
+                Err(e) => {
+                    eprintln!("Failed to create render state: {}", e);
+                    event_loop.exit();
+                }
+            }
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     event_loop.exit();
                 }
             }
-            WindowEvent::RedrawRequested => {
-                if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
+            WindowEvent::Resized(size) => {
+                if let Some(state) = &mut self.state {
+                    if size.width > 0 && size.height > 0 {
+                        state.surface.resize(size.width, size.height).ok();
+                    }
                 }
-                self.window.as_ref().unwrap().request_redraw();
             }
-            WindowEvent::Resized(new_size) => {
-                self.handle_resize(new_size);
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+            WindowEvent::RedrawRequested => {
+                if let Some(state) = &mut self.state {
+                    if let Err(e) = state.render() {
+                        eprintln!("Render error: {}", e);
+                    }
                 }
             }
             _ => {}
         }
     }
-}
-
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Bouncing Lines Example - Press Escape to exit");
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new()?)?;
-    Ok(())
 }

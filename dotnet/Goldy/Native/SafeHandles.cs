@@ -99,38 +99,6 @@ internal sealed class RenderPipelineHandle : SafeHandle
 }
 
 /// <summary>
-/// SafeHandle for Goldy BindGroupLayout.
-/// </summary>
-internal sealed class BindGroupLayoutHandle : SafeHandle
-{
-    public BindGroupLayoutHandle() : base(nint.Zero, true) { }
-    
-    public override bool IsInvalid => handle == nint.Zero;
-    
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.BindGroupLayoutDestroy(handle);
-        return true;
-    }
-}
-
-/// <summary>
-/// SafeHandle for Goldy BindGroup.
-/// </summary>
-internal sealed class BindGroupHandle : SafeHandle
-{
-    public BindGroupHandle() : base(nint.Zero, true) { }
-    
-    public override bool IsInvalid => handle == nint.Zero;
-    
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.BindGroupDestroy(handle);
-        return true;
-    }
-}
-
-/// <summary>
 /// SafeHandle for Goldy ComputePipeline.
 /// </summary>
 internal sealed class ComputePipelineHandle : SafeHandle

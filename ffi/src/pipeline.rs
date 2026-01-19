@@ -1,6 +1,5 @@
 //! FFI bindings for RenderPipeline.
 
-use crate::bind_group::GoldyBindGroupLayout;
 use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
 use crate::shader::GoldyShaderModule;
@@ -30,10 +29,6 @@ pub struct GoldyRenderPipelineDesc {
     pub topology: GoldyPrimitiveTopology,
     /// Target texture format.
     pub target_format: GoldyTextureFormat,
-    /// Pointer to bind group layouts array (can be null).
-    pub bind_group_layouts: *const *const GoldyBindGroupLayout,
-    /// Number of bind group layouts.
-    pub bind_group_layout_count: u32,
     /// Whether depth testing is enabled.
     pub depth_enabled: bool,
     /// Depth format (only used if depth_enabled is true).
@@ -52,8 +47,6 @@ impl Default for GoldyRenderPipelineDesc {
             vertex_stride: 24, // Default Vertex2D stride
             topology: GoldyPrimitiveTopology::TriangleList,
             target_format: GoldyTextureFormat::Rgba8Unorm,
-            bind_group_layouts: ptr::null(),
-            bind_group_layout_count: 0,
             depth_enabled: false,
             depth_format: GoldyDepthFormat::Depth24Plus,
             depth_write_enabled: true,
@@ -90,16 +83,17 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
                 .map(|a| (*a).into())
                 .collect()
         } else {
-            // Default Vertex2D layout
+            // Default Vertex2DUv layout (position + uv)
+            // This matches goldy::types::Vertex2DUv and FullscreenVertex shader input
             vec![
                 goldy::VertexAttribute {
                     location: 0,
-                    format: goldy::VertexFormat::Float32x2,
+                    format: goldy::VertexFormat::Float32x2, // POSITION
                     offset: 0,
                 },
                 goldy::VertexAttribute {
                     location: 1,
-                    format: goldy::VertexFormat::Float32x4,
+                    format: goldy::VertexFormat::Float32x2, // TEXCOORD0 (UV)
                     offset: 8,
                 },
             ]
@@ -109,22 +103,6 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
         stride: desc.vertex_stride,
         attributes,
     };
-
-    // Collect bind group layouts
-    let layouts: Vec<&goldy::BindGroupLayout> =
-        if desc.bind_group_layout_count > 0 && !desc.bind_group_layouts.is_null() {
-            slice::from_raw_parts(
-                desc.bind_group_layouts,
-                desc.bind_group_layout_count as usize,
-            )
-            .iter()
-            .map(|&ptr| &(*ptr).inner)
-            .collect()
-        } else {
-            vec![]
-        };
-
-    let layout_refs: Vec<&goldy::BindGroupLayout> = layouts.iter().copied().collect();
 
     // Build depth stencil state
     let depth_stencil = if desc.depth_enabled {
@@ -141,7 +119,6 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
         vertex_layout,
         topology: desc.topology.into(),
         target_format: desc.target_format.into(),
-        bind_group_layouts: &layout_refs,
         depth_stencil,
     };
 

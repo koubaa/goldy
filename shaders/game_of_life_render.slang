@@ -1,26 +1,30 @@
 // Game of Life rendering shader
 // Renders the grid as a fullscreen quad with cell colors
-//
-// ## Bindless Support
-//
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Buffers are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
 
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
-#ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct GameOfLifeRenderResources {
     StructuredBuffer<uint> cells;
 };
 ParameterBlock<GameOfLifeRenderResources> gResources;
 #define CELLS gResources.cells
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]] StructuredBuffer<uint> cells;
-#define CELLS cells
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.buffer_indices;
+[[vk::binding(0, 0)]] StructuredBuffer<uint> g_StorageBuffers[];
+#define CELLS g_StorageBuffers[getBufferIndex(0)]
+
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
+    uint cellsBufferIndex;
+};
+#define CELLS (*DescriptorHandle<StructuredBuffer<uint>>(uint2(cellsBufferIndex, 0)))
+
 #endif
 
 struct VSOutput {
@@ -81,4 +85,3 @@ float4 fs_main(VSOutput input) : SV_Target {
         return float4(dead + gridLine, 1.0);
     }
 }
-

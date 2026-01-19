@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.jpeg" alt="Goldy Logo" width="600">
+</p>
+
 # Goldy: Modern Graphics Library
 
 **Goldy** is a modern Rust GPU library that deliberately sheds legacy baggage. It targets only modern GPU APIs (Vulkan 1.4+, DX12, Metal) and can therefore be significantly simpler than libraries that must maintain backward compatibility.

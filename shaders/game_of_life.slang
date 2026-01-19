@@ -1,18 +1,12 @@
 // Conway's Game of Life compute shader
 // Uses ping-pong buffers: reads from one, writes to the other
-//
-// ## Bindless Support
-//
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Buffers are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
 
 // Grid dimensions (must match the example)
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
-#ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
 struct GameOfLifeResources {
     StructuredBuffer<uint> currentState;
     RWStructuredBuffer<uint> nextState;
@@ -20,12 +14,24 @@ struct GameOfLifeResources {
 ParameterBlock<GameOfLifeResources> gResources;
 #define CURRENT_STATE gResources.currentState
 #define NEXT_STATE gResources.nextState
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]] StructuredBuffer<uint> currentState;
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> nextState;
-#define CURRENT_STATE currentState
-#define NEXT_STATE nextState
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.buffer_indices;
+// Binding 0 = RW storage buffers, but we access read-only from currentState
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
+#define CURRENT_STATE g_StorageBuffers[getBufferIndex(0)]
+#define NEXT_STATE g_StorageBuffers[getBufferIndex(1)]
+
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
+    uint currentStateIndex;
+    uint nextStateIndex;
+};
+#define CURRENT_STATE (*DescriptorHandle<StructuredBuffer<uint>>(uint2(currentStateIndex, 0)))
+#define NEXT_STATE (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(nextStateIndex, 0)))
+
 #endif
 
 // Get cell state (1 = alive, 0 = dead)
@@ -74,4 +80,3 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     
     NEXT_STATE[idx] = newState;
 }
-

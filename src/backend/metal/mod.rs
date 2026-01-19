@@ -16,10 +16,9 @@ mod types;
 mod utils;
 
 use types::{
-    BindGroupLayoutState, BindGroupState, BindingState, BufferState, ComputePipelineState,
-    LogicalDevice, PipelineState, RenderTargetState, ResourceRegistry,
-    SamplerState_ as SamplerStateInternal, SurfaceState, TextureState, ARGUMENT_BUFFER_SIZE,
-    MAX_FRAMES_IN_FLIGHT,
+    BufferState, ComputePipelineState, LogicalDevice, PipelineState, RenderTargetState,
+    ResourceRegistry, SamplerState_ as SamplerStateInternal, SurfaceState, TextureState,
+    ARGUMENT_BUFFER_SIZE, MAX_FRAMES_IN_FLIGHT,
 };
 use utils::{
     address_mode_to_mtl, compare_to_mtl, depth_format_to_mtl, filter_to_mtl, format_to_mtl,
@@ -83,10 +82,6 @@ pub struct MetalBackend {
     next_pipeline_handle: PipelineHandle,
     compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
     next_compute_pipeline_handle: ComputePipelineHandle,
-    bind_group_layouts: HashMap<BindGroupLayoutHandle, BindGroupLayoutState>,
-    next_bind_group_layout_handle: BindGroupLayoutHandle,
-    bind_groups: HashMap<BindGroupHandle, BindGroupState>,
-    next_bind_group_handle: BindGroupHandle,
     render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
@@ -122,10 +117,6 @@ impl MetalBackend {
             next_pipeline_handle: 1,
             compute_pipelines: HashMap::new(),
             next_compute_pipeline_handle: 1,
-            bind_group_layouts: HashMap::new(),
-            next_bind_group_layout_handle: 1,
-            bind_groups: HashMap::new(),
-            next_bind_group_handle: 1,
             render_targets: HashMap::new(),
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
@@ -439,11 +430,21 @@ impl GpuBackend for MetalBackend {
 
         let command_queue = device.new_command_queue();
 
-        // Check for Argument Buffers Tier 2 support (required for bindless)
+        // Check for Argument Buffers Tier 2 support.
+        //
+        // RATIONALE FOR KEEPING THIS CHECK:
+        // Unlike Vulkan/DX12 where we assume modern hardware supports descriptor indexing,
+        // we keep this fallback for Metal because:
+        // 1. GitHub's free-tier macOS runners use older Intel GPUs that only support Tier 1
+        // 2. This allows CI tests to run without requiring self-hosted runners
+        // 3. Once GitHub provides Apple Silicon runners or we use self-hosted runners,
+        //    this fallback can be removed and Tier 2 can be required.
+        //
+        // Tier 2 is supported on: Apple Silicon (all), Intel Macs 2017+, AMD GPUs 2015+
         let arg_buffers_tier = device.argument_buffers_support();
         let bindless_enabled = arg_buffers_tier == mtl::MTLArgumentBuffersTier::Tier2;
 
-        // Initialize bindless infrastructure if supported
+        // Initialize resource binding infrastructure (Tier 2 path uses argument buffers)
         let (buffer_heap, texture_heap, argument_buffer, argument_encoder, texture_encoder) =
             if bindless_enabled {
                 tracing::info!("Metal Argument Buffers Tier 2 supported - enabling bindless");
@@ -559,10 +560,6 @@ impl GpuBackend for MetalBackend {
                 .retain(|_, p| p.device_handle != device_handle);
             self.compute_pipelines
                 .retain(|_, p| p.device_handle != device_handle);
-            self.bind_group_layouts
-                .retain(|_, l| l.device_handle != device_handle);
-            self.bind_groups
-                .retain(|_, g| g.device_handle != device_handle);
             self.render_targets
                 .retain(|_, t| t.device_handle != device_handle);
             self.surfaces
@@ -585,6 +582,7 @@ impl GpuBackend for MetalBackend {
         device_handle: DeviceHandle,
         size: u64,
         _usage: BufferUsage,
+        _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         let _span = goldy_span!("resource.buffer.create", size = size).entered();
 
@@ -731,6 +729,12 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
+    fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
+        self.buffers
+            .get(&buffer_handle)
+            .and_then(|b| b.arg_buffer_index)
+    }
+
     fn create_shader(
         &mut self,
         device_handle: DeviceHandle,
@@ -775,77 +779,6 @@ impl GpuBackend for MetalBackend {
         self.shaders.remove(&shader_handle);
     }
 
-    fn create_bind_group_layout(
-        &mut self,
-        device_handle: DeviceHandle,
-        entries: &[BindGroupLayoutEntry],
-    ) -> Result<BindGroupLayoutHandle> {
-        let _ = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-
-        let handle = self.next_bind_group_layout_handle;
-        self.next_bind_group_layout_handle += 1;
-
-        self.bind_group_layouts.insert(
-            handle,
-            BindGroupLayoutState {
-                device_handle,
-                entries: entries.to_vec(),
-            },
-        );
-
-        Ok(handle)
-    }
-
-    fn create_bind_group(
-        &mut self,
-        device_handle: DeviceHandle,
-        layout: BindGroupLayoutHandle,
-        entries: &[BindGroupEntry],
-    ) -> Result<BindGroupHandle> {
-        let _ = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-
-        let bindings: Vec<BindingState> = entries
-            .iter()
-            .map(|e| match &e.resource {
-                BindingResource::Buffer {
-                    buffer,
-                    offset,
-                    size,
-                } => BindingState::Buffer {
-                    buffer: *buffer,
-                    offset: *offset,
-                    size: *size,
-                },
-                BindingResource::Texture(tex) => BindingState::Texture(*tex),
-                BindingResource::Sampler(samp) => BindingState::Sampler(*samp),
-            })
-            .collect();
-
-        let handle = self.next_bind_group_handle;
-        self.next_bind_group_handle += 1;
-
-        self.bind_groups.insert(
-            handle,
-            BindGroupState {
-                device_handle,
-                layout_handle: layout,
-                bindings,
-            },
-        );
-
-        Ok(handle)
-    }
-
-    fn destroy_bind_group(&mut self, bind_group: BindGroupHandle) {
-        self.bind_groups.remove(&bind_group);
-    }
-
     fn create_pipeline(
         &mut self,
         device_handle: DeviceHandle,
@@ -862,29 +795,6 @@ impl GpuBackend for MetalBackend {
             vertex_layout,
             _topology,
             target_format,
-            &[],
-            None,
-        )
-    }
-
-    fn create_pipeline_with_layout(
-        &mut self,
-        device_handle: DeviceHandle,
-        vertex_shader: ShaderHandle,
-        fragment_shader: ShaderHandle,
-        vertex_layout: &VertexBufferLayout,
-        topology: PrimitiveTopology,
-        target_format: TextureFormat,
-        bind_group_layouts: &[BindGroupLayoutHandle],
-    ) -> Result<PipelineHandle> {
-        self.create_pipeline_with_depth(
-            device_handle,
-            vertex_shader,
-            fragment_shader,
-            vertex_layout,
-            topology,
-            target_format,
-            bind_group_layouts,
             None,
         )
     }
@@ -897,7 +807,6 @@ impl GpuBackend for MetalBackend {
         vertex_layout: &VertexBufferLayout,
         topology: PrimitiveTopology,
         target_format: TextureFormat,
-        _bind_group_layouts: &[BindGroupLayoutHandle],
         depth_stencil: Option<&crate::types::DepthStencilState>,
     ) -> Result<PipelineHandle> {
         // Ensure shaders are compiled for the required stages
@@ -1216,7 +1125,6 @@ impl GpuBackend for MetalBackend {
 
         // Cache bindless state for use in loop
         let bindless_enabled = logical_device.bindless_enabled;
-        let argument_buffer = logical_device.argument_buffer.as_ref();
 
         // Process commands
         let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
@@ -1254,217 +1162,224 @@ impl GpuBackend for MetalBackend {
                 } => {
                     current_index_buffer = Some((*buffer, *offset, *format));
                 }
-                RenderCommand::SetBindGroup { index, bind_group } => {
-                    if let Some(bg) = self.bind_groups.get(bind_group) {
-                        // Check if we should use ParameterBlock-based bindless
-                        let use_parameter_block = bindless_enabled
-                            && current_pipeline
-                                .map(|p| !p.parameter_block_layouts.is_empty())
-                                .unwrap_or(false);
+                RenderCommand::SetPushConstants { buffers } => {
+                    // Check if we should use ParameterBlock-based bindless (for Metal shaders using ParameterBlock)
+                    let use_parameter_block = bindless_enabled
+                        && current_pipeline
+                            .map(|p| !p.parameter_block_layouts.is_empty())
+                            .unwrap_or(false);
 
-                        if use_parameter_block {
-                            // NEW: ParameterBlock-based bindless rendering
-                            // Write GPU addresses directly to the pipeline's argument buffer
-                            if let Some(pipeline) = current_pipeline {
-                                if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
-                                    // For each binding, find corresponding field and write GPU address
-                                    for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                                        match binding {
-                                            BindingState::Buffer { buffer, offset, .. } => {
-                                                if let Some(buf) = self.buffers.get(buffer) {
-                                                    // Find the field offset from reflection
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            // Write GPU address to argument buffer at field offset
-                                                            let gpu_addr =
-                                                                buf.buffer.gpu_address() + *offset;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = gpu_addr;
-                                                            }
-                                                            tracing::trace!(
-                                                                "Wrote GPU address 0x{:x} at offset {} for field '{}'",
-                                                                gpu_addr,
-                                                                field.offset,
-                                                                field.name
-                                                            );
-                                                        }
-                                                    }
+                    if use_parameter_block {
+                        // ParameterBlock-based bindless: write GPU addresses to pipeline's argument buffer
+                        if let Some(pipeline) = current_pipeline {
+                            if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                // Write each buffer's GPU address at the corresponding field offset
+                                for (i, buffer_handle) in buffers.iter().enumerate() {
+                                    if let Some(buf) = self.buffers.get(buffer_handle) {
+                                        // Get field offset from reflection (field i corresponds to buffer i)
+                                        if let Some(pb_layout) =
+                                            pipeline.parameter_block_layouts.first()
+                                        {
+                                            if let Some(field) = pb_layout.fields.get(i) {
+                                                let gpu_addr = buf.buffer.gpu_address();
+                                                unsafe {
+                                                    let ptr =
+                                                        arg_buffer.contents().add(field.offset);
+                                                    *(ptr as *mut u64) = gpu_addr;
                                                 }
-                                            }
-                                            BindingState::Texture(tex_handle) => {
-                                                if let Some(tex) = self.textures.get(tex_handle) {
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            let resource_id =
-                                                                tex.texture.gpu_resource_id()._impl;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = resource_id;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            BindingState::Sampler(samp_handle) => {
-                                                if let Some(samp) = self.samplers.get(samp_handle) {
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            let resource_id = samp
-                                                                .sampler
-                                                                .gpu_resource_id()
-                                                                ._impl;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = resource_id;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Bind the argument buffer at the slot from reflection
-                                    if let Some(pb_layout) =
-                                        pipeline.parameter_block_layouts.first()
-                                    {
-                                        encoder.set_vertex_buffer(
-                                            pb_layout.binding_slot as u64,
-                                            Some(arg_buffer),
-                                            0,
-                                        );
-                                        encoder.set_fragment_buffer(
-                                            pb_layout.binding_slot as u64,
-                                            Some(arg_buffer),
-                                            0,
-                                        );
-                                        tracing::trace!(
-                                            "Bound ParameterBlock argument buffer at slot {}",
-                                            pb_layout.binding_slot
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            // LEGACY: Traditional binding or old-style bindless with push constants
-                            let mut bindless_indices = types::BindlessIndices::default();
-                            let mut has_bindless_resources = false;
-
-                            for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                                let buffer_index = (*index as usize * 16 + binding_idx) as u64;
-                                match binding {
-                                    BindingState::Buffer { buffer, offset, .. } => {
-                                        if let Some(buf) = self.buffers.get(buffer) {
-                                            // Traditional binding
-                                            encoder.set_vertex_buffer(
-                                                buffer_index,
-                                                Some(&buf.buffer),
-                                                *offset,
-                                            );
-                                            encoder.set_fragment_buffer(
-                                                buffer_index,
-                                                Some(&buf.buffer),
-                                                *offset,
-                                            );
-
-                                            if let Some(arg_idx) = buf.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.buffer_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    BindingState::Texture(tex_handle) => {
-                                        if let Some(tex) = self.textures.get(tex_handle) {
-                                            encoder.set_fragment_texture(
-                                                buffer_index,
-                                                Some(&tex.texture),
-                                            );
-
-                                            if let Some(arg_idx) = tex.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.texture_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    BindingState::Sampler(samp_handle) => {
-                                        if let Some(samp) = self.samplers.get(samp_handle) {
-                                            encoder.set_fragment_sampler_state(
-                                                buffer_index,
-                                                Some(&samp.sampler),
-                                            );
-
-                                            if let Some(arg_idx) = samp.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.sampler_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
+                                                tracing::trace!(
+                                                    "SetPushConstants: Wrote GPU address 0x{:x} at offset {} for field '{}'",
+                                                    gpu_addr,
+                                                    field.offset,
+                                                    field.name
+                                                );
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            // Legacy bindless with global argument buffer
-                            if bindless_enabled {
-                                if let Some(arg_buffer) = argument_buffer {
+                                // Bind the argument buffer at the ParameterBlock's slot
+                                if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
                                     encoder.set_vertex_buffer(
-                                        types::ARGUMENT_BUFFER_SLOT,
+                                        pb_layout.binding_slot as u64,
                                         Some(arg_buffer),
                                         0,
                                     );
                                     encoder.set_fragment_buffer(
-                                        types::ARGUMENT_BUFFER_SLOT,
+                                        pb_layout.binding_slot as u64,
                                         Some(arg_buffer),
                                         0,
                                     );
+                                    tracing::trace!(
+                                        "SetPushConstants: Bound ParameterBlock argument buffer at slot {}",
+                                        pb_layout.binding_slot
+                                    );
                                 }
                             }
-
-                            if has_bindless_resources {
-                                let indices_bytes: &[u8] = unsafe {
-                                    std::slice::from_raw_parts(
-                                        &bindless_indices as *const _ as *const u8,
-                                        std::mem::size_of::<types::BindlessIndices>(),
-                                    )
-                                };
-                                encoder.set_vertex_bytes(
-                                    types::PUSH_CONSTANTS_SLOT,
-                                    indices_bytes.len() as u64,
-                                    indices_bytes.as_ptr() as *const _,
-                                );
-                                encoder.set_fragment_bytes(
-                                    types::PUSH_CONSTANTS_SLOT,
-                                    indices_bytes.len() as u64,
-                                    indices_bytes.as_ptr() as *const _,
-                                );
+                        }
+                    } else {
+                        // Legacy mode: push buffer indices directly via set_*_bytes
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, buffer_handle) in buffers.iter().enumerate() {
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
+                            if let Some(buf) = self.buffers.get(buffer_handle) {
+                                indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
                             }
                         }
+                        let indices_bytes: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                &indices as *const _ as *const u8,
+                                std::mem::size_of::<types::BindlessIndices>(),
+                            )
+                        };
+                        encoder.set_vertex_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
+                        encoder.set_fragment_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
+                    }
+                }
+                RenderCommand::SetPushConstantsRaw {
+                    indices: raw_indices,
+                } => {
+                    // Check if we should use ParameterBlock-based bindless
+                    let use_parameter_block = bindless_enabled
+                        && current_pipeline
+                            .map(|p| !p.parameter_block_layouts.is_empty())
+                            .unwrap_or(false);
+
+                    if use_parameter_block {
+                        // ParameterBlock-based bindless: write GPU resource IDs to pipeline's argument buffer
+                        if let Some(pipeline) = current_pipeline {
+                            if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                // Get the resource registry for reverse lookups
+                                let registry = &logical_device.resource_registry;
+
+                                // For each index, determine if it's a texture or sampler and write its GPU resource ID
+                                for (i, &idx) in raw_indices.iter().enumerate() {
+                                    if let Some(pb_layout) =
+                                        pipeline.parameter_block_layouts.first()
+                                    {
+                                        if let Some(field) = pb_layout.fields.get(i) {
+                                            if registry.is_texture_index(idx) {
+                                                // It's a texture - find it and write its GPU resource ID
+                                                if let Some(tex_handle) =
+                                                    registry.texture_handle_by_index(idx)
+                                                {
+                                                    if let Some(tex) =
+                                                        self.textures.get(&tex_handle)
+                                                    {
+                                                        let resource_id =
+                                                            tex.texture.gpu_resource_id()._impl;
+                                                        unsafe {
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
+                                                            *(ptr as *mut u64) = resource_id;
+                                                        }
+                                                        tracing::trace!(
+                                                            "SetPushConstantsRaw: Wrote texture GPU resource ID 0x{:x} at offset {} for field '{}'",
+                                                            resource_id, field.offset, field.name
+                                                        );
+                                                    }
+                                                }
+                                            } else if registry.is_sampler_index(idx) {
+                                                // It's a sampler - find it and write its GPU resource ID
+                                                if let Some(samp_handle) =
+                                                    registry.sampler_handle_by_index(idx)
+                                                {
+                                                    if let Some(samp) =
+                                                        self.samplers.get(&samp_handle)
+                                                    {
+                                                        let resource_id =
+                                                            samp.sampler.gpu_resource_id()._impl;
+                                                        unsafe {
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
+                                                            *(ptr as *mut u64) = resource_id;
+                                                        }
+                                                        tracing::trace!(
+                                                            "SetPushConstantsRaw: Wrote sampler GPU resource ID 0x{:x} at offset {} for field '{}'",
+                                                            resource_id, field.offset, field.name
+                                                        );
+                                                    }
+                                                }
+                                            } else {
+                                                // It's a buffer index - find buffer and write GPU address
+                                                for buf_state in self.buffers.values() {
+                                                    if buf_state.arg_buffer_index == Some(idx) {
+                                                        let gpu_addr =
+                                                            buf_state.buffer.gpu_address();
+                                                        unsafe {
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
+                                                            *(ptr as *mut u64) = gpu_addr;
+                                                        }
+                                                        tracing::trace!(
+                                                            "SetPushConstantsRaw: Wrote buffer GPU address 0x{:x} at offset {} for field '{}'",
+                                                            gpu_addr, field.offset, field.name
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Bind the argument buffer at the ParameterBlock's slot
+                                if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    encoder.set_vertex_buffer(
+                                        pb_layout.binding_slot as u64,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                    encoder.set_fragment_buffer(
+                                        pb_layout.binding_slot as u64,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                    tracing::trace!(
+                                        "SetPushConstantsRaw: Bound ParameterBlock argument buffer at slot {}",
+                                        pb_layout.binding_slot
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Legacy mode: push raw indices directly via set_*_bytes
+                        let mut indices_data = [0u32; types::MAX_PUSH_CONSTANT_INDICES];
+                        for (i, &idx) in raw_indices.iter().enumerate() {
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
+                            indices_data[i] = idx;
+                        }
+                        let indices_bytes: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                indices_data.as_ptr() as *const u8,
+                                std::mem::size_of_val(&indices_data),
+                            )
+                        };
+                        encoder.set_vertex_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
+                        encoder.set_fragment_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
                     }
                 }
                 RenderCommand::Draw {
@@ -1770,6 +1685,12 @@ impl GpuBackend for MetalBackend {
         }
     }
 
+    fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
+        self.textures
+            .get(&texture_handle)
+            .and_then(|t| t.arg_buffer_index)
+    }
+
     fn create_sampler(
         &mut self,
         device_handle: DeviceHandle,
@@ -1854,6 +1775,12 @@ impl GpuBackend for MetalBackend {
                 device.resource_registry.unregister_sampler(sampler_handle);
             }
         }
+    }
+
+    fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
+        self.samplers
+            .get(&sampler_handle)
+            .and_then(|s| s.arg_buffer_index)
     }
 
     fn create_surface(
@@ -2016,7 +1943,6 @@ impl GpuBackend for MetalBackend {
 
         // Cache bindless state for use in loop
         let bindless_enabled = logical_device.bindless_enabled;
-        let argument_buffer = logical_device.argument_buffer.as_ref();
 
         // Process commands (similar to render_to_target)
         let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
@@ -2052,217 +1978,224 @@ impl GpuBackend for MetalBackend {
                 } => {
                     current_index_buffer = Some((*buffer, *offset, *format));
                 }
-                RenderCommand::SetBindGroup { index, bind_group } => {
-                    if let Some(bg) = self.bind_groups.get(bind_group) {
-                        // Check if we should use ParameterBlock-based bindless
-                        let use_parameter_block = bindless_enabled
-                            && current_pipeline
-                                .map(|p| !p.parameter_block_layouts.is_empty())
-                                .unwrap_or(false);
+                RenderCommand::SetPushConstants { buffers } => {
+                    // Check if we should use ParameterBlock-based bindless (for Metal shaders using ParameterBlock)
+                    let use_parameter_block = bindless_enabled
+                        && current_pipeline
+                            .map(|p| !p.parameter_block_layouts.is_empty())
+                            .unwrap_or(false);
 
-                        if use_parameter_block {
-                            // NEW: ParameterBlock-based bindless rendering
-                            // Write GPU addresses directly to the pipeline's argument buffer
-                            if let Some(pipeline) = current_pipeline {
-                                if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
-                                    // For each binding, find corresponding field and write GPU address
-                                    for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                                        match binding {
-                                            BindingState::Buffer { buffer, offset, .. } => {
-                                                if let Some(buf) = self.buffers.get(buffer) {
-                                                    // Find the field offset from reflection
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            // Write GPU address to argument buffer at field offset
-                                                            let gpu_addr =
-                                                                buf.buffer.gpu_address() + *offset;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = gpu_addr;
-                                                            }
-                                                            tracing::trace!(
-                                                                "Wrote GPU address 0x{:x} at offset {} for field '{}'",
-                                                                gpu_addr,
-                                                                field.offset,
-                                                                field.name
-                                                            );
-                                                        }
-                                                    }
+                    if use_parameter_block {
+                        // ParameterBlock-based bindless: write GPU addresses to pipeline's argument buffer
+                        if let Some(pipeline) = current_pipeline {
+                            if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                // Write each buffer's GPU address at the corresponding field offset
+                                for (i, buffer_handle) in buffers.iter().enumerate() {
+                                    if let Some(buf) = self.buffers.get(buffer_handle) {
+                                        // Get field offset from reflection (field i corresponds to buffer i)
+                                        if let Some(pb_layout) =
+                                            pipeline.parameter_block_layouts.first()
+                                        {
+                                            if let Some(field) = pb_layout.fields.get(i) {
+                                                let gpu_addr = buf.buffer.gpu_address();
+                                                unsafe {
+                                                    let ptr =
+                                                        arg_buffer.contents().add(field.offset);
+                                                    *(ptr as *mut u64) = gpu_addr;
                                                 }
-                                            }
-                                            BindingState::Texture(tex_handle) => {
-                                                if let Some(tex) = self.textures.get(tex_handle) {
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            let resource_id =
-                                                                tex.texture.gpu_resource_id()._impl;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = resource_id;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            BindingState::Sampler(samp_handle) => {
-                                                if let Some(samp) = self.samplers.get(samp_handle) {
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            let resource_id = samp
-                                                                .sampler
-                                                                .gpu_resource_id()
-                                                                ._impl;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = resource_id;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Bind the argument buffer at the slot from reflection
-                                    if let Some(pb_layout) =
-                                        pipeline.parameter_block_layouts.first()
-                                    {
-                                        encoder.set_vertex_buffer(
-                                            pb_layout.binding_slot as u64,
-                                            Some(arg_buffer),
-                                            0,
-                                        );
-                                        encoder.set_fragment_buffer(
-                                            pb_layout.binding_slot as u64,
-                                            Some(arg_buffer),
-                                            0,
-                                        );
-                                        tracing::trace!(
-                                            "Bound ParameterBlock argument buffer at slot {}",
-                                            pb_layout.binding_slot
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            // LEGACY: Traditional binding or old-style bindless with push constants
-                            let mut bindless_indices = types::BindlessIndices::default();
-                            let mut has_bindless_resources = false;
-
-                            for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                                let buffer_index = (*index as usize * 16 + binding_idx) as u64;
-                                match binding {
-                                    BindingState::Buffer { buffer, offset, .. } => {
-                                        if let Some(buf) = self.buffers.get(buffer) {
-                                            // Traditional binding
-                                            encoder.set_vertex_buffer(
-                                                buffer_index,
-                                                Some(&buf.buffer),
-                                                *offset,
-                                            );
-                                            encoder.set_fragment_buffer(
-                                                buffer_index,
-                                                Some(&buf.buffer),
-                                                *offset,
-                                            );
-
-                                            if let Some(arg_idx) = buf.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.buffer_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    BindingState::Texture(tex_handle) => {
-                                        if let Some(tex) = self.textures.get(tex_handle) {
-                                            encoder.set_fragment_texture(
-                                                buffer_index,
-                                                Some(&tex.texture),
-                                            );
-
-                                            if let Some(arg_idx) = tex.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.texture_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    BindingState::Sampler(samp_handle) => {
-                                        if let Some(samp) = self.samplers.get(samp_handle) {
-                                            encoder.set_fragment_sampler_state(
-                                                buffer_index,
-                                                Some(&samp.sampler),
-                                            );
-
-                                            if let Some(arg_idx) = samp.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.sampler_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
+                                                tracing::trace!(
+                                                    "SetPushConstants: Wrote GPU address 0x{:x} at offset {} for field '{}'",
+                                                    gpu_addr,
+                                                    field.offset,
+                                                    field.name
+                                                );
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            // Legacy bindless with global argument buffer
-                            if bindless_enabled {
-                                if let Some(arg_buffer) = argument_buffer {
+                                // Bind the argument buffer at the ParameterBlock's slot
+                                if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
                                     encoder.set_vertex_buffer(
-                                        types::ARGUMENT_BUFFER_SLOT,
+                                        pb_layout.binding_slot as u64,
                                         Some(arg_buffer),
                                         0,
                                     );
                                     encoder.set_fragment_buffer(
-                                        types::ARGUMENT_BUFFER_SLOT,
+                                        pb_layout.binding_slot as u64,
                                         Some(arg_buffer),
                                         0,
                                     );
+                                    tracing::trace!(
+                                        "SetPushConstants: Bound ParameterBlock argument buffer at slot {}",
+                                        pb_layout.binding_slot
+                                    );
                                 }
                             }
-
-                            if has_bindless_resources {
-                                let indices_bytes: &[u8] = unsafe {
-                                    std::slice::from_raw_parts(
-                                        &bindless_indices as *const _ as *const u8,
-                                        std::mem::size_of::<types::BindlessIndices>(),
-                                    )
-                                };
-                                encoder.set_vertex_bytes(
-                                    types::PUSH_CONSTANTS_SLOT,
-                                    indices_bytes.len() as u64,
-                                    indices_bytes.as_ptr() as *const _,
-                                );
-                                encoder.set_fragment_bytes(
-                                    types::PUSH_CONSTANTS_SLOT,
-                                    indices_bytes.len() as u64,
-                                    indices_bytes.as_ptr() as *const _,
-                                );
+                        }
+                    } else {
+                        // Legacy mode: push buffer indices directly via set_*_bytes
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, buffer_handle) in buffers.iter().enumerate() {
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
+                            if let Some(buf) = self.buffers.get(buffer_handle) {
+                                indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
                             }
                         }
+                        let indices_bytes: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                &indices as *const _ as *const u8,
+                                std::mem::size_of::<types::BindlessIndices>(),
+                            )
+                        };
+                        encoder.set_vertex_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
+                        encoder.set_fragment_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
+                    }
+                }
+                RenderCommand::SetPushConstantsRaw {
+                    indices: raw_indices,
+                } => {
+                    // Check if we should use ParameterBlock-based bindless
+                    let use_parameter_block = bindless_enabled
+                        && current_pipeline
+                            .map(|p| !p.parameter_block_layouts.is_empty())
+                            .unwrap_or(false);
+
+                    if use_parameter_block {
+                        // ParameterBlock-based bindless: write GPU resource IDs to pipeline's argument buffer
+                        if let Some(pipeline) = current_pipeline {
+                            if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                // Get the resource registry for reverse lookups
+                                let registry = &logical_device.resource_registry;
+
+                                // For each index, determine if it's a texture or sampler and write its GPU resource ID
+                                for (i, &idx) in raw_indices.iter().enumerate() {
+                                    if let Some(pb_layout) =
+                                        pipeline.parameter_block_layouts.first()
+                                    {
+                                        if let Some(field) = pb_layout.fields.get(i) {
+                                            if registry.is_texture_index(idx) {
+                                                // It's a texture - find it and write its GPU resource ID
+                                                if let Some(tex_handle) =
+                                                    registry.texture_handle_by_index(idx)
+                                                {
+                                                    if let Some(tex) =
+                                                        self.textures.get(&tex_handle)
+                                                    {
+                                                        let resource_id =
+                                                            tex.texture.gpu_resource_id()._impl;
+                                                        unsafe {
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
+                                                            *(ptr as *mut u64) = resource_id;
+                                                        }
+                                                        tracing::trace!(
+                                                            "SetPushConstantsRaw: Wrote texture GPU resource ID 0x{:x} at offset {} for field '{}'",
+                                                            resource_id, field.offset, field.name
+                                                        );
+                                                    }
+                                                }
+                                            } else if registry.is_sampler_index(idx) {
+                                                // It's a sampler - find it and write its GPU resource ID
+                                                if let Some(samp_handle) =
+                                                    registry.sampler_handle_by_index(idx)
+                                                {
+                                                    if let Some(samp) =
+                                                        self.samplers.get(&samp_handle)
+                                                    {
+                                                        let resource_id =
+                                                            samp.sampler.gpu_resource_id()._impl;
+                                                        unsafe {
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
+                                                            *(ptr as *mut u64) = resource_id;
+                                                        }
+                                                        tracing::trace!(
+                                                            "SetPushConstantsRaw: Wrote sampler GPU resource ID 0x{:x} at offset {} for field '{}'",
+                                                            resource_id, field.offset, field.name
+                                                        );
+                                                    }
+                                                }
+                                            } else {
+                                                // It's a buffer index - find buffer and write GPU address
+                                                for buf_state in self.buffers.values() {
+                                                    if buf_state.arg_buffer_index == Some(idx) {
+                                                        let gpu_addr =
+                                                            buf_state.buffer.gpu_address();
+                                                        unsafe {
+                                                            let ptr = arg_buffer
+                                                                .contents()
+                                                                .add(field.offset);
+                                                            *(ptr as *mut u64) = gpu_addr;
+                                                        }
+                                                        tracing::trace!(
+                                                            "SetPushConstantsRaw: Wrote buffer GPU address 0x{:x} at offset {} for field '{}'",
+                                                            gpu_addr, field.offset, field.name
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Bind the argument buffer at the ParameterBlock's slot
+                                if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
+                                    encoder.set_vertex_buffer(
+                                        pb_layout.binding_slot as u64,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                    encoder.set_fragment_buffer(
+                                        pb_layout.binding_slot as u64,
+                                        Some(arg_buffer),
+                                        0,
+                                    );
+                                    tracing::trace!(
+                                        "SetPushConstantsRaw: Bound ParameterBlock argument buffer at slot {}",
+                                        pb_layout.binding_slot
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Legacy mode: push raw indices directly via set_*_bytes
+                        let mut indices_data = [0u32; types::MAX_PUSH_CONSTANT_INDICES];
+                        for (i, &idx) in raw_indices.iter().enumerate() {
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
+                            indices_data[i] = idx;
+                        }
+                        let indices_bytes: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                indices_data.as_ptr() as *const u8,
+                                std::mem::size_of_val(&indices_data),
+                            )
+                        };
+                        encoder.set_vertex_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
+                        encoder.set_fragment_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
                     }
                 }
                 RenderCommand::Draw {
@@ -2368,7 +2301,6 @@ impl GpuBackend for MetalBackend {
         &mut self,
         device_handle: DeviceHandle,
         compute_shader: ShaderHandle,
-        _bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<ComputePipelineHandle> {
         // Ensure compute shader is compiled
         self.ensure_compute_shader_compiled(compute_shader)?;
@@ -2499,7 +2431,6 @@ impl GpuBackend for MetalBackend {
 
         // Cache bindless state for use in loop
         let bindless_enabled = logical_device.bindless_enabled;
-        let argument_buffer = logical_device.argument_buffer.as_ref();
 
         let mut current_pipeline: Option<&ComputePipelineState> = None;
 
@@ -2511,198 +2442,78 @@ impl GpuBackend for MetalBackend {
                         current_pipeline = Some(pipeline);
                     }
                 }
-                ComputeCommand::SetBindGroup { index, bind_group } => {
-                    if let Some(bg) = self.bind_groups.get(bind_group) {
-                        // Check if we should use ParameterBlock-based bindless
-                        let use_parameter_block = bindless_enabled
-                            && current_pipeline
-                                .map(|p| !p.parameter_block_layouts.is_empty())
-                                .unwrap_or(false);
+                ComputeCommand::SetPushConstants { buffers } => {
+                    // Check if we should use ParameterBlock-based bindless (for Metal shaders using ParameterBlock)
+                    let use_parameter_block = bindless_enabled
+                        && current_pipeline
+                            .map(|p| !p.parameter_block_layouts.is_empty())
+                            .unwrap_or(false);
 
-                        if use_parameter_block {
-                            // NEW: ParameterBlock-based bindless rendering
-                            // Write GPU addresses directly to the pipeline's argument buffer
-                            if let Some(pipeline) = current_pipeline {
-                                if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
-                                    // For each binding, find corresponding field and write GPU address
-                                    for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                                        match binding {
-                                            BindingState::Buffer { buffer, offset, .. } => {
-                                                if let Some(buf) = self.buffers.get(buffer) {
-                                                    // Find the field offset from reflection
-                                                    // Assume bind group index 0 maps to first ParameterBlock
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            // Write GPU address to argument buffer at field offset
-                                                            let gpu_addr =
-                                                                buf.buffer.gpu_address() + *offset;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = gpu_addr;
-                                                            }
-                                                            tracing::trace!(
-                                                                "Wrote GPU address 0x{:x} at offset {} for field '{}'",
-                                                                gpu_addr,
-                                                                field.offset,
-                                                                field.name
-                                                            );
-                                                        }
-                                                    }
+                    if use_parameter_block {
+                        // ParameterBlock-based bindless: write GPU addresses to pipeline's argument buffer
+                        if let Some(pipeline) = current_pipeline {
+                            if let Some(arg_buffer) = &pipeline.bindless_arg_buffer {
+                                // Write each buffer's GPU address at the corresponding field offset
+                                for (i, buffer_handle) in buffers.iter().enumerate() {
+                                    if let Some(buf) = self.buffers.get(buffer_handle) {
+                                        // Get field offset from reflection (field i corresponds to buffer i)
+                                        if let Some(pb_layout) =
+                                            pipeline.parameter_block_layouts.first()
+                                        {
+                                            if let Some(field) = pb_layout.fields.get(i) {
+                                                let gpu_addr = buf.buffer.gpu_address();
+                                                unsafe {
+                                                    let ptr =
+                                                        arg_buffer.contents().add(field.offset);
+                                                    *(ptr as *mut u64) = gpu_addr;
                                                 }
-                                            }
-                                            BindingState::Texture(tex_handle) => {
-                                                if let Some(tex) = self.textures.get(tex_handle) {
-                                                    // For textures, write the gpuResourceID
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            let resource_id =
-                                                                tex.texture.gpu_resource_id()._impl;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = resource_id;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            BindingState::Sampler(samp_handle) => {
-                                                if let Some(samp) = self.samplers.get(samp_handle) {
-                                                    // For samplers, write the gpuResourceID
-                                                    if let Some(pb_layout) =
-                                                        pipeline.parameter_block_layouts.first()
-                                                    {
-                                                        if let Some(field) =
-                                                            pb_layout.fields.get(binding_idx)
-                                                        {
-                                                            let resource_id = samp
-                                                                .sampler
-                                                                .gpu_resource_id()
-                                                                ._impl;
-                                                            unsafe {
-                                                                let ptr = arg_buffer
-                                                                    .contents()
-                                                                    .add(field.offset);
-                                                                *(ptr as *mut u64) = resource_id;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Bind the argument buffer at the slot from reflection
-                                    if let Some(pb_layout) =
-                                        pipeline.parameter_block_layouts.first()
-                                    {
-                                        encoder.set_buffer(
-                                            pb_layout.binding_slot as u64,
-                                            Some(arg_buffer),
-                                            0,
-                                        );
-                                        tracing::trace!(
-                                            "Bound ParameterBlock argument buffer at slot {}",
-                                            pb_layout.binding_slot
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            // LEGACY: Traditional binding or old-style bindless with push constants
-                            let mut bindless_indices = types::BindlessIndices::default();
-                            let mut has_bindless_resources = false;
-
-                            for (binding_idx, binding) in bg.bindings.iter().enumerate() {
-                                let buffer_index = (*index as usize * 16 + binding_idx) as u64;
-                                match binding {
-                                    BindingState::Buffer { buffer, offset, .. } => {
-                                        if let Some(buf) = self.buffers.get(buffer) {
-                                            // Traditional binding
-                                            encoder.set_buffer(
-                                                buffer_index,
-                                                Some(&buf.buffer),
-                                                *offset,
-                                            );
-
-                                            // Collect bindless index if available (legacy path)
-                                            if let Some(arg_idx) = buf.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.buffer_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    BindingState::Texture(tex_handle) => {
-                                        if let Some(tex) = self.textures.get(tex_handle) {
-                                            encoder.set_texture(buffer_index, Some(&tex.texture));
-
-                                            if let Some(arg_idx) = tex.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.texture_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    BindingState::Sampler(samp_handle) => {
-                                        if let Some(samp) = self.samplers.get(samp_handle) {
-                                            encoder.set_sampler_state(
-                                                buffer_index,
-                                                Some(&samp.sampler),
-                                            );
-
-                                            if let Some(arg_idx) = samp.arg_buffer_index {
-                                                if binding_idx < types::MAX_PUSH_CONSTANT_INDICES {
-                                                    bindless_indices.sampler_indices[binding_idx] =
-                                                        arg_idx;
-                                                    has_bindless_resources = true;
-                                                }
+                                                tracing::trace!(
+                                                    "SetPushConstants (compute): Wrote GPU address 0x{:x} at offset {} for field '{}'",
+                                                    gpu_addr,
+                                                    field.offset,
+                                                    field.name
+                                                );
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            // Legacy bindless with global argument buffer
-                            if bindless_enabled {
-                                if let Some(arg_buffer) = argument_buffer {
+                                // Bind the argument buffer at the ParameterBlock's slot
+                                if let Some(pb_layout) = pipeline.parameter_block_layouts.first() {
                                     encoder.set_buffer(
-                                        types::ARGUMENT_BUFFER_SLOT,
+                                        pb_layout.binding_slot as u64,
                                         Some(arg_buffer),
                                         0,
                                     );
+                                    tracing::trace!(
+                                        "SetPushConstants (compute): Bound ParameterBlock argument buffer at slot {}",
+                                        pb_layout.binding_slot
+                                    );
                                 }
                             }
-
-                            if has_bindless_resources {
-                                let indices_bytes: &[u8] = unsafe {
-                                    std::slice::from_raw_parts(
-                                        &bindless_indices as *const _ as *const u8,
-                                        std::mem::size_of::<types::BindlessIndices>(),
-                                    )
-                                };
-                                encoder.set_bytes(
-                                    types::PUSH_CONSTANTS_SLOT,
-                                    indices_bytes.len() as u64,
-                                    indices_bytes.as_ptr() as *const _,
-                                );
+                        }
+                    } else {
+                        // Legacy mode: push buffer indices directly via set_bytes
+                        let mut indices = types::BindlessIndices::default();
+                        for (i, buffer_handle) in buffers.iter().enumerate() {
+                            if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                                break;
+                            }
+                            if let Some(buf) = self.buffers.get(buffer_handle) {
+                                indices.buffer_indices[i] = buf.arg_buffer_index.unwrap_or(0);
                             }
                         }
+                        let indices_bytes: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                &indices as *const _ as *const u8,
+                                std::mem::size_of::<types::BindlessIndices>(),
+                            )
+                        };
+                        encoder.set_bytes(
+                            types::PUSH_CONSTANTS_SLOT,
+                            indices_bytes.len() as u64,
+                            indices_bytes.as_ptr() as *const _,
+                        );
                     }
                 }
                 ComputeCommand::Dispatch {
@@ -2782,7 +2593,12 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer = backend
-            .create_buffer(device, 256, BufferUsage::VERTEX | BufferUsage::COPY_DST)
+            .create_buffer(
+                device,
+                256,
+                BufferUsage::VERTEX | BufferUsage::COPY_DST,
+                None,
+            )
             .unwrap();
 
         assert_eq!(backend.buffer_size(buffer), 256);

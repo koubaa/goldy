@@ -1,11 +1,5 @@
 // Classic demoscene plasma effect
 // Uses goldy_exp module for vertex format and color utilities
-//
-// ## Bindless Support
-//
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Uniforms are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
 
 import goldy_exp;
 
@@ -14,18 +8,29 @@ struct TimeUniforms {
     float time;
 };
 
-#ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer support
 struct PlasmaResources {
     ConstantBuffer<TimeUniforms> uniforms;
 };
 ParameterBlock<PlasmaResources> gResources;
 #define TIME gResources.uniforms.time
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<TimeUniforms> uniforms;
-#define TIME uniforms.time
+
+#elif defined(__SPIRV__)
+// Vulkan: Use push constants for indices + descriptor array
+import goldy_exp.buffer_indices;
+
+// Global descriptor array of uniform buffers
+[[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
+#define TIME g_UniformBuffers[getBufferIndex(0)].time
+
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
+    uint uniformsIndex;
+};
+#define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
+
 #endif
 
 [shader("vertex")]

@@ -1,0 +1,60 @@
+{
+  "version": "2025.24.3",
+  "description": "Slang shader compiler libraries required by Goldy",
+  "download_url_template": "https://github.com/shader-slang/slang/releases/download/v{version}/slang-{version}-{platform}.zip",
+  "platforms": {
+    "windows-x86_64": {
+      "files": [
+        "slang-compiler.dll",
+        "slang.dll",
+        "slang-rt.dll",
+        "slang-glslang.dll",
+        "slang-glsl-module.dll",
+        "slang-llvm.dll"
+      ],
+      "primary": "slang-compiler.dll"
+    },
+    "linux-x86_64": {
+      "files": [
+        "libslang-compiler.so",
+        "libslang.so",
+        "libslang-rt.so",
+        "libslang-glslang-2025.24.3.so",
+        "libslang-glsl-module-2025.24.3.so",
+        "libslang-llvm.so"
+      ],
+      "primary": "libslang-compiler.so"
+    },
+    "linux-aarch64": {
+      "files": [
+        "libslang-compiler.so",
+        "libslang.so",
+        "libslang-rt.so",
+        "libslang-glslang-2025.24.3.so",
+        "libslang-glsl-module-2025.24.3.so"
+      ],
+      "primary": "libslang-compiler.so"
+    },
+    "macos-x86_64": {
+      "files": [
+        "libslang-compiler.dylib",
+        "libslang.dylib",
+        "libslang-rt.dylib",
+        "libslang-glslang-2025.24.3.dylib",
+        "libslang-glsl-module-2025.24.3.dylib"
+      ],
+      "primary": "libslang-compiler.dylib"
+    },
+    "macos-aarch64": {
+      "files": [
+        "libslang-compiler.dylib",
+        "libslang.dylib",
+        "libslang-rt.dylib",
+        "libslang-glslang-2025.24.3.dylib",
+        "libslang-glsl-module-2025.24.3.dylib",
+        "libslang-llvm.dylib"
+      ],
+      "primary": "libslang-compiler.dylib"
+    }
+  }
+}

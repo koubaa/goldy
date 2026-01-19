@@ -53,15 +53,7 @@ from goldy._goldy import (
     RenderPass,
     # Shader builtins
     Builtins,
-    # Bind groups
-    ShaderStages,
-    BindingType,
-    BindGroupLayoutBinding,
-    BindGroupLayout,
-    BufferBinding,
-    BindGroup,
     # Compute
-    ComputePipelineDesc,
     ComputePipeline,
     ComputeEncoder,
     ComputePass,
@@ -101,15 +93,7 @@ __all__ = [
     "RenderPass",
     # Shader builtins
     "Builtins",
-    # Bind groups
-    "ShaderStages",
-    "BindingType",
-    "BindGroupLayoutBinding",
-    "BindGroupLayout",
-    "BufferBinding",
-    "BindGroup",
     # Compute
-    "ComputePipelineDesc",
     "ComputePipeline",
     "ComputeEncoder",
     "ComputePass",

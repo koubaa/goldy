@@ -110,16 +110,17 @@ impl App {
 ## Error Handling
 
 ```rust
-let instance = Instance::new()?;  // Fails if no Vulkan driver
+let instance = Instance::new()?;  // Fails if no GPU backend available
 
 // Fails if no discrete GPU
 let device = instance.create_device(DeviceType::DiscreteGpu)?;
 ```
 
 Common errors:
-- No Vulkan driver installed
+- No GPU driver installed (DX12 on Windows, Vulkan on Linux)
 - No GPU of requested type
 - GPU doesn't meet minimum requirements
+- Requested backend not available (e.g., `GOLDY_BACKEND=vulkan` but Vulkan SDK not installed)
 
 ## Multiple Devices
 
@@ -141,11 +142,30 @@ let devices: Vec<Device> = adapters
 
 ```rust
 pub enum BackendType {
-    Vulkan,  // Currently the only backend
-    Metal,   // Planned
-    Dx12,    // Planned
+    Vulkan,  // Windows, Linux
+    Dx12,    // Windows (default on Windows)
+    Metal,   // macOS (planned)
 }
 ```
 
-Currently Goldy only supports Vulkan. Metal and DX12 backends are planned.
+Goldy currently supports Vulkan and DX12 backends. Metal is planned.
+
+### Selecting a Backend
+
+By default, Goldy uses DX12 on Windows and Vulkan on Linux. You can override this at runtime:
+
+```bash
+# Use Vulkan on Windows
+GOLDY_BACKEND=vulkan cargo run
+
+# Use DX12 explicitly
+GOLDY_BACKEND=dx12 cargo run
+```
+
+Or query the active backend programmatically:
+
+```rust
+let instance = Instance::new()?;
+println!("Using backend: {:?}", instance.backend_type());
+```
 

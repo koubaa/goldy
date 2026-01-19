@@ -59,12 +59,32 @@ Available GPUs:
 Using: NVIDIA GeForce RTX 4060 Ti
 ```
 
+## Backend Selection
+
+Goldy automatically selects the best backend for your platform:
+
+| Platform | Default Backend |
+|----------|-----------------|
+| Windows  | DX12            |
+| Linux    | Vulkan          |
+| macOS    | Metal (planned) |
+
+You can override this at runtime using the `GOLDY_BACKEND` environment variable:
+
+```bash
+# Use Vulkan on Windows (instead of DX12)
+GOLDY_BACKEND=vulkan cargo run
+
+# Valid values: vulkan, dx12, metal
+```
+
 ## Platform-Specific Setup
 
 ### Windows
 
-1. Install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
-2. Ensure your GPU drivers are up to date
+1. DX12 is used by default and requires no additional setup
+2. For Vulkan backend: Install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
+3. Ensure your GPU drivers are up to date
 
 ### Linux
 

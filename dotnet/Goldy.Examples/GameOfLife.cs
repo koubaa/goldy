@@ -1,11 +1,20 @@
 using Goldy;
+using Silk.NET.Maths;
+using Silk.NET.Windowing;
 
 /// <summary>
-/// Conway's Game of Life using Goldy compute and graphics shaders.
-/// Demonstrates ping-pong buffer technique for cellular automaton.
+/// Conway's Game of Life - Compute + Graphics Example
+/// 
+/// Demonstrates:
+/// - Compute shader running cellular automaton rules
+/// - Graphics shader rendering the grid
+/// - Ping-pong buffer technique for in-place updates
+/// 
 /// Uses shared shader files from the goldy/shaders/ directory.
+/// 
+/// Run with: dotnet run -- gameoflife
 /// </summary>
-class GameOfLife
+static class GameOfLife
 {
     const int GRID_WIDTH = 128;
     const int GRID_HEIGHT = 128;
@@ -18,17 +27,86 @@ class GameOfLife
     static string LoadShader(string name) => 
         File.ReadAllText(Path.Combine(ShaderDir, name));
 
-    static void Main(string[] args)
+    // Window reference
+    static IWindow? _window;
+    
+    // Goldy resources
+    static Instance? _instance;
+    static Device? _device;
+    static Surface? _surface;
+    static ComputePipeline? _computePipeline;
+    static RenderPipeline? _renderPipeline;
+    static ShaderModule? _computeShader;
+    static ShaderModule? _renderShader;
+    
+    // Ping-pong buffers
+    static Goldy.Buffer? _bufferA;
+    static Goldy.Buffer? _bufferB;
+    
+    // State: true = A is current (read from A, write to B)
+    static bool _useBufferA = true;
+    static DateTime _lastUpdate = DateTime.Now;
+
+    public static void Run()
     {
-        Console.WriteLine("Conway's Game of Life (Compute + Graphics)");
+        Console.WriteLine("Conway's Game of Life");
         Console.WriteLine(new string('=', 50));
 
-        // Create device
-        using var instance = new Instance();
-        using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
-        Console.WriteLine($"Backend: {instance.BackendType}");
+        var options = WindowOptions.Default with
+        {
+            Size = new Vector2D<int>(800, 800),
+            Title = "Game of Life (C#)",
+            
+            // CRITICAL: No graphics context - Goldy creates its own Vulkan/DX12/Metal context
+            API = GraphicsAPI.None,
+            
+            // Goldy handles presentation via Surface.Present()
+            ShouldSwapAutomatically = false,
+            
+            // VSync handled by Goldy's swapchain
+            VSync = false,
+        };
+
+        _window = Window.Create(options);
+        
+        _window.Load += OnLoad;
+        _window.Render += OnRender;
+        _window.Resize += OnResize;
+        _window.Closing += OnClosing;
+        
+        _window.Run();
+        
+        _window.Dispose();
+    }
+
+    static void OnLoad()
+    {
+        Console.WriteLine("Initializing GPU...");
+        
+        _instance = new Instance();
+        Console.WriteLine($"Backend: {_instance.BackendType}");
+
+        _device = _instance.CreateDevice(DeviceType.DiscreteGpu);
+        Console.WriteLine($"Using adapter {_device.AdapterId}");
         Console.WriteLine($"Grid: {GRID_WIDTH}x{GRID_HEIGHT} = {CELL_COUNT} cells");
-        Console.WriteLine();
+
+        // Get native window handle
+        var native = _window!.Native!;
+        
+        nint hwnd;
+        if (OperatingSystem.IsWindows())
+        {
+            hwnd = native.Win32!.Value.Hwnd;
+            Console.WriteLine($"Creating surface from HWND: 0x{hwnd:X}");
+            _surface = Surface.CreateWin32(_device, hwnd);
+        }
+        else
+        {
+            throw new PlatformNotSupportedException(
+                "Currently only Windows is supported. macOS and Linux support coming soon.");
+        }
+        
+        Console.WriteLine($"Surface: {_surface.Width}x{_surface.Height}, format: {_surface.Format}");
 
         // Create initial state
         var initialState = CreateInitialState();
@@ -36,126 +114,132 @@ class GameOfLife
         Console.WriteLine($"Initial state: {aliveCount} living cells");
 
         // Create ping-pong buffers
-        using var bufferA = Goldy.Buffer.WithData<uint>(device, initialState, BufferUsage.Storage);
-        using var bufferB = Goldy.Buffer.WithData<uint>(device, initialState, BufferUsage.Storage);
-        Console.WriteLine($"Created buffers: {bufferA.Size} bytes each");
+        _bufferA = Goldy.Buffer.WithData<uint>(_device, initialState, BufferUsage.Storage);
+        _bufferB = Goldy.Buffer.WithData<uint>(_device, initialState, BufferUsage.Storage);
+        Console.WriteLine($"Created buffers: {_bufferA.Size} bytes each");
 
         // === COMPUTE PIPELINE ===
-
-        // Compute bind group layout: read-only input, read-write output
-        using var computeBindLayout = new BindGroupLayout(device,
-            new BindGroupLayoutBinding(0, ShaderStages.Compute, BindingType.StorageBufferReadOnly),
-            new BindGroupLayoutBinding(1, ShaderStages.Compute, BindingType.StorageBufferReadWrite));
-
-        // A -> B: read from A, write to B
-        using var computeBindGroupA = new BindGroup(device, computeBindLayout,
-            new BufferBinding(0, bufferA),
-            new BufferBinding(1, bufferB));
-
-        // B -> A: read from B, write to A
-        using var computeBindGroupB = new BindGroup(device, computeBindLayout,
-            new BufferBinding(0, bufferB),
-            new BufferBinding(1, bufferA));
-
-        // Compile compute shader from shared file
         var computeShaderSrc = LoadShader("game_of_life.slang");
-        using var computeShader = new ShaderModule(device, computeShaderSrc);
+        _computeShader = new ShaderModule(_device, computeShaderSrc);
         Console.WriteLine("Compiled compute shader (game_of_life.slang)");
 
-        using var computePipeline = new ComputePipeline(device, computeShader, computeBindLayout);
+        // Create compute pipeline
+        _computePipeline = new ComputePipeline(_device, _computeShader);
         Console.WriteLine("Created compute pipeline");
 
         // === RENDER PIPELINE ===
-
-        // Render bind group layout: read-only storage buffer
-        using var renderBindLayout = new BindGroupLayout(device,
-            new BindGroupLayoutBinding(0, ShaderStages.Fragment, BindingType.StorageBufferReadOnly));
-
-        // Bind groups for reading from A or B
-        using var renderBindGroupA = new BindGroup(device, renderBindLayout,
-            new BufferBinding(0, bufferA));
-        using var renderBindGroupB = new BindGroup(device, renderBindLayout,
-            new BufferBinding(0, bufferB));
-
-        // Compile render shader from shared file
         var renderShaderSrc = LoadShader("game_of_life_render.slang");
-        using var renderShader = new ShaderModule(device, renderShaderSrc);
+        _renderShader = new ShaderModule(_device, renderShaderSrc);
         Console.WriteLine("Compiled render shader (game_of_life_render.slang)");
 
-        using var renderPipeline = new RenderPipeline(device, renderShader, renderShader,
+        // Create render pipeline
+        _renderPipeline = new RenderPipeline(_device, _renderShader, _renderShader,
             new RenderPipelineDesc
             {
-                TargetFormat = TextureFormat.Rgba8Unorm,
-                VertexStride = 16, // Vertex2DUv layout
-                BindGroupLayouts = [renderBindLayout],
+                TargetFormat = _surface.Format,
+                VertexStride = 16, // Vertex2DUv layout (not used for fullscreen triangle)
             });
         Console.WriteLine("Created render pipeline");
 
-        // Create render target
-        using var target = new RenderTarget(device, 512, 512, TextureFormat.Rgba8Unorm);
-        Console.WriteLine($"Created render target: {target.Width}x{target.Height}");
         Console.WriteLine();
+        Console.WriteLine("Features Gosper Glider Gun + random cells");
+        Console.WriteLine("Window ready! Close or press Escape to exit.");
+        Console.WriteLine();
+    }
 
-        // === SIMULATION LOOP ===
+    static void OnRender(double delta)
+    {
+        if (_surface == null || _computePipeline == null || _renderPipeline == null ||
+            _bufferA == null || _bufferB == null || _device == null || _window == null)
+            return;
+            
+        var size = _window.Size;
+        
+        if (size.X == 0 || size.Y == 0)
+            return;
 
-        int numGenerations = 100;
-        bool useBufferA = true;
+        // Update simulation ~30 times per second
+        var now = DateTime.Now;
+        var shouldUpdate = (now - _lastUpdate).TotalMilliseconds > 33;
 
-        Console.WriteLine($"Running {numGenerations} generations...");
-        var startTime = DateTime.Now;
-
-        for (int gen = 0; gen < numGenerations; gen++)
+        if (shouldUpdate)
         {
+            _lastUpdate = now;
+
             // === COMPUTE PASS: Update simulation ===
             var computeEncoder = new ComputeEncoder();
-            computeEncoder.SetPipeline(computePipeline);
+            computeEncoder.SetPipeline(_computePipeline);
 
-            // Choose which bind group based on current buffer
-            if (useBufferA)
-                computeEncoder.SetBindGroup(0, computeBindGroupA);  // A -> B
+            // Pass buffer indices via push constants
+            // Order matters: [current_state, next_state] matching shader slots
+            if (_useBufferA)
+            {
+                // A -> B: read from A, write to B
+                computeEncoder.SetPushConstants(_bufferA, _bufferB);
+            }
             else
-                computeEncoder.SetBindGroup(0, computeBindGroupB);  // B -> A
+            {
+                // B -> A: read from B, write to A
+                computeEncoder.SetPushConstants(_bufferB, _bufferA);
+            }
 
             // Dispatch workgroups (8x8 threads per group)
             uint workgroupsX = (GRID_WIDTH + 7) / 8;
             uint workgroupsY = (GRID_HEIGHT + 7) / 8;
             computeEncoder.Dispatch(workgroupsX, workgroupsY, 1);
-            computeEncoder.Execute(device);
+            computeEncoder.Execute(_device);
 
             // Toggle buffer for next frame
-            useBufferA = !useBufferA;
-
-            // === RENDER PASS: Visualize the grid ===
-            var encoder = new CommandEncoder();
-            encoder.Clear(Color.Black);
-            encoder.SetPipeline(renderPipeline);
-
-            // Read from the buffer that was just written to
-            if (useBufferA)
-                encoder.SetBindGroup(0, renderBindGroupA);
-            else
-                encoder.SetBindGroup(0, renderBindGroupB);
-
-            encoder.Draw(3); // Fullscreen triangle
-            target.Render(encoder);
-
-            if (gen % 10 == 0)
-                Console.WriteLine($"  Generation {gen}");
+            _useBufferA = !_useBufferA;
         }
 
-        var elapsed = DateTime.Now - startTime;
-        double fps = numGenerations / elapsed.TotalSeconds;
+        try
+        {
+            // === RENDER PASS: Visualize the grid ===
+            var frame = _surface.Acquire();
 
-        Console.WriteLine();
-        Console.WriteLine($"Completed {numGenerations} generations in {elapsed.TotalSeconds:F2}s");
-        Console.WriteLine($"Performance: {fps:F1} generations/second");
+            var encoder = new CommandEncoder();
+            encoder.Clear(Color.Black);
+            encoder.SetPipeline(_renderPipeline);
 
-        // Read final frame
-        var pixels = target.ReadToCpu();
-        Console.WriteLine($"Final frame: {pixels.Length} bytes ({target.Width}x{target.Height} RGBA)");
+            // Read from the buffer that is now "current"
+            // After the swap, _useBufferA points to the newly computed buffer
+            if (_useBufferA)
+                encoder.SetPushConstants(_bufferA);
+            else
+                encoder.SetPushConstants(_bufferB);
 
-        // Count living cells at end (by reading buffer)
-        Console.WriteLine("\nDone!");
+            encoder.Draw(3); // Fullscreen triangle
+            frame.Render(encoder);
+
+            _surface.Present(frame);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Render error: {ex.Message}");
+        }
+    }
+
+    static void OnResize(Vector2D<int> newSize)
+    {
+        if (newSize.X > 0 && newSize.Y > 0)
+        {
+            _surface?.Resize((uint)newSize.X, (uint)newSize.Y);
+        }
+    }
+
+    static void OnClosing()
+    {
+        // Dispose in reverse order of creation
+        _renderPipeline?.Dispose();
+        _computePipeline?.Dispose();
+        _renderShader?.Dispose();
+        _computeShader?.Dispose();
+        _bufferB?.Dispose();
+        _bufferA?.Dispose();
+        _surface?.Dispose();
+        _device?.Dispose();
+        _instance?.Dispose();
     }
 
     static uint[] CreateInitialState()
@@ -206,4 +290,3 @@ class GameOfLife
         return cells;
     }
 }
-

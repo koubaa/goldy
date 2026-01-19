@@ -13,27 +13,11 @@ public sealed class ComputePipeline : IDisposable
     /// <summary>
     /// Create a new compute pipeline.
     /// </summary>
-    public ComputePipeline(Device device, ShaderModule computeShader, params BindGroupLayout[] bindGroupLayouts)
+    public ComputePipeline(Device device, ShaderModule computeShader)
     {
         device.ThrowIfDisposed();
         
-        unsafe
-        {
-            var layoutHandles = new nint[bindGroupLayouts.Length];
-            for (int i = 0; i < bindGroupLayouts.Length; i++)
-            {
-                layoutHandles[i] = bindGroupLayouts[i].Handle;
-            }
-            
-            fixed (nint* ptr = layoutHandles)
-            {
-                Handle = NativeMethods.ComputePipelineCreate(
-                    device.Handle, 
-                    computeShader.Handle, 
-                    (nint)ptr, 
-                    (uint)bindGroupLayouts.Length);
-            }
-        }
+        Handle = NativeMethods.ComputePipelineCreate(device.Handle, computeShader.Handle);
         
         if (Handle == nint.Zero)
             throw GoldyException.FromLastError("ComputePipeline creation");
@@ -77,12 +61,29 @@ public sealed class ComputeEncoder
     }
 
     /// <summary>
-    /// Set a bind group for shader resources.
+    /// Set push constants for compute resource binding.
+    /// The indices are pushed in order, so buffers[0] becomes index 0,
+    /// buffers[1] becomes index 1, etc.
     /// </summary>
-    public void SetBindGroup(uint index, BindGroup bindGroup)
+    /// <param name="buffers">Buffers to pass to the shader via push constants.</param>
+    public void SetPushConstants(params Buffer[] buffers)
     {
         EnsureNotExecuted();
-        NativeMethods.ComputeEncoderSetBindGroup(_handle, index, bindGroup.Handle);
+        if (buffers.Length == 0)
+            return;
+
+        // Collect buffer handles into an array
+        Span<nint> handles = stackalloc nint[buffers.Length];
+        for (int i = 0; i < buffers.Length; i++)
+            handles[i] = buffers[i].Handle;
+
+        unsafe
+        {
+            fixed (nint* ptr = handles)
+            {
+                NativeMethods.ComputeEncoderSetPushConstants(_handle, (nint)ptr, (uint)buffers.Length);
+            }
+        }
     }
 
     /// <summary>

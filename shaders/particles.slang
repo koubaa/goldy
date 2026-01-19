@@ -1,21 +1,8 @@
 // Particle rain/snow demo
 // Toggle between rain and snow modes via uniform
-//
-// ## Bindless Support
-//
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Uniforms are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
+// Uses goldy_exp module for vertex format utilities
 
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
+import goldy_exp;
 
 // Uniform structure for particle parameters
 struct ParticleParams {
@@ -25,28 +12,36 @@ struct ParticleParams {
     float _pad2;
 };
 
-#ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer support
 struct ParticlesResources {
     ConstantBuffer<ParticleParams> params;
 };
 ParameterBlock<ParticlesResources> gResources;
 #define TIME gResources.params.time
 #define IS_SNOW gResources.params.is_snow
+
+#elif defined(__SPIRV__)
+// Vulkan: Use push constants for indices + descriptor array
+import goldy_exp.buffer_indices;
+
+// Global descriptor array of uniform buffers
+[[vk::binding(1, 0)]] ConstantBuffer<ParticleParams> g_ParamBuffers[];
+#define TIME g_ParamBuffers[getBufferIndex(0)].time
+#define IS_SNOW g_ParamBuffers[getBufferIndex(0)].is_snow
+
 #else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<ParticleParams> params;
-#define TIME params.time
-#define IS_SNOW params.is_snow
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
+    uint paramsIndex;
+};
+#define TIME (*DescriptorHandle<ConstantBuffer<ParticleParams>>(uint2(paramsIndex, 0))).time
+#define IS_SNOW (*DescriptorHandle<ConstantBuffer<ParticleParams>>(uint2(paramsIndex, 0))).is_snow
 #endif
 
 [shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
+FullscreenVarying vs_main(FullscreenVertex input) {
+    return vs_fullscreen(input);
 }
 
 float hash(float p) {
@@ -54,7 +49,7 @@ float hash(float p) {
 }
 
 [shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
+float4 fs_main(FullscreenVarying input) : SV_Target {
     float2 uv = input.uv;
     bool snow = IS_SNOW > 0.5;
     
@@ -90,7 +85,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
         float phase = hash(fi + 200.0) * 10.0;
         
         float t = frac(TIME * speed + phase);
-        float particle_y = t;
+        float particle_y = t;  // t goes 0->1, y=0 is top, so particles fall down
         
         float2 particle_pos = float2(x, particle_y);
         float dist = length(uv - particle_pos);
@@ -103,7 +98,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
         
         color += particle_color * brightness * fade * 0.06;
         
-        // Trail (shorter for snow)
+        // Trail (shorter for snow) - trail is above particle (smaller y = higher on screen)
         float trail_len = snow ? 0.03 : 0.08;
         float trail_top = particle_y - trail_len;
         
@@ -115,4 +110,3 @@ float4 fs_main(VertexOutput input) : SV_Target {
     
     return float4(color, 1.0);
 }
-
