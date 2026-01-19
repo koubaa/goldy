@@ -1,6 +1,5 @@
 //! Python wrapper for CommandEncoder and RenderPass.
 
-use crate::bind_group::PyBindGroup;
 use crate::buffer::PyBuffer;
 use crate::pipeline::PyRenderPipeline;
 use crate::types::{PyColor, PyIndexFormat};
@@ -138,33 +137,18 @@ impl PyRenderPass {
         });
     }
 
-    /// Set a bind group for shader resources (uniforms, storage buffers).
+    /// Set push constants for resource binding.
     ///
-    /// Args:
-    ///     index: The bind group set index (matches shader's [[vk::binding(N, index)]]).
-    ///     bind_group: The bind group to use.
-    fn set_bind_group(&self, py: Python<'_>, index: u32, bind_group: &PyBindGroup) {
-        self.encoder.borrow(py).with_encoder(|enc| {
-            let mut pass = enc.begin_render_pass();
-            pass.set_bind_group(index, &bind_group.inner);
-        });
-    }
-
-    /// Set push constants for fully bindless rendering.
-    ///
-    /// Pass the buffers whose bindless indices should be pushed to the shader.
-    /// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
-    /// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
-    ///
-    /// Use this instead of `set_bind_group()` for fully bindless shaders that
-    /// access resources via global descriptor arrays.
+    /// Pass the buffers whose indices should be pushed to the shader.
+    /// The indices are pushed in order, so `buffers[0]` becomes index 0,
+    /// `buffers[1]` becomes index 1, etc.
     ///
     /// Args:
     ///     buffers: List of buffers to pass to the shader via push constants.
     ///
     /// Example:
     ///     >>> rp.set_push_constants([uniform_buffer])
-    ///     # In shader: g_UniformBuffers[BINDLESS_INDEX(0)].time
+    ///     # In shader: g_UniformBuffers[getBufferIndex(0)].time
     fn set_push_constants(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
         self.encoder.borrow(py).with_encoder(|enc| {
             // Collect buffer references - deref the Arc to get &Buffer

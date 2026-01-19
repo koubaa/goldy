@@ -201,33 +201,6 @@ pub(crate) struct ComputePipelineState {
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
 }
 
-/// Bind group layout (descriptor set layout) state.
-pub(crate) struct BindGroupLayoutState {
-    #[allow(dead_code)]
-    pub device_handle: DeviceHandle,
-    pub layout: vk::DescriptorSetLayout,
-    /// Maps binding index to descriptor type for correct bind group creation.
-    pub binding_types: std::collections::HashMap<u32, ash::vk::DescriptorType>,
-}
-
-/// Tracks a single binding entry for bindless index lookup.
-#[derive(Clone)]
-pub(crate) enum BindGroupResourceRef {
-    Buffer(BufferHandle),
-    Texture(TextureHandle),
-    Sampler(SamplerHandle),
-}
-
-/// Bind group (descriptor set) state.
-pub(crate) struct BindGroupState {
-    pub device_handle: DeviceHandle,
-    pub descriptor_set: vk::DescriptorSet,
-    pub pool: vk::DescriptorPool,
-    /// Resource references for bindless index lookup (binding -> resource).
-    /// Used to retrieve bindless indices when SetBindGroup is called.
-    pub entries: Vec<(u32, BindGroupResourceRef)>,
-}
-
 /// GPU render target state with optional staging for CPU readback.
 pub(crate) struct RenderTargetState {
     pub device_handle: DeviceHandle,

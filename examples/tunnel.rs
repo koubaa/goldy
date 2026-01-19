@@ -1,8 +1,5 @@
 //! Tunnel example - classic demoscene tunnel effect.
 //!
-//! Demonstrates FULLY BINDLESS rendering where resource indices are passed
-//! directly via push constants instead of using bind groups.
-//!
 //! Run with: cargo run --example tunnel
 
 use goldy::{
@@ -62,7 +59,7 @@ impl App {
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::TUNNEL)?;
 
-        // Create pipeline WITHOUT bind group layouts - fully bindless!
+        // Create pipeline
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -70,7 +67,6 @@ impl App {
             &RenderPipelineDesc {
                 vertex_layout: Vertex2DUv::layout(),
                 target_format: surface.format(),
-                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
@@ -121,8 +117,7 @@ impl App {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
-            // Fully bindless: pass buffer indices directly via push constants
-            // The shader accesses g_UniformBuffers[BINDLESS_INDEX(0)].time
+            // Pass buffer index via push constants
             pass.set_push_constants(&[uniform_buffer]);
             pass.set_vertex_buffer(0, vertex_buffer);
             pass.draw(0..6, 0..1);
@@ -150,7 +145,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Tunnel Effect (Fully Bindless)")
+                            .with_title("Goldy - Tunnel Effect")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -188,7 +183,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Tunnel Example (Fully Bindless) - Press Escape to exit");
+    println!("Goldy Tunnel Example - Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;

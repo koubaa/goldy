@@ -208,27 +208,8 @@ pub(crate) struct ComputePipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline_state: Direct3D12::ID3D12PipelineState,
     pub root_signature: Direct3D12::ID3D12RootSignature,
-    /// Bind group layout handles for looking up binding types during dispatch.
-    pub bind_group_layouts: Vec<super::super::BindGroupLayoutHandle>,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-}
-
-/// Bind group layout (root signature descriptor table layout) state.
-#[allow(dead_code)]
-pub(crate) struct BindGroupLayoutState {
-    pub device_handle: DeviceHandle,
-    pub entries: Vec<super::super::BindGroupLayoutEntry>,
-}
-
-/// Bind group state.
-#[allow(dead_code)]
-pub(crate) struct BindGroupState {
-    pub device_handle: DeviceHandle,
-    pub layout_handle: super::super::BindGroupLayoutHandle,
-    pub buffer_bindings: Vec<(u32, BufferHandle, u64, u64)>, // binding, buffer, offset, size
-    pub texture_bindings: Vec<(u32, TextureHandle)>,         // binding, texture
-    pub sampler_bindings: Vec<(u32, SamplerHandle)>,         // binding, sampler
 }
 
 /// GPU render target state with optional staging for CPU readback.

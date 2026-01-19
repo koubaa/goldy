@@ -1,7 +1,6 @@
 //! Command encoding for GPU operations.
 
 use crate::backend::RenderCommand;
-use crate::bind_group::BindGroup;
 use crate::buffer::Buffer;
 use crate::pipeline::RenderPipeline;
 use crate::types::{Color, IndexFormat};
@@ -100,33 +99,16 @@ impl<'a> RenderPass<'a> {
         });
     }
 
-    /// Set a bind group for shader resources (uniforms, storage buffers).
+    /// Set push constants for resource binding.
     ///
-    /// The `index` corresponds to the bind group set in the shader
-    /// (e.g., `[[vk::binding(0, 0)]]` uses index 0).
-    ///
-    /// This uses hybrid bindless mode where the API looks traditional but
-    /// the backend translates it to bindless internally.
-    pub fn set_bind_group(&mut self, index: u32, bind_group: &BindGroup) {
-        self.encoder.commands.push(RenderCommand::SetBindGroup {
-            index,
-            bind_group: bind_group.handle,
-        });
-    }
-
-    /// Set push constants for fully bindless rendering.
-    ///
-    /// Pass the buffers whose bindless indices should be pushed to the shader.
-    /// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
-    /// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
-    ///
-    /// Use this instead of `set_bind_group()` for fully bindless shaders that
-    /// access resources via global descriptor arrays.
+    /// Pass the buffers whose indices should be pushed to the shader.
+    /// The indices are pushed in order, so `buffers[0]` becomes index 0,
+    /// `buffers[1]` becomes index 1, etc.
     ///
     /// # Example
     /// ```ignore
     /// pass.set_push_constants(&[&uniform_buffer]);
-    /// // In shader: g_UniformBuffers[BINDLESS_INDEX(0)].time
+    /// // In shader: g_UniformBuffers[getBufferIndex(0)].time
     /// ```
     pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
         self.encoder.commands.push(RenderCommand::SetPushConstants {
@@ -134,9 +116,9 @@ impl<'a> RenderPass<'a> {
         });
     }
 
-    /// Set push constants with raw u32 indices (fully bindless mode).
+    /// Set push constants with raw u32 indices.
     ///
-    /// Use this for textures and samplers, or when you already have the bindless indices.
+    /// Use this for textures and samplers, or when you already have the resource indices.
     /// The indices are pushed in order to the shader's push/root constants.
     ///
     /// # Example

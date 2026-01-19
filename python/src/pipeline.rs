@@ -1,6 +1,5 @@
 //! Python wrapper for RenderPipeline.
 
-use crate::bind_group::PyBindGroupLayout;
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
 use crate::shader::PyShaderModule;
@@ -22,8 +21,6 @@ pub struct PyRenderPipelineDesc {
     pub target_format: PyTextureFormat,
     /// Depth/stencil state (optional).
     pub depth_stencil: Option<PyDepthStencilState>,
-    /// Bind group layouts.
-    pub bind_group_layouts: Vec<Arc<goldy::BindGroupLayout>>,
 }
 
 #[pymethods]
@@ -35,24 +32,19 @@ impl PyRenderPipelineDesc {
     ///     topology: Primitive topology (default: TRIANGLE_LIST).
     ///     target_format: Target texture format (default: RGBA8_UNORM).
     ///     depth_stencil: Optional depth/stencil state.
-    ///     bind_group_layouts: Optional list of bind group layouts.
     #[new]
-    #[pyo3(signature = (vertex_layout=None, topology=PyPrimitiveTopology::TRIANGLE_LIST, target_format=PyTextureFormat::RGBA8_UNORM, depth_stencil=None, bind_group_layouts=None))]
+    #[pyo3(signature = (vertex_layout=None, topology=PyPrimitiveTopology::TRIANGLE_LIST, target_format=PyTextureFormat::RGBA8_UNORM, depth_stencil=None))]
     fn new(
         vertex_layout: Option<PyVertexBufferLayout>,
         topology: PyPrimitiveTopology,
         target_format: PyTextureFormat,
         depth_stencil: Option<PyDepthStencilState>,
-        bind_group_layouts: Option<Vec<PyRef<PyBindGroupLayout>>>,
     ) -> Self {
         PyRenderPipelineDesc {
             vertex_layout,
             topology,
             target_format,
             depth_stencil,
-            bind_group_layouts: bind_group_layouts
-                .map(|layouts| layouts.iter().map(|l| Arc::clone(&l.inner)).collect())
-                .unwrap_or_default(),
         }
     }
 
@@ -100,15 +92,10 @@ impl PyRenderPipeline {
             .map(|l| l.inner.clone())
             .unwrap_or_else(goldy::Vertex2D::layout);
 
-        // Create temporary references to BindGroupLayout
-        let layout_refs: Vec<&goldy::BindGroupLayout> =
-            desc.bind_group_layouts.iter().map(|l| l.as_ref()).collect();
-
         let rust_desc = goldy::RenderPipelineDesc {
             vertex_layout,
             topology: desc.topology.into(),
             target_format: desc.target_format.into(),
-            bind_group_layouts: &layout_refs,
             depth_stencil: desc.depth_stencil.as_ref().map(|ds| ds.inner.clone()),
         };
 

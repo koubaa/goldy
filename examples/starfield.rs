@@ -1,16 +1,15 @@
 //! Starfield example - classic 3D starfield flying through space.
 //!
-//! Demonstrates FULLY BINDLESS GPU compute + graphics integration using Surface API.
+//! Demonstrates GPU compute + graphics integration using Surface API.
 //! The compute shader updates star positions, the graphics shader renders them.
-//! Resource indices are passed directly via push constants instead of using bind groups.
 //!
 //! Run with: cargo run --example starfield
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline,
-    ComputePipelineDesc, DeviceType, Instance, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -60,7 +59,7 @@ fn rand_f32() -> f32 {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Starfield Example (Fully Bindless GPU Compute)");
+    println!("Goldy Starfield Example");
     println!("  Up/Down - Change speed");
     println!("  Escape - Exit");
 
@@ -84,7 +83,7 @@ struct RenderState {
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
-    // Buffers (kept for bindless access)
+    // Buffers
     star_buffer: Buffer,
     params_buffer: Buffer,
     // Graphics resources
@@ -145,16 +144,10 @@ impl RenderState {
         };
         let params_buffer = Buffer::with_data(&device, &[initial_params], BufferUsage::UNIFORM)?;
 
-        // Create compute pipeline - fully bindless, no bind group layouts
-        let compute_pipeline = ComputePipeline::new(
-            &device,
-            &compute_shader,
-            &ComputePipelineDesc {
-                bind_group_layouts: &[],
-            },
-        )?;
+        // Create compute pipeline
+        let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline - fully bindless, no bind group layouts
+        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -163,15 +156,11 @@ impl RenderState {
                 vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
-                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
 
-        println!(
-            "Created fully bindless GPU starfield with {} stars",
-            NUM_STARS
-        );
+        println!("Created starfield with {} stars", NUM_STARS);
 
         Ok(Self {
             window,
@@ -198,12 +187,12 @@ impl RenderState {
         };
         self.params_buffer.write_data(0, &[params])?;
 
-        // Run compute pass to update stars - fully bindless via push constants
+        // Run compute pass to update stars
         let mut compute_encoder = ComputeEncoder::new();
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            // Fully bindless: pass buffer indices directly via push constants
+            // Pass buffer indices via push constants
             pass.set_push_constants(&[&self.star_buffer, &self.params_buffer]);
             let workgroups = (NUM_STARS + 63) / 64;
             pass.dispatch(workgroups, 1, 1);
@@ -218,7 +207,7 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(&self.render_pipeline);
-            // Fully bindless: pass buffer indices directly via push constants
+            // Pass buffer indices via push constants
             // Render shader only needs the star buffer (read-only)
             pass.set_push_constants(&[&self.star_buffer]);
             // Draw 6 vertices (quad) per star instance
@@ -235,10 +224,7 @@ impl RenderState {
     fn change_speed(&mut self, delta: f32) {
         self.speed = (self.speed + delta).clamp(0.001, 0.1);
         if let Some(w) = Some(&self.window) {
-            w.set_title(&format!(
-                "Goldy - Starfield (Fully Bindless GPU Compute, speed: {:.1})",
-                self.speed
-            ));
+            w.set_title(&format!("Goldy - Starfield (speed: {:.1})", self.speed));
         }
     }
 }
@@ -250,7 +236,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Starfield (Fully Bindless GPU Compute)")
+                            .with_title("Goldy - Starfield")
                             .with_inner_size(winit::dpi::LogicalSize::new(1024, 768)),
                     )
                     .expect("Failed to create window"),

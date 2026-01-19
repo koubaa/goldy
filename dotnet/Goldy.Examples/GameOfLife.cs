@@ -3,13 +3,12 @@ using Silk.NET.Maths;
 using Silk.NET.Windowing;
 
 /// <summary>
-/// Conway's Game of Life - Fully Bindless Compute + Graphics Example
+/// Conway's Game of Life - Compute + Graphics Example
 /// 
 /// Demonstrates:
 /// - Compute shader running cellular automaton rules
 /// - Graphics shader rendering the grid
 /// - Ping-pong buffer technique for in-place updates
-/// - Fully bindless resource access via push constants
 /// 
 /// Uses shared shader files from the goldy/shaders/ directory.
 /// 
@@ -50,13 +49,13 @@ static class GameOfLife
 
     public static void Run()
     {
-        Console.WriteLine("Conway's Game of Life (Fully Bindless)");
+        Console.WriteLine("Conway's Game of Life");
         Console.WriteLine(new string('=', 50));
 
         var options = WindowOptions.Default with
         {
             Size = new Vector2D<int>(800, 800),
-            Title = "Game of Life (Fully Bindless C#)",
+            Title = "Game of Life (C#)",
             
             // CRITICAL: No graphics context - Goldy creates its own Vulkan/DX12/Metal context
             API = GraphicsAPI.None,
@@ -119,29 +118,28 @@ static class GameOfLife
         _bufferB = Goldy.Buffer.WithData<uint>(_device, initialState, BufferUsage.Storage);
         Console.WriteLine($"Created buffers: {_bufferA.Size} bytes each");
 
-        // === COMPUTE PIPELINE - Fully Bindless ===
+        // === COMPUTE PIPELINE ===
         var computeShaderSrc = LoadShader("game_of_life.slang");
         _computeShader = new ShaderModule(_device, computeShaderSrc);
         Console.WriteLine("Compiled compute shader (game_of_life.slang)");
 
-        // Create compute pipeline WITHOUT bind group layouts - fully bindless!
+        // Create compute pipeline
         _computePipeline = new ComputePipeline(_device, _computeShader);
-        Console.WriteLine("Created compute pipeline (bindless - no bind groups)");
+        Console.WriteLine("Created compute pipeline");
 
-        // === RENDER PIPELINE - Fully Bindless ===
+        // === RENDER PIPELINE ===
         var renderShaderSrc = LoadShader("game_of_life_render.slang");
         _renderShader = new ShaderModule(_device, renderShaderSrc);
         Console.WriteLine("Compiled render shader (game_of_life_render.slang)");
 
-        // Create render pipeline WITHOUT bind group layouts - fully bindless!
+        // Create render pipeline
         _renderPipeline = new RenderPipeline(_device, _renderShader, _renderShader,
             new RenderPipelineDesc
             {
                 TargetFormat = _surface.Format,
                 VertexStride = 16, // Vertex2DUv layout (not used for fullscreen triangle)
-                // No BindGroupLayouts needed for bindless!
             });
-        Console.WriteLine("Created render pipeline (bindless - no bind groups)");
+        Console.WriteLine("Created render pipeline");
 
         Console.WriteLine();
         Console.WriteLine("Features Gosper Glider Gun + random cells");
@@ -172,7 +170,7 @@ static class GameOfLife
             var computeEncoder = new ComputeEncoder();
             computeEncoder.SetPipeline(_computePipeline);
 
-            // Fully bindless: pass buffer indices via push constants
+            // Pass buffer indices via push constants
             // Order matters: [current_state, next_state] matching shader slots
             if (_useBufferA)
             {
@@ -204,7 +202,7 @@ static class GameOfLife
             encoder.Clear(Color.Black);
             encoder.SetPipeline(_renderPipeline);
 
-            // Fully bindless: read from the buffer that is now "current"
+            // Read from the buffer that is now "current"
             // After the swap, _useBufferA points to the newly computed buffer
             if (_useBufferA)
                 encoder.SetPushConstants(_bufferA);

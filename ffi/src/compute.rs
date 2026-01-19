@@ -1,11 +1,9 @@
 //! FFI bindings for ComputePipeline and ComputeEncoder.
 
-use crate::bind_group::{GoldyBindGroup, GoldyBindGroupLayout};
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
 use crate::shader::GoldyShaderModule;
 use std::ptr;
-use std::slice;
 
 /// Opaque handle to a Goldy ComputePipeline.
 pub struct GoldyComputePipeline {
@@ -27,32 +25,13 @@ pub struct GoldyComputeEncoder {
 pub unsafe extern "C" fn goldy_compute_pipeline_create(
     device: *const GoldyDevice,
     compute_shader: *const GoldyShaderModule,
-    bind_group_layouts: *const *const GoldyBindGroupLayout,
-    bind_group_layout_count: u32,
 ) -> *mut GoldyComputePipeline {
     if device.is_null() || compute_shader.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Device or shader is null"));
         return ptr::null_mut();
     }
 
-    // Collect bind group layouts
-    let layouts: Vec<&goldy::BindGroupLayout> =
-        if bind_group_layout_count > 0 && !bind_group_layouts.is_null() {
-            slice::from_raw_parts(bind_group_layouts, bind_group_layout_count as usize)
-                .iter()
-                .map(|&ptr| &(*ptr).inner)
-                .collect()
-        } else {
-            vec![]
-        };
-
-    let layout_refs: Vec<&goldy::BindGroupLayout> = layouts.iter().copied().collect();
-
-    let desc = goldy::ComputePipelineDesc {
-        bind_group_layouts: &layout_refs,
-    };
-
-    match goldy::ComputePipeline::new(&(*device).inner, &(*compute_shader).inner, &desc) {
+    match goldy::ComputePipeline::new(&(*device).inner, &(*compute_shader).inner) {
         Ok(pipeline) => Box::into_raw(Box::new(GoldyComputePipeline { inner: pipeline })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
@@ -107,31 +86,11 @@ pub unsafe extern "C" fn goldy_compute_encoder_set_pipeline(
     pass.set_pipeline(&(*pipeline).inner);
 }
 
-/// Set a bind group for compute.
+/// Set push constants for compute resource binding.
 ///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_compute_encoder_set_bind_group(
-    encoder: *mut GoldyComputeEncoder,
-    index: u32,
-    bind_group: *const GoldyBindGroup,
-) {
-    if encoder.is_null() || bind_group.is_null() {
-        return;
-    }
-    let mut pass = (*encoder).inner.begin_compute_pass();
-    pass.set_bind_group(index, &(*bind_group).inner);
-}
-
-/// Set push constants for fully bindless compute.
-///
-/// Pass the buffers whose bindless indices should be pushed to the shader.
-/// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
-/// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
-///
-/// Use this instead of `goldy_compute_encoder_set_bind_group()` for fully bindless shaders
-/// that access resources via global descriptor arrays.
+/// Pass the buffers whose indices should be pushed to the shader.
+/// The indices are pushed in order, so `buffers[0]` becomes index 0,
+/// `buffers[1]` becomes index 1, etc.
 ///
 /// # Safety
 /// All pointers must be valid. The buffers array must contain buffer_count elements.

@@ -1,7 +1,6 @@
-//! Textured quad example - demonstrates fully bindless texture sampling.
+//! Textured quad example - demonstrates texture sampling.
 //!
 //! Creates a procedural checkerboard texture and displays it on a quad.
-//! Resource indices are passed directly via push constants instead of using bind groups.
 //!
 //! Run with: cargo run --example textured_quad
 
@@ -19,7 +18,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-// Simple shader that samples a texture using fully bindless resources
+// Simple shader that samples a texture
 const TEXTURED_SHADER: &str = r#"
 struct VertexInput {
     float2 position : POSITION;
@@ -31,7 +30,7 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-// Bindless resource access - cross-platform
+// Resource access - cross-platform
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer support
 struct TexturedQuadResources {
@@ -45,12 +44,12 @@ ParameterBlock<TexturedQuadResources> gResources;
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
 [[vk::push_constant]]
-cbuffer BindlessIndices {
+cbuffer BufferIndices {
     uint g_TextureIndex;
     uint g_SamplerIndex;
 };
 
-// Vulkan: unbounded descriptor arrays matching goldy's bindless layout
+// Vulkan: unbounded descriptor arrays
 // Binding 0: storage buffers, 1: uniform buffers, 2: sampled images, 3: samplers
 [[vk::binding(2, 0)]] Texture2D<float4> g_Textures[];
 [[vk::binding(3, 0)]] SamplerState g_Samplers[];
@@ -60,7 +59,7 @@ cbuffer BindlessIndices {
 
 #else
 // DX12: root constants + DescriptorHandle (Slang lowers to ResourceDescriptorHeap)
-cbuffer BindlessIndices : register(b0, space0) {
+cbuffer BufferIndices : register(b0, space0) {
     uint g_TextureIndex;
     uint g_SamplerIndex;
 };
@@ -197,7 +196,7 @@ impl App {
             },
         )?;
 
-        // Create pipeline - fully bindless, no bind group layouts!
+        // Create pipeline
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
@@ -205,7 +204,6 @@ impl App {
             &RenderPipelineDesc {
                 vertex_layout: Vertex2DUv::layout(),
                 target_format: surface.format(),
-                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
@@ -253,7 +251,7 @@ impl App {
                 a: 1.0,
             });
             pass.set_pipeline(pipeline);
-            // Fully bindless: pass texture and sampler indices directly via push constants
+            // Pass texture and sampler indices via push constants
             pass.set_push_constants_raw(&[tex_idx, samp_idx]);
             pass.set_vertex_buffer(0, vertex_buffer);
             pass.draw(0..6, 0..1);
@@ -280,7 +278,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Textured Quad (Fully Bindless)")
+                            .with_title("Goldy - Textured Quad")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -318,7 +316,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Textured Quad Example (Fully Bindless)");
+    println!("Goldy Textured Quad Example");
     println!("Demonstrates texture sampling with a checkerboard pattern");
     println!("Press Escape to exit");
     let event_loop = EventLoop::new()?;

@@ -31,6 +31,6 @@ class Program
         Console.WriteLine("Available examples:");
         Console.WriteLine("  triangle         - Animated triangle in a window (Surface API)");
         Console.WriteLine("  gameoflife, gol  - Conway's Game of Life (compute + graphics)");
-        Console.WriteLine("  plasma           - Classic demoscene plasma effect (bindless)");
+        Console.WriteLine("  plasma           - Classic demoscene plasma effect");
     }
 }

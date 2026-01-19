@@ -19,7 +19,6 @@ Initial release of Goldy, a modern GPU library for Rust.
 - **Surface rendering** - Window/swapchain support via `raw-window-handle`
 - **Render targets** - Off-screen rendering with CPU readback
 - **Compute pipelines** - GPU compute shader support
-- **Bind groups** - Descriptor set abstraction for uniform buffers and textures
 - **18 examples** - From basic triangle to compute particles and Game of Life
 
 ### Platforms

@@ -343,14 +343,37 @@ class TestComputePipeline:
         """Test basic compute shader that doubles buffer values."""
         import goldy
         
-        # Simple compute shader that doubles each value
+        # Simple compute shader that doubles each value (cross-platform)
         compute_shader_src = '''
-[[vk::binding(0, 0)]] RWStructuredBuffer<float> data;
+// Cross-platform compute shader
+
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer
+struct ComputeResources {
+    RWStructuredBuffer<float> data;
+};
+ParameterBlock<ComputeResources> gResources;
+#define DATA gResources.data
+
+#elif defined(__SPIRV__)
+// Vulkan: Push constants for indices + global descriptor arrays
+import goldy_exp.buffer_indices;
+[[vk::binding(0, 0)]] RWStructuredBuffer<float> g_StorageBuffers[];
+#define DATA g_StorageBuffers[getBufferIndex(0)]
+
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
+    uint dataIndex;
+};
+#define DATA ResourceDescriptorHeap[dataIndex]
+
+#endif
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
-    data[id.x] = data[id.x] * 2.0;
+    DATA[id.x] = DATA[id.x] * 2.0;
 }
 '''
         
@@ -360,33 +383,17 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         # Create GPU storage buffer
         buffer = goldy.Buffer(device, input_data, goldy.BufferUsage.STORAGE)
         
-        # Create bind group layout for storage buffer
-        bind_layout = goldy.BindGroupLayout(device, [
-            goldy.BindGroupLayoutBinding(
-                0, goldy.ShaderStages.COMPUTE,
-                goldy.BindingType.storage_buffer(read_only=False)
-            ),
-        ])
-        
-        # Create bind group with our buffer
-        bind_group = goldy.BindGroup(device, bind_layout, [
-            goldy.BufferBinding(0, buffer),
-        ])
-        
         # Compile compute shader
         shader = goldy.ShaderModule.from_slang(device, compute_shader_src)
         
         # Create compute pipeline
-        pipeline = goldy.ComputePipeline(
-            device, shader,
-            goldy.ComputePipelineDesc([bind_layout])
-        )
+        pipeline = goldy.ComputePipeline(device, shader)
         
         # Dispatch compute work
         encoder = goldy.ComputeEncoder()
         with encoder.begin_compute_pass() as cp:
             cp.set_pipeline(pipeline)
-            cp.set_bind_group(0, bind_group)
+            cp.set_push_constants([buffer])
             # 256 elements / 64 threads per workgroup = 4 workgroups
             cp.dispatch(4, 1, 1)
         

@@ -38,16 +38,6 @@ typedef enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_WEB_GPU = 3,
 } GoldyBackendType;
 
-// Binding type for bind groups.
-typedef enum GoldyBindingType {
-    GOLDY_BINDING_TYPE_UNIFORM_BUFFER = 0,
-    GOLDY_BINDING_TYPE_STORAGE_BUFFER_READ_ONLY = 1,
-    GOLDY_BINDING_TYPE_STORAGE_BUFFER_READ_WRITE = 2,
-    GOLDY_BINDING_TYPE_TEXTURE = 3,
-    GOLDY_BINDING_TYPE_SAMPLER = 4,
-    GOLDY_BINDING_TYPE_STORAGE_TEXTURE = 5,
-} GoldyBindingType;
-
 // Comparison function for depth testing.
 typedef enum GoldyCompareFunction {
     GOLDY_COMPARE_FUNCTION_NEVER = 0,
@@ -138,12 +128,6 @@ typedef enum GoldyVertexFormat {
     GOLDY_VERTEX_FORMAT_UNORM8X4 = 7,
 } GoldyVertexFormat;
 
-// Opaque handle to a Goldy BindGroup.
-typedef struct GoldyBindGroup GoldyBindGroup;
-
-// Opaque handle to a Goldy BindGroupLayout.
-typedef struct GoldyBindGroupLayout GoldyBindGroupLayout;
-
 // Opaque handle to a Goldy Buffer.
 typedef struct GoldyBuffer GoldyBuffer;
 
@@ -185,43 +169,6 @@ typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
 // Opaque handle to a Goldy Texture.
 typedef struct GoldyTexture GoldyTexture;
-
-// Buffer binding descriptor.
-typedef struct GoldyBufferBinding {
-    uint32_t binding;
-    const struct GoldyBuffer *buffer;
-    uint64_t offset;
-    // Size in bytes, or 0 for entire buffer.
-    uint64_t size;
-} GoldyBufferBinding;
-
-// Texture binding descriptor.
-typedef struct GoldyTextureBinding {
-    uint32_t binding;
-    const struct GoldyTexture *texture;
-} GoldyTextureBinding;
-
-// Sampler binding descriptor.
-typedef struct GoldySamplerBinding {
-    uint32_t binding;
-    const struct GoldySampler *sampler;
-} GoldySamplerBinding;
-
-// Shader stages flags.
-typedef struct GoldyShaderStages {
-    uint32_t _0;
-} GoldyShaderStages;
-#define GoldyShaderStages_VERTEX (GoldyShaderStages){ ._0 = 1 }
-#define GoldyShaderStages_FRAGMENT (GoldyShaderStages){ ._0 = 2 }
-#define GoldyShaderStages_COMPUTE (GoldyShaderStages){ ._0 = 4 }
-#define GoldyShaderStages_ALL (GoldyShaderStages){ ._0 = 7 }
-
-// Bind group layout binding descriptor.
-typedef struct GoldyBindGroupLayoutBinding {
-    uint32_t binding;
-    struct GoldyShaderStages visibility;
-    enum GoldyBindingType binding_type;
-} GoldyBindGroupLayoutBinding;
 
 // Buffer usage flags.
 typedef struct GoldyBufferUsage {
@@ -269,10 +216,6 @@ typedef struct GoldyRenderPipelineDesc {
     enum GoldyPrimitiveTopology topology;
     // Target texture format.
     enum GoldyTextureFormat target_format;
-    // Pointer to bind group layouts array (can be null).
-    const struct GoldyBindGroupLayout *const *bind_group_layouts;
-    // Number of bind group layouts.
-    uint32_t bind_group_layout_count;
     // Whether depth testing is enabled.
     bool depth_enabled;
     // Depth format (only used if depth_enabled is true).
@@ -309,54 +252,6 @@ typedef struct GoldyTextureUsage {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
-
-// Create a bind group with buffer bindings only.
-//
-// Returns a pointer to the bind group, or null on failure.
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyBindGroup *goldy_bind_group_create(const struct GoldyDevice *device,
-                                               const struct GoldyBindGroupLayout *layout,
-                                               const struct GoldyBufferBinding *buffer_bindings,
-                                               uint32_t buffer_binding_count);
-
-// Create a bind group with buffers, textures, and samplers.
-//
-// Returns a pointer to the bind group, or null on failure.
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyBindGroup *goldy_bind_group_create_with_resources(const struct GoldyDevice *device,
-                                                              const struct GoldyBindGroupLayout *layout,
-                                                              const struct GoldyBufferBinding *buffer_bindings,
-                                                              uint32_t buffer_binding_count,
-                                                              const struct GoldyTextureBinding *texture_bindings,
-                                                              uint32_t texture_binding_count,
-                                                              const struct GoldySamplerBinding *sampler_bindings,
-                                                              uint32_t sampler_binding_count);
-
-// Destroy a bind group.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_bind_group_destroy(struct GoldyBindGroup *bind_group);
-
-// Create a bind group layout.
-//
-// Returns a pointer to the layout, or null on failure.
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyBindGroupLayout *goldy_bind_group_layout_create(const struct GoldyDevice *device,
-                                                            const struct GoldyBindGroupLayoutBinding *bindings,
-                                                            uint32_t binding_count);
-
-// Destroy a bind group layout.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_bind_group_layout_destroy(struct GoldyBindGroupLayout *layout);
 
 // Create a new buffer.
 //
@@ -436,20 +331,24 @@ void goldy_compute_encoder_dispatch(struct GoldyComputeEncoder *encoder,
 enum GoldyResult goldy_compute_encoder_execute(const struct GoldyComputeEncoder *encoder,
                                                const struct GoldyDevice *device);
 
-// Set a bind group for compute.
-//
-// # Safety
-// All pointers must be valid.
-void goldy_compute_encoder_set_bind_group(struct GoldyComputeEncoder *encoder,
-                                          uint32_t index,
-                                          const struct GoldyBindGroup *bind_group);
-
 // Set the compute pipeline.
 //
 // # Safety
 // Both pointers must be valid.
 void goldy_compute_encoder_set_pipeline(struct GoldyComputeEncoder *encoder,
                                         const struct GoldyComputePipeline *pipeline);
+
+// Set push constants for compute resource binding.
+//
+// Pass the buffers whose indices should be pushed to the shader.
+// The indices are pushed in order, so `buffers[0]` becomes index 0,
+// `buffers[1]` becomes index 1, etc.
+//
+// # Safety
+// All pointers must be valid. The buffers array must contain buffer_count elements.
+void goldy_compute_encoder_set_push_constants(struct GoldyComputeEncoder *encoder,
+                                              const struct GoldyBuffer *const *buffers,
+                                              uint32_t buffer_count);
 
 // Create a new compute pipeline.
 //
@@ -458,9 +357,7 @@ void goldy_compute_encoder_set_pipeline(struct GoldyComputeEncoder *encoder,
 // # Safety
 // All pointers must be valid.
 struct GoldyComputePipeline *goldy_compute_pipeline_create(const struct GoldyDevice *device,
-                                                           const struct GoldyShaderModule *compute_shader,
-                                                           const struct GoldyBindGroupLayout *const *bind_group_layouts,
-                                                           uint32_t bind_group_layout_count);
+                                                           const struct GoldyShaderModule *compute_shader);
 
 // Destroy a compute pipeline.
 //
@@ -534,14 +431,6 @@ void goldy_encoder_draw_indexed(struct GoldyCommandEncoder *encoder,
                                 uint32_t instance_start,
                                 uint32_t instance_count);
 
-// Set a bind group.
-//
-// # Safety
-// All pointers must be valid.
-void goldy_encoder_set_bind_group(struct GoldyCommandEncoder *encoder,
-                                  uint32_t index,
-                                  const struct GoldyBindGroup *bind_group);
-
 // Set an index buffer.
 //
 // # Safety
@@ -557,14 +446,11 @@ void goldy_encoder_set_index_buffer(struct GoldyCommandEncoder *encoder,
 void goldy_encoder_set_pipeline(struct GoldyCommandEncoder *encoder,
                                 const struct GoldyRenderPipeline *pipeline);
 
-// Set push constants for fully bindless rendering.
+// Set push constants for resource binding.
 //
-// Pass the buffers whose bindless indices should be pushed to the shader.
-// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
-// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
-//
-// Use this instead of `goldy_encoder_set_bind_group()` for fully bindless shaders
-// that access resources via global descriptor arrays.
+// Pass the buffers whose indices should be pushed to the shader.
+// The indices are pushed in order, so `buffers[0]` becomes index 0,
+// `buffers[1]` becomes index 1, etc.
 //
 // # Safety
 // All pointers must be valid. The buffers array must contain buffer_count elements.

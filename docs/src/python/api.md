@@ -95,7 +95,6 @@ desc = goldy.RenderPipelineDesc(
     topology=PrimitiveTopology.TRIANGLE_LIST,
     target_format=TextureFormat.RGBA8_UNORM,
     depth_stencil=None,           # DepthStencilState
-    bind_group_layouts=None,      # List of BindGroupLayout
 )
 ```
 
@@ -121,7 +120,7 @@ Active render pass for recording draw commands.
 - `set_pipeline(pipeline)` - Bind render pipeline
 - `set_vertex_buffer(slot, buffer)` - Bind vertex buffer
 - `set_index_buffer(buffer, format)` - Bind index buffer
-- `set_bind_group(index, bind_group)` - Bind resources
+- `set_push_constants(buffers)` - Pass buffer indices to shaders
 - `draw(vertices, instances=range(1))` - Draw vertices
 - `draw_indexed(indices, base_vertex, instances)` - Draw indexed
 
@@ -132,13 +131,7 @@ Active render pass for recording draw commands.
 Pipeline for compute shaders.
 
 ```python
-pipeline = goldy.ComputePipeline(device, shader, desc)
-```
-
-### ComputePipelineDesc
-
-```python
-desc = goldy.ComputePipelineDesc(bind_group_layouts)
+pipeline = goldy.ComputePipeline(device, shader)
 ```
 
 ### ComputeEncoder
@@ -149,55 +142,9 @@ Records compute commands.
 encoder = goldy.ComputeEncoder()
 with encoder.begin_compute_pass() as cp:
     cp.set_pipeline(pipeline)
-    cp.set_bind_group(0, bind_group)
+    cp.set_push_constants([buffer])
     cp.dispatch(workgroups_x, workgroups_y, workgroups_z)
 encoder.dispatch(device)
-```
-
-## Bind Groups
-
-### BindGroupLayout
-
-Defines the structure of shader resource bindings.
-
-```python
-layout = goldy.BindGroupLayout(device, [
-    goldy.BindGroupLayoutBinding(0, ShaderStages.FRAGMENT, BindingType.uniform_buffer()),
-])
-```
-
-### BindGroupLayoutBinding
-
-Single binding in a layout.
-
-```python
-goldy.BindGroupLayoutBinding(binding_index, shader_stages, binding_type)
-```
-
-### BindingType
-
-Type of resource binding.
-
-- `BindingType.uniform_buffer()` - Uniform buffer
-- `BindingType.storage_buffer(read_only=False)` - Storage buffer
-- `BindingType.texture()` - Sampled texture
-- `BindingType.sampler()` - Texture sampler
-
-### BindGroup
-
-Actual resource bindings matching a layout.
-
-```python
-bind_group = goldy.BindGroup(device, layout, [
-    goldy.BufferBinding(0, buffer),
-])
-```
-
-### BufferBinding
-
-```python
-goldy.BufferBinding(binding_index, buffer)
-goldy.BufferBinding.with_range(binding_index, buffer, offset, size)
 ```
 
 ## Enums
@@ -251,15 +198,6 @@ goldy.PrimitiveTopology.TRIANGLE_STRIP
 ```python
 goldy.IndexFormat.UINT16
 goldy.IndexFormat.UINT32
-```
-
-### ShaderStages
-
-```python
-goldy.ShaderStages.VERTEX
-goldy.ShaderStages.FRAGMENT
-goldy.ShaderStages.COMPUTE
-goldy.ShaderStages.ALL
 ```
 
 ## Types

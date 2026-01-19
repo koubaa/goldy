@@ -1,7 +1,6 @@
 //! Render pipeline management.
 
-use crate::backend::{BindGroupLayoutHandle, GpuBackend, PipelineHandle};
-use crate::bind_group::BindGroupLayout;
+use crate::backend::{GpuBackend, PipelineHandle};
 use crate::device::Device;
 use crate::shader::ShaderModule;
 use crate::types::*;
@@ -29,8 +28,8 @@ use std::sync::{Arc, Mutex};
 /// };
 /// # }
 /// ```
-#[derive(Clone, Default)]
-pub struct RenderPipelineDesc<'a> {
+#[derive(Clone, Default, Debug)]
+pub struct RenderPipelineDesc {
     /// Vertex buffer layout.
     pub vertex_layout: VertexBufferLayout,
     /// Primitive topology.
@@ -40,23 +39,8 @@ pub struct RenderPipelineDesc<'a> {
     /// **Must match** the format of the Surface or RenderTarget you render to.
     /// Use `surface.format()` or the format you passed to `RenderTarget::new()`.
     pub target_format: TextureFormat,
-    /// Bind group layouts used by this pipeline (optional).
-    /// The order determines the set index (first = set 0, second = set 1, etc.)
-    pub bind_group_layouts: &'a [&'a BindGroupLayout],
     /// Depth/stencil state (optional, None = no depth testing).
     pub depth_stencil: Option<DepthStencilState>,
-}
-
-impl<'a> std::fmt::Debug for RenderPipelineDesc<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RenderPipelineDesc")
-            .field("vertex_layout", &self.vertex_layout)
-            .field("topology", &self.topology)
-            .field("target_format", &self.target_format)
-            .field("bind_group_layouts_count", &self.bind_group_layouts.len())
-            .field("depth_stencil", &self.depth_stencil)
-            .finish()
-    }
 }
 
 impl Default for VertexBufferLayout {
@@ -81,11 +65,7 @@ impl RenderPipeline {
     ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
 
-        // Collect bind group layout handles
-        let layout_handles: Vec<BindGroupLayoutHandle> =
-            desc.bind_group_layouts.iter().map(|l| l.handle).collect();
-
-        let handle = if desc.depth_stencil.is_some() || !desc.bind_group_layouts.is_empty() {
+        let handle = if desc.depth_stencil.is_some() {
             // Use extended pipeline creation with depth/stencil support
             backend.create_pipeline_with_depth(
                 device.handle,
@@ -94,11 +74,10 @@ impl RenderPipeline {
                 &desc.vertex_layout,
                 desc.topology,
                 desc.target_format,
-                &layout_handles,
                 desc.depth_stencil.as_ref(),
             )?
         } else {
-            // Simple pipeline creation (no bind groups, no depth)
+            // Simple pipeline creation (no depth)
             backend.create_pipeline(
                 device.handle,
                 vertex_shader.handle,
@@ -127,7 +106,6 @@ impl Drop for RenderPipeline {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::bind_group::{BindGroupLayout, BindGroupLayoutBinding};
 
     fn create_test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
@@ -143,7 +121,6 @@ mod tests {
         let desc = RenderPipelineDesc::default();
 
         assert_eq!(desc.target_format, TextureFormat::Rgba8Unorm);
-        assert!(desc.bind_group_layouts.is_empty());
         assert!(desc.depth_stencil.is_none());
     }
 
@@ -209,68 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_with_bind_group_layout() {
-        let device = create_test_device();
-        let shader = create_test_shader(&device);
-
-        // Create a bind group layout
-        let layout = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
-
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                bind_group_layouts: &[&layout],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert!(pipeline.handle > 0);
-    }
-
-    #[test]
-    fn test_pipeline_with_multiple_bind_group_layouts() {
-        let device = create_test_device();
-        let shader = create_test_shader(&device);
-
-        // Create multiple bind group layouts
-        let layout0 = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
-
-        let layout1 = BindGroupLayout::new(
-            &device,
-            &[
-                BindGroupLayoutBinding::storage(0, true),
-                BindGroupLayoutBinding::storage(1, false),
-            ],
-        )
-        .unwrap();
-
-        let layout2 = BindGroupLayout::new(
-            &device,
-            &[
-                BindGroupLayoutBinding::texture(0),
-                BindGroupLayoutBinding::sampler(1),
-            ],
-        )
-        .unwrap();
-
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                bind_group_layouts: &[&layout0, &layout1, &layout2],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert!(pipeline.handle > 0);
-    }
-
-    #[test]
     fn test_pipeline_with_depth_stencil() {
         let device = create_test_device();
         let shader = create_test_shader(&device);
@@ -284,32 +199,6 @@ mod tests {
                     format: DepthFormat::Depth24Plus,
                     depth_write_enabled: true,
                     depth_compare: CompareFunction::Less,
-                }),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert!(pipeline.handle > 0);
-    }
-
-    #[test]
-    fn test_pipeline_with_bind_group_layouts_and_depth() {
-        let device = create_test_device();
-        let shader = create_test_shader(&device);
-
-        let layout = BindGroupLayout::new(&device, &[BindGroupLayoutBinding::uniform(0)]).unwrap();
-
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                bind_group_layouts: &[&layout],
-                depth_stencil: Some(DepthStencilState {
-                    format: DepthFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: CompareFunction::LessEqual,
                 }),
                 ..Default::default()
             },

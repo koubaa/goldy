@@ -1,15 +1,6 @@
 // Particle rain/snow demo
 // Toggle between rain and snow modes via uniform
 // Uses goldy_exp module for vertex format utilities
-//
-// ## Bindless Support
-//
-// This shader demonstrates cross-platform bindless resource access:
-//
-// - Metal (__BINDLESS__ + __METAL__): Uses ParameterBlock for argument buffers
-// - Vulkan (__BINDLESS__ + __SPIRV__): Uses push constants + descriptor arrays
-// - DX12 (__BINDLESS__ + __HLSL__): Uses root constants + ResourceDescriptorHeap
-// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 import goldy_exp;
 
@@ -20,8 +11,6 @@ struct ParticleParams {
     float _pad1;
     float _pad2;
 };
-
-#ifdef __BINDLESS__
 
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer support
@@ -34,29 +23,20 @@ ParameterBlock<ParticlesResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 
 // Global descriptor array of uniform buffers
 [[vk::binding(1, 0)]] ConstantBuffer<ParticleParams> g_ParamBuffers[];
-// Note: Use getBindlessIndex() function, not BINDLESS_INDEX macro (macros don't export from modules)
-#define TIME g_ParamBuffers[getBindlessIndex(0)].time
-#define IS_SNOW g_ParamBuffers[getBindlessIndex(0)].is_snow
+#define TIME g_ParamBuffers[getBufferIndex(0)].time
+#define IS_SNOW g_ParamBuffers[getBufferIndex(0)].is_snow
 
 #else
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0) {
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
     uint paramsIndex;
 };
 #define TIME (*DescriptorHandle<ConstantBuffer<ParticleParams>>(uint2(paramsIndex, 0))).time
 #define IS_SNOW (*DescriptorHandle<ConstantBuffer<ParticleParams>>(uint2(paramsIndex, 0))).is_snow
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<ParticleParams> params;
-#define TIME params.time
-#define IS_SNOW params.is_snow
 #endif
 
 [shader("vertex")]
@@ -130,4 +110,3 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
     
     return float4(color, 1.0);
 }
-

@@ -1,14 +1,5 @@
 // Interactive Mandelbrot fractal explorer
 // Uses goldy_exp module for vertex format and color utilities
-//
-// ## Bindless Support
-//
-// This shader demonstrates cross-platform bindless resource access:
-//
-// - Metal (__BINDLESS__ + __METAL__): Uses ParameterBlock for argument buffers
-// - Vulkan (__BINDLESS__ + __SPIRV__): Uses push constants + descriptor arrays
-// - DX12 (__BINDLESS__ + __HLSL__): Uses root constants + ResourceDescriptorHeap
-// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 import goldy_exp;
 
@@ -18,8 +9,6 @@ struct ViewUniforms {
     float zoom;
     float _padding;  // Align to 16 bytes
 };
-
-#ifdef __BINDLESS__
 
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer support
@@ -32,29 +21,20 @@ ParameterBlock<MandelbrotResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 
 // Global descriptor array of uniform buffers
 [[vk::binding(1, 0)]] ConstantBuffer<ViewUniforms> g_UniformBuffers[];
-// Note: Use getBindlessIndex() function, not BINDLESS_INDEX macro (macros don't export from modules)
-#define CENTER g_UniformBuffers[getBindlessIndex(0)].center
-#define ZOOM g_UniformBuffers[getBindlessIndex(0)].zoom
+#define CENTER g_UniformBuffers[getBufferIndex(0)].center
+#define ZOOM g_UniformBuffers[getBufferIndex(0)].zoom
 
 #else
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0) {
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
     uint uniformsIndex;
 };
 #define CENTER (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).center
 #define ZOOM (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).zoom
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<ViewUniforms> uniforms;
-#define CENTER uniforms.center
-#define ZOOM uniforms.zoom
 #endif
 
 // Vertex-less fullscreen triangle - generates geometry from vertex index

@@ -1,4 +1,3 @@
-using System.Linq;
 using System.Runtime.InteropServices;
 using Goldy.Native;
 
@@ -24,23 +23,7 @@ public sealed class RenderPipeline : IDisposable
         device.ThrowIfDisposed();
         
         var nativeDesc = desc.ToNative();
-        
-        // Pin and pass bind group layout handles
-        unsafe
-        {
-            if (desc._layoutHandles != null && desc._layoutHandles.Length > 0)
-            {
-                fixed (nint* layoutPtr = desc._layoutHandles)
-                {
-                    nativeDesc.BindGroupLayouts = (nint)layoutPtr;
-                    Handle = NativeMethods.RenderPipelineCreate(device.Handle, vertexShader.Handle, fragmentShader.Handle, in nativeDesc);
-                }
-            }
-            else
-            {
-                Handle = NativeMethods.RenderPipelineCreate(device.Handle, vertexShader.Handle, fragmentShader.Handle, in nativeDesc);
-            }
-        }
+        Handle = NativeMethods.RenderPipelineCreate(device.Handle, vertexShader.Handle, fragmentShader.Handle, in nativeDesc);
         
         if (Handle == nint.Zero)
             throw GoldyException.FromLastError("RenderPipeline creation");
@@ -82,24 +65,12 @@ public class RenderPipelineDesc
     public TextureFormat TargetFormat { get; set; } = TextureFormat.Rgba8Unorm;
 
     /// <summary>
-    /// Bind group layouts (optional).
-    /// </summary>
-    public BindGroupLayout[] BindGroupLayouts { get; set; } = [];
-
-    /// <summary>
     /// Depth stencil state (optional).
     /// </summary>
     public DepthStencilState? DepthStencil { get; set; }
 
-    internal nint[]? _layoutHandles; // Keep alive during pipeline creation
-
     internal RenderPipelineDescNative ToNative()
     {
-        // Marshal bind group layouts
-        _layoutHandles = BindGroupLayouts.Length > 0 
-            ? BindGroupLayouts.Select(l => l.Handle).ToArray() 
-            : null;
-
         return new RenderPipelineDescNative
         {
             VertexAttributes = nint.Zero,
@@ -107,8 +78,6 @@ public class RenderPipelineDesc
             VertexStride = VertexStride,
             Topology = Topology,
             TargetFormat = TargetFormat,
-            BindGroupLayouts = nint.Zero, // Will be set in Create
-            BindGroupLayoutCount = (uint)BindGroupLayouts.Length,
             DepthEnabled = DepthStencil.HasValue,
             DepthFormat = DepthStencil?.Format ?? Goldy.DepthFormat.Depth24Plus,
             DepthWriteEnabled = DepthStencil?.DepthWriteEnabled ?? true,

@@ -1,28 +1,11 @@
 //! Compute pipeline and pass management.
 
-use crate::backend::{BindGroupLayoutHandle, ComputeCommand, ComputePipelineHandle, GpuBackend};
-use crate::bind_group::{BindGroup, BindGroupLayout};
+use crate::backend::{ComputeCommand, ComputePipelineHandle, GpuBackend};
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::shader::ShaderModule;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
-
-/// Description for creating a compute pipeline.
-#[derive(Clone, Default)]
-pub struct ComputePipelineDesc<'a> {
-    /// Bind group layouts used by this pipeline (optional).
-    /// The order determines the set index (first = set 0, second = set 1, etc.)
-    pub bind_group_layouts: &'a [&'a BindGroupLayout],
-}
-
-impl<'a> std::fmt::Debug for ComputePipelineDesc<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ComputePipelineDesc")
-            .field("bind_group_layouts_count", &self.bind_group_layouts.len())
-            .finish()
-    }
-}
 
 /// A compute pipeline.
 ///
@@ -32,22 +15,27 @@ impl<'a> std::fmt::Debug for ComputePipelineDesc<'a> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{Instance, DeviceType, ShaderModule, ComputePipeline, ComputePipelineDesc};
+/// use goldy::{Instance, DeviceType, ShaderModule, ComputePipeline};
 ///
 /// let instance = Instance::new()?;
 /// let device = instance.create_device(DeviceType::DiscreteGpu)?;
 ///
 /// let shader = ShaderModule::from_slang(&device, r#"
-///     [[vk::binding(0, 0)]] RWStructuredBuffer<float> data;
+///     #include "goldy_exp.slang"
+///
+///     struct PushConstants { uint buffer_idx; };
+///     [[vk::push_constant]] PushConstants pc;
 ///
 ///     [shader("compute")]
 ///     [numthreads(64, 1, 1)]
 ///     void cs_main(uint3 id : SV_DispatchThreadID) {
-///         data[id.x] = data[id.x] * 2.0;
+///         // Access buffer via index
+///         float val = asfloat(g_StorageBuffers[pc.buffer_idx].Load(id.x * 4));
+///         g_StorageBuffers[pc.buffer_idx].Store(id.x * 4, asuint(val * 2.0));
 ///     }
 /// "#)?;
 ///
-/// let pipeline = ComputePipeline::new(&device, &shader, &ComputePipelineDesc::default())?;
+/// let pipeline = ComputePipeline::new(&device, &shader)?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct ComputePipeline {
@@ -57,22 +45,10 @@ pub struct ComputePipeline {
 
 impl ComputePipeline {
     /// Create a new compute pipeline.
-    pub fn new(
-        device: &Device,
-        compute_shader: &ShaderModule,
-        desc: &ComputePipelineDesc,
-    ) -> Result<Self> {
+    pub fn new(device: &Device, compute_shader: &ShaderModule) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
 
-        // Collect bind group layout handles
-        let layout_handles: Vec<BindGroupLayoutHandle> =
-            desc.bind_group_layouts.iter().map(|l| l.handle).collect();
-
-        let handle = backend.create_compute_pipeline(
-            device.handle,
-            compute_shader.handle,
-            &layout_handles,
-        )?;
+        let handle = backend.create_compute_pipeline(device.handle, compute_shader.handle)?;
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
@@ -104,7 +80,7 @@ impl Drop for ComputePipeline {
 /// let mut encoder = ComputeEncoder::new();
 /// let mut pass = encoder.begin_compute_pass();
 /// // pass.set_pipeline(&pipeline);
-/// // pass.set_bind_group(0, &bind_group);
+/// // pass.set_push_constants(&[&buffer]);
 /// // pass.dispatch(1, 1, 1);
 /// drop(pass);
 ///
@@ -161,28 +137,16 @@ impl<'a> ComputePass<'a> {
             .push(ComputeCommand::SetPipeline(pipeline.handle));
     }
 
-    /// Set a bind group for shader resources (uniforms, storage buffers).
+    /// Set push constants for resource binding (compute shaders).
     ///
-    /// The `index` corresponds to the bind group set in the shader
-    /// (e.g., `[[vk::binding(0, 0)]]` uses index 0).
-    pub fn set_bind_group(&mut self, index: u32, bind_group: &BindGroup) {
-        self.encoder.commands.push(ComputeCommand::SetBindGroup {
-            index,
-            bind_group: bind_group.handle,
-        });
-    }
-
-    /// Set push constants for fully bindless resource access (compute shaders).
-    ///
-    /// In fully bindless mode, buffer indices are passed directly via push/root constants
-    /// instead of through bind groups. The shader accesses resources through
-    /// global descriptor arrays indexed by these values.
+    /// Buffer indices are passed via push/root constants. The shader accesses
+    /// resources through global descriptor arrays indexed by these values.
     ///
     /// # Example
     /// ```ignore
     /// pass.set_push_constants(&[&particle_buffer, &params_buffer]);
-    /// // In shader: g_StorageBuffers[getBindlessIndex(0)] for particles
-    /// // In shader: g_UniformBuffers[getBindlessIndex(1)] for params
+    /// // In shader: g_StorageBuffers[getBufferIndex(0)] for particles
+    /// // In shader: g_UniformBuffers[getBufferIndex(1)] for params
     /// ```
     pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
         self.encoder

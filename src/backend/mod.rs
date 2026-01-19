@@ -33,11 +33,6 @@ pub mod mock;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 
-// WebGPU backend is currently native-only (uses native Slang compiler)
-// For browser WASM builds, use goldy-web which uses wgpu directly with slang-wasm
-// #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]
-// pub mod webgpu;
-
 use crate::types::{
     BackendType, BufferUsage, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat,
     PrimitiveTopology, SamplerDesc, TextureFormat, TextureUsage, VertexBufferLayout,
@@ -68,8 +63,6 @@ pub type BufferHandle = u64;
 pub type ShaderHandle = u64;
 pub type PipelineHandle = u64;
 pub type ComputePipelineHandle = u64;
-pub type BindGroupHandle = u64;
-pub type BindGroupLayoutHandle = u64;
 pub type RenderTargetHandle = u64;
 pub type SurfaceHandle = u64;
 pub type SwapchainImageHandle = u64;
@@ -96,11 +89,6 @@ pub enum RenderCommand {
         buffer: BufferHandle,
         offset: u64,
         format: IndexFormat,
-    },
-    /// Set a bind group (hybrid bindless mode).
-    SetBindGroup {
-        index: u32,
-        bind_group: BindGroupHandle,
     },
     /// Set push constants directly with buffer handles (fully bindless mode).
     /// The backend will look up each buffer's bindless index and push them.
@@ -131,11 +119,6 @@ pub enum RenderCommand {
 pub enum ComputeCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
-    /// Set a bind group.
-    SetBindGroup {
-        index: u32,
-        bind_group: BindGroupHandle,
-    },
     /// Set push constants (fully bindless mode - buffer indices passed directly).
     SetPushConstants { buffers: Vec<BufferHandle> },
     /// Dispatch compute workgroups.
@@ -184,20 +167,6 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
-    // Bind group management
-    fn create_bind_group_layout(
-        &mut self,
-        device: DeviceHandle,
-        entries: &[BindGroupLayoutEntry],
-    ) -> Result<BindGroupLayoutHandle>;
-    fn create_bind_group(
-        &mut self,
-        device: DeviceHandle,
-        layout: BindGroupLayoutHandle,
-        entries: &[BindGroupEntry],
-    ) -> Result<BindGroupHandle>;
-    fn destroy_bind_group(&mut self, bind_group: BindGroupHandle);
-
     // Pipeline management
     fn create_pipeline(
         &mut self,
@@ -207,17 +176,6 @@ pub trait GpuBackend: Send + Sync {
         vertex_layout: &VertexBufferLayout,
         topology: PrimitiveTopology,
         target_format: TextureFormat,
-    ) -> Result<PipelineHandle>;
-    #[allow(clippy::too_many_arguments)]
-    fn create_pipeline_with_layout(
-        &mut self,
-        device: DeviceHandle,
-        vertex_shader: ShaderHandle,
-        fragment_shader: ShaderHandle,
-        vertex_layout: &VertexBufferLayout,
-        topology: PrimitiveTopology,
-        target_format: TextureFormat,
-        bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<PipelineHandle>;
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
@@ -231,7 +189,6 @@ pub trait GpuBackend: Send + Sync {
         vertex_layout: &VertexBufferLayout,
         topology: PrimitiveTopology,
         target_format: TextureFormat,
-        bind_group_layouts: &[BindGroupLayoutHandle],
         depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle>;
 
@@ -337,7 +294,6 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         device: DeviceHandle,
         compute_shader: ShaderHandle,
-        bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<ComputePipelineHandle>;
 
     /// Destroy a compute pipeline.
@@ -347,59 +303,6 @@ pub trait GpuBackend: Send + Sync {
     /// This submits compute work to the GPU and waits for completion.
     fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand])
         -> Result<()>;
-}
-
-/// Bind group layout entry.
-#[derive(Debug, Clone)]
-pub struct BindGroupLayoutEntry {
-    pub binding: u32,
-    pub visibility: ShaderStages,
-    pub ty: BindingType,
-}
-
-/// Shader stage visibility flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ShaderStages(pub u32);
-
-impl ShaderStages {
-    pub const VERTEX: ShaderStages = ShaderStages(1);
-    pub const FRAGMENT: ShaderStages = ShaderStages(2);
-    pub const COMPUTE: ShaderStages = ShaderStages(4);
-    pub const ALL: ShaderStages = ShaderStages(7); // VERTEX | FRAGMENT | COMPUTE
-}
-
-/// Binding type for bind groups.
-#[derive(Debug, Clone)]
-pub enum BindingType {
-    UniformBuffer,
-    StorageBuffer {
-        read_only: bool,
-    },
-    /// Sampled texture (read-only in shader).
-    Texture,
-    /// Sampler for texture sampling.
-    Sampler,
-    /// Storage texture (read-write in shader).
-    StorageTexture,
-}
-
-/// Bind group entry.
-#[derive(Debug, Clone)]
-pub struct BindGroupEntry {
-    pub binding: u32,
-    pub resource: BindingResource,
-}
-
-/// Resource for a bind group entry.
-#[derive(Debug, Clone)]
-pub enum BindingResource {
-    Buffer {
-        buffer: BufferHandle,
-        offset: u64,
-        size: u64,
-    },
-    Texture(TextureHandle),
-    Sampler(SamplerHandle),
 }
 
 /// Create the default backend for the current platform.

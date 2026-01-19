@@ -69,21 +69,9 @@ public sealed class CommandEncoder
     }
 
     /// <summary>
-    /// Set a bind group for shader resources.
-    /// </summary>
-    public void SetBindGroup(uint index, BindGroup bindGroup)
-    {
-        EnsureNotConsumed();
-        NativeMethods.EncoderSetBindGroup(_handle, index, bindGroup.Handle);
-    }
-
-    /// <summary>
-    /// Set push constants for fully bindless rendering.
-    /// Pass the buffers whose bindless indices should be pushed to the shader.
-    /// The indices are pushed in order, so buffers[0] becomes BINDLESS_INDEX(0),
-    /// buffers[1] becomes BINDLESS_INDEX(1), etc.
-    /// Use this instead of SetBindGroup() for fully bindless shaders that
-    /// access resources via global descriptor arrays.
+    /// Set push constants for resource binding.
+    /// The indices are pushed in order, so buffers[0] becomes index 0,
+    /// buffers[1] becomes index 1, etc.
     /// </summary>
     /// <param name="buffers">Buffers to pass to the shader via push constants.</param>
     public void SetPushConstants(params Buffer[] buffers)

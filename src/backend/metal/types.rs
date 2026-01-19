@@ -12,9 +12,7 @@
 
 #![allow(dead_code)] // Some fields are for future use
 
-use super::super::{
-    BindGroupLayoutEntry, BufferHandle, DeviceHandle, SamplerHandle, TextureHandle,
-};
+use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
 // Use explicit crate path to avoid collision with our module name
@@ -136,7 +134,7 @@ impl ResourceRegistry {
 
     /// Check if an index is in the texture range (4096-8191)
     pub fn is_texture_index(&self, index: u32) -> bool {
-        index >= 4096 && index < 8192
+        (4096..8192).contains(&index)
     }
 
     /// Check if an index is in the sampler range (8192+)
@@ -213,33 +211,6 @@ pub(crate) struct ComputePipelineState {
     pub bindless_arg_buffer: Option<MTLBuffer>,
     /// ParameterBlock layouts from shader reflection (for filling arg buffer)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-}
-
-/// Bind group layout state.
-/// Metal uses argument buffers, but for simplicity we track binding metadata.
-pub(crate) struct BindGroupLayoutState {
-    pub device_handle: DeviceHandle,
-    pub entries: Vec<BindGroupLayoutEntry>,
-}
-
-/// Bind group state.
-/// Stores the actual buffer/texture/sampler bindings.
-pub(crate) struct BindGroupState {
-    pub device_handle: DeviceHandle,
-    pub layout_handle: super::super::BindGroupLayoutHandle,
-    pub bindings: Vec<BindingState>,
-}
-
-/// Individual binding within a bind group.
-#[derive(Clone)]
-pub(crate) enum BindingState {
-    Buffer {
-        buffer: BufferHandle,
-        offset: u64,
-        size: u64,
-    },
-    Texture(super::super::TextureHandle),
-    Sampler(super::super::SamplerHandle),
 }
 
 /// GPU render target state with optional staging for CPU readback.

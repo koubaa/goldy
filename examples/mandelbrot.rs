@@ -1,8 +1,5 @@
 //! Mandelbrot example - interactive fractal explorer.
 //!
-//! Demonstrates FULLY BINDLESS rendering where resource indices are passed
-//! directly via push constants instead of using bind groups.
-//!
 //! Run with: cargo run --example mandelbrot
 
 use goldy::{
@@ -63,7 +60,7 @@ impl App {
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::MANDELBROT)?;
 
-        // Create pipeline WITHOUT bind group layouts - fully bindless!
+        // Create pipeline
         // Empty vertex layout - vertex shader generates geometry from SV_VertexID
         let pipeline = RenderPipeline::new(
             &device,
@@ -75,7 +72,6 @@ impl App {
                     attributes: vec![],
                 },
                 target_format: surface.format(),
-                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
@@ -123,7 +119,7 @@ impl App {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
-            // Fully bindless: pass buffer indices directly via push constants
+            // Pass buffer indices via push constants
             pass.set_push_constants(&[uniform_buffer]);
             // No vertex buffer needed - vertex shader generates fullscreen triangle from SV_VertexID
             pass.draw(0..3, 0..1);
@@ -151,7 +147,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Mandelbrot (Fully Bindless, Arrows=pan, +/-=zoom, R=reset)")
+                            .with_title("Goldy - Mandelbrot (Arrows=pan, +/-=zoom, R=reset)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -203,7 +199,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Mandelbrot Example (Fully Bindless)");
+    println!("Goldy Mandelbrot Example");
     println!("  Arrows - Pan");
     println!("  +/- - Zoom in/out");
     println!("  R - Reset view");

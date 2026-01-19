@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Conway's Game of Life - Fully Bindless Compute + Graphics Example
+"""Conway's Game of Life - Compute + Graphics Example
 
 This example demonstrates:
 1. Compute shader running cellular automaton rules
 2. Graphics shader rendering the grid
 3. Ping-pong buffer technique for in-place updates
-4. Fully bindless resource access via push constants
 
 Usage:
     python game_of_life.py
@@ -72,7 +71,7 @@ def create_initial_state():
 
 
 def main():
-    print("Game of Life (Fully Bindless) - Press Escape to exit")
+    print("Game of Life - Press Escape to exit")
 
     # Initialize GLFW
     if not glfw.init():
@@ -81,7 +80,7 @@ def main():
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
     glfw.window_hint(glfw.RESIZABLE, True)
 
-    window = glfw.create_window(800, 800, "Game of Life (Fully Bindless)", None, None)
+    window = glfw.create_window(800, 800, "Game of Life", None, None)
     if not window:
         glfw.terminate()
         raise RuntimeError("Failed to create GLFW window")
@@ -102,13 +101,10 @@ def main():
     buffer_a = goldy.Buffer(device, initial_state, goldy.BufferUsage.STORAGE)
     buffer_b = goldy.Buffer(device, initial_state, goldy.BufferUsage.STORAGE)
 
-    # Create compute pipeline - fully bindless, no bind group layouts
-    compute_pipeline = goldy.ComputePipeline(
-        device, compute_shader,
-        goldy.ComputePipelineDesc()  # Empty = bindless
-    )
+    # Create compute pipeline
+    compute_pipeline = goldy.ComputePipeline(device, compute_shader)
 
-    # Create render pipeline - fully bindless, no bind group layouts
+    # Create render pipeline
     # Use empty vertex layout since the shader generates vertices via SV_VertexID
     render_pipeline = goldy.RenderPipeline(
         device, render_shader, render_shader,
@@ -159,7 +155,7 @@ def main():
             with compute_encoder.begin_compute_pass() as cp:
                 cp.set_pipeline(compute_pipeline)
 
-                # Fully bindless: pass buffer indices via push constants
+                # Pass buffer indices via push constants
                 # Order matters: [current_state, next_state] matching shader slots
                 if use_buffer_a:
                     # A -> B: read from A, write to B
@@ -186,7 +182,7 @@ def main():
             rp.clear(goldy.Color.BLACK)
             rp.set_pipeline(render_pipeline)
 
-            # Fully bindless: read from the buffer that is now "current"
+            # Read from the buffer that is now "current"
             if use_buffer_a:
                 rp.set_push_constants([buffer_a])
             else:

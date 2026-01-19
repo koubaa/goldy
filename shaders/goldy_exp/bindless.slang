@@ -21,8 +21,6 @@
 //
 // In your shader:
 //
-//   #ifdef __BINDLESS__
-//   
 //   // Define your resource struct
 //   struct MyResources {
 //       StructuredBuffer<MyData> dataBuffer;
@@ -38,12 +36,6 @@
 //   MyData d = gResources.dataBuffer[idx];
 //   gResources.outputBuffer[idx] = result;
 //   float4 color = gResources.myTexture.Sample(gResources.mySampler, uv);
-//   
-//   #else
-//   // Traditional binding fallback
-//   [[vk::binding(0, 0)]] StructuredBuffer<MyData> dataBuffer;
-//   // ...
-//   #endif
 //
 // == Metal Code Generation ==
 //
@@ -70,4 +62,3 @@ implementing goldy_exp;
 
 // Note: ParameterBlock is a built-in Slang type, no need to define it here.
 // Just use: ParameterBlock<YourResourceStruct> gResources;
-

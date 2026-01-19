@@ -2,7 +2,6 @@
 //!
 //! This crate provides Python bindings for the Goldy GPU library using PyO3.
 
-mod bind_group;
 mod buffer;
 mod compute;
 mod device;
@@ -55,16 +54,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;
 
-    // Bind groups
-    m.add_class::<bind_group::PyShaderStages>()?;
-    m.add_class::<bind_group::PyBindingType>()?;
-    m.add_class::<bind_group::PyBindGroupLayoutBinding>()?;
-    m.add_class::<bind_group::PyBindGroupLayout>()?;
-    m.add_class::<bind_group::PyBufferBinding>()?;
-    m.add_class::<bind_group::PyBindGroup>()?;
-
     // Compute
-    m.add_class::<compute::PyComputePipelineDesc>()?;
     m.add_class::<compute::PyComputePipeline>()?;
     m.add_class::<compute::PyComputeEncoder>()?;
     m.add_class::<compute::PyComputePass>()?;

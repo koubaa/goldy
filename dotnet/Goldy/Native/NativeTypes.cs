@@ -41,8 +41,6 @@ internal struct RenderPipelineDescNative
     public uint VertexStride;
     public PrimitiveTopology Topology;
     public TextureFormat TargetFormat;
-    public nint BindGroupLayouts;
-    public uint BindGroupLayoutCount;
     [MarshalAs(UnmanagedType.U1)]
     public bool DepthEnabled;
     public DepthFormat DepthFormat;
@@ -60,49 +58,6 @@ internal struct VertexAttributeNative
     public uint Location;
     public VertexFormat Format;
     public uint Offset;
-}
-
-/// <summary>
-/// Native bind group layout binding descriptor.
-/// </summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct BindGroupLayoutBindingNative
-{
-    public uint Binding;
-    public ShaderStages Visibility;
-    public BindingType BindingType;
-}
-
-/// <summary>
-/// Native buffer binding descriptor.
-/// </summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct BufferBindingNative
-{
-    public uint Binding;
-    public nint Buffer;
-    public ulong Offset;
-    public ulong Size;
-}
-
-/// <summary>
-/// Native texture binding descriptor.
-/// </summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct TextureBindingNative
-{
-    public uint Binding;
-    public nint Texture;
-}
-
-/// <summary>
-/// Native sampler binding descriptor.
-/// </summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct SamplerBindingNative
-{
-    public uint Binding;
-    public nint Sampler;
 }
 
 /// <summary>

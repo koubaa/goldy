@@ -104,7 +104,7 @@ const module = device.createShaderModule({ code: wgsl });
 | `digital_clock.slang` | 7-segment display shader | — |
 | `triangle.slang` | Procedural triangle from vertex ID | — |
 | `gradient.slang` | Animated color gradient | — |
-| `tunnel.slang` | Demoscene tunnel effect (bindless) | ✓ `import goldy_exp` |
+| `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
 | `checkerboard.slang` | Animated checker pattern | — |
 | `metaballs.slang` | Blending distance fields | — |
 | `starfield.slang` | 3D starfield flying forward | — |
@@ -113,11 +113,10 @@ const module = device.createShaderModule({ code: wgsl });
 
 ## Compilation Targets
 
-All shaders compile to:
-- **SPIR-V** (via native slang.dll) → Vulkan
-- **WGSL** (via slang-wasm) → WebGPU
-- **HLSL** (future) → DirectX 12
-- **MSL** (future) → Metal
+All shaders compile via native slang.dll:
+- **SPIR-V** → Vulkan
+- **DXIL** → DX12
+- **MSL** → Metal
 
 ## Preprocessor Defines
 
@@ -125,47 +124,49 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
 
 | Define | When Set | Use For |
 |--------|----------|---------|
-| `__BINDLESS__` | Bindless mode enabled | Conditionally use bindless resource access |
 | `__METAL__` | Targeting Metal | Metal-specific code (ParameterBlock for argument buffers) |
 | `__SPIRV__` | Targeting Vulkan | Vulkan-specific code (push constants, descriptor arrays) |
-| `__HLSL__` | Targeting DX12 | DX12-specific code (root constants, ResourceDescriptorHeap) |
+| `__DX12__` | Targeting DX12 | DX12-specific code (root constants, ResourceDescriptorHeap) |
 
-### Important Caveats
+### Cross-Platform Shader Pattern
 
-1. **Slang auto-defines `__HLSL__`** for all targets because it uses HLSL-like syntax internally. When writing cross-platform shaders, **always check `__METAL__` first, then `__SPIRV__`, then `__HLSL__`**:
+```slang
+#if defined(__METAL__)
+    // Metal: use ParameterBlock for argument buffers
+    struct MyResources {
+        ConstantBuffer<MyUniforms> uniforms;
+    };
+    ParameterBlock<MyResources> gResources;
+    #define TIME gResources.uniforms.time
+#elif defined(__SPIRV__)
+    // Vulkan: use push constants + descriptor arrays
+    [[vk::binding(1, 0)]] ConstantBuffer<MyUniforms> g_UniformBuffers[];
+    #define TIME g_UniformBuffers[getBufferIndex(0)].time
+#elif defined(__DX12__)
+    // DX12: use root constants + ResourceDescriptorHeap
+    cbuffer BufferIndices : register(b0) { uint uniformsIndex; };
+    #define TIME (*DescriptorHandle<ConstantBuffer<MyUniforms>>(uint2(uniformsIndex, 0))).time
+#endif
+```
 
-   ```slang
-   #ifdef __BINDLESS__
-   // CORRECT: Check __METAL__ first, then __SPIRV__, then __HLSL__
-   #if defined(__METAL__)
-       // Metal path - use ParameterBlock for argument buffers
-       struct MyResources {
-           ConstantBuffer<MyUniforms> uniforms;
-       };
-       ParameterBlock<MyResources> gResources;
-       #define TIME gResources.uniforms.time
-   #elif defined(__SPIRV__)
-       // Vulkan path - use push constants + descriptor arrays
-       [[vk::binding(1, 0)]] ConstantBuffer<MyUniforms> g_UniformBuffers[];
-       #define TIME g_UniformBuffers[getBindlessIndex(0)].time
-   #elif defined(__HLSL__)
-       // DX12 path - use root constants + ResourceDescriptorHeap
-       cbuffer BindlessIndices : register(b0) { uint uniformsIndex; };
-       #define TIME (*DescriptorHandle<ConstantBuffer<MyUniforms>>(uint2(uniformsIndex, 0))).time
-   #endif
-   #endif
-   ```
-   
-   **Why this order matters:** If you check `__HLSL__` before `__METAL__`, Metal shaders will incorrectly use DX12-specific features like `DescriptorHandle` which cause compilation errors like:
-   ```
-   error 36107: entrypoint uses features that are not available in 'fragment' stage for 'metal' compilation target
-   ```
+### Tips
 
-2. **Preprocessor defines don't propagate to imported modules**. If you `import` a module that uses `#ifdef __BINDLESS__`, the define won't be visible inside that module. Solutions:
-   - Don't use guards in modules that are only imported when bindless is active
+1. **Preprocessor defines don't propagate to imported modules** — this is a deliberate design decision in Slang, not a limitation. The module system (`import`, `__include`) isolates preprocessor state to enable true separate compilation and clean module boundaries. Think of `import foo;` as closer to `using namespace foo;` in C++ rather than `#include`.
+
+   **However, session-level macros DO propagate!** Macros passed via `-D` flag or the API's `PreprocessorMacroDesc` are visible to ALL modules, including imports. This is why Goldy's backend defines (`__METAL__`, `__SPIRV__`, `__DX12__`) work — they're passed at the session level.
+
+   | Macro Source | Visible in Imports? |
+   |--------------|---------------------|
+   | `#define` in source | ❌ No — isolated to that file |
+   | `-D` flag / session macros | ✅ Yes — visible everywhere |
+   | Traditional `#include` | ✅ Yes — behaves like C/C++ |
+
+   **Solutions for module-level configuration:**
+   - Use session-level `-D` flags for feature toggles (Goldy does this automatically)
    - Use functions instead of macros (functions export, macros don't)
+   - Don't use guards in modules that are only imported when needed
 
-3. **Push constants require specific syntax** for Vulkan SPIR-V:
+2. **Push constants require specific syntax** for Vulkan SPIR-V:
    ```slang
    // WRONG - cbuffer doesn't generate push constants
    [[vk::push_constant]]
@@ -176,7 +177,7 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
    [[vk::push_constant]] ConstantBuffer<MyDataBlock> myData;
    ```
 
-4. **Macros don't export from modules**. Use functions instead:
+3. **Macros don't export from modules**. Use functions instead:
    ```slang
    // In module - this WON'T be visible to importers:
    #define GET_INDEX(slot) indices[slot]
@@ -185,9 +186,9 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
    public uint getIndex(uint slot) { return indices[slot]; }
    ```
 
-5. **Metal bindless uses `ParameterBlock`, not push constants**. Unlike Vulkan/DX12 which use push/root constants to pass buffer indices, Metal uses `ParameterBlock` which Slang compiles to argument buffers:
+4. **Metal uses `ParameterBlock`, not push constants**. Unlike Vulkan/DX12 which use push/root constants to pass buffer indices, Metal uses `ParameterBlock` which Slang compiles to argument buffers:
    ```slang
-   // Metal bindless pattern
+   // Metal pattern
    struct MyResources {
        ConstantBuffer<MyUniforms> uniforms;
        Texture2D myTexture;
@@ -201,7 +202,7 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
 
 ## Module System
 
-Goldy uses Slang's module system for code sharing:
+Goldy uses Slang's module system for code sharing. Unlike `#include`, Slang modules provide true separate compilation — modules can be precompiled to `.slang-module` files and imported code behaves consistently regardless of where it's imported from.
 
 ```
 shaders/

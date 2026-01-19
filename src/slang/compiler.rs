@@ -89,27 +89,18 @@ pub struct CompiledShaderWithReflection {
 pub enum ShaderTarget {
     /// SPIR-V bytecode for Vulkan
     Spirv,
-    /// WGSL source for WebGPU
-    Wgsl,
-    /// HLSL source for DirectX (text, requires FXC/DXC to compile)
-    Hlsl,
     /// DXIL bytecode for DirectX 12 (binary, SM 6.6 for bindless)
     Dxil,
     /// Metal Shading Language
     Metal,
-    /// GLSL source
-    Glsl,
 }
 
 impl ShaderTarget {
     fn to_slang_target(self) -> SlangCompileTarget {
         match self {
             ShaderTarget::Spirv => SlangCompileTarget::Spirv,
-            ShaderTarget::Wgsl => SlangCompileTarget::Wgsl,
-            ShaderTarget::Hlsl => SlangCompileTarget::Hlsl,
             ShaderTarget::Dxil => SlangCompileTarget::Dxil,
             ShaderTarget::Metal => SlangCompileTarget::Metal,
-            ShaderTarget::Glsl => SlangCompileTarget::Glsl,
         }
     }
 
@@ -129,12 +120,10 @@ pub struct CompiledShader {
 }
 
 impl CompiledShader {
-    /// Get the data as a string (for text-based targets like WGSL, HLSL, GLSL).
+    /// Get the data as a string (for text-based targets like Metal).
     pub fn as_str(&self) -> Option<&str> {
         match self.target {
-            ShaderTarget::Wgsl | ShaderTarget::Hlsl | ShaderTarget::Metal | ShaderTarget::Glsl => {
-                std::str::from_utf8(&self.data).ok()
-            }
+            ShaderTarget::Metal => std::str::from_utf8(&self.data).ok(),
             ShaderTarget::Spirv | ShaderTarget::Dxil => None,
         }
     }
@@ -213,14 +202,11 @@ impl SlangCompiler {
         self.compile_with_entry_points(source, target, &entry_points)
     }
 
-    /// Compile for bindless rendering (adds __BINDLESS__ and target-specific defines).
+    /// Compile with target-specific defines for the active backend.
     ///
-    /// This is used by backends that support bindless resource access.
-    /// Shaders can check for `#ifdef __BINDLESS__` to use bindless patterns.
-    ///
-    /// Target-specific defines are also added since Slang doesn't provide them automatically:
+    /// Target-specific defines are added since Slang doesn't provide them automatically:
     /// - SPIR-V (Vulkan): `__SPIRV__`
-    /// - HLSL/DXIL (DX12): `__HLSL__`  
+    /// - DXIL (DX12): `__DX12__`  
     /// - Metal: `__METAL__`
     pub fn compile_bindless(
         &self,
@@ -233,12 +219,12 @@ impl SlangCompiler {
         self.compile_with_defines(source, target, entry_points, search_paths, &defines)
     }
 
-    /// Compile for bindless rendering with reflection data.
+    /// Compile with reflection data.
     ///
     /// Returns both the compiled shader and reflection information about
     /// ParameterBlocks, which is needed to properly set up argument buffers.
     ///
-    /// See [`Self::compile_bindless`] for details on defines.
+    /// See [`Self::compile_bindless`] for details on target-specific defines.
     pub fn compile_bindless_with_reflection(
         &self,
         source: &str,
@@ -250,17 +236,13 @@ impl SlangCompiler {
         self.compile_with_reflection(source, target, entry_points, search_paths, &defines)
     }
 
-    /// Get preprocessor defines for bindless compilation on a given target.
+    /// Get preprocessor defines for the given target.
     fn bindless_defines_for_target(target: ShaderTarget) -> Vec<(&'static str, &'static str)> {
-        let mut defines = vec![("__BINDLESS__", "1")];
         match target {
-            ShaderTarget::Spirv => defines.push(("__SPIRV__", "1")),
-            ShaderTarget::Dxil | ShaderTarget::Hlsl => defines.push(("__HLSL__", "1")),
-            ShaderTarget::Metal => defines.push(("__METAL__", "1")),
-            ShaderTarget::Wgsl => defines.push(("__WGSL__", "1")),
-            ShaderTarget::Glsl => defines.push(("__GLSL__", "1")),
+            ShaderTarget::Spirv => vec![("__SPIRV__", "1")],
+            ShaderTarget::Dxil => vec![("__DX12__", "1")],
+            ShaderTarget::Metal => vec![("__METAL__", "1")],
         }
-        defines
     }
 
     /// Compile with reflection data.
@@ -771,8 +753,7 @@ impl SlangCompiler {
         let _span = goldy_span!(
             "slang.compile",
             target = ?target,
-            entry_points = entry_points.len(),
-            bindless = defines.iter().any(|(k, _)| *k == "__BINDLESS__")
+            entry_points = entry_points.len()
         )
         .entered();
 

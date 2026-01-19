@@ -1,18 +1,17 @@
-//! Conway's Game of Life - Fully Bindless Compute + Graphics Example
+//! Conway's Game of Life - Compute + Graphics Example
 //!
 //! This example demonstrates:
 //! 1. Compute shader running cellular automaton rules
 //! 2. Graphics shader rendering the grid
 //! 3. Ping-pong buffer technique for in-place updates
-//! 4. Fully bindless resource access via push constants
 //!
 //! Run with: `cargo run --example game_of_life`
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline,
-    ComputePipelineDesc, DeviceType, Instance, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -152,16 +151,10 @@ impl RenderState {
         let buffer_a = Buffer::with_data(&device, &initial_state, BufferUsage::STORAGE)?;
         let buffer_b = Buffer::with_data(&device, &initial_state, BufferUsage::STORAGE)?;
 
-        // Create compute pipeline - fully bindless, no bind group layouts
-        let compute_pipeline = ComputePipeline::new(
-            &device,
-            &compute_shader,
-            &ComputePipelineDesc {
-                bind_group_layouts: &[],
-            },
-        )?;
+        // Create compute pipeline
+        let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline - fully bindless, no bind group layouts
+        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -170,13 +163,12 @@ impl RenderState {
                 vertex_layout: VertexBufferLayout::default(),
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
-                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
 
         println!(
-            "Game of Life initialized (fully bindless): {}x{} grid",
+            "Game of Life initialized: {}x{} grid",
             GRID_WIDTH, GRID_HEIGHT
         );
         println!("Features Gosper Glider Gun + random cells");
@@ -211,7 +203,7 @@ impl RenderState {
                 let mut pass = compute_encoder.begin_compute_pass();
                 pass.set_pipeline(&self.compute_pipeline);
 
-                // Fully bindless: pass buffer indices via push constants
+                // Pass buffer indices via push constants
                 // Order matters: [current_state, next_state] matching shader slots
                 if self.use_buffer_a {
                     // A -> B: read from A, write to B
@@ -241,7 +233,7 @@ impl RenderState {
             pass.clear(Color::BLACK);
             pass.set_pipeline(&self.render_pipeline);
 
-            // Fully bindless: read from the buffer that is now "current"
+            // Read from the buffer that is now "current"
             // After the swap, use_buffer_a points to the newly computed buffer
             if self.use_buffer_a {
                 pass.set_push_constants(&[&self.buffer_a]);
@@ -269,7 +261,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Game of Life (Fully Bindless)")
+                            .with_title("Game of Life")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .expect("Failed to create window"),
