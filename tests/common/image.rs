@@ -131,7 +131,9 @@ fn read_png(
         ImageComparisonError::FormatMismatch(format!("Failed to read PNG header: {}", e))
     })?;
 
-    let buffer_len = reader.output_buffer_size();
+    let buffer_len = reader
+        .output_buffer_size()
+        .expect("output buffer size should be known after reading info");
     let mut buffer = vec![0u8; buffer_len];
     let info = reader.next_frame(&mut buffer).map_err(|e| {
         ImageComparisonError::FormatMismatch(format!("Failed to decode PNG: {}", e))
