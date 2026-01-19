@@ -4,17 +4,12 @@
 Usage:
     python adapter_info.py
 """
-import sys
-print("[adapter_info] Script starting...", flush=True)
-print(f"[adapter_info] Python: {sys.version}", flush=True)
 
-print("[adapter_info] Importing goldy...", flush=True)
 import goldy
-print("[adapter_info] Goldy imported successfully", flush=True)
 
 
 def main():
-    print("Goldy GPU Adapter Information", flush=True)
+    print("Goldy GPU Adapter Information")
     print("=" * 50)
     
     # Create instance
@@ -52,5 +47,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-    print("[adapter_info] Script completed successfully", flush=True)
 

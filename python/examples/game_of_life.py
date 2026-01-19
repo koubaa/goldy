@@ -10,25 +10,12 @@ This example demonstrates:
 Usage:
     python game_of_life.py
 """
-import sys
-print("[game_of_life] Script starting...", flush=True)
 
-print("[game_of_life] Importing goldy...", flush=True)
 import goldy
-print("[game_of_life] Goldy imported successfully", flush=True)
-
-print("[game_of_life] Importing numpy...", flush=True)
 import numpy as np
-print("[game_of_life] Numpy imported successfully", flush=True)
-
-print("[game_of_life] Importing time, os...", flush=True)
 import time
 import os
-print("[game_of_life] time, os imported successfully", flush=True)
-
-print("[game_of_life] Importing glfw...", flush=True)
 import glfw
-print("[game_of_life] GLFW imported successfully", flush=True)
 
 
 GRID_WIDTH = 128
@@ -85,38 +72,24 @@ def create_initial_state():
 
 
 def main():
-    print("Game of Life (Fully Bindless) - Press Escape to exit", flush=True)
+    print("Game of Life (Fully Bindless) - Press Escape to exit")
 
     # Initialize GLFW
-    print("[game_of_life] Initializing GLFW...", flush=True)
     if not glfw.init():
         raise RuntimeError("Failed to initialize GLFW")
-    print("[game_of_life] GLFW initialized", flush=True)
 
-    print("[game_of_life] Setting window hints...", flush=True)
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
     glfw.window_hint(glfw.RESIZABLE, True)
-    print("[game_of_life] Window hints set", flush=True)
 
-    print("[game_of_life] Creating GLFW window...", flush=True)
     window = glfw.create_window(800, 800, "Game of Life (Fully Bindless)", None, None)
     if not window:
         glfw.terminate()
         raise RuntimeError("Failed to create GLFW window")
-    print("[game_of_life] GLFW window created", flush=True)
 
     # Create Goldy device and surface
-    print("[game_of_life] Creating Goldy instance...", flush=True)
     instance = goldy.Instance()
-    print("[game_of_life] Goldy instance created", flush=True)
-    
-    print("[game_of_life] Creating device...", flush=True)
     device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
-    print("[game_of_life] Device created", flush=True)
-    
-    print("[game_of_life] Creating surface from GLFW window...", flush=True)
     surface = goldy.Surface.from_glfw(device, window)
-    print("[game_of_life] Surface created", flush=True)
 
     # Load shaders
     compute_shader = goldy.ShaderModule.from_slang(device, load_shader("game_of_life.slang"))
@@ -156,8 +129,6 @@ def main():
     # CI mode: exit after a few frames to avoid hanging
     ci_mode = os.environ.get('CI') == 'true' or os.environ.get('GITHUB_ACTIONS') == 'true'
     max_frames = 10 if ci_mode else float('inf')
-    if ci_mode:
-        print(f"[game_of_life] CI mode detected, will exit after {max_frames} frames", flush=True)
 
     # Handle window resize
     def on_resize(win, w, h):
@@ -172,8 +143,6 @@ def main():
 
     glfw.set_key_callback(window, on_key)
 
-    print("[game_of_life] Entering render loop...", flush=True)
-    
     # Main render loop
     while not glfw.window_should_close(window) and frame_count < max_frames:
         glfw.poll_events()
@@ -230,14 +199,9 @@ def main():
         surface.present(frame)
         
         frame_count += 1
-        if ci_mode and frame_count % 5 == 0:
-            print(f"[game_of_life] Rendered {frame_count} frames...", flush=True)
         
-    print(f"[game_of_life] Render loop complete after {frame_count} frames", flush=True)
     glfw.terminate()
-    print("[game_of_life] GLFW terminated", flush=True)
 
 
 if __name__ == '__main__':
     main()
-    print("[game_of_life] Script completed successfully", flush=True)
