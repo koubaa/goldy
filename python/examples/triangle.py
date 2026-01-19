@@ -4,7 +4,6 @@
 This example demonstrates the Surface API for zero-copy GPU presentation.
 
 Usage:
-    pip install glfw
     python windowed.py
 """
 
@@ -12,11 +11,7 @@ import goldy
 import numpy as np
 import math
 
-try:
-    import glfw
-except ImportError:
-    print("This example requires GLFW. Install with: pip install glfw")
-    exit(1)
+import glfw
 
 
 def main():

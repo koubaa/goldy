@@ -4,7 +4,6 @@
 Demonstrates fragment shader with time-based animation using the Surface API.
 
 Usage:
-    pip install glfw
     python gradient.py
 """
 
@@ -13,11 +12,7 @@ import numpy as np
 import time
 import os
 
-try:
-    import glfw
-except ImportError:
-    print("This example requires GLFW. Install with: pip install glfw")
-    exit(1)
+import glfw
 
 
 def load_shader(name):

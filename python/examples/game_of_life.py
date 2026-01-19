@@ -8,7 +8,6 @@ This example demonstrates:
 4. Fully bindless resource access via push constants
 
 Usage:
-    pip install glfw
     python game_of_life.py
 """
 
@@ -16,12 +15,7 @@ import goldy
 import numpy as np
 import time
 import os
-
-try:
-    import glfw
-except ImportError:
-    print("This example requires GLFW. Install with: pip install glfw")
-    exit(1)
+import glfw
 
 
 GRID_WIDTH = 128
