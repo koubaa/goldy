@@ -86,49 +86,49 @@ impl PyBuffer {
 /// Returns (bytes, element_stride) where element_stride is the size of each element in bytes.
 fn extract_bytes_with_stride(data: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, u32)> {
     // Try numpy array first (most common case)
-    if let Ok(arr) = data.downcast::<PyArray1<f32>>() {
+    if let Ok(arr) = data.cast::<PyArray1<f32>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((bytemuck::cast_slice(slice).to_vec(), 4)); // f32 = 4 bytes
     }
 
-    if let Ok(arr) = data.downcast::<PyArray1<f64>>() {
+    if let Ok(arr) = data.cast::<PyArray1<f64>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((bytemuck::cast_slice(slice).to_vec(), 8)); // f64 = 8 bytes
     }
 
-    if let Ok(arr) = data.downcast::<PyArray1<i32>>() {
+    if let Ok(arr) = data.cast::<PyArray1<i32>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((bytemuck::cast_slice(slice).to_vec(), 4)); // i32 = 4 bytes
     }
 
-    if let Ok(arr) = data.downcast::<PyArray1<u32>>() {
+    if let Ok(arr) = data.cast::<PyArray1<u32>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((bytemuck::cast_slice(slice).to_vec(), 4)); // u32 = 4 bytes
     }
 
-    if let Ok(arr) = data.downcast::<PyArray1<i16>>() {
+    if let Ok(arr) = data.cast::<PyArray1<i16>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((bytemuck::cast_slice(slice).to_vec(), 2)); // i16 = 2 bytes
     }
 
-    if let Ok(arr) = data.downcast::<PyArray1<u16>>() {
+    if let Ok(arr) = data.cast::<PyArray1<u16>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((bytemuck::cast_slice(slice).to_vec(), 2)); // u16 = 2 bytes
     }
 
-    if let Ok(arr) = data.downcast::<PyArray1<i8>>() {
+    if let Ok(arr) = data.cast::<PyArray1<i8>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((bytemuck::cast_slice(slice).to_vec(), 1)); // i8 = 1 byte
     }
 
-    if let Ok(arr) = data.downcast::<PyArray1<u8>>() {
+    if let Ok(arr) = data.cast::<PyArray1<u8>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
         return Ok((slice.to_vec(), 1)); // u8 = 1 byte
