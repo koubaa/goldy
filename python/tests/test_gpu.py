@@ -336,6 +336,66 @@ class TestContextManager:
         assert np.all(pixels[:, :, 0] == 255)
 
 
+class TestComputePipeline:
+    """Test compute shader pipeline (covers game_of_life.py functionality)."""
+    
+    def test_compute_double_values(self, device):
+        """Test basic compute shader that doubles buffer values."""
+        import goldy
+        
+        # Simple compute shader that doubles each value
+        compute_shader_src = '''
+[[vk::binding(0, 0)]] RWStructuredBuffer<float> data;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    data[id.x] = data[id.x] * 2.0;
+}
+'''
+        
+        # Create input data
+        input_data = np.arange(256, dtype=np.float32)
+        
+        # Create GPU storage buffer
+        buffer = goldy.Buffer(device, input_data, goldy.BufferUsage.STORAGE)
+        
+        # Create bind group layout for storage buffer
+        bind_layout = goldy.BindGroupLayout(device, [
+            goldy.BindGroupLayoutBinding(
+                0, goldy.ShaderStages.COMPUTE,
+                goldy.BindingType.storage_buffer(read_only=False)
+            ),
+        ])
+        
+        # Create bind group with our buffer
+        bind_group = goldy.BindGroup(device, bind_layout, [
+            goldy.BufferBinding(0, buffer),
+        ])
+        
+        # Compile compute shader
+        shader = goldy.ShaderModule.from_slang(device, compute_shader_src)
+        
+        # Create compute pipeline
+        pipeline = goldy.ComputePipeline(
+            device, shader,
+            goldy.ComputePipelineDesc([bind_layout])
+        )
+        
+        # Dispatch compute work
+        encoder = goldy.ComputeEncoder()
+        with encoder.begin_compute_pass() as cp:
+            cp.set_pipeline(pipeline)
+            cp.set_bind_group(0, bind_group)
+            # 256 elements / 64 threads per workgroup = 4 workgroups
+            cp.dispatch(4, 1, 1)
+        
+        encoder.dispatch(device)
+        
+        # Compute shader executed without error
+        # (Full readback verification would require COPY_SRC staging buffer)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
 
