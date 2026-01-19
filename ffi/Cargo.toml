@@ -28,5 +28,5 @@ raw-window-handle = "0.6"
 
 [build-dependencies]
 # C header generation
-cbindgen = "0.28"
+cbindgen = "0.29"
 
