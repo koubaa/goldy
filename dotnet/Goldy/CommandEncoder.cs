@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Goldy.Native;
 
 namespace Goldy;
@@ -68,12 +69,29 @@ public sealed class CommandEncoder
     }
 
     /// <summary>
-    /// Set a bind group for shader resources.
+    /// Set push constants for resource binding.
+    /// The indices are pushed in order, so buffers[0] becomes index 0,
+    /// buffers[1] becomes index 1, etc.
     /// </summary>
-    public void SetBindGroup(uint index, BindGroup bindGroup)
+    /// <param name="buffers">Buffers to pass to the shader via push constants.</param>
+    public void SetPushConstants(params Buffer[] buffers)
     {
         EnsureNotConsumed();
-        NativeMethods.EncoderSetBindGroup(_handle, index, bindGroup.Handle);
+        if (buffers.Length == 0)
+            return;
+
+        // Collect buffer handles into an array
+        Span<nint> handles = stackalloc nint[buffers.Length];
+        for (int i = 0; i < buffers.Length; i++)
+            handles[i] = buffers[i].Handle;
+
+        unsafe
+        {
+            fixed (nint* ptr = handles)
+            {
+                NativeMethods.EncoderSetPushConstants(_handle, (nint)ptr, (uint)buffers.Length);
+            }
+        }
     }
 
     /// <summary>

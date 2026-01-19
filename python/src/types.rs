@@ -572,6 +572,16 @@ impl PyVertexBufferLayout {
         }
     }
 
+    /// Create an empty layout (for shaders that generate vertices procedurally).
+    ///
+    /// Use this for fullscreen triangle shaders that use SV_VertexID.
+    #[staticmethod]
+    fn empty() -> Self {
+        PyVertexBufferLayout {
+            inner: goldy::VertexBufferLayout::default(),
+        }
+    }
+
     /// Stride in bytes between vertices.
     #[getter]
     fn stride(&self) -> u32 {

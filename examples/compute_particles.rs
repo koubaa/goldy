@@ -8,10 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
-    BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
-    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    ShaderStages, Surface, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -54,11 +53,10 @@ struct RenderState {
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
+    // Buffer
     particle_buffer: Buffer,
-    compute_bind_group: BindGroup,
     // Graphics resources
     render_pipeline: RenderPipeline,
-    render_bind_group: BindGroup,
     // Frame counter for debug
     frame_count: u32,
 }
@@ -107,55 +105,18 @@ impl RenderState {
             BufferUsage::STORAGE | BufferUsage::VERTEX,
         )?;
 
-        // Compute bind group layout (particles RW)
-        let compute_bind_layout = BindGroupLayout::new(
-            &device,
-            &[BindGroupLayoutBinding {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::StorageBuffer { read_only: false },
-            }],
-        )?;
+        // Create compute pipeline
+        let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        let compute_bind_group = BindGroup::new(
-            &device,
-            &compute_bind_layout,
-            &[BufferBinding::new(0, &particle_buffer)],
-        )?;
-
-        let compute_pipeline = ComputePipeline::new(
-            &device,
-            &compute_shader,
-            &ComputePipelineDesc {
-                bind_group_layouts: &[&compute_bind_layout],
-            },
-        )?;
-
-        // Render bind group layout (particles read-only for vertex shader)
-        let render_bind_layout = BindGroupLayout::new(
-            &device,
-            &[BindGroupLayoutBinding {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::StorageBuffer { read_only: true },
-            }],
-        )?;
-
-        let render_bind_group = BindGroup::new(
-            &device,
-            &render_bind_layout,
-            &[BufferBinding::new(0, &particle_buffer)],
-        )?;
-
+        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
             &render_shader,
             &RenderPipelineDesc {
-                vertex_layout: VertexBufferLayout::default(), // Not used, we read from storage buffer
+                vertex_layout: VertexBufferLayout::empty(), // Shader uses SV_VertexID, not vertex attributes
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
-                bind_group_layouts: &[&render_bind_layout],
                 ..Default::default()
             },
         )?;
@@ -171,9 +132,7 @@ impl RenderState {
             surface,
             compute_pipeline,
             particle_buffer,
-            compute_bind_group,
             render_pipeline,
-            render_bind_group,
             frame_count: 0,
         })
     }
@@ -186,7 +145,8 @@ impl RenderState {
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            pass.set_bind_group(0, &self.compute_bind_group);
+            // Pass buffer indices via push constants
+            pass.set_push_constants(&[&self.particle_buffer]);
             // Dispatch enough workgroups to cover all particles (64 threads per group)
             let workgroups = (NUM_PARTICLES + 63) / 64;
             pass.dispatch(workgroups, 1, 1);
@@ -209,7 +169,8 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            pass.set_bind_group(0, &self.render_bind_group);
+            // Pass buffer indices via push constants
+            pass.set_push_constants(&[&self.particle_buffer]);
             // Draw 6 vertices (quad) per particle instance
             pass.draw(0..6, 0..NUM_PARTICLES);
         }
@@ -231,7 +192,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy Compute Particles")
+                            .with_title("Goldy - Compute Particles")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
                     .expect("Failed to create window"),

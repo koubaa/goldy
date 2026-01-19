@@ -1,11 +1,5 @@
 // Interactive Mandelbrot fractal explorer
 // Uses goldy_exp module for vertex format and color utilities
-//
-// ## Bindless Support
-//
-// When __BINDLESS__ is defined (Metal Argument Buffers Tier 2):
-// - Uniforms are accessed via ParameterBlock for argument buffer support
-// - Traditional binding syntax works as fallback
 
 import goldy_exp;
 
@@ -16,20 +10,31 @@ struct ViewUniforms {
     float _padding;  // Align to 16 bytes
 };
 
-#ifdef __BINDLESS__
-// Bindless mode: Use ParameterBlock for Metal argument buffer support
+#if defined(__METAL__)
+// Metal: Use ParameterBlock for argument buffer support
 struct MandelbrotResources {
     ConstantBuffer<ViewUniforms> uniforms;
 };
 ParameterBlock<MandelbrotResources> gResources;
 #define CENTER gResources.uniforms.center
 #define ZOOM gResources.uniforms.zoom
+
+#elif defined(__SPIRV__)
+// Vulkan: Use push constants for indices + descriptor array
+import goldy_exp.buffer_indices;
+
+// Global descriptor array of uniform buffers
+[[vk::binding(1, 0)]] ConstantBuffer<ViewUniforms> g_UniformBuffers[];
+#define CENTER g_UniformBuffers[getBufferIndex(0)].center
+#define ZOOM g_UniformBuffers[getBufferIndex(0)].zoom
+
 #else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<ViewUniforms> uniforms;
-#define CENTER uniforms.center
-#define ZOOM uniforms.zoom
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
+    uint uniformsIndex;
+};
+#define CENTER (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).center
+#define ZOOM (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).zoom
 #endif
 
 // Vertex-less fullscreen triangle - generates geometry from vertex index

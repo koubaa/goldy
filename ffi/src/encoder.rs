@@ -1,6 +1,5 @@
 //! FFI bindings for CommandEncoder.
 
-use crate::bind_group::GoldyBindGroup;
 use crate::buffer::GoldyBuffer;
 use crate::pipeline::GoldyRenderPipeline;
 use crate::types::{GoldyColor, GoldyIndexFormat};
@@ -106,21 +105,38 @@ pub unsafe extern "C" fn goldy_encoder_set_vertex_buffer_offset(
     pass.set_vertex_buffer_offset(slot, &(*buffer).inner, offset);
 }
 
-/// Set a bind group.
+/// Set push constants for resource binding.
+///
+/// Pass the buffers whose indices should be pushed to the shader.
+/// The indices are pushed in order, so `buffers[0]` becomes index 0,
+/// `buffers[1]` becomes index 1, etc.
 ///
 /// # Safety
-/// All pointers must be valid.
+/// All pointers must be valid. The buffers array must contain buffer_count elements.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_encoder_set_bind_group(
+pub unsafe extern "C" fn goldy_encoder_set_push_constants(
     encoder: *mut GoldyCommandEncoder,
-    index: u32,
-    bind_group: *const GoldyBindGroup,
+    buffers: *const *const GoldyBuffer,
+    buffer_count: u32,
 ) {
-    if encoder.is_null() || bind_group.is_null() {
+    if encoder.is_null() || (buffer_count > 0 && buffers.is_null()) {
         return;
     }
+
+    // Convert array of buffer pointers to slice of Buffer references
+    let buffer_refs: Vec<&goldy::Buffer> = (0..buffer_count as usize)
+        .filter_map(|i| {
+            let buf_ptr = *buffers.add(i);
+            if buf_ptr.is_null() {
+                None
+            } else {
+                Some(&(*buf_ptr).inner)
+            }
+        })
+        .collect();
+
     let mut pass = (*encoder).inner.begin_render_pass();
-    pass.set_bind_group(index, &(*bind_group).inner);
+    pass.set_push_constants(&buffer_refs);
 }
 
 /// Set an index buffer.

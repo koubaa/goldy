@@ -3,10 +3,9 @@
 //! Run with: cargo test --test generate_screenshots -- --nocapture
 
 use goldy::{
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, Buffer, BufferBinding,
-    BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, ComputePipelineDesc,
-    Device, DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, ShaderModule, ShaderStages, TextureFormat, Vertex2D, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, Device,
+    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget,
+    ShaderModule, TextureFormat, Vertex2D, VertexBufferLayout,
 };
 use std::path::Path;
 
@@ -253,75 +252,9 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     let buffer_b = Buffer::with_data(device, &initial_state, BufferUsage::STORAGE)
         .expect("Failed to create buffer B");
 
-    let compute_bind_layout = BindGroupLayout::new(
-        device,
-        &[
-            BindGroupLayoutBinding {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::StorageBuffer { read_only: true },
-            },
-            BindGroupLayoutBinding {
-                binding: 1,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::StorageBuffer { read_only: false },
-            },
-        ],
-    )
-    .expect("Failed to create compute bind layout");
-
-    let compute_bind_group_a = BindGroup::new(
-        device,
-        &compute_bind_layout,
-        &[
-            BufferBinding::new(0, &buffer_a),
-            BufferBinding::new(1, &buffer_b),
-        ],
-    )
-    .expect("Failed to create compute bind group A");
-
-    let compute_bind_group_b = BindGroup::new(
-        device,
-        &compute_bind_layout,
-        &[
-            BufferBinding::new(0, &buffer_b),
-            BufferBinding::new(1, &buffer_a),
-        ],
-    )
-    .expect("Failed to create compute bind group B");
-
-    let compute_pipeline = ComputePipeline::new(
-        device,
-        &compute_shader,
-        &ComputePipelineDesc {
-            bind_group_layouts: &[&compute_bind_layout],
-        },
-    )
-    .expect("Failed to create compute pipeline");
-
-    let render_bind_layout = BindGroupLayout::new(
-        device,
-        &[BindGroupLayoutBinding {
-            binding: 0,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::StorageBuffer { read_only: true },
-        }],
-    )
-    .expect("Failed to create render bind layout");
-
-    let render_bind_group_a = BindGroup::new(
-        device,
-        &render_bind_layout,
-        &[BufferBinding::new(0, &buffer_a)],
-    )
-    .expect("Failed to create render bind group A");
-
-    let render_bind_group_b = BindGroup::new(
-        device,
-        &render_bind_layout,
-        &[BufferBinding::new(0, &buffer_b)],
-    )
-    .expect("Failed to create render bind group B");
+    // Create pipelines
+    let compute_pipeline =
+        ComputePipeline::new(device, &compute_shader).expect("Failed to create compute pipeline");
 
     let render_pipeline = RenderPipeline::new(
         device,
@@ -331,7 +264,6 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             vertex_layout: VertexBufferLayout::default(),
             topology: PrimitiveTopology::TriangleList,
             target_format: TextureFormat::Rgba8Unorm,
-            bind_group_layouts: &[&render_bind_layout],
             ..Default::default()
         },
     )
@@ -346,10 +278,11 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&compute_pipeline);
+            // Bindless: pass buffer indices via push constants
             if use_buffer_a {
-                pass.set_bind_group(0, &compute_bind_group_a);
+                pass.set_push_constants(&[&buffer_a, &buffer_b]);
             } else {
-                pass.set_bind_group(0, &compute_bind_group_b);
+                pass.set_push_constants(&[&buffer_b, &buffer_a]);
             }
             pass.dispatch(workgroups_x, workgroups_y, 1);
         }
@@ -372,10 +305,11 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         let mut pass = encoder.begin_render_pass();
         pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);
+        // Bindless: pass buffer index via push constants
         if use_buffer_a {
-            pass.set_bind_group(0, &render_bind_group_a);
+            pass.set_push_constants(&[&buffer_a]);
         } else {
-            pass.set_bind_group(0, &render_bind_group_b);
+            pass.set_push_constants(&[&buffer_b]);
         }
         pass.draw(0..3, 0..1);
     }

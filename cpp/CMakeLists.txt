@@ -117,6 +117,42 @@ if(GOLDY_BUILD_EXAMPLES)
 endif()
 
 # =============================================================================
+# Find Slang libraries
+# =============================================================================
+
+# Determine platform for Slang binaries
+if(WIN32)
+    set(SLANG_PLATFORM "windows-x86_64")
+    set(SLANG_LIB_PATTERN "*.dll")
+elseif(APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+        set(SLANG_PLATFORM "macos-aarch64")
+    else()
+        set(SLANG_PLATFORM "macos-x86_64")
+    endif()
+    set(SLANG_LIB_PATTERN "*.dylib")
+else()
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+        set(SLANG_PLATFORM "linux-aarch64")
+    else()
+        set(SLANG_PLATFORM "linux-x86_64")
+    endif()
+    set(SLANG_LIB_PATTERN "*.so")
+endif()
+
+set(SLANG_BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../slang/bin/${SLANG_PLATFORM}")
+
+# Find Slang libraries
+if(EXISTS "${SLANG_BIN_DIR}")
+    file(GLOB SLANG_LIBS "${SLANG_BIN_DIR}/${SLANG_LIB_PATTERN}")
+    message(STATUS "Found ${CMAKE_LISTS_LENGTH} Slang libraries in ${SLANG_BIN_DIR}")
+else()
+    message(WARNING "Slang binaries not found at ${SLANG_BIN_DIR}")
+    message(WARNING "Run slang/download.sh to download Slang binaries")
+    set(SLANG_LIBS "")
+endif()
+
+# =============================================================================
 # Installation
 # =============================================================================
 
@@ -131,7 +167,7 @@ install(
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-# Install native library
+# Install native library (goldy_ffi)
 if(WIN32)
     if(GOLDY_BUILD_FROM_SOURCE)
         install(FILES ${GOLDY_FFI_LIB} DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -142,6 +178,16 @@ if(WIN32)
     endif()
 else()
     install(FILES ${GOLDY_FFI_LIB} DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+
+# Install Slang libraries alongside goldy_ffi
+if(SLANG_LIBS)
+    if(WIN32)
+        install(FILES ${SLANG_LIBS} DESTINATION ${CMAKE_INSTALL_BINDIR})
+    else()
+        install(FILES ${SLANG_LIBS} DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    endif()
+    message(STATUS "Will install Slang libraries to ${CMAKE_INSTALL_BINDIR}")
 endif()
 
 # Install CMake config

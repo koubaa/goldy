@@ -196,29 +196,93 @@ pub unsafe extern "C" fn goldy_surface_frame_height(frame: *const GoldySurfaceFr
     (*frame).inner.height()
 }
 
-// Platform-specific surface creation would go here.
-// For Windows, we'd need HWND; for macOS, NSView/CAMetalLayer; for Linux, Wayland/X11 handles.
-// These are typically better handled at the C# level using raw-window-handle compatible types.
+// Platform-specific surface creation
 
 #[cfg(windows)]
 mod windows_surface {
     use super::*;
+    use raw_window_handle::{
+        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, Win32WindowHandle,
+        WindowsDisplayHandle,
+    };
     use std::ffi::c_void;
+    use std::num::NonZeroIsize;
+
+    /// Wrapper struct to hold Win32 window handles for surface creation.
+    struct Win32Window {
+        hwnd: NonZeroIsize,
+    }
+
+    impl HasWindowHandle for Win32Window {
+        fn window_handle(
+            &self,
+        ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            let handle = Win32WindowHandle::new(self.hwnd);
+            // hinstance is optional for surface creation
+            Ok(unsafe {
+                raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::Win32(handle))
+            })
+        }
+    }
+
+    impl HasDisplayHandle for Win32Window {
+        fn display_handle(
+            &self,
+        ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            let handle = WindowsDisplayHandle::new();
+            Ok(unsafe {
+                raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::Windows(handle))
+            })
+        }
+    }
 
     /// Create a surface from a Win32 HWND.
     ///
+    /// # Arguments
+    /// * `device` - A valid Goldy device pointer
+    /// * `hwnd` - A Win32 HWND (window handle)
+    ///
+    /// # Returns
+    /// A pointer to the created surface, or null on failure.
+    /// Call `goldy_get_last_error()` for error details on failure.
+    ///
     /// # Safety
-    /// The device pointer and hwnd must be valid.
+    /// - The device pointer must be valid and not null.
+    /// - The hwnd must be a valid Win32 window handle.
+    /// - The window must remain valid for the lifetime of the surface.
     #[no_mangle]
     pub unsafe extern "C" fn goldy_surface_create_win32(
-        _device: *const GoldyDevice,
-        _hwnd: *mut c_void,
+        device: *const GoldyDevice,
+        hwnd: *mut c_void,
     ) -> *mut GoldySurface {
-        // This would require implementing raw-window-handle traits for HWND
-        // For now, return null - actual implementation needs platform-specific code
-        set_last_error_from_anyhow(&anyhow::anyhow!(
-            "Win32 surface creation not yet implemented in FFI"
-        ));
-        ptr::null_mut()
+        if device.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Device pointer is null"));
+            return ptr::null_mut();
+        }
+
+        if hwnd.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("HWND is null"));
+            return ptr::null_mut();
+        }
+
+        // Convert the void pointer to NonZeroIsize
+        let hwnd_isize = hwnd as isize;
+        let hwnd_nonzero = match NonZeroIsize::new(hwnd_isize) {
+            Some(h) => h,
+            None => {
+                set_last_error_from_anyhow(&anyhow::anyhow!("HWND is zero"));
+                return ptr::null_mut();
+            }
+        };
+
+        let window = Win32Window { hwnd: hwnd_nonzero };
+
+        match goldy::Surface::new(&(*device).inner, &window) {
+            Ok(surface) => Box::into_raw(Box::new(GoldySurface { inner: surface })),
+            Err(e) => {
+                set_last_error_from_anyhow(&e);
+                ptr::null_mut()
+            }
+        }
     }
 }

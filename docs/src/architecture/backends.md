@@ -6,9 +6,9 @@ Goldy uses a backend abstraction that allows different GPU APIs while maintainin
 
 | Backend | Status | Platforms |
 |---------|--------|-----------|
-| Vulkan | ✅ Implemented | Windows, Linux, (macOS via MoltenVK) |
-| DX12 | ✅ Implemented | Windows |
-| Metal | 🔜 Stub (planned) | macOS, iOS |
+| Vulkan |  Implemented | Windows, Linux |
+| DX12 |  Implemented | Windows |
+| Metal | Implemented | macOS, iOS |
 
 ## Backend Independence
 
@@ -34,8 +34,6 @@ Each backend uses **native idioms**, not translation:
 │   device addr │    │               │    │               │
 └───────────────┘    └───────────────┘    └───────────────┘
 ```
-
-**Key point**: MoltenVK must translate Vulkan → Metal, adding complexity. Goldy's Metal backend would use Metal directly.
 
 ## Vulkan Backend
 
@@ -134,20 +132,55 @@ The backend maps these to native handles internally.
 
 ## Backend Selection
 
-Backend selection based on platform:
+### Default Selection
+
+By default, Goldy selects the platform-preferred backend:
+
+| Platform | Default Backend |
+|----------|-----------------|
+| Windows  | DX12            |
+| Linux    | Vulkan          |
+| macOS    | Metal           |
+
+### Runtime Override
+
+You can override the default backend at runtime using the `GOLDY_BACKEND` environment variable:
+
+```bash
+# Use Vulkan on Windows (instead of DX12)
+GOLDY_BACKEND=vulkan cargo run --example triangle
+
+# Use DX12 explicitly
+GOLDY_BACKEND=dx12 cargo run --example triangle
+
+# Valid values: vulkan (or vk), dx12 (or d3d12), metal (or mtl)
+```
+
+This is useful for:
+- Testing your app on different backends
+- Working around driver bugs
+- Debugging backend-specific issues
+
+### Compile-Time Selection
+
+You can also select backends at compile time using Cargo features. This excludes both the code and dependencies for unselected backends:
+
+```bash
+# Build with only Vulkan backend (excludes DX12 code and dependencies)
+cargo build --no-default-features --features vulkan
+```
+
+For detailed information on feature flags, dependency exclusion, and CI setup, see [Conditional Compilation](conditional-compilation.md).
+
+### Programmatic Selection
+
+The backend can be queried at runtime:
 
 ```rust
-impl Instance {
-    pub fn new() -> Result<Self> {
-        #[cfg(windows)]
-        let backend = Dx12Backend::new()?;  // DX12 on Windows
-        
-        #[cfg(not(windows))]
-        let backend = VulkanBackend::new()?; // Vulkan elsewhere
-        
-        Ok(Self { backend: Box::new(backend) })
-    }
-}
+let instance = Instance::new()?;
+println!("Backend: {:?}", instance.backend_type());
+// Prints: Backend: Dx12  (on Windows)
+// Prints: Backend: Vulkan  (on Linux)
 ```
 
 ## Adding a New Backend

@@ -45,10 +45,6 @@ pub struct VulkanBackend {
     next_pipeline_handle: PipelineHandle,
     compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
     next_compute_pipeline_handle: ComputePipelineHandle,
-    bind_group_layouts: HashMap<BindGroupLayoutHandle, BindGroupLayoutState>,
-    next_bind_group_layout_handle: BindGroupLayoutHandle,
-    bind_groups: HashMap<BindGroupHandle, BindGroupState>,
-    next_bind_group_handle: BindGroupHandle,
     render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
@@ -196,10 +192,6 @@ impl VulkanBackend {
             next_pipeline_handle: 1,
             compute_pipelines: HashMap::new(),
             next_compute_pipeline_handle: 1,
-            bind_group_layouts: HashMap::new(),
-            next_bind_group_layout_handle: 1,
-            bind_groups: HashMap::new(),
-            next_bind_group_handle: 1,
             render_targets: HashMap::new(),
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
@@ -326,10 +318,10 @@ impl VulkanBackend {
         let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
         let device_handle = shader.device_handle;
 
-        // Compile with per-backend Slang compiler (avoids global state issues)
-        let compiled = self
+        // Compile shader with reflection data for resource binding
+        let result = self
             .slang_compiler
-            .compile_with_options(
+            .compile_bindless_with_reflection(
                 &slang_source,
                 crate::slang::ShaderTarget::Spirv,
                 &[(entry_point_name, stage)],
@@ -337,7 +329,12 @@ impl VulkanBackend {
             )
             .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
 
-        let spirv = compiled.as_spirv().context("Invalid SPIR-V output")?;
+        let spirv_data = result
+            .shader
+            .as_spirv()
+            .context("Invalid SPIR-V output")?
+            .to_vec();
+        let reflection = Some(result.reflection);
 
         // Get device
         let logical_device = self
@@ -346,7 +343,9 @@ impl VulkanBackend {
             .context("Shader's device no longer valid")?;
 
         // Create Vulkan shader module
-        let create_info = vk::ShaderModuleCreateInfo::default().code(spirv);
+        // Convert Vec<u8> to &[u32] for SPIR-V
+        let spirv_u32: &[u32] = bytemuck::cast_slice(&spirv_data);
+        let create_info = vk::ShaderModuleCreateInfo::default().code(spirv_u32);
         let module = unsafe {
             logical_device
                 .device
@@ -357,16 +356,30 @@ impl VulkanBackend {
         tracing::debug!(
             "Compiled {} ({} SPIR-V words)",
             entry_point_name,
-            spirv.len()
+            spirv_u32.len()
         );
 
-        // Cache the module - need to re-get shader as mutable
+        // Cache the module and reflection data
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         match stage {
             crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
             crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
             crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
             _ => {} // Already validated above, shouldn't reach here
+        }
+
+        // Store reflection data (merge with existing if any)
+        if let Some(ref new_reflection) = reflection {
+            if let Some(ref mut existing) = shader.reflection {
+                // Merge parameter blocks
+                for pb in &new_reflection.parameter_blocks {
+                    if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                        existing.parameter_blocks.push(pb.clone());
+                    }
+                }
+            } else {
+                shader.reflection = reflection;
+            }
         }
 
         Ok(module)

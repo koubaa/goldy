@@ -1,6 +1,5 @@
 //! Python wrapper for CommandEncoder and RenderPass.
 
-use crate::bind_group::PyBindGroup;
 use crate::buffer::PyBuffer;
 use crate::pipeline::PyRenderPipeline;
 use crate::types::{PyColor, PyIndexFormat};
@@ -138,15 +137,26 @@ impl PyRenderPass {
         });
     }
 
-    /// Set a bind group for shader resources (uniforms, storage buffers).
+    /// Set push constants for resource binding.
+    ///
+    /// Pass the buffers whose indices should be pushed to the shader.
+    /// The indices are pushed in order, so `buffers[0]` becomes index 0,
+    /// `buffers[1]` becomes index 1, etc.
     ///
     /// Args:
-    ///     index: The bind group set index (matches shader's [[vk::binding(N, index)]]).
-    ///     bind_group: The bind group to use.
-    fn set_bind_group(&self, py: Python<'_>, index: u32, bind_group: &PyBindGroup) {
+    ///     buffers: List of buffers to pass to the shader via push constants.
+    ///
+    /// Example:
+    ///     >>> rp.set_push_constants([uniform_buffer])
+    ///     # In shader: g_UniformBuffers[getBufferIndex(0)].time
+    fn set_push_constants(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
         self.encoder.borrow(py).with_encoder(|enc| {
+            // Collect buffer references - deref the Arc to get &Buffer
+            let buffer_refs: Vec<&goldy::Buffer> =
+                buffers.iter().map(|b| b.inner.as_ref()).collect();
+
             let mut pass = enc.begin_render_pass();
-            pass.set_bind_group(index, &bind_group.inner);
+            pass.set_push_constants(&buffer_refs);
         });
     }
 

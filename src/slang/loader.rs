@@ -20,6 +20,8 @@ pub struct SlangLibrary {
     pub destroy_compile_request: FnSpDestroyCompileRequest,
     // Target configuration
     pub add_code_gen_target: FnSpAddCodeGenTarget,
+    pub set_target_profile: FnSpSetTargetProfile,
+    pub find_profile: FnSpFindProfile,
     // Source input
     pub add_translation_unit: FnSpAddTranslationUnit,
     pub add_translation_unit_source_string: FnSpAddTranslationUnitSourceString,
@@ -99,6 +101,12 @@ impl SlangLibrary {
                 *library
                     .get(b"spAddCodeGenTarget\0")
                     .context("Failed to load spAddCodeGenTarget")?;
+            let set_target_profile: FnSpSetTargetProfile = *library
+                .get(b"spSetTargetProfile\0")
+                .context("Failed to load spSetTargetProfile")?;
+            let find_profile: FnSpFindProfile = *library
+                .get(b"spFindProfile\0")
+                .context("Failed to load spFindProfile")?;
             let add_translation_unit: FnSpAddTranslationUnit = *library
                 .get(b"spAddTranslationUnit\0")
                 .context("Failed to load spAddTranslationUnit")?;
@@ -218,6 +226,8 @@ impl SlangLibrary {
                 create_compile_request,
                 destroy_compile_request,
                 add_code_gen_target,
+                set_target_profile,
+                find_profile,
                 add_translation_unit,
                 add_translation_unit_source_string,
                 add_entry_point,
@@ -310,6 +320,13 @@ impl SlangLibrary {
         // Try relative to executable
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
+                // Check directly in exe directory (for FFI deployments where slang-compiler.dll
+                // is copied alongside the FFI DLL, e.g., .NET runtimes)
+                let path = exe_dir.join(lib_name);
+                if path.exists() {
+                    return Some(path);
+                }
+
                 // Check in slang/bin/{platform}/ relative to exe
                 let path = exe_dir
                     .join("slang")
@@ -334,7 +351,7 @@ impl SlangLibrary {
             }
         }
 
-        // Try relative to current directory
+        // Try relative to current directory (for development)
         let path = PathBuf::from("slang")
             .join("bin")
             .join(platform_dir)

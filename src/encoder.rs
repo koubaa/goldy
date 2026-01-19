@@ -1,7 +1,6 @@
 //! Command encoding for GPU operations.
 
 use crate::backend::RenderCommand;
-use crate::bind_group::BindGroup;
 use crate::buffer::Buffer;
 use crate::pipeline::RenderPipeline;
 use crate::types::{Color, IndexFormat};
@@ -100,15 +99,41 @@ impl<'a> RenderPass<'a> {
         });
     }
 
-    /// Set a bind group for shader resources (uniforms, storage buffers).
+    /// Set push constants for resource binding.
     ///
-    /// The `index` corresponds to the bind group set in the shader
-    /// (e.g., `[[vk::binding(0, 0)]]` uses index 0).
-    pub fn set_bind_group(&mut self, index: u32, bind_group: &BindGroup) {
-        self.encoder.commands.push(RenderCommand::SetBindGroup {
-            index,
-            bind_group: bind_group.handle,
+    /// Pass the buffers whose indices should be pushed to the shader.
+    /// The indices are pushed in order, so `buffers[0]` becomes index 0,
+    /// `buffers[1]` becomes index 1, etc.
+    ///
+    /// # Example
+    /// ```ignore
+    /// pass.set_push_constants(&[&uniform_buffer]);
+    /// // In shader: g_UniformBuffers[getBufferIndex(0)].time
+    /// ```
+    pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
+        self.encoder.commands.push(RenderCommand::SetPushConstants {
+            buffers: buffers.iter().map(|b| b.handle).collect(),
         });
+    }
+
+    /// Set push constants with raw u32 indices.
+    ///
+    /// Use this for textures and samplers, or when you already have the resource indices.
+    /// The indices are pushed in order to the shader's push/root constants.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let tex_idx = texture.bindless_index().unwrap();
+    /// let samp_idx = sampler.bindless_index().unwrap();
+    /// pass.set_push_constants_raw(&[tex_idx, samp_idx]);
+    /// // In shader: GET_TEXTURE() and GET_SAMPLER() macros use these indices
+    /// ```
+    pub fn set_push_constants_raw(&mut self, indices: &[u32]) {
+        self.encoder
+            .commands
+            .push(RenderCommand::SetPushConstantsRaw {
+                indices: indices.to_vec(),
+            });
     }
 
     /// Draw primitives.

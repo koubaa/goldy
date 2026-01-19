@@ -1,12 +1,15 @@
 //! Particles example - rain/snow particle system.
 //!
-//! Demonstrates many moving particles with physics using Surface API.
+//! Demonstrates GPU compute + graphics integration using Surface API.
+//! The compute shader updates particle positions, the graphics shader renders them.
 //!
 //! Run with: cargo run --example particles
 
+use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -17,82 +20,31 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const NUM_PARTICLES: usize = 1000;
+const NUM_PARTICLES: u32 = 1000;
 
+/// Particle structure matching the shader layout
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Particle {
-    x: f32,
-    y: f32,
-    vx: f32,
-    vy: f32,
+    position: [f32; 2],
+    velocity: [f32; 2],
     size: f32,
-    color: Color,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
 }
 
-impl Particle {
-    fn new_rain() -> Self {
-        Self {
-            x: random() * 2.0 - 1.0,
-            y: -1.0 - random() * 0.5,
-            vx: (random() - 0.5) * 0.002,
-            vy: 0.01 + random() * 0.02,
-            size: 0.002 + random() * 0.003,
-            color: Color {
-                r: 0.5 + random() * 0.2,
-                g: 0.6 + random() * 0.2,
-                b: 0.9 + random() * 0.1,
-                a: 0.6 + random() * 0.4,
-            },
-        }
-    }
-
-    fn new_snow() -> Self {
-        Self {
-            x: random() * 2.0 - 1.0,
-            y: -1.0 - random() * 0.5,
-            vx: (random() - 0.5) * 0.005,
-            vy: 0.002 + random() * 0.005,
-            size: 0.003 + random() * 0.008,
-            color: Color {
-                r: 0.95 + random() * 0.05,
-                g: 0.95 + random() * 0.05,
-                b: 1.0,
-                a: 0.7 + random() * 0.3,
-            },
-        }
-    }
-
-    fn update(&mut self, is_snow: bool) {
-        self.x += self.vx;
-        self.y += self.vy;
-
-        if is_snow {
-            self.vx += (random() - 0.5) * 0.001;
-            self.vx = self.vx.clamp(-0.01, 0.01);
-        }
-
-        if self.y > 1.0 || self.x < -1.2 || self.x > 1.2 {
-            if is_snow {
-                *self = Self::new_snow();
-            } else {
-                *self = Self::new_rain();
-            }
-        }
-    }
-
-    fn vertices(&self) -> [Vertex2D; 6] {
-        let s = self.size;
-        let c = self.color;
-        [
-            Vertex2D::new(self.x - s, self.y - s * 3.0, c),
-            Vertex2D::new(self.x + s, self.y - s * 3.0, c),
-            Vertex2D::new(self.x + s, self.y + s * 3.0, c),
-            Vertex2D::new(self.x - s, self.y - s * 3.0, c),
-            Vertex2D::new(self.x + s, self.y + s * 3.0, c),
-            Vertex2D::new(self.x - s, self.y + s * 3.0, c),
-        ]
-    }
+/// Uniform parameters for the shaders
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ParticleParams {
+    is_snow: f32,
+    frame: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
+// Simple pseudo-random for initialization
 static mut SEED: u32 = 42;
 fn random() -> f32 {
     unsafe {
@@ -101,96 +53,183 @@ fn random() -> f32 {
     }
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
+fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_env_filter("info").init();
+    println!("Goldy Particles Example");
+    println!("  Space - Toggle rain/snow");
+    println!("  Escape - Exit");
 
-struct App {
-    instance: Instance,
-    device: Option<Arc<goldy::Device>>,
-    pipeline: Option<RenderPipeline>,
-    shader: Option<ShaderModule>,
-    window: Option<Arc<Window>>,
-    surface: Option<Surface>,
-    particles: Vec<Particle>,
-    is_snow: bool,
-    vertex_buffers: Vec<Buffer>,
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = App::default();
+    event_loop.run_app(&mut app)?;
+
+    Ok(())
 }
 
-impl App {
-    fn new() -> anyhow::Result<Self> {
-        let particles: Vec<Particle> = (0..NUM_PARTICLES).map(|_| Particle::new_rain()).collect();
-        Ok(Self {
-            instance: Instance::new()?,
-            device: None,
-            pipeline: None,
-            shader: None,
-            window: None,
-            surface: None,
-            particles,
-            is_snow: false,
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
-        })
-    }
+#[derive(Default)]
+struct App {
+    state: Option<RenderState>,
+}
 
-    fn toggle_mode(&mut self) {
-        self.is_snow = !self.is_snow;
-        for p in &mut self.particles {
-            if self.is_snow {
-                *p = Particle::new_snow();
-            } else {
-                *p = Particle::new_rain();
-            }
-        }
-        if let Some(w) = &self.window {
-            w.set_title(&format!(
-                "Goldy - {} (Surface API, Space to toggle)",
-                if self.is_snow { "Snow" } else { "Rain" }
-            ));
-        }
-    }
+struct RenderState {
+    window: Arc<Window>,
+    device: Arc<goldy::Device>,
+    surface: Surface,
+    // Compute resources
+    compute_pipeline: ComputePipeline,
+    // Buffers
+    particle_buffer: Buffer,
+    params_buffer: Buffer,
+    // Graphics resources
+    render_pipeline: RenderPipeline,
+    // State
+    is_snow: bool,
+    frame_count: f32,
+}
 
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+impl RenderState {
+    fn new(window: Arc<Window>) -> Result<Self> {
+        let instance = Instance::new()?;
+        let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(
+
+        // Compute shader for particle physics
+        let compute_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
+
+        // Render shader for visualization
+        let render_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
+
+        // Create particle buffer with initial rain particles
+        let particles = Self::create_particles(false);
+        let particle_buffer = Buffer::with_data(
             &device,
-            &shader,
-            &shader,
+            &particles,
+            BufferUsage::STORAGE | BufferUsage::VERTEX,
+        )?;
+
+        // Create params buffer
+        let initial_params = ParticleParams {
+            is_snow: 0.0,
+            frame: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+        let params_buffer = Buffer::with_data(&device, &[initial_params], BufferUsage::UNIFORM)?;
+
+        // Create compute pipeline
+        let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
+
+        // Create render pipeline
+        let render_pipeline = RenderPipeline::new(
+            &device,
+            &render_shader,
+            &render_shader,
             &RenderPipelineDesc {
-                vertex_layout: Vertex2D::layout(),
+                vertex_layout: VertexBufferLayout::empty(),
+                topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
                 ..Default::default()
             },
         )?;
-        self.device = Some(device);
-        self.shader = Some(shader);
-        self.pipeline = Some(pipeline);
-        self.surface = Some(surface);
+
+        println!(
+            "Created rain/snow simulation with {} particles",
+            NUM_PARTICLES
+        );
+
+        Ok(Self {
+            window,
+            device,
+            surface,
+            compute_pipeline,
+            particle_buffer,
+            params_buffer,
+            render_pipeline,
+            is_snow: false,
+            frame_count: 0.0,
+        })
+    }
+
+    fn create_particles(is_snow: bool) -> Vec<Particle> {
+        let mut particles = Vec::with_capacity(NUM_PARTICLES as usize);
+        for _ in 0..NUM_PARTICLES {
+            let x = random() * 2.0 - 1.0;
+            // Start particles distributed across screen so some are immediately visible
+            let y = random() * 2.2 - 1.0; // y from -1.0 to 1.2
+
+            let (vx, vy, size) = if is_snow {
+                (
+                    (random() - 0.5) * 0.005,
+                    -(0.002 + random() * 0.005),
+                    0.003 + random() * 0.008,
+                )
+            } else {
+                (
+                    (random() - 0.5) * 0.002,
+                    -(0.01 + random() * 0.02),
+                    0.002 + random() * 0.003,
+                )
+            };
+
+            particles.push(Particle {
+                position: [x, y],
+                velocity: [vx, vy],
+                size,
+                _pad1: 0.0,
+                _pad2: 0.0,
+                _pad3: 0.0,
+            });
+        }
+        particles
+    }
+
+    fn toggle_mode(&mut self) -> Result<()> {
+        self.is_snow = !self.is_snow;
+
+        // Reinitialize particles for the new mode
+        let particles = Self::create_particles(self.is_snow);
+        self.particle_buffer.write_data(0, &particles)?;
+
+        self.window.set_title(&format!(
+            "Goldy - {} (Space to toggle)",
+            if self.is_snow { "Snow" } else { "Rain" }
+        ));
+
         Ok(())
     }
 
-    fn render_frame(&mut self) -> anyhow::Result<()> {
-        let window = self.window.as_ref().unwrap();
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
+    fn render(&mut self) -> Result<()> {
+        self.frame_count += 1.0;
+
+        // Update params buffer
+        let params = ParticleParams {
+            is_snow: if self.is_snow { 1.0 } else { 0.0 },
+            frame: self.frame_count,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+        self.params_buffer.write_data(0, &[params])?;
+
+        // Run compute pass to update particles
+        let mut compute_encoder = ComputeEncoder::new();
+        {
+            let mut pass = compute_encoder.begin_compute_pass();
+            pass.set_pipeline(&self.compute_pipeline);
+            // Pass buffer indices via push constants
+            pass.set_push_constants(&[&self.particle_buffer, &self.params_buffer]);
+            let workgroups = (NUM_PARTICLES + 63) / 64;
+            pass.dispatch(workgroups, 1, 1);
         }
+        compute_encoder.dispatch(&self.device)?;
 
-        for p in &mut self.particles {
-            p.update(self.is_snow);
-        }
+        // Render particles
+        let frame = self.surface.acquire()?;
 
-        let mut vertices: Vec<Vertex2D> = Vec::with_capacity(NUM_PARTICLES * 6);
-        for p in &self.particles {
-            vertices.extend_from_slice(&p.vertices());
-        }
-
-        let device = self.device.as_ref().unwrap();
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
-
-        let bg = if self.is_snow {
+        let bg_color = if self.is_snow {
             Color {
                 r: 0.05,
                 g: 0.05,
@@ -206,87 +245,84 @@ impl App {
             }
         };
 
-        let frame = surface.acquire()?;
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
-
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
-            pass.clear(bg);
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.draw(0..vertices.len() as u32, 0..1);
+            pass.clear(bg_color);
+            pass.set_pipeline(&self.render_pipeline);
+            // Pass buffer indices via push constants
+            pass.set_push_constants(&[&self.particle_buffer, &self.params_buffer]);
+            // Draw 6 vertices (quad) per particle instance
+            pass.draw(0..6, 0..NUM_PARTICLES);
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
-        self.vertex_buffers.push(vertex_buffer);
-        Ok(())
-    }
+        self.surface.present(frame)?;
 
-    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
-            }
-        }
+        self.window.request_redraw();
+        Ok(())
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        if self.state.is_none() {
             let window = Arc::new(
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Rain (Surface API, Space to toggle)")
+                            .with_title("Goldy - Rain (Space to toggle)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
-                    .unwrap(),
+                    .expect("Failed to create window"),
             );
-            self.window = Some(window.clone());
-            self.init_gpu(&window).unwrap();
-            window.request_redraw();
+
+            match RenderState::new(window.clone()) {
+                Ok(state) => {
+                    self.state = Some(state);
+                    window.request_redraw();
+                }
+                Err(e) => {
+                    eprintln!("Failed to create render state: {}", e);
+                    event_loop.exit();
+                }
+            }
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                match event.logical_key {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    Key::Named(NamedKey::Space) => self.toggle_mode(),
-                    _ => {}
+                if let Some(state) = &mut self.state {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Escape) => event_loop.exit(),
+                        Key::Named(NamedKey::Space) => {
+                            if let Err(e) = state.toggle_mode() {
+                                eprintln!("Failed to toggle mode: {}", e);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(state) = &mut self.state {
+                    if size.width > 0 && size.height > 0 {
+                        state.surface.resize(size.width, size.height).ok();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
-                }
-                self.window.as_ref().unwrap().request_redraw();
-            }
-            WindowEvent::Resized(new_size) => {
-                self.handle_resize(new_size);
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                if let Some(state) = &mut self.state {
+                    if let Err(e) = state.render() {
+                        eprintln!("Render error: {}", e);
+                    }
                 }
             }
             _ => {}
         }
     }
-}
-
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
-    println!("Goldy Particles Example");
-    println!("  Space - Toggle rain/snow");
-    println!("  Escape - Exit");
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new()?)?;
-    Ok(())
 }

@@ -33,9 +33,11 @@ impl PyBuffer {
     ///     >>> buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
     #[new]
     fn new(device: &PyDevice, data: &Bound<'_, PyAny>, usage: PyBufferUsage) -> PyResult<Self> {
-        let bytes = extract_bytes(data)?;
+        let (bytes, element_stride) = extract_bytes_with_stride(data)?;
+        // Use the correct element stride for StructuredBuffer views on DX12
         let buffer =
-            goldy::Buffer::with_bytes(&device.inner, &bytes, usage.into()).into_py_result()?;
+            goldy::Buffer::with_bytes_stride(&device.inner, &bytes, usage.into(), element_stride)
+                .into_py_result()?;
 
         Ok(PyBuffer {
             inner: Arc::new(buffer),
@@ -65,7 +67,7 @@ impl PyBuffer {
     ///     offset: Byte offset to write at.
     ///     data: Data to write as numpy array or bytes.
     fn write(&self, offset: u64, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let bytes = extract_bytes(data)?;
+        let (bytes, _stride) = extract_bytes_with_stride(data)?;
         self.inner.write(offset, &bytes).into_py_result()
     }
 
@@ -80,60 +82,61 @@ impl PyBuffer {
     }
 }
 
-/// Extract bytes from a Python object (numpy array or bytes).
-fn extract_bytes(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+/// Extract bytes and element stride from a Python object (numpy array or bytes).
+/// Returns (bytes, element_stride) where element_stride is the size of each element in bytes.
+fn extract_bytes_with_stride(data: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, u32)> {
     // Try numpy array first (most common case)
     if let Ok(arr) = data.downcast::<PyArray1<f32>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(bytemuck::cast_slice(slice).to_vec());
+        return Ok((bytemuck::cast_slice(slice).to_vec(), 4)); // f32 = 4 bytes
     }
 
     if let Ok(arr) = data.downcast::<PyArray1<f64>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(bytemuck::cast_slice(slice).to_vec());
+        return Ok((bytemuck::cast_slice(slice).to_vec(), 8)); // f64 = 8 bytes
     }
 
     if let Ok(arr) = data.downcast::<PyArray1<i32>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(bytemuck::cast_slice(slice).to_vec());
+        return Ok((bytemuck::cast_slice(slice).to_vec(), 4)); // i32 = 4 bytes
     }
 
     if let Ok(arr) = data.downcast::<PyArray1<u32>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(bytemuck::cast_slice(slice).to_vec());
+        return Ok((bytemuck::cast_slice(slice).to_vec(), 4)); // u32 = 4 bytes
     }
 
     if let Ok(arr) = data.downcast::<PyArray1<i16>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(bytemuck::cast_slice(slice).to_vec());
+        return Ok((bytemuck::cast_slice(slice).to_vec(), 2)); // i16 = 2 bytes
     }
 
     if let Ok(arr) = data.downcast::<PyArray1<u16>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(bytemuck::cast_slice(slice).to_vec());
+        return Ok((bytemuck::cast_slice(slice).to_vec(), 2)); // u16 = 2 bytes
     }
 
     if let Ok(arr) = data.downcast::<PyArray1<i8>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(bytemuck::cast_slice(slice).to_vec());
+        return Ok((bytemuck::cast_slice(slice).to_vec(), 1)); // i8 = 1 byte
     }
 
     if let Ok(arr) = data.downcast::<PyArray1<u8>>() {
         let readonly = arr.readonly();
         let slice = readonly.as_slice()?;
-        return Ok(slice.to_vec());
+        return Ok((slice.to_vec(), 1)); // u8 = 1 byte
     }
 
     // Try bytes
     if let Ok(bytes) = data.extract::<Vec<u8>>() {
-        return Ok(bytes);
+        return Ok((bytes, 1)); // Raw bytes = 1 byte stride
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(

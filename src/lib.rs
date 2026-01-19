@@ -12,7 +12,6 @@
 //! ```
 
 pub mod backend;
-pub mod bind_group;
 pub mod buffer;
 pub mod compute;
 pub mod device;
@@ -37,12 +36,8 @@ pub mod slang;
 pub mod instrumentation;
 
 // Re-export main types
-pub use bind_group::{
-    BindGroup, BindGroupLayout, BindGroupLayoutBinding, BindingType, BufferBinding, SamplerBinding,
-    ShaderStages, TextureBinding,
-};
 pub use buffer::Buffer;
-pub use compute::{ComputeEncoder, ComputePass, ComputePipeline, ComputePipelineDesc};
+pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};

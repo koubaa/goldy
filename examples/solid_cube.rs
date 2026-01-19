@@ -125,17 +125,6 @@ fn generate_cube_vertices() -> Vec<Vertex3D> {
     vertices
 }
 
-// Generate indices for 6 faces (2 triangles per face)
-fn generate_cube_indices() -> Vec<u16> {
-    let mut indices = Vec::new();
-    for face in 0..6 {
-        let base = (face * 4) as u16;
-        // Two triangles per face
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-    indices
-}
-
 fn rotate_y(p: [f32; 3], angle: f32) -> [f32; 3] {
     let (s, c) = (angle.sin(), angle.cos());
     [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c]
@@ -163,15 +152,12 @@ struct App {
     surface: Option<Surface>,
     start_time: Instant,
     vertex_buffers: Vec<Buffer>,
-    index_buffer: Option<Buffer>,
     cube_vertices: Vec<Vertex3D>,
-    cube_indices: Vec<u16>,
 }
 
 impl App {
     fn new() -> anyhow::Result<Self> {
         let cube_vertices = generate_cube_vertices();
-        let cube_indices = generate_cube_indices();
 
         Ok(Self {
             instance: Instance::new()?,
@@ -182,9 +168,7 @@ impl App {
             surface: None,
             start_time: Instant::now(),
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
-            index_buffer: None,
             cube_vertices,
-            cube_indices,
         })
     }
 
@@ -205,14 +189,10 @@ impl App {
             },
         )?;
 
-        // Create index buffer once
-        let index_buffer = Buffer::with_data(&device, &self.cube_indices, BufferUsage::INDEX)?;
-
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
-        self.index_buffer = Some(index_buffer);
         Ok(())
     }
 
@@ -225,22 +205,64 @@ impl App {
 
         let time = self.start_time.elapsed().as_secs_f32();
 
-        // Transform cube vertices and project to 2D
-        let vertices: Vec<Vertex2D> = self
+        // Transform cube vertices to 3D (rotated but not projected yet)
+        let rotated_3d: Vec<[f32; 3]> = self
             .cube_vertices
             .iter()
-            .map(|v| {
-                let rotated = rotate_x(rotate_y(v.position, time), time * 0.7);
-                let projected = project(rotated, 2.0);
-                Vertex2D::new(projected[0], projected[1], v.color)
+            .map(|v| rotate_x(rotate_y(v.position, time), time * 0.7))
+            .collect();
+
+        // Calculate average Z for each face (4 vertices per face, 6 faces)
+        // Painter's algorithm: sort faces back-to-front (largest Z = furthest = draw first)
+        let mut face_depths: Vec<(usize, f32)> = (0..6)
+            .map(|face_idx| {
+                let base = face_idx * 4;
+                let avg_z = (rotated_3d[base][2]
+                    + rotated_3d[base + 1][2]
+                    + rotated_3d[base + 2][2]
+                    + rotated_3d[base + 3][2])
+                    / 4.0;
+                (face_idx, avg_z)
             })
             .collect();
+
+        // Sort by Z descending (furthest first)
+        face_depths.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        // Build vertices and indices in sorted order
+        let mut vertices = Vec::with_capacity(24);
+        let mut sorted_indices = Vec::with_capacity(36);
+
+        for (new_base, (face_idx, _)) in face_depths.iter().enumerate() {
+            let old_base = face_idx * 4;
+            let new_base = (new_base * 4) as u16;
+
+            // Add vertices for this face
+            for i in 0..4 {
+                let projected = project(rotated_3d[old_base + i], 2.0);
+                vertices.push(Vertex2D::new(
+                    projected[0],
+                    projected[1],
+                    self.cube_vertices[old_base + i].color,
+                ));
+            }
+
+            // Add indices for this face (2 triangles)
+            sorted_indices.extend_from_slice(&[
+                new_base,
+                new_base + 1,
+                new_base + 2,
+                new_base,
+                new_base + 2,
+                new_base + 3,
+            ]);
+        }
 
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let index_buffer = self.index_buffer.as_ref().unwrap();
         let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
+        let index_buffer = Buffer::with_data(device.as_ref(), &sorted_indices, BufferUsage::INDEX)?;
 
         let frame = surface.acquire()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
@@ -258,8 +280,8 @@ impl App {
             });
             pass.set_pipeline(pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.set_index_buffer(index_buffer, IndexFormat::Uint16);
-            pass.draw_indexed(0..self.cube_indices.len() as u32, 0, 0..1);
+            pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
+            pass.draw_indexed(0..sorted_indices.len() as u32, 0, 0..1);
         }
 
         frame.render(encoder)?;

@@ -12,5 +12,11 @@
     <ProjectReference Include="..\Goldy\Goldy.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Silk.NET.Windowing" Version="2.22.0" />
+    <!-- Override transitive dependency to fix CVE-2024-43485 and CVE-2024-30105 -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
 </Project>
 

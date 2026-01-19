@@ -174,9 +174,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_vertex_buffer_offset")]
     internal static partial void EncoderSetVertexBufferOffset(nint encoder, uint slot, nint buffer, ulong offset);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_bind_group")]
-    internal static partial void EncoderSetBindGroup(nint encoder, uint index, nint bindGroup);
-
     [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_index_buffer")]
     internal static partial void EncoderSetIndexBuffer(nint encoder, nint buffer, IndexFormat format);
 
@@ -186,35 +183,15 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_encoder_draw_indexed")]
     internal static partial void EncoderDrawIndexed(nint encoder, uint indexStart, uint indexCount, int baseVertex, uint instanceStart, uint instanceCount);
 
-    // ========================================================================
-    // BindGroup
-    // ========================================================================
-
-    [LibraryImport(LibName, EntryPoint = "goldy_bind_group_layout_create")]
-    internal static partial nint BindGroupLayoutCreate(nint device, nint bindings, uint bindingCount);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_bind_group_layout_destroy")]
-    internal static partial void BindGroupLayoutDestroy(nint layout);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_bind_group_create")]
-    internal static partial nint BindGroupCreate(nint device, nint layout, nint bufferBindings, uint bufferBindingCount);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_bind_group_create_with_resources")]
-    internal static partial nint BindGroupCreateWithResources(
-        nint device, nint layout,
-        nint bufferBindings, uint bufferBindingCount,
-        nint textureBindings, uint textureBindingCount,
-        nint samplerBindings, uint samplerBindingCount);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_bind_group_destroy")]
-    internal static partial void BindGroupDestroy(nint bindGroup);
+    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_push_constants")]
+    internal static partial void EncoderSetPushConstants(nint encoder, nint buffers, uint bufferCount);
 
     // ========================================================================
     // Compute
     // ========================================================================
 
     [LibraryImport(LibName, EntryPoint = "goldy_compute_pipeline_create")]
-    internal static partial nint ComputePipelineCreate(nint device, nint computeShader, nint bindGroupLayouts, uint bindGroupLayoutCount);
+    internal static partial nint ComputePipelineCreate(nint device, nint computeShader);
 
     [LibraryImport(LibName, EntryPoint = "goldy_compute_pipeline_destroy")]
     internal static partial void ComputePipelineDestroy(nint pipeline);
@@ -228,8 +205,8 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_pipeline")]
     internal static partial void ComputeEncoderSetPipeline(nint encoder, nint pipeline);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_bind_group")]
-    internal static partial void ComputeEncoderSetBindGroup(nint encoder, uint index, nint bindGroup);
+    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_push_constants")]
+    internal static partial void ComputeEncoderSetPushConstants(nint encoder, nint buffers, uint bufferCount);
 
     [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_dispatch")]
     internal static partial void ComputeEncoderDispatch(nint encoder, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
@@ -302,6 +279,16 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_surface_frame_height")]
     internal static partial uint SurfaceFrameHeight(nint frame);
+
+    // ========================================================================
+    // Surface - Platform-specific creation
+    // ========================================================================
+
+    /// <summary>
+    /// Create a surface from a Win32 HWND.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_create_win32")]
+    internal static partial nint SurfaceCreateWin32(nint device, nint hwnd);
 }
 
 /// <summary>
