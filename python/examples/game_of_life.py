@@ -130,7 +130,6 @@ def main():
 
     use_buffer_a = True
     last_update = time.time()
-    frame_count = 0
 
     # Handle window resize
     def on_resize(win, w, h):
@@ -200,10 +199,6 @@ def main():
         frame.render(encoder)
         surface.present(frame)
         
-        frame_count += 1
-        if frame_count == 1 or frame_count % 60 == 0:
-            print(f"Frame {frame_count}, use_buffer_a={use_buffer_a}, should_update={should_update}")
-
     glfw.terminate()
 
 
