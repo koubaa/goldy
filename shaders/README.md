@@ -96,6 +96,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | `goldy_exp/vertex.slang` | Vertex formats and shaders (see below) |
 | `goldy_exp/types.slang` | Common data types: `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `Instance2D` |
 | `goldy_exp/primitives.slang` | Procedural geometry: `quad_local()`, `quad_position()`, `quad_position_rotated()`, `billboard_position()`, `fullscreen_position()`, `fullscreen_uv()` |
+| `goldy_exp/descriptor_handle.slang` | Cross-platform `DescriptorHandle<T>` support (routes by access pattern) |
 
 ### Vertex Formats
 
@@ -194,7 +195,7 @@ const module = device.createShaderModule({ code: wgsl });
 
 | File | Description | Uses Module |
 |------|-------------|-------------|
-| `plasma.slang` | Classic demoscene plasma | ✓ `import goldy_exp` |
+| `plasma.slang` | Classic demoscene plasma (uses `DescriptorHandle<T>`) | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
 | `vertex_color_2d.slang` | Basic 2D position + color | — |
 | `digital_clock.slang` | 7-segment display shader | — |
@@ -224,26 +225,53 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
 | `__SPIRV__` | Targeting Vulkan | Vulkan-specific code (push constants, descriptor arrays) |
 | `__DX12__` | Targeting DX12 | DX12-specific code (root constants, ResourceDescriptorHeap) |
 
-### Cross-Platform Shader Pattern
+### Cross-Platform Resource Binding with `DescriptorHandle<T>`
+
+Goldy shaders use Slang's `DescriptorHandle<T>` for cross-platform bindless resource access.
+This eliminates preprocessor directives entirely:
 
 ```slang
-#if defined(__METAL__)
-    // Metal: use ParameterBlock for argument buffers
-    struct MyResources {
-        ConstantBuffer<MyUniforms> uniforms;
-    };
-    ParameterBlock<MyResources> gResources;
-    #define TIME gResources.uniforms.time
-#elif defined(__SPIRV__)
-    // Vulkan: use push constants + descriptor arrays
-    [[vk::binding(1, 0)]] ConstantBuffer<MyUniforms> g_UniformBuffers[];
-    #define TIME g_UniformBuffers[getBufferIndex(0)].time
-#elif defined(__DX12__)
-    // DX12: use root constants + ResourceDescriptorHeap
-    cbuffer BufferIndices : register(b0) { uint uniformsIndex; };
-    #define TIME (*DescriptorHandle<ConstantBuffer<MyUniforms>>(uint2(uniformsIndex, 0))).time
-#endif
+import goldy_exp;
+
+// Declare resource as a DescriptorHandle - works on ALL platforms!
+uniform DescriptorHandle<ConstantBuffer<TimeUniforms>> uniforms;
+
+[shader("fragment")]
+float4 fs_main(FullscreenVarying input) : SV_Target {
+    float t = (*uniforms).time;  // Dereference to access
+    // ...
+}
 ```
+
+**How it works:**
+- HLSL/DXIL: Compiles to `ResourceDescriptorHeap[index]`
+- SPIRV: Uses Goldy's custom `getDescriptorFromHandle` (auto-included from `goldy_exp`)
+- Metal: Compiles to argument buffer pointer
+
+**See `plasma.slang` for a complete example.**
+
+<details>
+<summary>Technical Details: Vulkan Descriptor Override</summary>
+
+The `goldy_exp` module includes `goldy_exp/descriptor_handle.slang` which provides a custom
+`getDescriptorFromHandle` override for SPIRV. Slang's default bindings don't match Goldy's
+Vulkan descriptor layout.
+
+**Goldy's bindings are organized by ACCESS PATTERN:**
+
+| Binding | Access Pattern | What Hardware Does | Slang Types |
+|---------|----------------|-------------------|-------------|
+| 0 | **Scattered** | Any thread, any address, read/write | `StructuredBuffer<T>`, `RWStructuredBuffer<T>` |
+| 1 | **Broadcast** | All threads same address (cache optimized) | `ConstantBuffer<T>` |
+| 2 | **Interpolated** | Hardware filtering between neighbors | `Texture2D<T>` with sampler |
+| 3 | **Direct Spatial** | 2D/3D indexing, no filtering, read/write | `RWTexture2D<T>` |
+| 4 | **Filter Config** | Settings for interpolated access (not data) | `SamplerState` |
+
+The override routes `DescriptorHandle<T>` dereferences to the correct heap based on
+the resource's access pattern. This is transparent to shader code — just
+`import goldy_exp` and use `DescriptorHandle<T>`.
+
+</details>
 
 ### Tips
 

@@ -120,7 +120,10 @@ impl GpuBackend for VulkanBackend {
             bindless_pipeline_layout,
         ) = {
             // Create descriptor set layout with update-after-bind flag
+            // Bindings organized by ACCESS PATTERN (see types.rs::bindless_bindings)
             let binding_flags = [
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
                 vk::DescriptorBindingFlags::PARTIALLY_BOUND
                     | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
                 vk::DescriptorBindingFlags::PARTIALLY_BOUND
@@ -136,25 +139,31 @@ impl GpuBackend for VulkanBackend {
                     .binding_flags(&binding_flags);
 
             let bindings = [
-                // Storage buffers (binding 0)
+                // Binding 0: Scattered buffer access (read/write)
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::STORAGE_BUFFERS)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                     .stage_flags(vk::ShaderStageFlags::ALL),
-                // Uniform buffers (binding 1)
+                // Binding 1: Broadcast buffer access (read-only uniforms)
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::UNIFORM_BUFFERS)
                     .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                     .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                     .stage_flags(vk::ShaderStageFlags::ALL),
-                // Sampled images (binding 2)
+                // Binding 2: Filtered image reads
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::SAMPLED_IMAGES)
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                     .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                     .stage_flags(vk::ShaderStageFlags::ALL),
-                // Samplers (binding 3)
+                // Binding 3: Unfiltered image access (read/write)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::STORAGE_IMAGES)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Binding 4: Filter configuration
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::SAMPLERS)
                     .descriptor_type(vk::DescriptorType::SAMPLER)
@@ -183,6 +192,10 @@ impl GpuBackend for VulkanBackend {
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::STORAGE_IMAGE,
                     descriptor_count: types::MAX_BINDLESS_RESOURCES,
                 },
                 vk::DescriptorPoolSize {

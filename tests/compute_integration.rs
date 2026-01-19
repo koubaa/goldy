@@ -54,9 +54,11 @@ ParameterBlock<ComputeResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
+// NOTE: Both StructuredBuffer and RWStructuredBuffer use binding 0 (STORAGE_BUFFERS)
+// Binding 1 is reserved for UNIFORM_BUFFERS (ConstantBuffer)
 import goldy_exp.buffer_indices;
 [[vk::binding(0, 0)]] StructuredBuffer<uint> g_ReadBuffers[];
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
 #define INPUT g_ReadBuffers[getBufferIndex(0)]
 #define OUTPUT g_StorageBuffers[getBufferIndex(1)]
 

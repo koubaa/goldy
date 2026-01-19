@@ -271,6 +271,10 @@ impl ShaderLibrary {
                     "goldy_exp/buffer_indices",
                     include_str!("../shaders/goldy_exp/buffer_indices.slang"),
                 ),
+                (
+                    "goldy_exp/descriptor_handle",
+                    include_str!("../shaders/goldy_exp/descriptor_handle.slang"),
+                ),
             ],
         )
     }
@@ -335,6 +339,7 @@ mod tests {
         assert!(lib.has_module("goldy_exp/resources"));
         assert!(lib.has_module("goldy_exp/bindless"));
         assert!(lib.has_module("goldy_exp/buffer_indices"));
+        assert!(lib.has_module("goldy_exp/descriptor_handle"));
     }
 
     #[test]

@@ -1,48 +1,23 @@
 // Classic demoscene plasma effect
-// Uses goldy_exp module for vertex format and color utilities
+// Uses DescriptorHandle<T> for cross-platform bindless resource access
 
 import goldy_exp;
 
-// Uniform structure
 struct TimeUniforms {
     float time;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer support
-struct PlasmaResources {
-    ConstantBuffer<TimeUniforms> uniforms;
-};
-ParameterBlock<PlasmaResources> gResources;
-#define TIME gResources.uniforms.time
-
-#elif defined(__SPIRV__)
-// Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.buffer_indices;
-
-// Global descriptor array of uniform buffers
-[[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-#define TIME g_UniformBuffers[getBufferIndex(0)].time
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0) {
-    uint uniformsIndex;
-};
-#define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
-
-#endif
+uniform DescriptorHandle<ConstantBuffer<TimeUniforms>> uniforms;
 
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
-    // Use vertex-less fullscreen triangle - no vertex buffer needed
     return vs_fullscreen_triangle(vertex_id);
 }
 
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
     float2 uv = scale_uv(input.uv, 4.0);
-    float t = TIME;
+    float t = (*uniforms).time;
     
     // Classic plasma formula
     float v = sin(uv.x + t);
@@ -55,6 +30,5 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
     
     v = v / 2.0;
     
-    // Use rainbow palette from goldy module
     return float4(rainbow(v), 1.0);
 }

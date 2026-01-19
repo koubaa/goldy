@@ -15,7 +15,7 @@ pub const TRIANGLE: &str = include_str!("../shaders/triangle.slang");
 /// Digital clock shader (uses vertex coloring)
 pub const DIGITAL_CLOCK: &str = include_str!("../shaders/digital_clock.slang");
 
-/// Plasma effect shader
+/// Plasma effect shader (uses DescriptorHandle<T> for cross-platform bindless)
 pub const PLASMA: &str = include_str!("../shaders/plasma.slang");
 
 /// Gradient effect shader
@@ -119,5 +119,66 @@ mod tests {
                 name
             );
         }
+    }
+
+    /// Verify PLASMA uses DescriptorHandle<T> (no preprocessor)
+    #[test]
+    fn test_plasma_uses_descriptor_handle() {
+        assert!(
+            PLASMA.contains("DescriptorHandle"),
+            "PLASMA should use DescriptorHandle<T>"
+        );
+        assert!(
+            !PLASMA.contains("#if"),
+            "PLASMA should not contain #if directive"
+        );
+        assert!(
+            !PLASMA.contains("#define"),
+            "PLASMA should not contain #define directive"
+        );
+    }
+
+    /// Test that PLASMA compiles via Slang
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_plasma_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shader_path = manifest_dir.join("shaders");
+        let shader_path_str = shader_path.to_string_lossy();
+
+        // No platform-specific defines needed - DescriptorHandle<T> is cross-platform
+        let defines: Vec<(&str, &str)> = vec![];
+
+        // Test SPIRV compilation (Vulkan)
+        let result = compiler.compile_with_defines(
+            PLASMA,
+            ShaderTarget::Spirv,
+            &[],
+            &[&shader_path_str],
+            &defines,
+        );
+        assert!(
+            result.is_ok(),
+            "PLASMA failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        // Test DXIL compilation (DX12)
+        let result = compiler.compile_with_defines(
+            PLASMA,
+            ShaderTarget::Dxil,
+            &[],
+            &[&shader_path_str],
+            &defines,
+        );
+        assert!(
+            result.is_ok(),
+            "PLASMA failed to compile for DXIL: {:?}",
+            result.err()
+        );
     }
 }

@@ -39,7 +39,10 @@ struct AnimParams {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    println!("Goldy Instancing Example - {} quads (GPU-driven)", NUM_QUADS);
+    println!(
+        "Goldy Instancing Example - {} quads (GPU-driven)",
+        NUM_QUADS
+    );
     println!("Press Escape to exit");
 
     let event_loop = EventLoop::new()?;
@@ -79,14 +82,10 @@ impl RenderState {
         let surface = Surface::new(&device, window.as_ref())?;
 
         // Load shaders
-        let compute_shader = ShaderModule::from_slang(
-            &device,
-            include_str!("../shaders/instancing_update.slang"),
-        )?;
-        let render_shader = ShaderModule::from_slang(
-            &device,
-            include_str!("../shaders/instancing_render.slang"),
-        )?;
+        let compute_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/instancing_update.slang"))?;
+        let render_shader =
+            ShaderModule::from_slang(&device, include_str!("../shaders/instancing_render.slang"))?;
 
         // Create instance buffer with initial positions
         // Positions are static, compute shader updates rotation and color
@@ -102,15 +101,18 @@ impl RenderState {
                 instances.push(Instance2D::new(
                     cx,
                     cy,
-                    0.0,      // rotation - will be updated by compute
+                    0.0, // rotation - will be updated by compute
                     QUAD_SIZE,
                     [1.0, 1.0, 1.0, 1.0], // color - will be updated by compute
                 ));
             }
         }
 
-        let instance_buffer =
-            Buffer::with_data(&device, &instances, BufferUsage::STORAGE | BufferUsage::VERTEX)?;
+        let instance_buffer = Buffer::with_data(
+            &device,
+            &instances,
+            BufferUsage::STORAGE | BufferUsage::VERTEX,
+        )?;
 
         // Create params buffer
         let params = AnimParams {

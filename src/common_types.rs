@@ -69,11 +69,7 @@ pub struct Particle3D {
 
 impl Particle3D {
     /// Create a new particle.
-    pub const fn new(
-        position: [f32; 3],
-        velocity: [f32; 3],
-        lifetime: f32,
-    ) -> Self {
+    pub const fn new(position: [f32; 3], velocity: [f32; 3], lifetime: f32) -> Self {
         Self {
             position,
             velocity,
