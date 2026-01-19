@@ -1,8 +1,7 @@
 /**
- * Goldy C++ Example: Plasma (Fully Bindless)
+ * Goldy C++ Example: Plasma
  *
- * Demonstrates fully BINDLESS rendering:
- * - No BindGroup/BindGroupLayout needed
+ * Demonstrates bindless rendering:
  * - Using set_push_constants() to pass buffer indices to shaders
  * - Time-based animation with uniform buffer updates
  *
@@ -27,7 +26,7 @@ struct Uniforms {
     float time;
 };
 
-// Plasma shader using bindless resource access
+// Plasma shader
 constexpr const char* PLASMA_SHADER = R"(
 import goldy_exp;
 
@@ -35,8 +34,6 @@ import goldy_exp;
 struct TimeUniforms {
     float time;
 };
-
-#ifdef __BINDLESS__
 
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer support
@@ -48,26 +45,19 @@ ParameterBlock<PlasmaResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 
 // Global descriptor array of uniform buffers
 [[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-#define TIME g_UniformBuffers[getBindlessIndex(0)].time
+#define TIME g_UniformBuffers[getBufferIndex(0)].time
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
     uint uniformsIndex;
 };
 #define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
 
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<TimeUniforms> uniforms;
-#define TIME uniforms.time
 #endif
 
 [shader("vertex")]
@@ -112,7 +102,7 @@ void write_ppm(const char* filename, uint32_t width, uint32_t height,
 
 int main() {
     try {
-        std::cout << "Goldy C++ Plasma Example (Fully Bindless)\n";
+        std::cout << "Goldy C++ Plasma Example\n";
         std::cout << "==========================================\n\n";
 
         // Create instance and enumerate adapters
@@ -158,9 +148,9 @@ int main() {
 
         // Compile shader
         goldy::ShaderModule shader(device, PLASMA_SHADER);
-        std::cout << "Compiled plasma shader (bindless)\n";
+        std::cout << "Compiled plasma shader\n";
 
-        // Create pipeline WITHOUT bind group layouts - fully bindless!
+        // Create pipeline
         std::array<GoldyVertexAttribute, 2> attributes = {{
             { 0, GOLDY_VERTEX_FORMAT_FLOAT32X2, 0 },                    // position
             { 1, GOLDY_VERTEX_FORMAT_FLOAT32X2, sizeof(float) * 2 },    // uv
@@ -173,12 +163,9 @@ int main() {
         pipeline_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         pipeline_desc.target_format = GOLDY_TEXTURE_FORMAT_RGBA8_UNORM;
         pipeline_desc.depth_enabled = false;
-        // No bind_group_layouts needed for bindless!
-        pipeline_desc.bind_group_layouts = nullptr;
-        pipeline_desc.bind_group_layout_count = 0;
 
         goldy::RenderPipeline pipeline(device, shader, shader, pipeline_desc);
-        std::cout << "Created render pipeline (bindless - no bind groups)\n";
+        std::cout << "Created render pipeline\n";
 
         // Create render target
         constexpr uint32_t WIDTH = 800;
@@ -201,7 +188,7 @@ int main() {
             goldy::CommandEncoder encoder;
             encoder.clear(goldy::Color::black());
             encoder.set_pipeline(pipeline);
-            // BINDLESS: Pass buffer indices via push constants instead of bind groups!
+            // Pass buffer indices via push constants
             encoder.set_push_constants(uniform_buffer);
             encoder.set_vertex_buffer(0, vertex_buffer);
             encoder.draw(6);  // 6 vertices = 2 triangles = fullscreen quad

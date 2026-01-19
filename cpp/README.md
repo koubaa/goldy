@@ -119,7 +119,6 @@ cmake --build build
 | `goldy::RenderPipeline` | Graphics pipeline |
 | `goldy::RenderTarget` | Offscreen render target |
 | `goldy::CommandEncoder` | Records render commands |
-| `goldy::BindGroup` | Shader resource bindings |
 | `goldy::ComputePipeline` | Compute shader pipeline |
 | `goldy::ComputeEncoder` | Records compute commands |
 | `goldy::Texture` | GPU texture |

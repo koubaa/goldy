@@ -1,17 +1,13 @@
-//! Compute pipeline integration tests (Fully Bindless)
+//! Compute pipeline integration tests.
 //!
-//! These tests verify compute pipeline functionality with actual GPU backends
-//! using the fully bindless resource binding model.
+//! These tests verify compute pipeline functionality with actual GPU backends.
 
 use goldy::{
-    Buffer, BufferUsage, ComputeEncoder, ComputePipeline, ComputePipelineDesc, DeviceType,
-    Instance, ShaderModule,
+    Buffer, BufferUsage, ComputeEncoder, ComputePipeline, DeviceType, Instance, ShaderModule,
 };
 
-/// Simple compute shader that doubles each value in a buffer (fully bindless).
+/// Simple compute shader that doubles each value in a buffer.
 const DOUBLE_SHADER: &str = r#"
-#ifdef __BINDLESS__
-
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer
 struct ComputeResources {
@@ -22,23 +18,17 @@ ParameterBlock<ComputeResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 [[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
-#define DATA g_StorageBuffers[getBindlessIndex(0)]
+#define DATA g_StorageBuffers[getBufferIndex(0)]
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0, space0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
     uint dataBufferIndex;
 };
 #define DATA (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(dataBufferIndex, 0)))
 
-#endif
-
-#else
-// Traditional binding mode (fallback)
-[[vk::binding(0, 0)]] RWStructuredBuffer<uint> data;
-#define DATA data
 #endif
 
 [shader("compute")]
@@ -48,10 +38,8 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-/// Compute shader that reads from one buffer and writes to another (fully bindless).
+/// Compute shader that reads from one buffer and writes to another.
 const COPY_SHADER: &str = r#"
-#ifdef __BINDLESS__
-
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer
 struct ComputeResources {
@@ -64,29 +52,21 @@ ParameterBlock<ComputeResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 [[vk::binding(0, 0)]] StructuredBuffer<uint> g_ReadBuffers[];
 [[vk::binding(1, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
-#define INPUT g_ReadBuffers[getBindlessIndex(0)]
-#define OUTPUT g_StorageBuffers[getBindlessIndex(1)]
+#define INPUT g_ReadBuffers[getBufferIndex(0)]
+#define OUTPUT g_StorageBuffers[getBufferIndex(1)]
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0, space0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
     uint inputBufferIndex;
     uint outputBufferIndex;
 };
 #define INPUT (*DescriptorHandle<StructuredBuffer<uint>>(uint2(inputBufferIndex, 0)))
 #define OUTPUT (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(outputBufferIndex, 0)))
 
-#endif
-
-#else
-// Traditional binding mode (fallback)
-[[vk::binding(0, 0)]] StructuredBuffer<uint> input;
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> output;
-#define INPUT input
-#define OUTPUT output
 #endif
 
 [shader("compute")]
@@ -107,14 +87,7 @@ fn test_compute_pipeline_creation() {
     let shader =
         ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
 
-    // Fully bindless: no bind group layouts needed
-    let pipeline = ComputePipeline::new(
-        &device,
-        &shader,
-        &ComputePipelineDesc {
-            bind_group_layouts: &[],
-        },
-    );
+    let pipeline = ComputePipeline::new(&device, &shader);
 
     assert!(
         pipeline.is_ok(),
@@ -143,7 +116,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
 
-    let pipeline = ComputePipeline::new(&device, &shader, &ComputePipelineDesc::default());
+    let pipeline = ComputePipeline::new(&device, &shader);
 
     assert!(
         pipeline.is_ok(),
@@ -171,8 +144,8 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
 
-    let pipeline = ComputePipeline::new(&device, &shader, &ComputePipelineDesc::default())
-        .expect("Failed to create compute pipeline");
+    let pipeline =
+        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -201,22 +174,15 @@ fn test_compute_with_uav_buffer() {
     let buffer = Buffer::with_data(&device, &initial_data, BufferUsage::STORAGE)
         .expect("Failed to create buffer");
 
-    // Fully bindless: no bind group layouts needed
-    let pipeline = ComputePipeline::new(
-        &device,
-        &shader,
-        &ComputePipelineDesc {
-            bind_group_layouts: &[],
-        },
-    )
-    .expect("Failed to create compute pipeline");
+    let pipeline =
+        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
-    // Dispatch using fully bindless push constants
+    // Dispatch compute
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // Fully bindless: pass buffer indices directly via push constants
+        // Pass buffer indices via push constants
         pass.set_push_constants(&[&buffer]);
         pass.dispatch(1, 1, 1); // 64 threads total
     }
@@ -248,22 +214,15 @@ fn test_compute_with_srv_and_uav() {
     let output_buffer = Buffer::with_data(&device, &output_data, BufferUsage::STORAGE)
         .expect("Failed to create output buffer");
 
-    // Fully bindless: no bind group layouts needed
-    let pipeline = ComputePipeline::new(
-        &device,
-        &shader,
-        &ComputePipelineDesc {
-            bind_group_layouts: &[],
-        },
-    )
-    .expect("Failed to create compute pipeline");
+    let pipeline =
+        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
-    // Dispatch using fully bindless push constants
+    // Dispatch compute
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // Fully bindless: pass buffer indices directly via push constants
+        // Pass buffer indices via push constants
         // Order matches shader slots: [input (slot 0), output (slot 1)]
         pass.set_push_constants(&[&input_buffer, &output_buffer]);
         pass.dispatch(1, 1, 1); // 64 threads

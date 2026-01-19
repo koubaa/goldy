@@ -4,7 +4,7 @@
 add_executable(triangle triangle.cpp)
 target_link_libraries(triangle PRIVATE goldy::goldy)
 
-# Plasma example - fully bindless rendering
+# Plasma example
 add_executable(plasma plasma.cpp)
 target_link_libraries(plasma PRIVATE goldy::goldy)
 

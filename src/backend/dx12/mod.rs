@@ -12,9 +12,8 @@ mod types;
 mod utils;
 
 use types::{
-    BindGroupLayoutState, BindGroupState, BufferState, ComputePipelineState, DxgiAdapterInfo,
-    FrameSync, LogicalDevice, PipelineState, RenderTargetState, SamplerState, ShaderState,
-    SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
+    BufferState, ComputePipelineState, DxgiAdapterInfo, FrameSync, LogicalDevice, PipelineState,
+    RenderTargetState, SamplerState, ShaderState, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
 };
 use utils::{
     depth_format_to_dxgi, dxgi_to_format, format_to_dxgi, index_format_to_dxgi, topology_to_d3d12,
@@ -55,10 +54,6 @@ pub struct Dx12Backend {
     next_pipeline_handle: PipelineHandle,
     compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
     next_compute_pipeline_handle: ComputePipelineHandle,
-    bind_group_layouts: HashMap<BindGroupLayoutHandle, BindGroupLayoutState>,
-    next_bind_group_layout_handle: BindGroupLayoutHandle,
-    bind_groups: HashMap<BindGroupHandle, BindGroupState>,
-    next_bind_group_handle: BindGroupHandle,
     render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
@@ -159,10 +154,6 @@ impl Dx12Backend {
             next_pipeline_handle: 1,
             compute_pipelines: HashMap::new(),
             next_compute_pipeline_handle: 1,
-            bind_group_layouts: HashMap::new(),
-            next_bind_group_layout_handle: 1,
-            bind_groups: HashMap::new(),
-            next_bind_group_handle: 1,
             render_targets: HashMap::new(),
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
@@ -250,13 +241,13 @@ impl Dx12Backend {
         // Compile Slang directly to DXIL (SM 6.6 for bindless support)
         // This bypasses FXC entirely and uses Slang's built-in DXIL emission
         let (bytecode, reflection) = if bindless_enabled {
-            // Define __BINDLESS__ and __DX12__ for DX12 ResourceDescriptorHeap pattern
+            // Define __DX12__ for DX12 ResourceDescriptorHeap pattern
             let compile_result = self.slang_compiler.compile_with_reflection(
                 &slang_source,
                 crate::slang::ShaderTarget::Dxil,
                 &[(entry_point_name, stage)],
                 &search_path_refs,
-                &[("__BINDLESS__", "1"), ("__DX12__", "1")],
+                &[("__DX12__", "1")],
             );
 
             let result = compile_result.with_context(|| {
@@ -1060,89 +1051,6 @@ impl GpuBackend for Dx12Backend {
         self.shaders.remove(&shader_handle);
     }
 
-    fn create_bind_group_layout(
-        &mut self,
-        device_handle: DeviceHandle,
-        entries: &[BindGroupLayoutEntry],
-    ) -> Result<BindGroupLayoutHandle> {
-        let _ = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-
-        let handle = self.next_bind_group_layout_handle;
-        self.next_bind_group_layout_handle += 1;
-
-        self.bind_group_layouts.insert(
-            handle,
-            BindGroupLayoutState {
-                device_handle,
-                entries: entries.to_vec(),
-            },
-        );
-
-        Ok(handle)
-    }
-
-    fn create_bind_group(
-        &mut self,
-        device_handle: DeviceHandle,
-        layout_handle: BindGroupLayoutHandle,
-        entries: &[BindGroupEntry],
-    ) -> Result<BindGroupHandle> {
-        let _ = self
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-
-        let _ = self
-            .bind_group_layouts
-            .get(&layout_handle)
-            .context("Invalid bind group layout handle")?;
-
-        let mut buffer_bindings = Vec::new();
-        let mut texture_bindings = Vec::new();
-        let mut sampler_bindings = Vec::new();
-
-        for entry in entries {
-            match &entry.resource {
-                BindingResource::Buffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
-                    buffer_bindings.push((entry.binding, *buffer, *offset, *size));
-                }
-                BindingResource::Texture(tex) => {
-                    texture_bindings.push((entry.binding, *tex));
-                }
-                BindingResource::Sampler(samp) => {
-                    sampler_bindings.push((entry.binding, *samp));
-                }
-            }
-        }
-
-        let handle = self.next_bind_group_handle;
-        self.next_bind_group_handle += 1;
-
-        self.bind_groups.insert(
-            handle,
-            BindGroupState {
-                device_handle,
-                layout_handle,
-                buffer_bindings,
-                texture_bindings,
-                sampler_bindings,
-            },
-        );
-
-        Ok(handle)
-    }
-
-    fn destroy_bind_group(&mut self, bind_group_handle: BindGroupHandle) {
-        self.bind_groups.remove(&bind_group_handle);
-    }
-
     fn create_pipeline(
         &mut self,
         device_handle: DeviceHandle,
@@ -1151,27 +1059,6 @@ impl GpuBackend for Dx12Backend {
         vertex_layout: &VertexBufferLayout,
         topology: PrimitiveTopology,
         target_format: TextureFormat,
-    ) -> Result<PipelineHandle> {
-        self.create_pipeline_with_layout(
-            device_handle,
-            vertex_shader,
-            fragment_shader,
-            vertex_layout,
-            topology,
-            target_format,
-            &[],
-        )
-    }
-
-    fn create_pipeline_with_layout(
-        &mut self,
-        device_handle: DeviceHandle,
-        vertex_shader: ShaderHandle,
-        fragment_shader: ShaderHandle,
-        vertex_layout: &VertexBufferLayout,
-        topology: PrimitiveTopology,
-        target_format: TextureFormat,
-        bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<PipelineHandle> {
         // Compile shaders on-demand
         let vs_bytecode =
@@ -1184,197 +1071,68 @@ impl GpuBackend for Dx12Backend {
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        // Create root signature
-        let bindless_enabled = logical_device.bindless_enabled;
-
-        let root_signature = if bindless_enabled {
-            // Bindless mode: root constants at slot 0 for resource indices
-            // Slang's DescriptorHandle<T> uses ResourceDescriptorHeap[index] with HEAP_DIRECTLY_INDEXED
-            // NOTE: The HEAP_DIRECTLY_INDEXED flags require Root Signature version 1.1
-            let root_constants = D3D12_ROOT_PARAMETER1 {
-                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-                Anonymous: D3D12_ROOT_PARAMETER1_0 {
-                    Constants: D3D12_ROOT_CONSTANTS {
-                        ShaderRegister: 0,
-                        RegisterSpace: 0,
-                        Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
-                    },
+        // Create root signature - always use bindless mode with root constants
+        // Slang's DescriptorHandle<T> uses ResourceDescriptorHeap[index] with HEAP_DIRECTLY_INDEXED
+        // NOTE: The HEAP_DIRECTLY_INDEXED flags require Root Signature version 1.1
+        let root_constants = D3D12_ROOT_PARAMETER1 {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+            Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                Constants: D3D12_ROOT_CONSTANTS {
+                    ShaderRegister: 0,
+                    RegisterSpace: 0,
+                    Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
                 },
-                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-            };
-
-            let root_params = [root_constants];
-
-            let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
-                NumParameters: 1,
-                pParameters: root_params.as_ptr(),
-                NumStaticSamplers: 0,
-                pStaticSamplers: std::ptr::null(),
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
-                    | D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
-                    | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
-            };
-
-            let versioned_desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
-                Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
-                Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
-            };
-
-            let mut signature_blob: Option<ID3DBlob> = None;
-            let mut error_blob: Option<ID3DBlob> = None;
-
-            let serialize_result = unsafe {
-                D3D12SerializeVersionedRootSignature(
-                    &versioned_desc,
-                    &mut signature_blob,
-                    Some(&mut error_blob),
-                )
-            };
-
-            serialize_result
-                .context("Failed to serialize bindless root signature (requires RS 1.1)")?;
-
-            let blob = signature_blob.context("Root signature serialization produced no output")?;
-            let signature: ID3D12RootSignature = unsafe {
-                logical_device.device.CreateRootSignature(
-                    0,
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    ),
-                )
-            }
-            .context("Failed to create bindless root signature")?;
-
-            tracing::debug!(
-                "Created bindless root signature with {} root constants",
-                types::MAX_ROOT_CONSTANT_INDICES
-            );
-
-            signature
-        } else if bind_group_layouts.is_empty() {
-            // Empty root signature (traditional mode, no bindings)
-            let desc = D3D12_ROOT_SIGNATURE_DESC {
-                NumParameters: 0,
-                pParameters: std::ptr::null(),
-                NumStaticSamplers: 0,
-                pStaticSamplers: std::ptr::null(),
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
-            };
-
-            let mut signature_blob: Option<ID3DBlob> = None;
-            let mut error_blob: Option<ID3DBlob> = None;
-
-            unsafe {
-                D3D12SerializeRootSignature(
-                    &desc,
-                    D3D_ROOT_SIGNATURE_VERSION_1,
-                    &mut signature_blob,
-                    Some(&mut error_blob),
-                )
-            }
-            .context("Failed to serialize root signature")?;
-
-            let blob = signature_blob.context("Root signature serialization produced no output")?;
-            let signature: ID3D12RootSignature = unsafe {
-                logical_device.device.CreateRootSignature(
-                    0,
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    ),
-                )
-            }
-            .context("Failed to create root signature")?;
-
-            signature
-        } else {
-            // Traditional mode: root signature with per-binding descriptors
-            let mut root_params: Vec<D3D12_ROOT_PARAMETER> = Vec::new();
-
-            // Track register indices separately for each register space
-            let mut srv_register = 0u32;
-            let mut uav_register = 0u32;
-            let mut cbv_register = 0u32;
-
-            for layout_handle in bind_group_layouts.iter() {
-                if let Some(layout) = self.bind_group_layouts.get(layout_handle) {
-                    for entry in &layout.entries {
-                        let (param_type, register) = match &entry.ty {
-                            BindingType::StorageBuffer { read_only: true } => {
-                                let reg = srv_register;
-                                srv_register += 1;
-                                (D3D12_ROOT_PARAMETER_TYPE_SRV, reg)
-                            }
-                            BindingType::StorageBuffer { read_only: false } => {
-                                let reg = uav_register;
-                                uav_register += 1;
-                                (D3D12_ROOT_PARAMETER_TYPE_UAV, reg)
-                            }
-                            BindingType::UniformBuffer => {
-                                let reg = cbv_register;
-                                cbv_register += 1;
-                                (D3D12_ROOT_PARAMETER_TYPE_CBV, reg)
-                            }
-                            _ => {
-                                tracing::warn!("Unsupported binding type in graphics pipeline");
-                                continue;
-                            }
-                        };
-
-                        root_params.push(D3D12_ROOT_PARAMETER {
-                            ParameterType: param_type,
-                            Anonymous: D3D12_ROOT_PARAMETER_0 {
-                                Descriptor: D3D12_ROOT_DESCRIPTOR {
-                                    ShaderRegister: register,
-                                    RegisterSpace: 0,
-                                },
-                            },
-                            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-                        });
-                    }
-                }
-            }
-
-            let desc = D3D12_ROOT_SIGNATURE_DESC {
-                NumParameters: root_params.len() as u32,
-                pParameters: if root_params.is_empty() {
-                    std::ptr::null()
-                } else {
-                    root_params.as_ptr()
-                },
-                NumStaticSamplers: 0,
-                pStaticSamplers: std::ptr::null(),
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
-            };
-
-            let mut signature_blob: Option<ID3DBlob> = None;
-            let mut error_blob: Option<ID3DBlob> = None;
-
-            unsafe {
-                D3D12SerializeRootSignature(
-                    &desc,
-                    D3D_ROOT_SIGNATURE_VERSION_1,
-                    &mut signature_blob,
-                    Some(&mut error_blob),
-                )
-            }
-            .context("Failed to serialize root signature")?;
-
-            let blob = signature_blob.context("Root signature serialization produced no output")?;
-            let signature: ID3D12RootSignature = unsafe {
-                logical_device.device.CreateRootSignature(
-                    0,
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    ),
-                )
-            }
-            .context("Failed to create root signature")?;
-
-            signature
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
         };
+
+        let root_params = [root_constants];
+
+        let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
+            NumParameters: 1,
+            pParameters: root_params.as_ptr(),
+            NumStaticSamplers: 0,
+            pStaticSamplers: std::ptr::null(),
+            Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
+                | D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+                | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+        };
+
+        let versioned_desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
+            Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
+            Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
+        };
+
+        let mut signature_blob: Option<ID3DBlob> = None;
+        let mut error_blob: Option<ID3DBlob> = None;
+
+        let serialize_result = unsafe {
+            D3D12SerializeVersionedRootSignature(
+                &versioned_desc,
+                &mut signature_blob,
+                Some(&mut error_blob),
+            )
+        };
+
+        serialize_result
+            .context("Failed to serialize bindless root signature (requires RS 1.1)")?;
+
+        let blob = signature_blob.context("Root signature serialization produced no output")?;
+        let root_signature: ID3D12RootSignature = unsafe {
+            logical_device.device.CreateRootSignature(
+                0,
+                std::slice::from_raw_parts(
+                    blob.GetBufferPointer() as *const u8,
+                    blob.GetBufferSize(),
+                ),
+            )
+        }
+        .context("Failed to create bindless root signature")?;
+
+        tracing::debug!(
+            "Created bindless root signature with {} root constants",
+            types::MAX_ROOT_CONSTANT_INDICES
+        );
 
         // Build input layout
         // We use semantic conventions based on location and format:
@@ -1788,138 +1546,6 @@ impl GpuBackend for Dx12Backend {
                         unsafe { cmd.IASetIndexBuffer(Some(&view)) };
                     }
                 }
-                RenderCommand::SetBindGroup { index, bind_group } => {
-                    // Re-borrow device to check bindless mode
-                    let bindless_enabled = self
-                        .devices
-                        .get(&device_handle)
-                        .map(|d| d.bindless_enabled)
-                        .unwrap_or(false);
-
-                    if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        if bindless_enabled {
-                            // Bindless mode: push resource indices via root constants
-                            let mut indices = types::BindlessIndices::default();
-                            let mut idx = 0usize;
-
-                            // Get the layout to check binding types
-                            let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
-
-                            // Collect buffer indices - use SRV for read-only storage, UAV/CBV for others
-                            for (binding, buffer_handle, _, _) in &bg_state.buffer_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                    // Check if this is a read-only storage buffer (needs SRV, not UAV)
-                                    let is_read_only_storage = layout
-                                        .and_then(|l| {
-                                            l.entries.iter().find(|e| e.binding == *binding).map(
-                                                |e| {
-                                                    matches!(
-                                                        e.ty,
-                                                        BindingType::StorageBuffer {
-                                                            read_only: true
-                                                        }
-                                                    )
-                                                },
-                                            )
-                                        })
-                                        .unwrap_or(false);
-
-                                    let offset = if is_read_only_storage
-                                        && buf_state.bindless_srv_offset.is_some()
-                                    {
-                                        // Use SRV offset for read-only storage buffer access
-                                        buf_state.bindless_srv_offset.unwrap()
-                                    } else {
-                                        // Use primary offset (UAV for storage, CBV for uniform)
-                                        buf_state.bindless_offset.unwrap_or(0)
-                                    };
-                                    indices.indices[idx] = offset;
-                                    idx += 1;
-                                }
-                            }
-
-                            // Collect texture indices
-                            for (_, tex_handle) in &bg_state.texture_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(tex_state) = self.textures.get(tex_handle) {
-                                    indices.indices[idx] = tex_state.bindless_offset.unwrap_or(0);
-                                    idx += 1;
-                                }
-                            }
-
-                            // Collect sampler indices
-                            for (_, samp_handle) in &bg_state.sampler_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(samp_state) = self.samplers.get(samp_handle) {
-                                    indices.indices[idx] = samp_state.bindless_offset.unwrap_or(0);
-                                    idx += 1;
-                                }
-                            }
-
-                            unsafe {
-                                cmd.SetGraphicsRoot32BitConstants(
-                                    0,                                       // Root parameter index
-                                    types::MAX_ROOT_CONSTANT_INDICES as u32, // Num 32-bit values
-                                    indices.indices.as_ptr() as *const std::ffi::c_void,
-                                    0, // Dest offset
-                                );
-                            }
-                        } else {
-                            // Traditional mode: per-resource binding
-                            let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
-
-                            for (binding, buffer_handle, _offset, _size) in
-                                &bg_state.buffer_bindings
-                            {
-                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                    let gpu_address =
-                                        unsafe { buf_state.resource.GetGPUVirtualAddress() };
-                                    let binding_type = layout.and_then(|l| {
-                                        l.entries
-                                            .iter()
-                                            .find(|e| e.binding == *binding)
-                                            .map(|e| &e.ty)
-                                    });
-                                    let root_param_idx = *index + *binding;
-
-                                    unsafe {
-                                        match binding_type {
-                                            Some(BindingType::StorageBuffer {
-                                                read_only: true,
-                                            }) => {
-                                                cmd.SetGraphicsRootShaderResourceView(
-                                                    root_param_idx,
-                                                    gpu_address,
-                                                );
-                                            }
-                                            Some(BindingType::StorageBuffer {
-                                                read_only: false,
-                                            }) => {
-                                                cmd.SetGraphicsRootUnorderedAccessView(
-                                                    root_param_idx,
-                                                    gpu_address,
-                                                );
-                                            }
-                                            _ => {
-                                                cmd.SetGraphicsRootConstantBufferView(
-                                                    root_param_idx,
-                                                    gpu_address,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
                 RenderCommand::SetPushConstants { buffers } => {
                     // Fully bindless mode: push buffer indices directly via root constants
                     let bindless_enabled = self
@@ -2224,6 +1850,17 @@ impl GpuBackend for Dx12Backend {
             unsafe { WaitForSingleObject(event, INFINITE) };
             unsafe { CloseHandle(event) }.ok();
         }
+
+        // Increment fence value for next operation (CRITICAL: was missing, causing race condition)
+        let logical_device = self
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        logical_device.fence_value += 1;
+
+        // Re-borrow render_target after mutable borrow of devices
+        let render_target = self.render_targets.get(&target).unwrap();
+        let staging_buffer = render_target.staging_buffer.as_ref().unwrap();
 
         // Read from staging buffer
         let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -2570,138 +2207,6 @@ impl GpuBackend for Dx12Backend {
                         unsafe { cmd.IASetIndexBuffer(Some(&view)) };
                     }
                 }
-                RenderCommand::SetBindGroup { index, bind_group } => {
-                    // Re-borrow device to check bindless mode
-                    let bindless_enabled = self
-                        .devices
-                        .get(&device_handle)
-                        .map(|d| d.bindless_enabled)
-                        .unwrap_or(false);
-
-                    if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        if bindless_enabled {
-                            // Bindless mode: push resource indices via root constants
-                            let mut indices = types::BindlessIndices::default();
-                            let mut idx = 0usize;
-
-                            // Get the layout to check binding types
-                            let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
-
-                            // Collect buffer indices - use SRV for read-only storage, UAV/CBV for others
-                            for (binding, buffer_handle, _, _) in &bg_state.buffer_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                    // Check if this is a read-only storage buffer (needs SRV, not UAV)
-                                    let is_read_only_storage = layout
-                                        .and_then(|l| {
-                                            l.entries.iter().find(|e| e.binding == *binding).map(
-                                                |e| {
-                                                    matches!(
-                                                        e.ty,
-                                                        BindingType::StorageBuffer {
-                                                            read_only: true
-                                                        }
-                                                    )
-                                                },
-                                            )
-                                        })
-                                        .unwrap_or(false);
-
-                                    let offset = if is_read_only_storage
-                                        && buf_state.bindless_srv_offset.is_some()
-                                    {
-                                        // Use SRV offset for read-only storage buffer access
-                                        buf_state.bindless_srv_offset.unwrap()
-                                    } else {
-                                        // Use primary offset (UAV for storage, CBV for uniform)
-                                        buf_state.bindless_offset.unwrap_or(0)
-                                    };
-                                    indices.indices[idx] = offset;
-                                    idx += 1;
-                                }
-                            }
-
-                            // Collect texture indices
-                            for (_, tex_handle) in &bg_state.texture_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(tex_state) = self.textures.get(tex_handle) {
-                                    indices.indices[idx] = tex_state.bindless_offset.unwrap_or(0);
-                                    idx += 1;
-                                }
-                            }
-
-                            // Collect sampler indices
-                            for (_, samp_handle) in &bg_state.sampler_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(samp_state) = self.samplers.get(samp_handle) {
-                                    indices.indices[idx] = samp_state.bindless_offset.unwrap_or(0);
-                                    idx += 1;
-                                }
-                            }
-
-                            unsafe {
-                                cmd.SetGraphicsRoot32BitConstants(
-                                    0,                                       // Root parameter index
-                                    types::MAX_ROOT_CONSTANT_INDICES as u32, // Num 32-bit values
-                                    indices.indices.as_ptr() as *const std::ffi::c_void,
-                                    0, // Dest offset
-                                );
-                            }
-                        } else {
-                            // Traditional mode: per-resource binding
-                            let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
-
-                            for (binding, buffer_handle, _offset, _size) in
-                                &bg_state.buffer_bindings
-                            {
-                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                    let gpu_address =
-                                        unsafe { buf_state.resource.GetGPUVirtualAddress() };
-                                    let binding_type = layout.and_then(|l| {
-                                        l.entries
-                                            .iter()
-                                            .find(|e| e.binding == *binding)
-                                            .map(|e| &e.ty)
-                                    });
-                                    let root_param_idx = *index + *binding;
-
-                                    unsafe {
-                                        match binding_type {
-                                            Some(BindingType::StorageBuffer {
-                                                read_only: true,
-                                            }) => {
-                                                cmd.SetGraphicsRootShaderResourceView(
-                                                    root_param_idx,
-                                                    gpu_address,
-                                                );
-                                            }
-                                            Some(BindingType::StorageBuffer {
-                                                read_only: false,
-                                            }) => {
-                                                cmd.SetGraphicsRootUnorderedAccessView(
-                                                    root_param_idx,
-                                                    gpu_address,
-                                                );
-                                            }
-                                            _ => {
-                                                cmd.SetGraphicsRootConstantBufferView(
-                                                    root_param_idx,
-                                                    gpu_address,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
                 RenderCommand::SetPushConstants { buffers } => {
                     // Fully bindless mode: push buffer indices directly via root constants
                     let bindless_enabled = self
@@ -2998,19 +2503,17 @@ impl GpuBackend for Dx12Backend {
         vertex_layout: &VertexBufferLayout,
         topology: PrimitiveTopology,
         target_format: TextureFormat,
-        bind_group_layouts: &[BindGroupLayoutHandle],
         _depth_stencil: Option<&crate::types::DepthStencilState>,
     ) -> Result<PipelineHandle> {
         // TODO: Implement proper depth stencil state in PSO
         // For now, delegate to the existing method (ignoring depth stencil)
-        self.create_pipeline_with_layout(
+        self.create_pipeline(
             device_handle,
             vertex_shader,
             fragment_shader,
             vertex_layout,
             topology,
             target_format,
-            bind_group_layouts,
         )
     }
 
@@ -3544,7 +3047,6 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         device_handle: DeviceHandle,
         compute_shader: ShaderHandle,
-        bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<ComputePipelineHandle> {
         // Compile shader on-demand
         let cs_bytecode =
@@ -3555,227 +3057,59 @@ impl GpuBackend for Dx12Backend {
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        let bindless_enabled = logical_device.bindless_enabled;
-
-        // Create root signature
-        let root_signature = if bindless_enabled {
-            // Bindless mode: root constants at slot 0 for resource indices
-            let root_constants = D3D12_ROOT_PARAMETER {
-                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-                Anonymous: D3D12_ROOT_PARAMETER_0 {
-                    Constants: D3D12_ROOT_CONSTANTS {
-                        ShaderRegister: 0,
-                        RegisterSpace: 0,
-                        Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
-                    },
+        // Create root signature - always use bindless mode with root constants
+        let root_constants = D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                Constants: D3D12_ROOT_CONSTANTS {
+                    ShaderRegister: 0,
+                    RegisterSpace: 0,
+                    Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
                 },
-                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-            };
-
-            let root_params = [root_constants];
-
-            let desc = D3D12_ROOT_SIGNATURE_DESC {
-                NumParameters: 1,
-                pParameters: root_params.as_ptr(),
-                NumStaticSamplers: 0,
-                pStaticSamplers: std::ptr::null(),
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
-                    | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
-            };
-
-            let mut signature_blob: Option<ID3DBlob> = None;
-            let mut error_blob: Option<ID3DBlob> = None;
-
-            unsafe {
-                D3D12SerializeRootSignature(
-                    &desc,
-                    D3D_ROOT_SIGNATURE_VERSION_1,
-                    &mut signature_blob,
-                    Some(&mut error_blob),
-                )
-            }
-            .context("Failed to serialize bindless compute root signature")?;
-
-            let blob = signature_blob.context("Root signature serialization produced no output")?;
-            let signature: ID3D12RootSignature = unsafe {
-                logical_device.device.CreateRootSignature(
-                    0,
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    ),
-                )
-            }
-            .context("Failed to create bindless compute root signature")?;
-
-            tracing::debug!(
-                "Created bindless compute root signature with {} root constants",
-                types::MAX_ROOT_CONSTANT_INDICES
-            );
-
-            signature
-        } else if bind_group_layouts.is_empty() {
-            let desc = D3D12_ROOT_SIGNATURE_DESC {
-                NumParameters: 0,
-                pParameters: std::ptr::null(),
-                NumStaticSamplers: 0,
-                pStaticSamplers: std::ptr::null(),
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
-            };
-
-            let mut signature_blob: Option<ID3DBlob> = None;
-            let mut error_blob: Option<ID3DBlob> = None;
-
-            unsafe {
-                D3D12SerializeRootSignature(
-                    &desc,
-                    D3D_ROOT_SIGNATURE_VERSION_1,
-                    &mut signature_blob,
-                    Some(&mut error_blob),
-                )
-            }
-            .context("Failed to serialize root signature")?;
-
-            let blob = signature_blob.context("Root signature serialization produced no output")?;
-            let signature: ID3D12RootSignature = unsafe {
-                logical_device.device.CreateRootSignature(
-                    0,
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    ),
-                )
-            }
-            .context("Failed to create root signature")?;
-
-            signature
-        } else {
-            // Create root signature with root descriptors (SRV/UAV/CBV) for each binding
-            // Using root descriptors is simpler than descriptor tables for buffers
-            let mut root_params: Vec<D3D12_ROOT_PARAMETER> = Vec::new();
-
-            // Track register indices separately for each register space
-            // SRV uses t registers, UAV uses u registers, CBV uses b registers
-            let mut srv_register = 0u32;
-            let mut uav_register = 0u32;
-            let mut cbv_register = 0u32;
-
-            // Flatten all bindings from all layouts into root parameters
-            // Each binding becomes its own root parameter (root descriptors)
-            for layout_handle in bind_group_layouts.iter() {
-                if let Some(layout) = self.bind_group_layouts.get(layout_handle) {
-                    for entry in &layout.entries {
-                        let (param_type, register) = match &entry.ty {
-                            BindingType::StorageBuffer { read_only: true } => {
-                                let reg = srv_register;
-                                srv_register += 1;
-                                (D3D12_ROOT_PARAMETER_TYPE_SRV, reg)
-                            }
-                            BindingType::StorageBuffer { read_only: false } => {
-                                let reg = uav_register;
-                                uav_register += 1;
-                                (D3D12_ROOT_PARAMETER_TYPE_UAV, reg)
-                            }
-                            BindingType::UniformBuffer => {
-                                let reg = cbv_register;
-                                cbv_register += 1;
-                                (D3D12_ROOT_PARAMETER_TYPE_CBV, reg)
-                            }
-                            _ => {
-                                tracing::warn!("Unsupported binding type in compute pipeline");
-                                continue;
-                            }
-                        };
-
-                        root_params.push(D3D12_ROOT_PARAMETER {
-                            ParameterType: param_type,
-                            Anonymous: D3D12_ROOT_PARAMETER_0 {
-                                Descriptor: D3D12_ROOT_DESCRIPTOR {
-                                    ShaderRegister: register,
-                                    RegisterSpace: 0,
-                                },
-                            },
-                            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-                        });
-                    }
-                }
-            }
-
-            tracing::debug!(
-                "Creating root signature with {} root parameters",
-                root_params.len()
-            );
-            for (i, param) in root_params.iter().enumerate() {
-                let (ty, reg) = unsafe {
-                    match param.ParameterType {
-                        D3D12_ROOT_PARAMETER_TYPE_SRV => {
-                            ("SRV", param.Anonymous.Descriptor.ShaderRegister)
-                        }
-                        D3D12_ROOT_PARAMETER_TYPE_UAV => {
-                            ("UAV", param.Anonymous.Descriptor.ShaderRegister)
-                        }
-                        D3D12_ROOT_PARAMETER_TYPE_CBV => {
-                            ("CBV", param.Anonymous.Descriptor.ShaderRegister)
-                        }
-                        _ => ("???", 0),
-                    }
-                };
-                tracing::debug!("  Root param {}: {} at register {}", i, ty, reg);
-            }
-
-            let desc = D3D12_ROOT_SIGNATURE_DESC {
-                NumParameters: root_params.len() as u32,
-                pParameters: if root_params.is_empty() {
-                    std::ptr::null()
-                } else {
-                    root_params.as_ptr()
-                },
-                NumStaticSamplers: 0,
-                pStaticSamplers: std::ptr::null(),
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
-            };
-
-            let mut signature_blob: Option<ID3DBlob> = None;
-            let mut error_blob: Option<ID3DBlob> = None;
-
-            let result = unsafe {
-                D3D12SerializeRootSignature(
-                    &desc,
-                    D3D_ROOT_SIGNATURE_VERSION_1,
-                    &mut signature_blob,
-                    Some(&mut error_blob),
-                )
-            };
-
-            if let Err(e) = result {
-                if let Some(err) = error_blob {
-                    let msg = unsafe {
-                        let ptr = err.GetBufferPointer() as *const u8;
-                        let len = err.GetBufferSize();
-                        std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len))
-                    };
-                    tracing::error!("Root signature serialization error: {}", msg);
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to serialize root signature: {:?}",
-                    e
-                ));
-            }
-
-            let blob = signature_blob.context("Root signature serialization produced no output")?;
-            let signature: ID3D12RootSignature = unsafe {
-                logical_device.device.CreateRootSignature(
-                    0,
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    ),
-                )
-            }
-            .context("Failed to create root signature")?;
-
-            signature
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
         };
+
+        let root_params = [root_constants];
+
+        let desc = D3D12_ROOT_SIGNATURE_DESC {
+            NumParameters: 1,
+            pParameters: root_params.as_ptr(),
+            NumStaticSamplers: 0,
+            pStaticSamplers: std::ptr::null(),
+            Flags: D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+                | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+        };
+
+        let mut signature_blob: Option<ID3DBlob> = None;
+        let mut error_blob: Option<ID3DBlob> = None;
+
+        unsafe {
+            D3D12SerializeRootSignature(
+                &desc,
+                D3D_ROOT_SIGNATURE_VERSION_1,
+                &mut signature_blob,
+                Some(&mut error_blob),
+            )
+        }
+        .context("Failed to serialize bindless compute root signature")?;
+
+        let blob = signature_blob.context("Root signature serialization produced no output")?;
+        let root_signature: ID3D12RootSignature = unsafe {
+            logical_device.device.CreateRootSignature(
+                0,
+                std::slice::from_raw_parts(
+                    blob.GetBufferPointer() as *const u8,
+                    blob.GetBufferSize(),
+                ),
+            )
+        }
+        .context("Failed to create bindless compute root signature")?;
+
+        tracing::debug!(
+            "Created bindless compute root signature with {} root constants",
+            types::MAX_ROOT_CONSTANT_INDICES
+        );
 
         // Create compute PSO
         let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
@@ -3802,7 +3136,6 @@ impl GpuBackend for Dx12Backend {
                 device_handle,
                 pipeline_state,
                 root_signature,
-                bind_group_layouts: bind_group_layouts.to_vec(),
                 parameter_block_layouts: Vec::new(),
             },
         );
@@ -3856,8 +3189,8 @@ impl GpuBackend for Dx12Backend {
             }
         }
 
-        // Track current pipeline for bind group binding
-        let mut current_pipeline_handle: Option<ComputePipelineHandle> = None;
+        // Track current pipeline (reserved for future use)
+        let mut _current_pipeline_handle: Option<ComputePipelineHandle> = None;
 
         // Process commands
         for command in commands {
@@ -3868,182 +3201,7 @@ impl GpuBackend for Dx12Backend {
                             command_list.SetComputeRootSignature(&pipeline_state.root_signature);
                             command_list.SetPipelineState(&pipeline_state.pipeline_state);
                         }
-                        current_pipeline_handle = Some(*handle);
-                    }
-                }
-                ComputeCommand::SetBindGroup { index, bind_group } => {
-                    // Re-borrow device to check bindless mode
-                    let bindless_enabled = self
-                        .devices
-                        .get(&device_handle)
-                        .map(|d| d.bindless_enabled)
-                        .unwrap_or(false);
-
-                    if let Some(bg_state) = self.bind_groups.get(bind_group) {
-                        if bindless_enabled {
-                            // Bindless mode: push resource indices via root constants
-                            let mut indices = types::BindlessIndices::default();
-                            let mut idx = 0usize;
-
-                            // Get the layout to check binding types
-                            let layout = self.bind_group_layouts.get(&bg_state.layout_handle);
-
-                            // Collect buffer indices - use SRV for read-only storage, UAV/CBV for others
-                            for (binding, buffer_handle, _, _) in &bg_state.buffer_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                    // Check if this is a read-only storage buffer (needs SRV, not UAV)
-                                    let is_read_only_storage = layout
-                                        .and_then(|l| {
-                                            l.entries.iter().find(|e| e.binding == *binding).map(
-                                                |e| {
-                                                    matches!(
-                                                        e.ty,
-                                                        BindingType::StorageBuffer {
-                                                            read_only: true
-                                                        }
-                                                    )
-                                                },
-                                            )
-                                        })
-                                        .unwrap_or(false);
-
-                                    let offset = if is_read_only_storage
-                                        && buf_state.bindless_srv_offset.is_some()
-                                    {
-                                        // Use SRV offset for read-only storage buffer access
-                                        buf_state.bindless_srv_offset.unwrap()
-                                    } else {
-                                        // Use primary offset (UAV for storage, CBV for uniform)
-                                        buf_state.bindless_offset.unwrap_or(0)
-                                    };
-                                    indices.indices[idx] = offset;
-                                    idx += 1;
-                                }
-                            }
-
-                            // Collect texture indices
-                            for (_, tex_handle) in &bg_state.texture_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(tex_state) = self.textures.get(tex_handle) {
-                                    indices.indices[idx] = tex_state.bindless_offset.unwrap_or(0);
-                                    idx += 1;
-                                }
-                            }
-
-                            // Collect sampler indices
-                            for (_, samp_handle) in &bg_state.sampler_bindings {
-                                if idx >= types::MAX_ROOT_CONSTANT_INDICES {
-                                    break;
-                                }
-                                if let Some(samp_state) = self.samplers.get(samp_handle) {
-                                    indices.indices[idx] = samp_state.bindless_offset.unwrap_or(0);
-                                    idx += 1;
-                                }
-                            }
-
-                            unsafe {
-                                command_list.SetComputeRoot32BitConstants(
-                                    0,                                       // Root parameter index
-                                    types::MAX_ROOT_CONSTANT_INDICES as u32, // Num 32-bit values
-                                    indices.indices.as_ptr() as *const std::ffi::c_void,
-                                    0, // Dest offset
-                                );
-                            }
-                        } else if let Some(pipeline_handle) = &current_pipeline_handle {
-                            // Traditional mode: per-resource binding
-                            // Get the pipeline to look up layouts
-                            if let Some(pipeline_state) =
-                                self.compute_pipelines.get(pipeline_handle)
-                            {
-                                // Get the layout for this bind group index
-                                if let Some(layout_handle) =
-                                    pipeline_state.bind_group_layouts.get(*index as usize)
-                                {
-                                    if let Some(layout) = self.bind_group_layouts.get(layout_handle)
-                                    {
-                                        // Calculate root parameter index
-                                        // Each binding becomes a separate root parameter
-                                        let mut root_param_base = 0u32;
-                                        for i in 0..*index {
-                                            if let Some(lh) =
-                                                pipeline_state.bind_group_layouts.get(i as usize)
-                                            {
-                                                if let Some(l) = self.bind_group_layouts.get(lh) {
-                                                    root_param_base += l.entries.len() as u32;
-                                                }
-                                            }
-                                        }
-
-                                        for (binding, buffer_handle, _offset, _size) in
-                                            &bg_state.buffer_bindings
-                                        {
-                                            if let Some(buf_state) = self.buffers.get(buffer_handle)
-                                            {
-                                                let gpu_address = unsafe {
-                                                    buf_state.resource.GetGPUVirtualAddress()
-                                                };
-
-                                                // Find the binding type in the layout
-                                                if let Some(entry) = layout
-                                                    .entries
-                                                    .iter()
-                                                    .find(|e| e.binding == *binding)
-                                                {
-                                                    // Find which root parameter this binding corresponds to
-                                                    let mut local_idx = 0u32;
-                                                    for e in &layout.entries {
-                                                        if e.binding == *binding {
-                                                            break;
-                                                        }
-                                                        local_idx += 1;
-                                                    }
-                                                    let root_param_idx =
-                                                        root_param_base + local_idx;
-
-                                                    unsafe {
-                                                        match &entry.ty {
-                                                            BindingType::StorageBuffer {
-                                                                read_only: true,
-                                                            } => {
-                                                                command_list
-                                                                    .SetComputeRootShaderResourceView(
-                                                                        root_param_idx,
-                                                                        gpu_address,
-                                                                    );
-                                                            }
-                                                            BindingType::StorageBuffer {
-                                                                read_only: false,
-                                                            } => {
-                                                                command_list
-                                                                    .SetComputeRootUnorderedAccessView(
-                                                                        root_param_idx,
-                                                                        gpu_address,
-                                                                    );
-                                                            }
-                                                            BindingType::UniformBuffer => {
-                                                                command_list
-                                                                    .SetComputeRootConstantBufferView(
-                                                                        root_param_idx,
-                                                                        gpu_address,
-                                                                    );
-                                                            }
-                                                            _ => {
-                                                                tracing::warn!("Unsupported binding type in compute dispatch");
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        _current_pipeline_handle = Some(*handle);
                     }
                 }
                 ComputeCommand::SetPushConstants { buffers } => {

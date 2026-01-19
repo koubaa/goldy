@@ -1,15 +1,6 @@
 // Spinning 3D wireframe cube
 // Rendered entirely in fragment shader using SDF techniques
 // Uses goldy_exp module for vertex format utilities
-//
-// ## Bindless Support
-//
-// This shader demonstrates cross-platform bindless resource access:
-//
-// - Metal (__BINDLESS__ + __METAL__): Uses ParameterBlock for argument buffers
-// - Vulkan (__BINDLESS__ + __SPIRV__): Uses push constants + descriptor arrays
-// - DX12 (__BINDLESS__ + __HLSL__): Uses root constants + ResourceDescriptorHeap
-// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 import goldy_exp;
 
@@ -17,8 +8,6 @@ import goldy_exp;
 struct TimeUniforms {
     float time;
 };
-
-#ifdef __BINDLESS__
 
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer support
@@ -30,26 +19,18 @@ ParameterBlock<SpinningCubeResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 
 // Global descriptor array of uniform buffers
 [[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-// Note: Use getBindlessIndex() function, not BINDLESS_INDEX macro (macros don't export from modules)
-#define TIME g_UniformBuffers[getBindlessIndex(0)].time
+#define TIME g_UniformBuffers[getBufferIndex(0)].time
 
 #else
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0) {
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
     uint uniformsIndex;
 };
 #define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<TimeUniforms> uniforms;
-#define TIME uniforms.time
 #endif
 
 [shader("vertex")]
@@ -143,4 +124,3 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
     
     return float4(color, 1.0);
 }
-

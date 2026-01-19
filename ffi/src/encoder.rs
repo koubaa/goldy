@@ -1,6 +1,5 @@
 //! FFI bindings for CommandEncoder.
 
-use crate::bind_group::GoldyBindGroup;
 use crate::buffer::GoldyBuffer;
 use crate::pipeline::GoldyRenderPipeline;
 use crate::types::{GoldyColor, GoldyIndexFormat};
@@ -106,31 +105,11 @@ pub unsafe extern "C" fn goldy_encoder_set_vertex_buffer_offset(
     pass.set_vertex_buffer_offset(slot, &(*buffer).inner, offset);
 }
 
-/// Set a bind group.
+/// Set push constants for resource binding.
 ///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_encoder_set_bind_group(
-    encoder: *mut GoldyCommandEncoder,
-    index: u32,
-    bind_group: *const GoldyBindGroup,
-) {
-    if encoder.is_null() || bind_group.is_null() {
-        return;
-    }
-    let mut pass = (*encoder).inner.begin_render_pass();
-    pass.set_bind_group(index, &(*bind_group).inner);
-}
-
-/// Set push constants for fully bindless rendering.
-///
-/// Pass the buffers whose bindless indices should be pushed to the shader.
-/// The indices are pushed in order, so `buffers[0]` becomes `BINDLESS_INDEX(0)`,
-/// `buffers[1]` becomes `BINDLESS_INDEX(1)`, etc.
-///
-/// Use this instead of `goldy_encoder_set_bind_group()` for fully bindless shaders
-/// that access resources via global descriptor arrays.
+/// Pass the buffers whose indices should be pushed to the shader.
+/// The indices are pushed in order, so `buffers[0]` becomes index 0,
+/// `buffers[1]` becomes index 1, etc.
 ///
 /// # Safety
 /// All pointers must be valid. The buffers array must contain buffer_count elements.

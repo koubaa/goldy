@@ -1,19 +1,8 @@
 // Game of Life rendering shader
 // Renders the grid as a fullscreen quad with cell colors
-//
-// ## Bindless Support
-//
-// This shader demonstrates cross-platform bindless resource access:
-//
-// - Metal (__BINDLESS__ + !__DX12__): Uses ParameterBlock for argument buffers
-// - Vulkan (__BINDLESS__ + !__DX12__): Uses ParameterBlock (same as Metal)
-// - DX12 (__BINDLESS__ + __DX12__): Uses DescriptorHandle + ResourceDescriptorHeap
-// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
-
-#ifdef __BINDLESS__
 
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer
@@ -25,23 +14,17 @@ ParameterBlock<GameOfLifeRenderResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 [[vk::binding(0, 0)]] StructuredBuffer<uint> g_StorageBuffers[];
-#define CELLS g_StorageBuffers[getBindlessIndex(0)]
+#define CELLS g_StorageBuffers[getBufferIndex(0)]
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0, space0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
     uint cellsBufferIndex;
 };
 #define CELLS (*DescriptorHandle<StructuredBuffer<uint>>(uint2(cellsBufferIndex, 0)))
 
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]] StructuredBuffer<uint> cells;
-#define CELLS cells
 #endif
 
 struct VSOutput {
@@ -102,4 +85,3 @@ float4 fs_main(VSOutput input) : SV_Target {
         return float4(dead + gridLine, 1.0);
     }
 }
-

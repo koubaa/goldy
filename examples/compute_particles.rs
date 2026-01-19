@@ -1,17 +1,16 @@
-//! GPU Particle Simulation Example (Fully Bindless)
+//! GPU Particle Simulation Example
 //!
-//! This example demonstrates fully bindless compute + graphics integration:
+//! This example demonstrates compute + graphics integration:
 //! 1. Compute shader updates particle positions/velocities
 //! 2. Graphics shader renders particles as colored quads (instanced)
-//! Resource indices are passed directly via push constants instead of using bind groups.
 //!
 //! Run with: `cargo run --example compute_particles`
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline,
-    ComputePipelineDesc, DeviceType, Instance, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
+    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -54,7 +53,7 @@ struct RenderState {
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
-    // Buffer (kept for bindless access)
+    // Buffer
     particle_buffer: Buffer,
     // Graphics resources
     render_pipeline: RenderPipeline,
@@ -106,16 +105,10 @@ impl RenderState {
             BufferUsage::STORAGE | BufferUsage::VERTEX,
         )?;
 
-        // Create compute pipeline - fully bindless, no bind group layouts
-        let compute_pipeline = ComputePipeline::new(
-            &device,
-            &compute_shader,
-            &ComputePipelineDesc {
-                bind_group_layouts: &[],
-            },
-        )?;
+        // Create compute pipeline
+        let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline - fully bindless, no bind group layouts
+        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -124,13 +117,12 @@ impl RenderState {
                 vertex_layout: VertexBufferLayout::empty(), // Shader uses SV_VertexID, not vertex attributes
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
-                bind_group_layouts: &[],
                 ..Default::default()
             },
         )?;
 
         println!(
-            "Created fully bindless compute particles example with {} particles",
+            "Created compute particles example with {} particles",
             NUM_PARTICLES
         );
 
@@ -148,12 +140,12 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
-        // Run compute pass to update particles - fully bindless via push constants
+        // Run compute pass to update particles
         let mut compute_encoder = ComputeEncoder::new();
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            // Fully bindless: pass buffer indices directly via push constants
+            // Pass buffer indices via push constants
             pass.set_push_constants(&[&self.particle_buffer]);
             // Dispatch enough workgroups to cover all particles (64 threads per group)
             let workgroups = (NUM_PARTICLES + 63) / 64;
@@ -177,7 +169,7 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            // Fully bindless: pass buffer indices directly via push constants
+            // Pass buffer indices via push constants
             pass.set_push_constants(&[&self.particle_buffer]);
             // Draw 6 vertices (quad) per particle instance
             pass.draw(0..6, 0..NUM_PARTICLES);
@@ -200,7 +192,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy Compute Particles (Fully Bindless)")
+                            .with_title("Goldy - Compute Particles")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
                     )
                     .expect("Failed to create window"),

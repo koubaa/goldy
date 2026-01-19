@@ -118,19 +118,14 @@ impl Sampler {
     }
 
     /// Get the backend handle for this sampler.
-    ///
-    /// This is used for binding the sampler to shaders via bind groups.
     pub fn handle(&self) -> SamplerHandle {
         self.handle
     }
 
-    /// Get the sampler's index in the global bindless descriptor set.
+    /// Get the sampler's index in the global descriptor set.
     ///
-    /// Returns `Some(index)` if bindless is enabled and this sampler is registered.
+    /// Returns `Some(index)` if this sampler is registered.
     /// Returns `None` otherwise.
-    ///
-    /// Use this for fully bindless rendering where you pass resource indices
-    /// directly via push constants instead of using bind groups.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.sampler_bindless_index(self.handle)

@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Plasma example - classic demoscene plasma effect.
 
-Demonstrates FULLY BINDLESS rendering where resource indices are passed
-directly via push constants instead of using bind groups.
-
 Usage:
     pip install glfw
     python plasma.py
@@ -25,7 +22,7 @@ def load_shader(name):
 
 
 def main():
-    print("Goldy Plasma Example (Fully Bindless) - Press Escape to exit")
+    print("Goldy Plasma Example - Press Escape to exit")
 
     # Initialize GLFW
     if not glfw.init():
@@ -37,7 +34,7 @@ def main():
 
     # Create window
     width, height = 800, 600
-    window = glfw.create_window(width, height, "Goldy - Plasma Effect (Fully Bindless)", None, None)
+    window = glfw.create_window(width, height, "Goldy - Plasma Effect", None, None)
     if not window:
         glfw.terminate()
         raise RuntimeError("Failed to create GLFW window")
@@ -71,7 +68,7 @@ def main():
     plasma_shader_src = load_shader("plasma.slang")
     shader = goldy.ShaderModule.from_slang(device, plasma_shader_src)
 
-    # Create pipeline WITHOUT bind group layouts - fully bindless!
+    # Create pipeline
     pipeline = goldy.RenderPipeline(
         device, shader, shader,
         goldy.RenderPipelineDesc(
@@ -115,7 +112,7 @@ def main():
         with encoder.begin_render_pass() as rp:
             rp.clear(goldy.Color.BLACK)
             rp.set_pipeline(pipeline)
-            # Fully bindless: pass buffer indices directly via push constants
+            # Pass buffer indices via push constants
             rp.set_push_constants([uniform_buffer])
             rp.set_vertex_buffer(0, vertex_buffer)
             rp.draw(range(6))

@@ -45,10 +45,6 @@ pub struct VulkanBackend {
     next_pipeline_handle: PipelineHandle,
     compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
     next_compute_pipeline_handle: ComputePipelineHandle,
-    bind_group_layouts: HashMap<BindGroupLayoutHandle, BindGroupLayoutState>,
-    next_bind_group_layout_handle: BindGroupLayoutHandle,
-    bind_groups: HashMap<BindGroupHandle, BindGroupState>,
-    next_bind_group_handle: BindGroupHandle,
     render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
@@ -196,10 +192,6 @@ impl VulkanBackend {
             next_pipeline_handle: 1,
             compute_pipelines: HashMap::new(),
             next_compute_pipeline_handle: 1,
-            bind_group_layouts: HashMap::new(),
-            next_bind_group_layout_handle: 1,
-            bind_groups: HashMap::new(),
-            next_bind_group_handle: 1,
             render_targets: HashMap::new(),
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
@@ -326,43 +318,23 @@ impl VulkanBackend {
         let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
         let device_handle = shader.device_handle;
 
-        // Check if bindless is enabled on the device
-        let bindless_enabled = self
-            .devices
-            .get(&device_handle)
-            .map(|d| d.bindless_enabled)
-            .unwrap_or(false);
+        // Compile shader with reflection data for resource binding
+        let result = self
+            .slang_compiler
+            .compile_bindless_with_reflection(
+                &slang_source,
+                crate::slang::ShaderTarget::Spirv,
+                &[(entry_point_name, stage)],
+                &search_paths,
+            )
+            .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
 
-        // Compile shader with bindless if enabled (to get reflection data)
-        let (spirv_data, reflection) = if bindless_enabled {
-            let result = self
-                .slang_compiler
-                .compile_bindless_with_reflection(
-                    &slang_source,
-                    crate::slang::ShaderTarget::Spirv,
-                    &[(entry_point_name, stage)],
-                    &search_paths,
-                )
-                .with_context(|| {
-                    format!("Failed to compile {} shader (bindless)", entry_point_name)
-                })?;
-
-            let spirv = result.shader.as_spirv().context("Invalid SPIR-V output")?;
-            (spirv.to_vec(), Some(result.reflection))
-        } else {
-            let compiled = self
-                .slang_compiler
-                .compile_with_options(
-                    &slang_source,
-                    crate::slang::ShaderTarget::Spirv,
-                    &[(entry_point_name, stage)],
-                    &search_paths,
-                )
-                .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
-
-            let spirv = compiled.as_spirv().context("Invalid SPIR-V output")?;
-            (spirv.to_vec(), None)
-        };
+        let spirv_data = result
+            .shader
+            .as_spirv()
+            .context("Invalid SPIR-V output")?
+            .to_vec();
+        let reflection = Some(result.reflection);
 
         // Get device
         let logical_device = self
@@ -382,10 +354,9 @@ impl VulkanBackend {
         .context("Failed to create Vulkan shader module")?;
 
         tracing::debug!(
-            "Compiled {} ({} SPIR-V words, bindless={})",
+            "Compiled {} ({} SPIR-V words)",
             entry_point_name,
-            spirv_u32.len(),
-            bindless_enabled
+            spirv_u32.len()
         );
 
         // Cache the module and reflection data

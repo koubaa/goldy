@@ -13,27 +13,11 @@ public sealed class ComputePipeline : IDisposable
     /// <summary>
     /// Create a new compute pipeline.
     /// </summary>
-    public ComputePipeline(Device device, ShaderModule computeShader, params BindGroupLayout[] bindGroupLayouts)
+    public ComputePipeline(Device device, ShaderModule computeShader)
     {
         device.ThrowIfDisposed();
         
-        unsafe
-        {
-            var layoutHandles = new nint[bindGroupLayouts.Length];
-            for (int i = 0; i < bindGroupLayouts.Length; i++)
-            {
-                layoutHandles[i] = bindGroupLayouts[i].Handle;
-            }
-            
-            fixed (nint* ptr = layoutHandles)
-            {
-                Handle = NativeMethods.ComputePipelineCreate(
-                    device.Handle, 
-                    computeShader.Handle, 
-                    (nint)ptr, 
-                    (uint)bindGroupLayouts.Length);
-            }
-        }
+        Handle = NativeMethods.ComputePipelineCreate(device.Handle, computeShader.Handle);
         
         if (Handle == nint.Zero)
             throw GoldyException.FromLastError("ComputePipeline creation");
@@ -77,21 +61,9 @@ public sealed class ComputeEncoder
     }
 
     /// <summary>
-    /// Set a bind group for shader resources.
-    /// </summary>
-    public void SetBindGroup(uint index, BindGroup bindGroup)
-    {
-        EnsureNotExecuted();
-        NativeMethods.ComputeEncoderSetBindGroup(_handle, index, bindGroup.Handle);
-    }
-
-    /// <summary>
-    /// Set push constants for fully bindless compute.
-    /// Pass the buffers whose bindless indices should be pushed to the shader.
-    /// The indices are pushed in order, so buffers[0] becomes BINDLESS_INDEX(0),
-    /// buffers[1] becomes BINDLESS_INDEX(1), etc.
-    /// Use this instead of SetBindGroup() for fully bindless shaders that
-    /// access resources via global descriptor arrays.
+    /// Set push constants for compute resource binding.
+    /// The indices are pushed in order, so buffers[0] becomes index 0,
+    /// buffers[1] becomes index 1, etc.
     /// </summary>
     /// <param name="buffers">Buffers to pass to the shader via push constants.</param>
     public void SetPushConstants(params Buffer[] buffers)

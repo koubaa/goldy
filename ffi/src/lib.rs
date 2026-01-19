@@ -3,7 +3,6 @@
 //! This crate provides a stable C ABI for interoperating with Goldy from
 //! other languages (C#, Python via ctypes, etc.).
 
-mod bind_group;
 mod buffer;
 mod compute;
 mod device;
@@ -18,7 +17,6 @@ mod surface;
 mod texture;
 mod types;
 
-pub use bind_group::*;
 pub use buffer::*;
 pub use compute::*;
 pub use device::*;

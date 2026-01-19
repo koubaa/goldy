@@ -17,8 +17,6 @@ struct ParticleParams {
     float _pad2;
 };
 
-#ifdef __BINDLESS__
-
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer
 struct ComputeResources {
@@ -31,30 +29,21 @@ ParameterBlock<ComputeResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 [[vk::binding(0, 0)]] RWStructuredBuffer<Particle> g_StorageBuffers[];
 [[vk::binding(1, 0)]] ConstantBuffer<ParticleParams> g_UniformBuffers[];
-#define PARTICLES g_StorageBuffers[getBindlessIndex(0)]
-#define PARAMS g_UniformBuffers[getBindlessIndex(1)]
+#define PARTICLES g_StorageBuffers[getBufferIndex(0)]
+#define PARAMS g_UniformBuffers[getBufferIndex(1)]
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0, space0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
     uint particleBufferIndex;
     uint paramsBufferIndex;
 };
 #define PARTICLES (*DescriptorHandle<RWStructuredBuffer<Particle>>(uint2(particleBufferIndex, 0)))
 #define PARAMS (*DescriptorHandle<ConstantBuffer<ParticleParams>>(uint2(paramsBufferIndex, 0)))
 
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]] RWStructuredBuffer<Particle> particles;
-[[vk::binding(1, 0)]] ConstantBuffer<ParticleParams> params;
-
-#define PARTICLES particles
-#define PARAMS params
 #endif
 
 static const uint NUM_PARTICLES = 1000;

@@ -5,9 +5,8 @@ using Silk.NET.Maths;
 using Silk.NET.Windowing;
 
 /// <summary>
-/// Classic demoscene plasma effect using fully bindless rendering.
+/// Classic demoscene plasma effect.
 /// Demonstrates:
-/// - Fully BINDLESS rendering (no BindGroup needed)
 /// - Using SetPushConstants() to pass buffer indices to shaders
 /// - Time-based animation with uniform buffer updates
 /// - Windowed rendering via Surface API
@@ -16,7 +15,7 @@ using Silk.NET.Windowing;
 /// </summary>
 static class Plasma
 {
-    // Plasma shader using bindless resource access
+    // Plasma shader
     const string PlasmaShader = """
         import goldy_exp;
 
@@ -24,8 +23,6 @@ static class Plasma
         struct TimeUniforms {
             float time;
         };
-
-        #ifdef __BINDLESS__
 
         #if defined(__METAL__)
         // Metal: Use ParameterBlock for argument buffer support
@@ -37,26 +34,19 @@ static class Plasma
 
         #elif defined(__SPIRV__)
         // Vulkan: Use push constants for indices + descriptor array
-        import goldy_exp.bindless_indices;
+        import goldy_exp.buffer_indices;
 
         // Global descriptor array of uniform buffers
         [[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-        #define TIME g_UniformBuffers[getBindlessIndex(0)].time
+        #define TIME g_UniformBuffers[getBufferIndex(0)].time
 
-        #elif defined(__HLSL__) || defined(__DX12__)
-        // DX12: Bindless via root constants + ResourceDescriptorHeap
-        cbuffer BindlessIndices : register(b0) {
+        #elif defined(__DX12__)
+        // DX12: Root constants + ResourceDescriptorHeap
+        cbuffer BufferIndices : register(b0) {
             uint uniformsIndex;
         };
         #define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
 
-        #endif
-
-        #else
-        // Traditional binding mode
-        [[vk::binding(0, 0)]]
-        ConstantBuffer<TimeUniforms> uniforms;
-        #define TIME uniforms.time
         #endif
 
         [shader("vertex")]
@@ -102,7 +92,7 @@ static class Plasma
 
     public static void Run()
     {
-        Console.WriteLine("Goldy Plasma Example (Fully Bindless)");
+        Console.WriteLine("Goldy Plasma Example");
         Console.WriteLine(new string('=', 60));
 
         var options = WindowOptions.Default with
@@ -187,18 +177,16 @@ static class Plasma
 
         // Compile shader
         _shader = new ShaderModule(_device, PlasmaShader);
-        Console.WriteLine("Compiled plasma shader (bindless)");
+        Console.WriteLine("Compiled plasma shader");
 
-        // Create pipeline WITHOUT bind group layouts - fully bindless!
-        // Use surface's actual format for the pipeline
+        // Create pipeline
         _pipeline = new RenderPipeline(_device, _shader, _shader,
             new RenderPipelineDesc
             {
                 TargetFormat = _surface.Format,
                 VertexStride = 16, // Vertex2DUv layout: 4 floats * 4 bytes
-                // No BindGroupLayouts needed for bindless!
             });
-        Console.WriteLine("Created render pipeline (bindless - no bind groups)");
+        Console.WriteLine("Created render pipeline");
         
         Console.WriteLine();
         Console.WriteLine("Window ready! Close or press Escape to exit.");
@@ -231,7 +219,7 @@ static class Plasma
             var encoder = new CommandEncoder();
             encoder.Clear(Color.Black);
             encoder.SetPipeline(_pipeline);
-            // BINDLESS: Pass buffer indices via push constants instead of bind groups!
+            // Pass buffer indices via push constants
             encoder.SetPushConstants(_uniformBuffer);
             encoder.SetVertexBuffer(0, _vertexBuffer);
             encoder.Draw(6);  // 6 vertices = 2 triangles = fullscreen quad

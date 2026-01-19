@@ -196,17 +196,3 @@ public enum ShaderStages : uint
     Compute = 4,
     All = 7,
 }
-
-/// <summary>
-/// Binding type for bind groups.
-/// </summary>
-public enum BindingType
-{
-    UniformBuffer = 0,
-    StorageBufferReadOnly = 1,
-    StorageBufferReadWrite = 2,
-    Texture = 3,
-    Sampler = 4,
-    StorageTexture = 5,
-}
-

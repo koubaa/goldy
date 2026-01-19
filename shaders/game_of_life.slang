@@ -1,20 +1,9 @@
 // Conway's Game of Life compute shader
 // Uses ping-pong buffers: reads from one, writes to the other
-//
-// ## Bindless Support
-//
-// This shader demonstrates cross-platform bindless resource access for compute:
-//
-// - Metal (__BINDLESS__ + !__DX12__): Uses ParameterBlock for argument buffers
-// - Vulkan (__BINDLESS__ + !__DX12__): Uses ParameterBlock (same as Metal)
-// - DX12 (__BINDLESS__ + __DX12__): Uses DescriptorHandle + ResourceDescriptorHeap
-// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 // Grid dimensions (must match the example)
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
-
-#ifdef __BINDLESS__
 
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer
@@ -28,29 +17,21 @@ ParameterBlock<GameOfLifeResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 // Binding 0 = RW storage buffers, but we access read-only from currentState
 [[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
-#define CURRENT_STATE g_StorageBuffers[getBindlessIndex(0)]
-#define NEXT_STATE g_StorageBuffers[getBindlessIndex(1)]
+#define CURRENT_STATE g_StorageBuffers[getBufferIndex(0)]
+#define NEXT_STATE g_StorageBuffers[getBufferIndex(1)]
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0, space0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
     uint currentStateIndex;
     uint nextStateIndex;
 };
 #define CURRENT_STATE (*DescriptorHandle<StructuredBuffer<uint>>(uint2(currentStateIndex, 0)))
 #define NEXT_STATE (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(nextStateIndex, 0)))
 
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]] StructuredBuffer<uint> currentState;
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> nextState;
-#define CURRENT_STATE currentState
-#define NEXT_STATE nextState
 #endif
 
 // Get cell state (1 = alive, 0 = dead)
@@ -99,4 +80,3 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     
     NEXT_STATE[idx] = newState;
 }
-

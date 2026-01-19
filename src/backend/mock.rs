@@ -24,10 +24,6 @@ pub struct MockBackend {
     next_pipeline_handle: PipelineHandle,
     compute_pipelines: HashMap<ComputePipelineHandle, MockComputePipeline>,
     next_compute_pipeline_handle: ComputePipelineHandle,
-    bind_group_layouts: HashMap<BindGroupLayoutHandle, MockBindGroupLayout>,
-    next_bind_group_layout_handle: BindGroupLayoutHandle,
-    bind_groups: HashMap<BindGroupHandle, MockBindGroup>,
-    next_bind_group_handle: BindGroupHandle,
     render_targets: HashMap<RenderTargetHandle, MockRenderTarget>,
     next_render_target_handle: RenderTargetHandle,
     surfaces: HashMap<SurfaceHandle, MockSurface>,
@@ -86,16 +82,6 @@ struct MockPipeline {
 
 #[allow(dead_code)]
 struct MockComputePipeline {
-    device_handle: DeviceHandle,
-}
-
-#[allow(dead_code)]
-struct MockBindGroupLayout {
-    device_handle: DeviceHandle,
-}
-
-#[allow(dead_code)]
-struct MockBindGroup {
     device_handle: DeviceHandle,
 }
 
@@ -159,10 +145,6 @@ impl MockBackend {
             next_pipeline_handle: 1,
             compute_pipelines: HashMap::new(),
             next_compute_pipeline_handle: 1,
-            bind_group_layouts: HashMap::new(),
-            next_bind_group_layout_handle: 1,
-            bind_groups: HashMap::new(),
-            next_bind_group_handle: 1,
             render_targets: HashMap::new(),
             next_render_target_handle: 1,
             surfaces: HashMap::new(),
@@ -243,9 +225,6 @@ impl GpuBackend for MockBackend {
         self.pipelines.retain(|_, p| p.device_handle != device);
         self.compute_pipelines
             .retain(|_, p| p.device_handle != device);
-        self.bind_group_layouts
-            .retain(|_, l| l.device_handle != device);
-        self.bind_groups.retain(|_, g| g.device_handle != device);
         self.render_targets.retain(|_, t| t.device_handle != device);
         self.textures.retain(|_, t| t.device_handle != device);
         self.samplers.retain(|_, s| s.device_handle != device);
@@ -345,55 +324,6 @@ impl GpuBackend for MockBackend {
         self.shaders.remove(&shader);
     }
 
-    fn create_bind_group_layout(
-        &mut self,
-        device: DeviceHandle,
-        _entries: &[BindGroupLayoutEntry],
-    ) -> Result<BindGroupLayoutHandle> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-
-        let handle = self.next_bind_group_layout_handle;
-        self.next_bind_group_layout_handle += 1;
-
-        self.bind_group_layouts.insert(
-            handle,
-            MockBindGroupLayout {
-                device_handle: device,
-            },
-        );
-
-        Ok(handle)
-    }
-
-    fn create_bind_group(
-        &mut self,
-        device: DeviceHandle,
-        _layout: BindGroupLayoutHandle,
-        _entries: &[BindGroupEntry],
-    ) -> Result<BindGroupHandle> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-
-        let handle = self.next_bind_group_handle;
-        self.next_bind_group_handle += 1;
-
-        self.bind_groups.insert(
-            handle,
-            MockBindGroup {
-                device_handle: device,
-            },
-        );
-
-        Ok(handle)
-    }
-
-    fn destroy_bind_group(&mut self, bind_group: BindGroupHandle) {
-        self.bind_groups.remove(&bind_group);
-    }
-
     fn create_pipeline(
         &mut self,
         device: DeviceHandle,
@@ -420,26 +350,6 @@ impl GpuBackend for MockBackend {
         Ok(handle)
     }
 
-    fn create_pipeline_with_layout(
-        &mut self,
-        device: DeviceHandle,
-        vertex_shader: ShaderHandle,
-        fragment_shader: ShaderHandle,
-        vertex_layout: &VertexBufferLayout,
-        topology: PrimitiveTopology,
-        target_format: TextureFormat,
-        _bind_group_layouts: &[BindGroupLayoutHandle],
-    ) -> Result<PipelineHandle> {
-        self.create_pipeline(
-            device,
-            vertex_shader,
-            fragment_shader,
-            vertex_layout,
-            topology,
-            target_format,
-        )
-    }
-
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
         self.pipelines.remove(&pipeline);
     }
@@ -452,7 +362,6 @@ impl GpuBackend for MockBackend {
         vertex_layout: &VertexBufferLayout,
         topology: PrimitiveTopology,
         target_format: TextureFormat,
-        _bind_group_layouts: &[BindGroupLayoutHandle],
         _depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
         self.create_pipeline(
@@ -808,7 +717,6 @@ impl GpuBackend for MockBackend {
         &mut self,
         device: DeviceHandle,
         _compute_shader: ShaderHandle,
-        _bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> Result<ComputePipelineHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");

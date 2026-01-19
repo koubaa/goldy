@@ -1,14 +1,5 @@
 // Classic demoscene tunnel effect
 // Uses goldy_exp module for vertex format utilities
-//
-// ## Bindless Support
-//
-// This shader demonstrates cross-platform bindless resource access:
-//
-// - Metal (__BINDLESS__ + __METAL__): ParameterBlock for argument buffer
-// - Vulkan (__BINDLESS__ + __SPIRV__): Push constants + global descriptor arrays (binding 1 = uniforms)
-// - DX12 (__BINDLESS__ + __HLSL__): Root constants + ResourceDescriptorHeap
-// - Traditional mode (no __BINDLESS__): Standard binding syntax
 
 import goldy_exp;
 
@@ -17,9 +8,6 @@ struct TimeUniforms {
     float time;
 };
 
-#ifdef __BINDLESS__
-
-// NOTE: Check __METAL__ FIRST, then __SPIRV__, because Slang auto-defines __HLSL__ for all targets
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer
 struct TunnelResources {
@@ -31,26 +19,18 @@ ParameterBlock<TunnelResources> gResources;
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
 // Must match backend layout: binding 1 = uniform buffers array
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 
 [[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-// Note: Use getBindlessIndex() function, not BINDLESS_INDEX macro (macros don't export from modules)
-#define TIME g_UniformBuffers[getBindlessIndex(0)].time
+#define TIME g_UniformBuffers[getBufferIndex(0)].time
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0) {
     uint uniformsIndex;
 };
 #define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
 
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]]
-ConstantBuffer<TimeUniforms> uniforms;
-#define TIME uniforms.time
 #endif
 
 [shader("vertex")]

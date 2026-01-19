@@ -6,8 +6,6 @@ struct Particle {
     float2 velocity;
 };
 
-#ifdef __BINDLESS__
-
 #if defined(__METAL__)
 // Metal: Use ParameterBlock for argument buffer
 struct RenderResources {
@@ -18,24 +16,17 @@ ParameterBlock<RenderResources> gResources;
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.bindless_indices;
+import goldy_exp.buffer_indices;
 [[vk::binding(0, 0)]] StructuredBuffer<Particle> g_StorageBuffers[];
-#define PARTICLES g_StorageBuffers[getBindlessIndex(0)]
+#define PARTICLES g_StorageBuffers[getBufferIndex(0)]
 
-#elif defined(__HLSL__) || defined(__DX12__)
-// DX12: Bindless via root constants + ResourceDescriptorHeap
-cbuffer BindlessIndices : register(b0, space0) {
+#elif defined(__DX12__)
+// DX12: Root constants + ResourceDescriptorHeap
+cbuffer BufferIndices : register(b0, space0) {
     uint particleBufferIndex;
 };
 #define PARTICLES (*DescriptorHandle<StructuredBuffer<Particle>>(uint2(particleBufferIndex, 0)))
 
-#endif
-
-#else
-// Traditional binding mode
-[[vk::binding(0, 0)]] StructuredBuffer<Particle> particles;
-
-#define PARTICLES particles
 #endif
 
 struct VSOutput {

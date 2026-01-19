@@ -1,44 +1,11 @@
 //! Python wrappers for Compute pipeline and encoder.
 
-use crate::bind_group::{PyBindGroup, PyBindGroupLayout};
 use crate::buffer::PyBuffer;
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
 use crate::shader::PyShaderModule;
 use pyo3::prelude::*;
 use std::sync::{Arc, Mutex};
-
-// =============================================================================
-// ComputePipelineDesc
-// =============================================================================
-
-/// Description for creating a compute pipeline.
-#[pyclass(name = "ComputePipelineDesc", module = "goldy")]
-#[derive(Clone, Default)]
-pub struct PyComputePipelineDesc {
-    pub(crate) bind_group_layouts: Vec<Arc<goldy::BindGroupLayout>>,
-}
-
-#[pymethods]
-impl PyComputePipelineDesc {
-    /// Create a new compute pipeline description.
-    #[new]
-    #[pyo3(signature = (bind_group_layouts=None))]
-    fn new(bind_group_layouts: Option<Vec<PyRef<PyBindGroupLayout>>>) -> Self {
-        PyComputePipelineDesc {
-            bind_group_layouts: bind_group_layouts
-                .map(|layouts| layouts.iter().map(|l| Arc::clone(&l.inner)).collect())
-                .unwrap_or_default(),
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "ComputePipelineDesc(bind_group_layouts={})",
-            self.bind_group_layouts.len()
-        )
-    }
-}
 
 // =============================================================================
 // ComputePipeline
@@ -60,27 +27,13 @@ impl PyComputePipeline {
     /// Args:
     ///     device: The GPU device.
     ///     compute_shader: The compute shader module.
-    ///     desc: Pipeline description with bind group layouts.
     ///
     /// Returns:
     ///     A new ComputePipeline instance.
     #[new]
-    fn new(
-        device: &PyDevice,
-        compute_shader: &PyShaderModule,
-        desc: &PyComputePipelineDesc,
-    ) -> PyResult<Self> {
-        // Create temporary references to BindGroupLayout
-        let layout_refs: Vec<&goldy::BindGroupLayout> =
-            desc.bind_group_layouts.iter().map(|l| l.as_ref()).collect();
-
-        let rust_desc = goldy::ComputePipelineDesc {
-            bind_group_layouts: &layout_refs,
-        };
-
+    fn new(device: &PyDevice, compute_shader: &PyShaderModule) -> PyResult<Self> {
         let pipeline =
-            goldy::ComputePipeline::new(&device.inner, &compute_shader.inner, &rust_desc)
-                .into_py_result()?;
+            goldy::ComputePipeline::new(&device.inner, &compute_shader.inner).into_py_result()?;
 
         Ok(PyComputePipeline {
             inner: Arc::new(pipeline),
@@ -105,7 +58,7 @@ impl PyComputePipeline {
 ///     >>> encoder = goldy.ComputeEncoder()
 ///     >>> with encoder.begin_compute_pass() as cp:
 ///     ...     cp.set_pipeline(pipeline)
-///     ...     cp.set_bind_group(0, bind_group)
+///     ...     cp.set_push_constants([buffer])
 ///     ...     cp.dispatch(16, 16, 1)
 ///     >>> encoder.dispatch(device)
 #[pyclass(name = "ComputeEncoder", module = "goldy")]
@@ -179,30 +132,17 @@ impl PyComputePass {
         });
     }
 
-    /// Set a bind group for shader resources (storage buffers, etc.).
+    /// Set push constants for compute resource binding.
     ///
-    /// Args:
-    ///     index: The bind group set index (matches shader's [[vk::binding(N, index)]]).
-    ///     bind_group: The bind group to use.
-    fn set_bind_group(&self, py: Python<'_>, index: u32, bind_group: &PyBindGroup) {
-        self.encoder.borrow(py).with_encoder(|enc| {
-            let mut pass = enc.begin_compute_pass();
-            pass.set_bind_group(index, &bind_group.inner);
-        });
-    }
-
-    /// Set push constants for fully bindless compute (no bind groups needed).
-    ///
-    /// This is the preferred way to pass buffer indices to shaders that use
-    /// bindless resources. The buffers' descriptor indices are pushed directly
-    /// to the GPU, and shaders can use BINDLESS_INDEX(n) to access them.
+    /// Pass buffer indices to shaders. The buffers' descriptor indices are pushed
+    /// directly to the GPU.
     ///
     /// Args:
     ///     buffers: List of buffers to pass to the shader via push constants.
     ///
     /// Example:
     ///     >>> cp.set_push_constants([buffer_a, buffer_b])
-    ///     # In shader: g_StorageBuffers[BINDLESS_INDEX(0)] and [BINDLESS_INDEX(1)]
+    ///     # In shader: g_StorageBuffers[getBufferIndex(0)] and [getBufferIndex(1)]
     fn set_push_constants(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
         self.encoder.borrow(py).with_encoder(|enc| {
             // Collect buffer references - deref the Arc to get &Buffer

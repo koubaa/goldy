@@ -91,24 +91,6 @@ public class TypeTests
     }
 
     [Fact]
-    public void BindGroupLayoutBinding_Factories_Work()
-    {
-        var uniform = BindGroupLayoutBinding.Uniform(0);
-        Assert.Equal(0u, uniform.Binding);
-        Assert.Equal(ShaderStages.All, uniform.Visibility);
-        Assert.Equal(BindingType.UniformBuffer, uniform.BindingType);
-
-        var storage = BindGroupLayoutBinding.Storage(1, readOnly: true);
-        Assert.Equal(1u, storage.Binding);
-        Assert.Equal(BindingType.StorageBufferReadOnly, storage.BindingType);
-
-        var texture = BindGroupLayoutBinding.Texture(2);
-        Assert.Equal(2u, texture.Binding);
-        Assert.Equal(ShaderStages.Fragment, texture.Visibility);
-        Assert.Equal(BindingType.Texture, texture.BindingType);
-    }
-
-    [Fact]
     public void SamplerDesc_Default_HasCorrectValues()
     {
         var desc = SamplerDesc.Default;

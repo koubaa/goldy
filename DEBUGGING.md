@@ -36,8 +36,6 @@ Goldy creates both SRV and UAV descriptors for storage buffers, stored as:
 
 This matches the common ping-pong pattern (e.g., Game of Life: read from buffer A, write to buffer B).
 
-**If your compute shader has a different access pattern**, you may need to use `set_bind_group()` instead, which allows explicit read-only vs read-write specification via the bind group layout.
-
 ### Python/FFI Buffers with Wrong Element Stride
 
 If a `StructuredBuffer<uint>` reads garbage on DX12 but works on Vulkan, check the buffer's element stride. DX12's structured buffer views require the correct `StructureByteStride`:
