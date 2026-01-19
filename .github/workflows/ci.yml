@@ -325,15 +325,10 @@ jobs:
             libxcb-xfixes0-dev \
             libxkbcommon-dev
 
-      - name: Download Slang compiler
+      - name: Download and bundle Slang
         run: |
-          cd slang
-          chmod +x download.sh
-          ./download.sh
-          SLANG_DIR="$(pwd)/bin/linux-x86_64"
-          SLANG_LIB="$SLANG_DIR/libslang.so"
-          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
-          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+          cd slang && chmod +x download.sh && ./download.sh
+          cd ../python && python build-slang.py
 
       - name: Verify lavapipe installation
         run: |
@@ -372,8 +367,6 @@ jobs:
         env:
           VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
           VK_LAYER_PATH: ""
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
           pip install .
           pytest tests/ -v
@@ -383,8 +376,6 @@ jobs:
         env:
           VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
           VK_LAYER_PATH: ""
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
           PYTHONUNBUFFERED: "1"
         run: |
           python examples/adapter_info.py
@@ -407,19 +398,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Download Slang compiler
+      - name: Download and bundle Slang
         run: |
-          cd slang
-          chmod +x download.sh
-          ./download.sh
-          if [ "$(uname -m)" = "arm64" ]; then
-            SLANG_DIR="$(pwd)/bin/macos-aarch64"
-          else
-            SLANG_DIR="$(pwd)/bin/macos-x86_64"
-          fi
-          SLANG_LIB="$SLANG_DIR/libslang.dylib"
-          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
-          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+          cd slang && chmod +x download.sh && ./download.sh
+          cd ../python && python build-slang.py
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -440,9 +422,6 @@ jobs:
 
       - name: Install and test Python bindings
         working-directory: python
-        env:
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
           pip install .
           pytest tests/ -v
@@ -450,8 +429,6 @@ jobs:
       - name: Run Python examples
         working-directory: python
         env:
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
           PYTHONUNBUFFERED: "1"
         run: |
           python examples/adapter_info.py
@@ -530,15 +507,8 @@ jobs:
             libxcb-xfixes0-dev \
             libxkbcommon-dev
 
-      - name: Download Slang compiler
-        run: |
-          cd slang
-          chmod +x download.sh
-          ./download.sh
-          SLANG_DIR="$(pwd)/bin/linux-x86_64"
-          SLANG_LIB="$SLANG_DIR/libslang.so"
-          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
-          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+      - name: Download Slang
+        run: cd slang && chmod +x download.sh && ./download.sh
 
       - name: Verify lavapipe installation
         run: |
@@ -588,8 +558,6 @@ jobs:
         env:
           VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
           VK_LAYER_PATH: ""
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
           ./triangle
           # Verify output file was created
@@ -610,22 +578,8 @@ jobs:
         run: |
           brew install cmake ninja
 
-      - name: Download Slang compiler
-        run: |
-          cd slang
-          chmod +x download.sh
-          ./download.sh
-          # Determine architecture
-          if [ "$(uname -m)" = "arm64" ]; then
-            SLANG_DIR="$(pwd)/bin/macos-aarch64"
-          else
-            SLANG_DIR="$(pwd)/bin/macos-x86_64"
-          fi
-          SLANG_LIB="$SLANG_DIR/libslang.dylib"
-          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
-          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
-          echo "Slang libraries:"
-          ls -la "$SLANG_DIR" || echo "Directory not found"
+      - name: Download Slang
+        run: cd slang && chmod +x download.sh && ./download.sh
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -657,9 +611,6 @@ jobs:
 
       - name: Run triangle example
         working-directory: cpp/build/examples
-        env:
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
           ./triangle
           # Verify output file was created
