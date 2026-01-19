@@ -11,8 +11,8 @@ keywords = ["gpu", "graphics", "ffi", "c-bindings"]
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-# Core goldy library
-goldy = { path = ".." }
+# Core goldy library - default-features = false allows feature passthrough
+goldy = { path = "..", default-features = false }
 
 # Error handling
 anyhow = "1.0"
@@ -30,3 +30,10 @@ raw-window-handle = "0.6"
 # C header generation
 cbindgen = "0.29"
 
+[features]
+# Default enables all platform-appropriate backends (same as goldy)
+default = ["vulkan", "dx12", "metal"]
+# Backend features pass through to goldy - only selected backends are compiled
+vulkan = ["goldy/vulkan"]
+dx12 = ["goldy/dx12"]
+metal = ["goldy/metal"]
