@@ -264,29 +264,30 @@ impl SlangLibrary {
     }
 
     /// Find the Slang library path.
+    ///
+    /// Search order:
+    /// 1. GOLDY_SLANG_PATH environment variable (user override)
+    /// 2. Vendored next to executable (happy path for distribution)
+    /// 3. Vulkan SDK (Windows fallback)
     fn find_library() -> Result<PathBuf> {
-        // 1. Check GOLDY_SLANG_PATH or RAG_SLANG_PATH environment variable
-        for env_var in ["GOLDY_SLANG_PATH", "RAG_SLANG_PATH"] {
-            if let Ok(path) = std::env::var(env_var) {
-                let path = PathBuf::from(path);
-                if path.exists() {
-                    return Ok(path);
-                }
-                tracing::warn!("{} set but file not found: {}", env_var, path.display());
+        // 1. Check GOLDY_SLANG_PATH environment variable (user override)
+        if let Ok(path) = std::env::var("GOLDY_SLANG_PATH") {
+            let path = PathBuf::from(path);
+            if path.exists() {
+                return Ok(path);
             }
+            tracing::warn!(
+                "GOLDY_SLANG_PATH set but file not found: {}",
+                path.display()
+            );
         }
 
-        // 2. Check build.rs downloaded binaries (via GOLDY_SLANG_DIR compile-time env)
-        if let Some(path) = Self::find_build_script_library() {
-            return Ok(path);
-        }
-
-        // 3. Check vendored binaries (for development)
+        // 2. Check vendored binaries next to executable
         if let Some(path) = Self::find_vendored_library() {
             return Ok(path);
         }
 
-        // 4. Check Vulkan SDK (Windows development fallback)
+        // 3. Check Vulkan SDK (Windows fallback)
         #[cfg(target_os = "windows")]
         if let Some(path) = Self::find_vulkan_sdk_library() {
             return Ok(path);
@@ -294,70 +295,28 @@ impl SlangLibrary {
 
         anyhow::bail!(
             "Could not find Slang library. Options:\n\
-             1. Set GOLDY_SLANG_PATH environment variable\n\
-             2. Install Vulkan SDK 1.4+ (Windows)\n\
+             1. Ensure slang is bundled next to the executable\n\
+             2. Set GOLDY_SLANG_PATH environment variable\n\
              3. For development: run slang/download.sh"
         )
     }
 
-    /// Find library downloaded by build.rs.
-    fn find_build_script_library() -> Option<PathBuf> {
-        // GOLDY_SLANG_DIR is set at compile time by build.rs
-        let slang_dir = option_env!("GOLDY_SLANG_DIR")?;
-        let lib_name = Self::library_name();
-        let path = PathBuf::from(slang_dir).join(lib_name);
-        if path.exists() {
-            return Some(path);
-        }
-        None
-    }
-
-    /// Find vendored library based on platform.
+    /// Find vendored library next to the executable.
+    ///
+    /// This is the happy path for distribution - Slang libraries should be
+    /// copied alongside the native library (goldy_ffi.dll/so/dylib or _goldy.so).
     fn find_vendored_library() -> Option<PathBuf> {
         let lib_name = Self::library_name();
-        let platform_dir = Self::platform_dir();
 
-        // Try relative to executable
+        // Try relative to executable (covers most deployment scenarios)
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                // Check directly in exe directory (for FFI deployments where slang-compiler.dll
-                // is copied alongside the FFI DLL, e.g., .NET runtimes)
+                // Check directly in exe directory
                 let path = exe_dir.join(lib_name);
                 if path.exists() {
                     return Some(path);
                 }
-
-                // Check in slang/bin/{platform}/ relative to exe
-                let path = exe_dir
-                    .join("slang")
-                    .join("bin")
-                    .join(platform_dir)
-                    .join(lib_name);
-                if path.exists() {
-                    return Some(path);
-                }
-
-                // Check in ../slang/bin/{platform}/ (for running from target/debug)
-                let path = exe_dir
-                    .join("..")
-                    .join("..")
-                    .join("slang")
-                    .join("bin")
-                    .join(platform_dir)
-                    .join(lib_name);
-                if path.exists() {
-                    return Some(path);
-                }
             }
-        }
-
-        // Try relative to current directory (for development)
-        let path = PathBuf::from("slang")
-            .join("bin")
-            .join(platform_dir)
-            .join(lib_name);
-        if path.exists() {
-            return Some(path);
         }
 
         None
@@ -409,45 +368,6 @@ impl SlangLibrary {
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             compile_error!("Unsupported platform for Slang library")
-        }
-    }
-
-    /// Get the platform directory name.
-    fn platform_dir() -> &'static str {
-        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        {
-            "windows-x86_64"
-        }
-        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-        {
-            "windows-aarch64"
-        }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        {
-            "linux-x86_64"
-        }
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        {
-            "linux-aarch64"
-        }
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        {
-            "macos-x86_64"
-        }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            "macos-aarch64"
-        }
-        #[cfg(not(any(
-            all(target_os = "windows", target_arch = "x86_64"),
-            all(target_os = "windows", target_arch = "aarch64"),
-            all(target_os = "linux", target_arch = "x86_64"),
-            all(target_os = "linux", target_arch = "aarch64"),
-            all(target_os = "macos", target_arch = "x86_64"),
-            all(target_os = "macos", target_arch = "aarch64"),
-        )))]
-        {
-            compile_error!("Unsupported platform/architecture combination")
         }
     }
 }

@@ -49,6 +49,18 @@ if(GOLDY_FFI_LIB)
                 COMMENT "Copying libgoldy_ffi.so to output directory"
             )
         endif()
+        
+        # Copy Slang libraries to output directory (required for runtime)
+        if(SLANG_LIBS)
+            foreach(slang_lib IN LISTS SLANG_LIBS)
+                add_custom_command(TARGET ${example} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${slang_lib}"
+                        "$<TARGET_FILE_DIR:${example}>"
+                    COMMENT "Copying Slang library to output directory"
+                )
+            endforeach()
+        endif()
     endforeach()
 endif()
 

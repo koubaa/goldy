@@ -2,12 +2,15 @@
 //!
 //! These tests require a GPU and are skipped in CI if no GPU is available.
 
+mod common;
+
 use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, DeviceType, IndexFormat, Instance, RenderPipeline,
     RenderPipelineDesc, RenderTarget, ShaderModule, TextureFormat, Vertex2D,
 };
 
 fn create_device() -> Option<goldy::Device> {
+    common::init_test_env();
     let instance = Instance::new().ok()?;
     instance.create_device(DeviceType::DiscreteGpu).ok()
 }
