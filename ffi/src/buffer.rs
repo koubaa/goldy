@@ -2,7 +2,7 @@
 
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
-use crate::types::GoldyBufferUsage;
+use crate::types::GoldyDataAccess;
 use std::ptr;
 use std::slice;
 
@@ -11,7 +11,11 @@ pub struct GoldyBuffer {
     pub(crate) inner: goldy::Buffer,
 }
 
-/// Create a new buffer.
+/// Create a new buffer with the specified access pattern.
+///
+/// # Access Patterns
+/// - `Scattered` (0): Any thread can access any address (StructuredBuffer, RWStructuredBuffer)
+/// - `Broadcast` (1): All threads read same address (ConstantBuffer)
 ///
 /// Returns a pointer to the buffer, or null on failure.
 ///
@@ -21,14 +25,14 @@ pub struct GoldyBuffer {
 pub unsafe extern "C" fn goldy_buffer_create(
     device: *const GoldyDevice,
     size: u64,
-    usage: GoldyBufferUsage,
+    access: GoldyDataAccess,
 ) -> *mut GoldyBuffer {
     if device.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
 
-    match goldy::Buffer::new(&(*device).inner, size, usage.into()) {
+    match goldy::Buffer::new(&(*device).inner, size, access.into()) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
@@ -38,6 +42,8 @@ pub unsafe extern "C" fn goldy_buffer_create(
 }
 
 /// Create a buffer initialized with data.
+///
+/// See `goldy_buffer_create` for access pattern documentation.
 ///
 /// Returns a pointer to the buffer, or null on failure.
 ///
@@ -49,7 +55,7 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data(
     device: *const GoldyDevice,
     data: *const u8,
     size: usize,
-    usage: GoldyBufferUsage,
+    access: GoldyDataAccess,
 ) -> *mut GoldyBuffer {
     if device.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
@@ -66,7 +72,7 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data(
         &[]
     };
 
-    match goldy::Buffer::with_bytes(&(*device).inner, data_slice, usage.into()) {
+    match goldy::Buffer::with_bytes(&(*device).inner, data_slice, access.into()) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
@@ -132,14 +138,14 @@ pub unsafe extern "C" fn goldy_buffer_size(buffer: *const GoldyBuffer) -> u64 {
     (*buffer).inner.size()
 }
 
-/// Get the buffer usage flags.
+/// Get the buffer's access pattern.
 ///
 /// # Safety
 /// The buffer pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_buffer_usage(buffer: *const GoldyBuffer) -> GoldyBufferUsage {
+pub unsafe extern "C" fn goldy_buffer_access(buffer: *const GoldyBuffer) -> GoldyDataAccess {
     if buffer.is_null() {
-        return GoldyBufferUsage(0);
+        return GoldyDataAccess::Scattered;
     }
-    (*buffer).inner.usage().into()
+    (*buffer).inner.access().into()
 }

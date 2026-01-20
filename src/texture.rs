@@ -6,7 +6,7 @@
 
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
-use crate::types::{TextureFormat, TextureUsage};
+use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -23,10 +23,18 @@ pub struct Texture {
 }
 
 impl Texture {
-    /// Create a new empty texture.
+    /// Create a new empty texture with the specified access pattern.
     ///
     /// The texture is created with uninitialized data. Use `write()` to
     /// upload image data after creation.
+    ///
+    /// # Access Patterns
+    ///
+    /// - `SpatialAccess::Interpolated`: Hardware filtering between neighbors (texture units).
+    ///   Use for textures sampled with bilinear/trilinear filtering.
+    ///
+    /// - `SpatialAccess::Direct`: Direct 2D indexing without filtering.
+    ///   Use for storage images, compute output, or when you need exact pixel values.
     ///
     /// # Arguments
     ///
@@ -34,7 +42,8 @@ impl Texture {
     /// * `width` - Width in pixels
     /// * `height` - Height in pixels
     /// * `format` - Pixel format
-    /// * `usage` - How the texture will be used
+    /// * `access` - Spatial access pattern
+    /// * `flags` - Additional texture flags (copy operations, render target)
     ///
     /// # Errors
     ///
@@ -44,11 +53,12 @@ impl Texture {
         width: u32,
         height: u32,
         format: TextureFormat,
-        usage: TextureUsage,
+        access: SpatialAccess,
+        flags: TextureFlags,
     ) -> Result<Self> {
         let handle = {
             let mut backend = device.backend.lock().unwrap();
-            backend.create_texture(device.handle, width, height, format, usage)?
+            backend.create_texture(device.handle, width, height, format, access, flags)?
         };
 
         Ok(Self {
@@ -65,6 +75,8 @@ impl Texture {
     /// The data must be in the correct format for the texture's pixel format.
     /// For RGBA8 textures, this is 4 bytes per pixel in RGBA order.
     ///
+    /// See [`Texture::new`] for access pattern documentation.
+    ///
     /// # Arguments
     ///
     /// * `device` - The GPU device to create the texture on
@@ -72,7 +84,8 @@ impl Texture {
     /// * `width` - Width in pixels
     /// * `height` - Height in pixels
     /// * `format` - Pixel format
-    /// * `usage` - How the texture will be used
+    /// * `access` - Spatial access pattern
+    /// * `flags` - Additional texture flags
     ///
     /// # Errors
     ///
@@ -85,7 +98,8 @@ impl Texture {
         width: u32,
         height: u32,
         format: TextureFormat,
-        usage: TextureUsage,
+        access: SpatialAccess,
+        flags: TextureFlags,
     ) -> Result<Self> {
         let expected_size = (width * height * format.bytes_per_pixel()) as usize;
         if data.len() != expected_size {
@@ -96,7 +110,7 @@ impl Texture {
             );
         }
 
-        let texture = Self::new(device, width, height, format, usage)?;
+        let texture = Self::new(device, width, height, format, access, flags)?;
         texture.write(data)?;
         Ok(texture)
     }
@@ -188,7 +202,8 @@ mod tests {
             256,
             256,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
         )
         .unwrap();
 
@@ -216,7 +231,8 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
         )
         .unwrap();
 
@@ -237,7 +253,8 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
         );
 
         assert!(result.is_err());
@@ -251,7 +268,8 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
         )
         .unwrap();
 
@@ -267,7 +285,8 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
         )
         .unwrap();
 

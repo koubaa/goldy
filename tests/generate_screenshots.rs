@@ -5,7 +5,7 @@
 mod common;
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, Device,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, Device,
     DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget,
     ShaderModule, TextureFormat, Vertex2D, VertexBufferLayout,
 };
@@ -87,7 +87,7 @@ fn render_triangle(
     .expect("Failed to create pipeline");
 
     let vertex_buffer =
-        Buffer::with_data(device, &vertices, BufferUsage::VERTEX).expect("Failed to create VB");
+        Buffer::with_data(device, &vertices, DataAccess::Scattered).expect("Failed to create VB");
 
     let mut encoder = CommandEncoder::new();
     {
@@ -249,9 +249,9 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             .expect("Failed to load render shader");
 
     let initial_state = create_gol_initial_state();
-    let buffer_a = Buffer::with_data(device, &initial_state, BufferUsage::STORAGE)
+    let buffer_a = Buffer::with_data(device, &initial_state, DataAccess::Scattered)
         .expect("Failed to create buffer A");
-    let buffer_b = Buffer::with_data(device, &initial_state, BufferUsage::STORAGE)
+    let buffer_b = Buffer::with_data(device, &initial_state, DataAccess::Scattered)
         .expect("Failed to create buffer B");
 
     // Create pipelines

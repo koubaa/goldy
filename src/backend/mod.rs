@@ -34,8 +34,8 @@ pub mod mock;
 pub mod metal;
 
 use crate::types::{
-    BackendType, BufferUsage, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat,
-    PrimitiveTopology, SamplerDesc, TextureFormat, TextureUsage, VertexBufferLayout,
+    BackendType, Color, DataAccess, DepthFormat, DepthStencilState, DeviceType, IndexFormat,
+    PrimitiveTopology, SamplerDesc, SpatialAccess, TextureFlags, TextureFormat, VertexBufferLayout,
 };
 use anyhow::Result;
 
@@ -147,7 +147,7 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         device: DeviceHandle,
         size: u64,
-        usage: BufferUsage,
+        access: DataAccess,
         element_stride: Option<u32>,
     ) -> Result<BufferHandle>;
     fn destroy_buffer(&mut self, buffer: BufferHandle);
@@ -225,7 +225,8 @@ pub trait GpuBackend: Send + Sync {
         width: u32,
         height: u32,
         format: TextureFormat,
-        usage: TextureUsage,
+        access: SpatialAccess,
+        flags: TextureFlags,
     ) -> Result<TextureHandle>;
     fn write_texture(
         &mut self,

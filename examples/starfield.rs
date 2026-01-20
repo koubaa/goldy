@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
     Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
     VertexBufferLayout,
 };
@@ -133,7 +133,7 @@ impl RenderState {
         }
 
         let star_buffer =
-            Buffer::with_data(&device, &stars, BufferUsage::STORAGE | BufferUsage::VERTEX)?;
+            Buffer::with_data(&device, &stars, DataAccess::Scattered)?;
 
         // Create params buffer
         let initial_params = StarfieldParams {
@@ -142,7 +142,7 @@ impl RenderState {
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer = Buffer::with_data(&device, &[initial_params], BufferUsage::UNIFORM)?;
+        let params_buffer = Buffer::with_data(&device, &[initial_params], DataAccess::Broadcast)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

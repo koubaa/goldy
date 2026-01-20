@@ -71,32 +71,36 @@ pub enum BackendType {
 pub struct Buffer { /* ... */ }
 
 impl Buffer {
-    /// Create an empty buffer
-    pub fn new(device: &Device, size: usize, usage: BufferUsage) -> Result<Self>;
+    /// Create an empty buffer with the specified access pattern
+    pub fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self>;
     
     /// Create a buffer with initial data
-    pub fn with_data<T: Pod>(device: &Device, data: &[T], usage: BufferUsage) -> Result<Self>;
+    pub fn with_data<T: Pod>(device: &Device, data: &[T], access: DataAccess) -> Result<Self>;
     
     /// Write data to the buffer
-    pub fn write<T: Pod>(&self, data: &[T]) -> Result<()>;
+    pub fn write<T: Pod>(&self, offset: u64, data: &[T]) -> Result<()>;
     
     /// Get buffer size in bytes
-    pub fn size(&self) -> usize;
+    pub fn size(&self) -> u64;
+    
+    /// Get the buffer's access pattern
+    pub fn access(&self) -> DataAccess;
 }
 ```
 
-### BufferUsage
+### DataAccess
 
 ```rust
-bitflags! {
-    pub struct BufferUsage: u32 {
-        const VERTEX = 0x01;
-        const INDEX = 0x02;
-        const UNIFORM = 0x04;
-        const STORAGE = 0x08;
-        const COPY_SRC = 0x10;
-        const COPY_DST = 0x20;
-    }
+/// Data access pattern for buffers.
+/// Describes how threads will access the buffer, determining hardware optimizations.
+pub enum DataAccess {
+    /// Any thread, any address, read/write. No coherence assumptions.
+    /// Maps to StructuredBuffer, RWStructuredBuffer in shaders.
+    Scattered,
+    
+    /// All threads read same address. Hardware broadcast optimization.
+    /// Maps to ConstantBuffer in shaders.
+    Broadcast,
 }
 ```
 

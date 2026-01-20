@@ -23,6 +23,17 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// Data access pattern for buffers.
+//
+// - `Scattered`: Any thread, any address, read/write. No coherence assumptions.
+// - `Broadcast`: All threads read same address. Hardware broadcast optimization.
+typedef enum GoldyDataAccess {
+    // Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
+    GOLDY_DATA_ACCESS_SCATTERED = 0,
+    // All threads same address, broadcast optimized (ConstantBuffer).
+    GOLDY_DATA_ACCESS_BROADCAST = 1,
+} GoldyDataAccess;
+
 // Result codes for FFI functions.
 typedef enum GoldyResult {
     // Operation succeeded.
@@ -128,6 +139,17 @@ typedef enum GoldyFilterMode {
     GOLDY_FILTER_MODE_LINEAR = 1,
 } GoldyFilterMode;
 
+// Spatial access pattern for textures.
+//
+// - `Interpolated`: Hardware filtering between neighbors (texture units).
+// - `Direct`: Direct 2D/3D indexing, no filtering, read/write.
+typedef enum GoldySpatialAccess {
+    // Hardware filtering between neighbors (Texture2D with sampler).
+    GOLDY_SPATIAL_ACCESS_INTERPOLATED = 0,
+    // Direct 2D/3D indexing, no filtering (RWTexture2D).
+    GOLDY_SPATIAL_ACCESS_DIRECT = 1,
+} GoldySpatialAccess;
+
 // Opaque handle to a Goldy Buffer.
 typedef struct GoldyBuffer GoldyBuffer;
 
@@ -169,17 +191,6 @@ typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
 // Opaque handle to a Goldy Texture.
 typedef struct GoldyTexture GoldyTexture;
-
-// Buffer usage flags.
-typedef struct GoldyBufferUsage {
-    uint32_t _0;
-} GoldyBufferUsage;
-#define GoldyBufferUsage_VERTEX (GoldyBufferUsage){ ._0 = (1 << 0) }
-#define GoldyBufferUsage_INDEX (GoldyBufferUsage){ ._0 = (1 << 1) }
-#define GoldyBufferUsage_UNIFORM (GoldyBufferUsage){ ._0 = (1 << 2) }
-#define GoldyBufferUsage_STORAGE (GoldyBufferUsage){ ._0 = (1 << 3) }
-#define GoldyBufferUsage_COPY_SRC (GoldyBufferUsage){ ._0 = (1 << 4) }
-#define GoldyBufferUsage_COPY_DST (GoldyBufferUsage){ ._0 = (1 << 5) }
 
 // RGBA color with floating point components (0.0 - 1.0).
 typedef struct GoldyColor {
@@ -239,21 +250,30 @@ typedef struct GoldySamplerDesc {
     float lod_max_clamp;
 } GoldySamplerDesc;
 
-// Texture usage flags.
-typedef struct GoldyTextureUsage {
+// Texture flags for copy and render operations.
+typedef struct GoldyTextureFlags {
     uint32_t _0;
-} GoldyTextureUsage;
-#define GoldyTextureUsage_COPY_SRC (GoldyTextureUsage){ ._0 = (1 << 0) }
-#define GoldyTextureUsage_COPY_DST (GoldyTextureUsage){ ._0 = (1 << 1) }
-#define GoldyTextureUsage_SAMPLED (GoldyTextureUsage){ ._0 = (1 << 2) }
-#define GoldyTextureUsage_STORAGE (GoldyTextureUsage){ ._0 = (1 << 3) }
-#define GoldyTextureUsage_RENDER_TARGET (GoldyTextureUsage){ ._0 = (1 << 4) }
+} GoldyTextureFlags;
+#define GoldyTextureFlags_NONE (GoldyTextureFlags){ ._0 = 0 }
+#define GoldyTextureFlags_COPY_SRC (GoldyTextureFlags){ ._0 = (1 << 0) }
+#define GoldyTextureFlags_COPY_DST (GoldyTextureFlags){ ._0 = (1 << 1) }
+#define GoldyTextureFlags_RENDER_TARGET (GoldyTextureFlags){ ._0 = (1 << 2) }
 
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
-// Create a new buffer.
+// Get the buffer's access pattern.
+//
+// # Safety
+// The buffer pointer must be valid.
+enum GoldyDataAccess goldy_buffer_access(const struct GoldyBuffer *buffer);
+
+// Create a new buffer with the specified access pattern.
+//
+// # Access Patterns
+// - `Scattered` (0): Any thread can access any address (StructuredBuffer, RWStructuredBuffer)
+// - `Broadcast` (1): All threads read same address (ConstantBuffer)
 //
 // Returns a pointer to the buffer, or null on failure.
 //
@@ -261,9 +281,11 @@ extern "C" {
 // The device pointer must be valid.
 struct GoldyBuffer *goldy_buffer_create(const struct GoldyDevice *device,
                                         uint64_t size,
-                                        struct GoldyBufferUsage usage);
+                                        enum GoldyDataAccess access);
 
 // Create a buffer initialized with data.
+//
+// See `goldy_buffer_create` for access pattern documentation.
 //
 // Returns a pointer to the buffer, or null on failure.
 //
@@ -273,7 +295,7 @@ struct GoldyBuffer *goldy_buffer_create(const struct GoldyDevice *device,
 struct GoldyBuffer *goldy_buffer_create_with_data(const struct GoldyDevice *device,
                                                   const uint8_t *data,
                                                   size_t size,
-                                                  struct GoldyBufferUsage usage);
+                                                  enum GoldyDataAccess access);
 
 // Destroy a buffer.
 //
@@ -286,12 +308,6 @@ void goldy_buffer_destroy(struct GoldyBuffer *buffer);
 // # Safety
 // The buffer pointer must be valid.
 uint64_t goldy_buffer_size(const struct GoldyBuffer *buffer);
-
-// Get the buffer usage flags.
-//
-// # Safety
-// The buffer pointer must be valid.
-struct GoldyBufferUsage goldy_buffer_usage(const struct GoldyBuffer *buffer);
 
 // Write data to a buffer.
 //
@@ -760,7 +776,16 @@ enum GoldyResult goldy_surface_resize(struct GoldySurface *surface,
 // The surface pointer must be valid.
 uint32_t goldy_surface_width(const struct GoldySurface *surface);
 
-// Create a new texture.
+// Create a new texture with the specified spatial access pattern.
+//
+// # Access Patterns
+// - `Interpolated` (0): Hardware filtering between neighbors (Texture2D with sampler)
+// - `Direct` (1): Direct 2D indexing, no filtering (RWTexture2D)
+//
+// # Flags
+// - `COPY_SRC` (1): Can be used as a copy source
+// - `COPY_DST` (2): Can be used as a copy destination
+// - `RENDER_TARGET` (4): Can be used as a render attachment
 //
 // Returns a pointer to the texture, or null on failure.
 //
@@ -770,7 +795,8 @@ struct GoldyTexture *goldy_texture_create(const struct GoldyDevice *device,
                                           uint32_t width,
                                           uint32_t height,
                                           enum GoldyTextureFormat format,
-                                          struct GoldyTextureUsage usage);
+                                          enum GoldySpatialAccess access,
+                                          struct GoldyTextureFlags flags);
 
 // Destroy a texture.
 //

@@ -14,7 +14,7 @@ device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
 
 # Create storage buffer with data
 data = np.arange(256, dtype=np.float32)
-buffer = goldy.Buffer(device, data, goldy.BufferUsage.STORAGE)
+buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
 
 # Define compute shader (Slang)
 SHADER = """
@@ -69,8 +69,8 @@ For iterative algorithms, use two buffers alternating as input/output:
 
 ```python
 # Create two buffers
-buffer_a = goldy.Buffer(device, initial_data, goldy.BufferUsage.STORAGE)
-buffer_b = goldy.Buffer(device, initial_data, goldy.BufferUsage.STORAGE)
+buffer_a = goldy.Buffer(device, initial_data, goldy.DataAccess.SCATTERED)
+buffer_b = goldy.Buffer(device, initial_data, goldy.DataAccess.SCATTERED)
 
 # Iterate, swapping buffers each step
 use_a = True
@@ -147,7 +147,7 @@ Use compute results in render passes via shared storage buffers:
 
 ```python
 # Create storage buffer accessible from both compute and fragment shaders
-buffer = goldy.Buffer(device, data, goldy.BufferUsage.STORAGE)
+buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
 
 # Run compute
 compute_encoder = goldy.ComputeEncoder()

@@ -46,23 +46,39 @@ public enum TextureFormat
 }
 
 /// <summary>
-/// Buffer usage flags.
+/// Data access pattern for buffers.
+/// Describes how threads will access the buffer, which determines hardware optimization strategies.
 /// </summary>
-[Flags]
-public enum BufferUsage : uint
+public enum DataAccess
 {
-    /// <summary>Can be used as a vertex buffer.</summary>
-    Vertex = 1 << 0,
-    /// <summary>Can be used as an index buffer.</summary>
-    Index = 1 << 1,
-    /// <summary>Can be used as a uniform buffer.</summary>
-    Uniform = 1 << 2,
-    /// <summary>Can be used as a storage buffer.</summary>
-    Storage = 1 << 3,
-    /// <summary>Can be used as a copy source.</summary>
-    CopySrc = 1 << 4,
-    /// <summary>Can be used as a copy destination.</summary>
-    CopyDst = 1 << 5,
+    /// <summary>
+    /// Any thread, any address, read/write. No coherence assumptions.
+    /// Maps to storage buffers (StructuredBuffer, RWStructuredBuffer in shaders).
+    /// </summary>
+    Scattered = 0,
+    /// <summary>
+    /// All threads read same address. Hardware broadcast optimization.
+    /// Maps to uniform/constant buffers (ConstantBuffer in shaders).
+    /// </summary>
+    Broadcast = 1,
+}
+
+/// <summary>
+/// Spatial access pattern for textures.
+/// Describes how the texture will be accessed, which determines hardware optimization strategies.
+/// </summary>
+public enum SpatialAccess
+{
+    /// <summary>
+    /// Hardware filtering between neighbors (texture units).
+    /// Maps to sampled images (Texture2D with sampler in shaders).
+    /// </summary>
+    Interpolated = 0,
+    /// <summary>
+    /// Direct 2D/3D indexing, no filtering, read/write.
+    /// Maps to storage images (RWTexture2D in shaders).
+    /// </summary>
+    Direct = 1,
 }
 
 /// <summary>
@@ -144,21 +160,19 @@ public enum CompareFunction
 }
 
 /// <summary>
-/// Texture usage flags.
+/// Texture flags for copy and render operations.
 /// </summary>
 [Flags]
-public enum TextureUsage : uint
+public enum TextureFlags : uint
 {
+    /// <summary>No flags.</summary>
+    None = 0,
     /// <summary>Can be used as a copy source.</summary>
     CopySrc = 1 << 0,
     /// <summary>Can be used as a copy destination.</summary>
     CopyDst = 1 << 1,
-    /// <summary>Can be sampled in a shader.</summary>
-    Sampled = 1 << 2,
-    /// <summary>Can be used as a storage texture.</summary>
-    Storage = 1 << 3,
     /// <summary>Can be used as a render attachment.</summary>
-    RenderTarget = 1 << 4,
+    RenderTarget = 1 << 2,
 }
 
 /// <summary>

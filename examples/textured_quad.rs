@@ -5,8 +5,8 @@
 //! Run with: cargo run --example textured_quad
 
 use goldy::{
-    types::{AddressMode, FilterMode, SamplerDesc, TextureFormat, TextureUsage},
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    types::{AddressMode, FilterMode, SamplerDesc, SpatialAccess, TextureFlags, TextureFormat},
+    Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
     RenderPipelineDesc, Sampler, ShaderModule, Surface, Texture, Vertex2DUv,
 };
 use std::sync::Arc;
@@ -176,7 +176,8 @@ impl App {
             tex_width,
             tex_height,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
         )?;
 
         // Create sampler with linear filtering and repeat addressing
@@ -209,7 +210,7 @@ impl App {
         )?;
 
         // Create vertex buffer
-        let vertex_buffer = Buffer::with_data(&device, &QUAD_VERTICES, BufferUsage::VERTEX)?;
+        let vertex_buffer = Buffer::with_data(&device, &QUAD_VERTICES, DataAccess::Scattered)?;
 
         self.device = Some(device);
         self.shader = Some(shader);

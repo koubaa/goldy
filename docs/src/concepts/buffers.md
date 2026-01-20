@@ -1,60 +1,50 @@
 # Buffers
 
-Buffers store data on the GPU - vertices, indices, uniform data, etc.
+Buffers store data on the GPU - uniform data, shader storage, etc.
 
 ## Creating Buffers
 
 ### With Initial Data
 
 ```rust
-use goldy::{Buffer, BufferUsage};
+use goldy::{Buffer, DataAccess};
 
-let vertices = [
-    Vertex2D::new(0.0, -0.5, Color::RED),
-    Vertex2D::new(-0.5, 0.5, Color::GREEN),
-    Vertex2D::new(0.5, 0.5, Color::BLUE),
-];
-
-let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+let data = [1.0f32, 2.0, 3.0, 4.0];
+let buffer = Buffer::with_data(&device, &data, DataAccess::Broadcast)?;
 ```
 
 ### Empty Buffer
 
 ```rust
-let buffer = Buffer::new(&device, size_in_bytes, BufferUsage::VERTEX)?;
+let buffer = Buffer::new(&device, size_in_bytes, DataAccess::Scattered)?;
 ```
 
-## Buffer Usage
+## Data Access Patterns
+
+Goldy uses access-pattern-based resource binding instead of traditional graphics categories. This describes **how** threads access data:
 
 ```rust
-bitflags! {
-    pub struct BufferUsage: u32 {
-        const VERTEX = 0x01;    // Vertex data
-        const INDEX = 0x02;     // Index data
-        const UNIFORM = 0x04;   // Uniform/constant data
-        const STORAGE = 0x08;   // Shader storage
-        const COPY_SRC = 0x10;  // Copy source
-        const COPY_DST = 0x20;  // Copy destination
-    }
+pub enum DataAccess {
+    /// Any thread, any address, read/write. No coherence assumptions.
+    /// Maps to StructuredBuffer, RWStructuredBuffer in shaders.
+    Scattered,
+    
+    /// All threads read same address. Hardware broadcast optimization.
+    /// Maps to ConstantBuffer in shaders.
+    Broadcast,
 }
 ```
 
-Usages can be combined:
-
-```rust
-let buffer = Buffer::new(
-    &device, 
-    size, 
-    BufferUsage::VERTEX | BufferUsage::COPY_DST
-)?;
-```
+Choose based on access pattern:
+- **Scattered**: General-purpose storage (particles, compute data)
+- **Broadcast**: Uniform data (transforms, time, settings)
 
 ## Writing Data
 
 ### Full Replace
 
 ```rust
-let buffer = Buffer::new(&device, size, BufferUsage::VERTEX)?;
+let buffer = Buffer::new(&device, size, DataAccess::Scattered)?;
 buffer.write(&data)?;
 ```
 
@@ -91,26 +81,17 @@ Use `bytemuck` for safe casting:
 let bytes: &[u8] = bytemuck::cast_slice(&vertices);
 ```
 
-## Vertex Buffers
+## Vertex Data (Bindless)
 
-For vertex buffers, you need to describe the layout:
+Goldy uses bindless vertex access - vertex data is stored in `Scattered` buffers 
+and accessed directly in shaders via bindless descriptors:
 
 ```rust
-let layout = VertexBufferLayout {
-    stride: std::mem::size_of::<MyVertex>() as u32,
-    attributes: vec![
-        VertexAttribute { 
-            location: 0, 
-            format: VertexFormat::Float32x3, 
-            offset: 0 
-        },
-        VertexAttribute { 
-            location: 1, 
-            format: VertexFormat::Float32x4, 
-            offset: 12 
-        },
-    ],
-};
+// Store vertex data in a scattered buffer
+let vertices = Buffer::with_data(&device, &vertex_data, DataAccess::Scattered)?;
+
+// In shader: access via bindless index
+// StructuredBuffer<Vertex> vertices = getBuffer(push_constants.vertex_buffer_index);
 ```
 
 ### Built-in Vertex2D
@@ -129,18 +110,22 @@ impl Vertex2D {
 }
 ```
 
-## Index Buffers
+## Index Data (Bindless)
+
+Index data is also stored as `Scattered` buffers:
 
 ```rust
 let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];  // Two triangles
-let index_buffer = Buffer::with_data(&device, &indices, BufferUsage::INDEX)?;
+let index_buffer = Buffer::with_data(&device, &indices, DataAccess::Scattered)?;
 
 // In render pass
 pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
 pass.draw_indexed(0..6, 0, 0..1);
 ```
 
-## Uniform Buffers (future)
+## Uniform/Constant Buffers
+
+For data that all threads read from the same address (broadcast pattern):
 
 ```rust
 #[repr(C)]
@@ -149,7 +134,7 @@ struct Uniforms {
     time: f32,
 }
 
-let uniforms = Buffer::with_data(&device, &[data], BufferUsage::UNIFORM)?;
+let uniforms = Buffer::with_data(&device, &[data], DataAccess::Broadcast)?;
 ```
 
 ## Performance Tips
@@ -160,11 +145,11 @@ Create buffers with all data at once when possible:
 
 ```rust
 // Good: single allocation
-let vertices = generate_all_vertices();
-let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+let data = generate_all_data();
+let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered)?;
 
 // Less efficient: multiple writes
-let buffer = Buffer::new(&device, size, BufferUsage::VERTEX)?;
+let buffer = Buffer::new(&device, size, DataAccess::Scattered)?;
 buffer.write(&part1)?;
 buffer.write_at(offset, &part2)?;  // Multiple writes
 ```
@@ -193,9 +178,9 @@ GPU memory is precious. Size buffers appropriately:
 
 ```rust
 // Know your data size
-let vertex_size = std::mem::size_of::<MyVertex>();
-let total_size = vertex_size * num_vertices;
-let buffer = Buffer::new(&device, total_size, BufferUsage::VERTEX)?;
+let element_size = std::mem::size_of::<MyData>();
+let total_size = element_size * num_elements;
+let buffer = Buffer::new(&device, total_size, DataAccess::Scattered)?;
 ```
 
 ## Ownership
@@ -204,7 +189,7 @@ Buffers are owned resources. When dropped, GPU memory is freed:
 
 ```rust
 {
-    let buffer = Buffer::new(&device, size, usage)?;
+    let buffer = Buffer::new(&device, size, DataAccess::Scattered)?;
     // buffer is valid
 } // buffer destroyed, GPU memory freed
 ```
@@ -212,7 +197,7 @@ Buffers are owned resources. When dropped, GPU memory is freed:
 For shared ownership, use `Arc<Buffer>`:
 
 ```rust
-let buffer = Arc::new(Buffer::new(&device, size, usage)?);
+let buffer = Arc::new(Buffer::new(&device, size, DataAccess::Scattered)?);
 let buffer2 = buffer.clone();  // Same buffer, reference counted
 ```
 

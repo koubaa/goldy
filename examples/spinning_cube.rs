@@ -5,7 +5,7 @@
 //! Run with: cargo run --example spinning_cube
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, PrimitiveTopology,
+    Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
@@ -151,7 +151,7 @@ impl App {
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
+        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, DataAccess::Scattered)?;
 
         let frame = surface.acquire()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {

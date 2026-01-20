@@ -137,7 +137,7 @@ fn render_frame(&mut self) -> anyhow::Result<()> {
     }
 
     // Upload and draw
-    let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+    let buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
     // ... render as usual
 }
 ```

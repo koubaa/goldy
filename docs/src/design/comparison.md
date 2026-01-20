@@ -85,7 +85,7 @@ Goldy talks directly to modern backend APIs without a translation layer. Each ba
 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
     label: Some("Vertex Buffer"),
     size: data.len() as u64,
-    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,  // wgpu uses bitflags
     mapped_at_creation: false,
 });
 queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&data));
@@ -93,7 +93,7 @@ queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&data));
 
 **Goldy:**
 ```rust
-let buffer = Buffer::with_data(&device, &data, BufferUsage::VERTEX)?;
+let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered)?;
 ```
 
 ### Render Pass

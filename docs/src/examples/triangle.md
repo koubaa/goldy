@@ -26,7 +26,7 @@ let vertices = [
     Vertex2D::new(-0.5, 0.5, Color::GREEN),  // Bottom-left (green)
     Vertex2D::new(0.5, 0.5, Color::BLUE),    // Bottom-right (blue)
 ];
-let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+let buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
 ```
 
 ### Shader
@@ -76,7 +76,7 @@ let vertices = [
     Vertex2D::new(0.5, 0.5, Color::BLUE),
 ];
 // Recreate buffer each frame for animation
-let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+let buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
 ```
 
 ### Multiple Triangles

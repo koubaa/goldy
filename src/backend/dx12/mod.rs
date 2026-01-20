@@ -582,7 +582,7 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         device_handle: DeviceHandle,
         size: u64,
-        usage: BufferUsage,
+        access: DataAccess,
         element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         // First pass: create the resource (immutable borrow of device)
@@ -592,7 +592,8 @@ impl GpuBackend for Dx12Backend {
                 .get(&device_handle)
                 .context("Invalid device handle")?;
 
-            let is_storage = usage.contains(BufferUsage::STORAGE);
+            // Scattered access -> storage buffer (UAV), Broadcast access -> uniform buffer (CBV)
+            let is_storage = access == DataAccess::Scattered;
 
             // Storage buffers need DEFAULT heap for UAV support (bindless)
             // Non-storage buffers can use UPLOAD heap for simpler CPU access
@@ -703,8 +704,8 @@ impl GpuBackend for Dx12Backend {
         self.next_buffer_handle += 1;
 
         // Second pass: register in bindless heap if enabled
-        // Storage buffers get UAV + SRV descriptors, uniform buffers get CBV descriptors
-        let is_uniform = usage.contains(BufferUsage::UNIFORM);
+        // Scattered access -> UAV + SRV descriptors, Broadcast access -> CBV descriptors
+        let is_uniform = access == DataAccess::Broadcast;
         let (bindless_offset, bindless_srv_offset) =
             if bindless_enabled && (is_storage || is_uniform) {
                 let logical_device = self
@@ -2701,7 +2702,8 @@ impl GpuBackend for Dx12Backend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        _usage: crate::types::TextureUsage,
+        _access: SpatialAccess,
+        _flags: TextureFlags,
     ) -> Result<TextureHandle> {
         let logical_device = self
             .devices

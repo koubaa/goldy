@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
     Instance, Instance2D, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
     Surface, VertexBufferLayout,
 };
@@ -111,7 +111,7 @@ impl RenderState {
         let instance_buffer = Buffer::with_data(
             &device,
             &instances,
-            BufferUsage::STORAGE | BufferUsage::VERTEX,
+            DataAccess::Scattered,
         )?;
 
         // Create params buffer
@@ -121,7 +121,7 @@ impl RenderState {
             total_instances: NUM_QUADS,
             _pad: 0,
         };
-        let params_buffer = Buffer::with_data(&device, &[params], BufferUsage::UNIFORM)?;
+        let params_buffer = Buffer::with_data(&device, &[params], DataAccess::Broadcast)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

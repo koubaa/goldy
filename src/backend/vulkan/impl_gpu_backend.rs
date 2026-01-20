@@ -446,35 +446,31 @@ impl GpuBackend for VulkanBackend {
         self.devices.contains_key(&device)
     }
 
-    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, usage: BufferUsage, _element_stride: Option<u32>) -> Result<BufferHandle> {
+    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, access: DataAccess, _element_stride: Option<u32>) -> Result<BufferHandle> {
         let logical_device = self
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        let mut vk_usage = vk::BufferUsageFlags::empty();
-        if usage.contains(BufferUsage::VERTEX) {
-            vk_usage |= vk::BufferUsageFlags::VERTEX_BUFFER;
-        }
-        if usage.contains(BufferUsage::INDEX) {
-            vk_usage |= vk::BufferUsageFlags::INDEX_BUFFER;
-        }
-        if usage.contains(BufferUsage::UNIFORM) {
-            vk_usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
-        }
-        if usage.contains(BufferUsage::STORAGE) {
-            vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER;
-        }
-        if usage.contains(BufferUsage::COPY_SRC) {
-            vk_usage |= vk::BufferUsageFlags::TRANSFER_SRC;
-        }
-        if usage.contains(BufferUsage::COPY_DST) {
-            vk_usage |= vk::BufferUsageFlags::TRANSFER_DST;
-        }
+        // Map access pattern to Vulkan buffer usage flags
+        // All buffers get TRANSFER_SRC | TRANSFER_DST for flexibility
+        let mut vk_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+        
+        let is_storage = match access {
+            DataAccess::Scattered => {
+                // Scattered: any thread any address - use storage buffer
+                vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER;
+                true
+            }
+            DataAccess::Broadcast => {
+                // Broadcast: all threads same address - use uniform buffer
+                vk_usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
+                false
+            }
+        };
 
-        let is_storage = usage.contains(BufferUsage::STORAGE);
-        let is_uniform = usage.contains(BufferUsage::UNIFORM);
-        let should_register_bindless = is_storage || is_uniform; // Only register UNIFORM/STORAGE buffers
+        // All buffers are registered for bindless access
+        let should_register_bindless = true;
         let bindless_enabled = logical_device.bindless_enabled;
         let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
@@ -2567,7 +2563,8 @@ impl GpuBackend for VulkanBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        usage: crate::types::TextureUsage,
+        access: SpatialAccess,
+        flags: TextureFlags,
     ) -> Result<TextureHandle> {
         // Get physical device for memory type lookup
         let physical_device = {
@@ -2592,16 +2589,25 @@ impl GpuBackend for VulkanBackend {
         let logical_device = self.devices.get(&device_handle)
             .context("Invalid device handle")?;
 
-        // Convert usage flags
-        let mut vk_usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
-        if usage.contains(crate::types::TextureUsage::RENDER_TARGET) {
+        // Map access pattern and flags to Vulkan image usage
+        let mut vk_usage = vk::ImageUsageFlags::TRANSFER_DST;
+        
+        // Interpolated access -> sampled image, Direct access -> storage image
+        match access {
+            SpatialAccess::Interpolated => {
+                vk_usage |= vk::ImageUsageFlags::SAMPLED;
+            }
+            SpatialAccess::Direct => {
+                vk_usage |= vk::ImageUsageFlags::STORAGE;
+            }
+        }
+        
+        // Apply additional flags
+        if flags.contains(TextureFlags::RENDER_TARGET) {
             vk_usage |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
         }
-        if usage.contains(crate::types::TextureUsage::COPY_SRC) {
+        if flags.contains(TextureFlags::COPY_SRC) {
             vk_usage |= vk::ImageUsageFlags::TRANSFER_SRC;
-        }
-        if usage.contains(crate::types::TextureUsage::STORAGE) {
-            vk_usage |= vk::ImageUsageFlags::STORAGE;
         }
 
         // Create texture image

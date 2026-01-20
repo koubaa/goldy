@@ -125,29 +125,65 @@ impl From<goldy::TextureFormat> for GoldyTextureFormat {
     }
 }
 
-/// Buffer usage flags.
+/// Data access pattern for buffers.
+///
+/// - `Scattered`: Any thread, any address, read/write. No coherence assumptions.
+/// - `Broadcast`: All threads read same address. Hardware broadcast optimization.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GoldyBufferUsage(pub u32);
-
-impl GoldyBufferUsage {
-    pub const VERTEX: GoldyBufferUsage = GoldyBufferUsage(1 << 0);
-    pub const INDEX: GoldyBufferUsage = GoldyBufferUsage(1 << 1);
-    pub const UNIFORM: GoldyBufferUsage = GoldyBufferUsage(1 << 2);
-    pub const STORAGE: GoldyBufferUsage = GoldyBufferUsage(1 << 3);
-    pub const COPY_SRC: GoldyBufferUsage = GoldyBufferUsage(1 << 4);
-    pub const COPY_DST: GoldyBufferUsage = GoldyBufferUsage(1 << 5);
+pub enum GoldyDataAccess {
+    /// Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
+    Scattered = 0,
+    /// All threads same address, broadcast optimized (ConstantBuffer).
+    Broadcast = 1,
 }
 
-impl From<GoldyBufferUsage> for goldy::BufferUsage {
-    fn from(u: GoldyBufferUsage) -> Self {
-        goldy::BufferUsage::from_bits_truncate(u.0)
+impl From<GoldyDataAccess> for goldy::DataAccess {
+    fn from(a: GoldyDataAccess) -> Self {
+        match a {
+            GoldyDataAccess::Scattered => goldy::DataAccess::Scattered,
+            GoldyDataAccess::Broadcast => goldy::DataAccess::Broadcast,
+        }
     }
 }
 
-impl From<goldy::BufferUsage> for GoldyBufferUsage {
-    fn from(u: goldy::BufferUsage) -> Self {
-        GoldyBufferUsage(u.bits())
+impl From<goldy::DataAccess> for GoldyDataAccess {
+    fn from(a: goldy::DataAccess) -> Self {
+        match a {
+            goldy::DataAccess::Scattered => GoldyDataAccess::Scattered,
+            goldy::DataAccess::Broadcast => GoldyDataAccess::Broadcast,
+        }
+    }
+}
+
+/// Spatial access pattern for textures.
+///
+/// - `Interpolated`: Hardware filtering between neighbors (texture units).
+/// - `Direct`: Direct 2D/3D indexing, no filtering, read/write.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldySpatialAccess {
+    /// Hardware filtering between neighbors (Texture2D with sampler).
+    Interpolated = 0,
+    /// Direct 2D/3D indexing, no filtering (RWTexture2D).
+    Direct = 1,
+}
+
+impl From<GoldySpatialAccess> for goldy::SpatialAccess {
+    fn from(a: GoldySpatialAccess) -> Self {
+        match a {
+            GoldySpatialAccess::Interpolated => goldy::SpatialAccess::Interpolated,
+            GoldySpatialAccess::Direct => goldy::SpatialAccess::Direct,
+        }
+    }
+}
+
+impl From<goldy::SpatialAccess> for GoldySpatialAccess {
+    fn from(a: goldy::SpatialAccess) -> Self {
+        match a {
+            goldy::SpatialAccess::Interpolated => GoldySpatialAccess::Interpolated,
+            goldy::SpatialAccess::Direct => GoldySpatialAccess::Direct,
+        }
     }
 }
 
@@ -347,22 +383,27 @@ impl GoldyAdapterInfo {
     }
 }
 
-/// Texture usage flags.
+/// Texture flags for copy and render operations.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GoldyTextureUsage(pub u32);
+pub struct GoldyTextureFlags(pub u32);
 
-impl GoldyTextureUsage {
-    pub const COPY_SRC: GoldyTextureUsage = GoldyTextureUsage(1 << 0);
-    pub const COPY_DST: GoldyTextureUsage = GoldyTextureUsage(1 << 1);
-    pub const SAMPLED: GoldyTextureUsage = GoldyTextureUsage(1 << 2);
-    pub const STORAGE: GoldyTextureUsage = GoldyTextureUsage(1 << 3);
-    pub const RENDER_TARGET: GoldyTextureUsage = GoldyTextureUsage(1 << 4);
+impl GoldyTextureFlags {
+    pub const NONE: GoldyTextureFlags = GoldyTextureFlags(0);
+    pub const COPY_SRC: GoldyTextureFlags = GoldyTextureFlags(1 << 0);
+    pub const COPY_DST: GoldyTextureFlags = GoldyTextureFlags(1 << 1);
+    pub const RENDER_TARGET: GoldyTextureFlags = GoldyTextureFlags(1 << 2);
 }
 
-impl From<GoldyTextureUsage> for goldy::TextureUsage {
-    fn from(u: GoldyTextureUsage) -> Self {
-        goldy::TextureUsage::from_bits_truncate(u.0)
+impl From<GoldyTextureFlags> for goldy::TextureFlags {
+    fn from(f: GoldyTextureFlags) -> Self {
+        goldy::TextureFlags::from_bits_truncate(f.0)
+    }
+}
+
+impl From<goldy::TextureFlags> for GoldyTextureFlags {
+    fn from(f: goldy::TextureFlags) -> Self {
+        GoldyTextureFlags(f.bits())
     }
 }
 

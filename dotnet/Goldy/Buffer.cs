@@ -12,24 +12,30 @@ public sealed class Buffer : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// Create a new buffer.
+    /// Create a new buffer with the specified access pattern.
     /// </summary>
-    public Buffer(Device device, ulong size, BufferUsage usage)
+    /// <param name="device">The GPU device to create the buffer on.</param>
+    /// <param name="size">Size in bytes.</param>
+    /// <param name="access">Access pattern (Scattered for general data, Broadcast for uniforms).</param>
+    public Buffer(Device device, ulong size, DataAccess access)
     {
         device.ThrowIfDisposed();
         
-        Handle = NativeMethods.BufferCreate(device.Handle, size, usage);
+        Handle = NativeMethods.BufferCreate(device.Handle, size, access);
         if (Handle == nint.Zero)
             throw GoldyException.FromLastError("Buffer creation");
         
         Size = size;
-        Usage = usage;
+        Access = access;
     }
 
     /// <summary>
     /// Create a buffer initialized with data.
     /// </summary>
-    public Buffer(Device device, ReadOnlySpan<byte> data, BufferUsage usage)
+    /// <param name="device">The GPU device to create the buffer on.</param>
+    /// <param name="data">Initial data to upload.</param>
+    /// <param name="access">Access pattern (Scattered for general data, Broadcast for uniforms).</param>
+    public Buffer(Device device, ReadOnlySpan<byte> data, DataAccess access)
     {
         device.ThrowIfDisposed();
         
@@ -37,7 +43,7 @@ public sealed class Buffer : IDisposable
         {
             fixed (byte* ptr = data)
             {
-                Handle = NativeMethods.BufferCreateWithData(device.Handle, (nint)ptr, (nuint)data.Length, usage);
+                Handle = NativeMethods.BufferCreateWithData(device.Handle, (nint)ptr, (nuint)data.Length, access);
             }
         }
         
@@ -45,16 +51,16 @@ public sealed class Buffer : IDisposable
             throw GoldyException.FromLastError("Buffer creation");
         
         Size = (ulong)data.Length;
-        Usage = usage;
+        Access = access;
     }
 
     /// <summary>
     /// Create a buffer initialized with typed data.
     /// </summary>
-    public static Buffer WithData<T>(Device device, ReadOnlySpan<T> data, BufferUsage usage) where T : unmanaged
+    public static Buffer WithData<T>(Device device, ReadOnlySpan<T> data, DataAccess access) where T : unmanaged
     {
         var bytes = MemoryMarshal.AsBytes(data);
-        return new Buffer(device, bytes, usage);
+        return new Buffer(device, bytes, access);
     }
 
     /// <summary>
@@ -63,9 +69,9 @@ public sealed class Buffer : IDisposable
     public ulong Size { get; }
 
     /// <summary>
-    /// Get the buffer usage flags.
+    /// Get the buffer's access pattern.
     /// </summary>
-    public BufferUsage Usage { get; }
+    public DataAccess Access { get; }
 
     /// <summary>
     /// Write data to the buffer.

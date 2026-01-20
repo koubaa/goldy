@@ -6,7 +6,7 @@ Let's draw a colored triangle in a window using Goldy.
 
 ```rust
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Surface,
+    Buffer, DataAccess, Color, CommandEncoder, DeviceType, Surface,
     Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, TextureFormat,
     Vertex2D, shader::builtins,
 };
@@ -48,7 +48,7 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+        let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
         
         // Load built-in vertex color shader
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
@@ -165,7 +165,7 @@ let vertices = [
     Vertex2D::new(-0.5, 0.5, Color::GREEN),
     Vertex2D::new(0.5, 0.5, Color::BLUE),
 ];
-let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
 ```
 
 `Vertex2D` is a built-in vertex type with position and color. `Buffer::with_data` creates a GPU buffer and uploads the data.

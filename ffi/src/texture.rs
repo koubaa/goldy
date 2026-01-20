@@ -2,7 +2,7 @@
 
 use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
-use crate::types::{GoldyTextureFormat, GoldyTextureUsage};
+use crate::types::{GoldySpatialAccess, GoldyTextureFlags, GoldyTextureFormat};
 use std::ptr;
 
 /// Opaque handle to a Goldy Texture.
@@ -10,7 +10,16 @@ pub struct GoldyTexture {
     pub(crate) inner: goldy::Texture,
 }
 
-/// Create a new texture.
+/// Create a new texture with the specified spatial access pattern.
+///
+/// # Access Patterns
+/// - `Interpolated` (0): Hardware filtering between neighbors (Texture2D with sampler)
+/// - `Direct` (1): Direct 2D indexing, no filtering (RWTexture2D)
+///
+/// # Flags
+/// - `COPY_SRC` (1): Can be used as a copy source
+/// - `COPY_DST` (2): Can be used as a copy destination
+/// - `RENDER_TARGET` (4): Can be used as a render attachment
 ///
 /// Returns a pointer to the texture, or null on failure.
 ///
@@ -22,14 +31,22 @@ pub unsafe extern "C" fn goldy_texture_create(
     width: u32,
     height: u32,
     format: GoldyTextureFormat,
-    usage: GoldyTextureUsage,
+    access: GoldySpatialAccess,
+    flags: GoldyTextureFlags,
 ) -> *mut GoldyTexture {
     if device.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return ptr::null_mut();
     }
 
-    match goldy::Texture::new(&(*device).inner, width, height, format.into(), usage.into()) {
+    match goldy::Texture::new(
+        &(*device).inner,
+        width,
+        height,
+        format.into(),
+        access.into(),
+        flags.into(),
+    ) {
         Ok(texture) => Box::into_raw(Box::new(GoldyTexture { inner: texture })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

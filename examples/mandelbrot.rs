@@ -3,7 +3,7 @@
 //! Run with: cargo run --example mandelbrot
 
 use goldy::{
-    shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
     RenderPipelineDesc, ShaderModule, Surface,
 };
 use std::sync::Arc;
@@ -76,7 +76,7 @@ impl App {
         let uniform_buffer = Buffer::new(
             device.as_ref(),
             std::mem::size_of::<Uniforms>() as u64,
-            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            DataAccess::Broadcast,
         )?;
 
         self.device = Some(device);

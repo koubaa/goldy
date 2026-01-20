@@ -119,83 +119,76 @@ impl From<goldy::TextureFormat> for PyTextureFormat {
 }
 
 // =============================================================================
-// BufferUsage
+// DataAccess
 // =============================================================================
 
-/// Buffer usage flags.
-#[pyclass(name = "BufferUsage", module = "goldy")]
-#[derive(Clone, Copy)]
-pub struct PyBufferUsage {
-    bits: u32,
+/// Data access pattern for buffers.
+///
+/// Describes how threads will access the buffer, which determines hardware optimization strategies:
+/// - SCATTERED: Any thread can access any address (read/write). No coherence assumptions.
+/// - BROADCAST: All threads read same address. Hardware broadcast optimization.
+#[pyclass(name = "DataAccess", module = "goldy", eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PyDataAccess {
+    /// Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
+    #[default]
+    SCATTERED = 0,
+    /// All threads same address, broadcast optimized (ConstantBuffer).
+    BROADCAST = 1,
 }
 
-#[pymethods]
-impl PyBufferUsage {
-    /// Can be used as a vertex buffer.
-    #[classattr]
-    const VERTEX: PyBufferUsage = PyBufferUsage { bits: 1 << 0 };
-
-    /// Can be used as an index buffer.
-    #[classattr]
-    const INDEX: PyBufferUsage = PyBufferUsage { bits: 1 << 1 };
-
-    /// Can be used as a uniform buffer.
-    #[classattr]
-    const UNIFORM: PyBufferUsage = PyBufferUsage { bits: 1 << 2 };
-
-    /// Can be used as a storage buffer.
-    #[classattr]
-    const STORAGE: PyBufferUsage = PyBufferUsage { bits: 1 << 3 };
-
-    /// Can be used as a copy source.
-    #[classattr]
-    const COPY_SRC: PyBufferUsage = PyBufferUsage { bits: 1 << 4 };
-
-    /// Can be used as a copy destination.
-    #[classattr]
-    const COPY_DST: PyBufferUsage = PyBufferUsage { bits: 1 << 5 };
-
-    /// Combine two buffer usage flags.
-    fn __or__(&self, other: &PyBufferUsage) -> PyBufferUsage {
-        PyBufferUsage {
-            bits: self.bits | other.bits,
+impl From<PyDataAccess> for goldy::DataAccess {
+    fn from(access: PyDataAccess) -> Self {
+        match access {
+            PyDataAccess::SCATTERED => goldy::DataAccess::Scattered,
+            PyDataAccess::BROADCAST => goldy::DataAccess::Broadcast,
         }
-    }
-
-    /// Check if this usage contains another.
-    fn __and__(&self, other: &PyBufferUsage) -> PyBufferUsage {
-        PyBufferUsage {
-            bits: self.bits & other.bits,
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        let mut parts = Vec::new();
-        if self.bits & (1 << 0) != 0 {
-            parts.push("VERTEX");
-        }
-        if self.bits & (1 << 1) != 0 {
-            parts.push("INDEX");
-        }
-        if self.bits & (1 << 2) != 0 {
-            parts.push("UNIFORM");
-        }
-        if self.bits & (1 << 3) != 0 {
-            parts.push("STORAGE");
-        }
-        if self.bits & (1 << 4) != 0 {
-            parts.push("COPY_SRC");
-        }
-        if self.bits & (1 << 5) != 0 {
-            parts.push("COPY_DST");
-        }
-        format!("BufferUsage({})", parts.join(" | "))
     }
 }
 
-impl From<PyBufferUsage> for goldy::BufferUsage {
-    fn from(usage: PyBufferUsage) -> Self {
-        goldy::BufferUsage::from_bits_truncate(usage.bits)
+impl From<goldy::DataAccess> for PyDataAccess {
+    fn from(access: goldy::DataAccess) -> Self {
+        match access {
+            goldy::DataAccess::Scattered => PyDataAccess::SCATTERED,
+            goldy::DataAccess::Broadcast => PyDataAccess::BROADCAST,
+        }
+    }
+}
+
+// =============================================================================
+// SpatialAccess
+// =============================================================================
+
+/// Spatial access pattern for textures.
+///
+/// Describes how the texture will be accessed, which determines hardware optimization strategies:
+/// - INTERPOLATED: Hardware filtering between neighbors (texture units).
+/// - DIRECT: Direct 2D/3D indexing, no filtering, read/write.
+#[pyclass(name = "SpatialAccess", module = "goldy", eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PySpatialAccess {
+    /// Hardware filtering between neighbors (Texture2D with sampler).
+    #[default]
+    INTERPOLATED = 0,
+    /// Direct 2D/3D indexing, no filtering (RWTexture2D).
+    DIRECT = 1,
+}
+
+impl From<PySpatialAccess> for goldy::SpatialAccess {
+    fn from(access: PySpatialAccess) -> Self {
+        match access {
+            PySpatialAccess::INTERPOLATED => goldy::SpatialAccess::Interpolated,
+            PySpatialAccess::DIRECT => goldy::SpatialAccess::Direct,
+        }
+    }
+}
+
+impl From<goldy::SpatialAccess> for PySpatialAccess {
+    fn from(access: goldy::SpatialAccess) -> Self {
+        match access {
+            goldy::SpatialAccess::Interpolated => PySpatialAccess::INTERPOLATED,
+            goldy::SpatialAccess::Direct => PySpatialAccess::DIRECT,
+        }
     }
 }
 

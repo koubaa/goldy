@@ -15,7 +15,7 @@ pub const TRIANGLE: &str = include_str!("../shaders/triangle.slang");
 /// Digital clock shader (uses vertex coloring)
 pub const DIGITAL_CLOCK: &str = include_str!("../shaders/digital_clock.slang");
 
-/// Plasma effect shader (uses DescriptorHandle<T> for cross-platform bindless)
+/// Plasma effect shader (uses preprocessor-based platform selection)
 pub const PLASMA: &str = include_str!("../shaders/plasma.slang");
 
 /// Gradient effect shader
@@ -121,24 +121,21 @@ mod tests {
         }
     }
 
-    /// Verify PLASMA uses DescriptorHandle<T> (no preprocessor)
+    /// Verify PLASMA structure
     #[test]
-    fn test_plasma_uses_descriptor_handle() {
+    fn test_plasma_structure() {
+        // Plasma should use DescriptorHandle for DX12 and descriptor arrays for SPIRV/Metal
         assert!(
             PLASMA.contains("DescriptorHandle"),
-            "PLASMA should use DescriptorHandle<T>"
+            "PLASMA should use DescriptorHandle<T> for DX12"
         );
         assert!(
-            !PLASMA.contains("#if"),
-            "PLASMA should not contain #if directive"
-        );
-        assert!(
-            !PLASMA.contains("#define"),
-            "PLASMA should not contain #define directive"
+            PLASMA.contains("import goldy_exp"),
+            "PLASMA should import goldy_exp module"
         );
     }
 
-    /// Test that PLASMA compiles via Slang
+    /// Test that PLASMA compiles via Slang for all targets
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_plasma_compiles() {
@@ -150,16 +147,14 @@ mod tests {
         let shader_path = manifest_dir.join("shaders");
         let shader_path_str = shader_path.to_string_lossy();
 
-        // No platform-specific defines needed - DescriptorHandle<T> is cross-platform
-        let defines: Vec<(&str, &str)> = vec![];
-
-        // Test SPIRV compilation (Vulkan)
+        // Test SPIRV compilation (Vulkan) - needs __SPIRV__ define
+        let spirv_defines = vec![("__SPIRV__", "1")];
         let result = compiler.compile_with_defines(
             PLASMA,
             ShaderTarget::Spirv,
             &[],
             &[&shader_path_str],
-            &defines,
+            &spirv_defines,
         );
         assert!(
             result.is_ok(),
@@ -167,13 +162,14 @@ mod tests {
             result.err()
         );
 
-        // Test DXIL compilation (DX12)
+        // Test DXIL compilation (DX12) - needs __DX12__ define
+        let dxil_defines = vec![("__DX12__", "1")];
         let result = compiler.compile_with_defines(
             PLASMA,
             ShaderTarget::Dxil,
             &[],
             &[&shader_path_str],
-            &defines,
+            &dxil_defines,
         );
         assert!(
             result.is_ok(),

@@ -2,7 +2,7 @@
 
 use crate::backend::{BufferHandle, GpuBackend};
 use crate::device::Device;
-use crate::types::BufferUsage;
+use crate::types::DataAccess;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -11,28 +11,38 @@ pub struct Buffer {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
     size: u64,
-    usage: BufferUsage,
+    access: DataAccess,
 }
 
 impl Buffer {
-    /// Create a new buffer.
-    pub fn new(device: &Device, size: u64, usage: BufferUsage) -> Result<Self> {
+    /// Create a new buffer with the specified access pattern.
+    ///
+    /// # Access Patterns
+    ///
+    /// - `DataAccess::Scattered`: Any thread can access any address (read/write).
+    ///   Use for general-purpose data (StructuredBuffer, RWStructuredBuffer).
+    ///
+    /// - `DataAccess::Broadcast`: All threads read the same address.
+    ///   Hardware optimizes for wave-wide broadcast (ConstantBuffer).
+    pub fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_buffer(device.handle, size, usage, None)?;
+        let handle = backend.create_buffer(device.handle, size, access, None)?;
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,
             size,
-            usage,
+            access,
         })
     }
 
     /// Create a buffer initialized with data.
+    ///
+    /// See [`Buffer::new`] for access pattern documentation.
     pub fn with_data<T: bytemuck::Pod>(
         device: &Device,
         data: &[T],
-        usage: BufferUsage,
+        access: DataAccess,
     ) -> Result<Self> {
         let bytes = bytemuck::cast_slice(data);
         let element_stride = std::mem::size_of::<T>() as u32;
@@ -40,7 +50,7 @@ impl Buffer {
         let handle = backend.create_buffer(
             device.handle,
             bytes.len() as u64,
-            usage,
+            access,
             Some(element_stride),
         )?;
         drop(backend);
@@ -49,16 +59,18 @@ impl Buffer {
             backend: Arc::clone(&device.backend),
             handle,
             size: bytes.len() as u64,
-            usage,
+            access,
         };
         buffer.write(0, bytes)?;
         Ok(buffer)
     }
 
     /// Create a buffer initialized with raw bytes.
-    pub fn with_bytes(device: &Device, data: &[u8], usage: BufferUsage) -> Result<Self> {
+    ///
+    /// See [`Buffer::new`] for access pattern documentation.
+    pub fn with_bytes(device: &Device, data: &[u8], access: DataAccess) -> Result<Self> {
         // For raw bytes, use stride of 1 (byte-addressable)
-        Self::with_bytes_stride(device, data, usage, 1)
+        Self::with_bytes_stride(device, data, access, 1)
     }
 
     /// Create a buffer initialized with raw bytes and a custom element stride.
@@ -66,17 +78,19 @@ impl Buffer {
     /// The stride is used for creating StructuredBuffer views on DX12. For example,
     /// if the data contains u32 values, use stride=4 so the GPU can correctly
     /// interpret the buffer as `StructuredBuffer<uint>`.
+    ///
+    /// See [`Buffer::new`] for access pattern documentation.
     pub fn with_bytes_stride(
         device: &Device,
         data: &[u8],
-        usage: BufferUsage,
+        access: DataAccess,
         element_stride: u32,
     ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
         let handle = backend.create_buffer(
             device.handle,
             data.len() as u64,
-            usage,
+            access,
             Some(element_stride),
         )?;
         drop(backend);
@@ -85,7 +99,7 @@ impl Buffer {
             backend: Arc::clone(&device.backend),
             handle,
             size: data.len() as u64,
-            usage,
+            access,
         };
         buffer.write(0, data)?;
         Ok(buffer)
@@ -107,15 +121,15 @@ impl Buffer {
         self.size
     }
 
-    /// Get the buffer usage flags.
-    pub fn usage(&self) -> BufferUsage {
-        self.usage
+    /// Get the buffer's access pattern.
+    pub fn access(&self) -> DataAccess {
+        self.access
     }
 
     /// Get the buffer's index in the global bindless descriptor set.
     ///
-    /// Returns `Some(index)` if this buffer is registered in the global descriptor set
-    /// (i.e., has UNIFORM or STORAGE usage). Returns `None` otherwise.
+    /// Returns `Some(index)` if this buffer is registered in the global descriptor set.
+    /// All buffers with Scattered or Broadcast access are registered.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.buffer_bindless_index(self.handle)

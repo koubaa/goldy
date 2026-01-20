@@ -5,7 +5,7 @@
 mod common;
 
 use goldy::{
-    Buffer, BufferUsage, ComputeEncoder, ComputePipeline, DeviceType, Instance, ShaderModule,
+    Buffer, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance, ShaderModule,
 };
 
 /// Simple compute shader that doubles each value in a buffer.
@@ -175,7 +175,7 @@ fn test_compute_with_uav_buffer() {
 
     // Create buffer with initial data
     let initial_data: Vec<u32> = (0..64).collect();
-    let buffer = Buffer::with_data(&device, &initial_data, BufferUsage::STORAGE)
+    let buffer = Buffer::with_data(&device, &initial_data, DataAccess::Scattered)
         .expect("Failed to create buffer");
 
     let pipeline =
@@ -210,12 +210,12 @@ fn test_compute_with_srv_and_uav() {
 
     // Create input buffer (read-only)
     let input_data: Vec<u32> = (0..64).collect();
-    let input_buffer = Buffer::with_data(&device, &input_data, BufferUsage::STORAGE)
+    let input_buffer = Buffer::with_data(&device, &input_data, DataAccess::Scattered)
         .expect("Failed to create input buffer");
 
     // Create output buffer (read-write)
     let output_data: Vec<u32> = vec![0; 64];
-    let output_buffer = Buffer::with_data(&device, &output_data, BufferUsage::STORAGE)
+    let output_buffer = Buffer::with_data(&device, &output_data, DataAccess::Scattered)
         .expect("Failed to create output buffer");
 
     let pipeline =

@@ -41,7 +41,7 @@ buffer = goldy.Buffer(device, data, usage)
 **Constructor:**
 - `device` - GPU device
 - `data` - NumPy array or bytes
-- `usage` - `BufferUsage` flags
+- `access` - `DataAccess` pattern (SCATTERED or BROADCAST)
 
 **Properties:**
 - `size` - Buffer size in bytes
@@ -170,17 +170,22 @@ goldy.TextureFormat.RGBA16_FLOAT
 goldy.TextureFormat.RGBA32_FLOAT
 ```
 
-### BufferUsage
+### DataAccess
 
-Flags can be combined with `|`:
+Data access patterns for buffers:
 
 ```python
-goldy.BufferUsage.VERTEX
-goldy.BufferUsage.INDEX
-goldy.BufferUsage.UNIFORM
-goldy.BufferUsage.STORAGE
-goldy.BufferUsage.COPY_SRC
-goldy.BufferUsage.COPY_DST
+goldy.DataAccess.SCATTERED  # Any thread, any address (StructuredBuffer)
+goldy.DataAccess.BROADCAST  # All threads same address (ConstantBuffer)
+```
+
+### SpatialAccess
+
+Spatial access patterns for textures:
+
+```python
+goldy.SpatialAccess.INTERPOLATED  # Hardware filtering (Texture2D + sampler)
+goldy.SpatialAccess.DIRECT        # Direct indexing (RWTexture2D)
 ```
 
 ### PrimitiveTopology

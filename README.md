@@ -11,7 +11,7 @@ A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets 
 ## Quick Example
 
 ```rust
-use goldy::{Instance, DeviceType, Buffer, BufferUsage, Color, CommandEncoder, FrameOutput, TextureFormat};
+use goldy::{Instance, DeviceType, Buffer, DataAccess, Color, CommandEncoder, FrameOutput, TextureFormat};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;

@@ -60,23 +60,29 @@ public class TypeTests
     }
 
     [Fact]
-    public void BufferUsage_Flags_Work()
+    public void DataAccess_Enum_HasCorrectValues()
     {
-        var usage = BufferUsage.Vertex | BufferUsage.CopyDst;
-        
-        Assert.True(usage.HasFlag(BufferUsage.Vertex));
-        Assert.True(usage.HasFlag(BufferUsage.CopyDst));
-        Assert.False(usage.HasFlag(BufferUsage.Index));
+        // Verify enum values match C FFI
+        Assert.Equal(0, (int)DataAccess.Scattered);
+        Assert.Equal(1, (int)DataAccess.Broadcast);
     }
 
     [Fact]
-    public void TextureUsage_Flags_Work()
+    public void SpatialAccess_Enum_HasCorrectValues()
     {
-        var usage = TextureUsage.Sampled | TextureUsage.CopyDst;
+        // Verify enum values match C FFI
+        Assert.Equal(0, (int)SpatialAccess.Interpolated);
+        Assert.Equal(1, (int)SpatialAccess.Direct);
+    }
+
+    [Fact]
+    public void TextureFlags_Work()
+    {
+        var flags = TextureFlags.CopySrc | TextureFlags.CopyDst;
         
-        Assert.True(usage.HasFlag(TextureUsage.Sampled));
-        Assert.True(usage.HasFlag(TextureUsage.CopyDst));
-        Assert.False(usage.HasFlag(TextureUsage.Storage));
+        Assert.True(flags.HasFlag(TextureFlags.CopySrc));
+        Assert.True(flags.HasFlag(TextureFlags.CopyDst));
+        Assert.False(flags.HasFlag(TextureFlags.RenderTarget));
     }
 
     [Fact]
