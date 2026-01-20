@@ -132,8 +132,7 @@ impl RenderState {
             });
         }
 
-        let star_buffer =
-            Buffer::with_data(&device, &stars, DataAccess::Scattered)?;
+        let star_buffer = Buffer::with_data(&device, &stars, DataAccess::Scattered)?;
 
         // Create params buffer
         let initial_params = StarfieldParams {

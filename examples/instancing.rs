@@ -108,11 +108,7 @@ impl RenderState {
             }
         }
 
-        let instance_buffer = Buffer::with_data(
-            &device,
-            &instances,
-            DataAccess::Scattered,
-        )?;
+        let instance_buffer = Buffer::with_data(&device, &instances, DataAccess::Scattered)?;
 
         // Create params buffer
         let params = AnimParams {

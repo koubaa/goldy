@@ -20,9 +20,9 @@ use std::path::Path;
 
 use common::image::{compare_images, ComparisonType, ImageComparisonError};
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, Device,
-    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget,
-    ShaderModule, TextureFormat, Vertex2D, VertexBufferLayout,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule,
+    TextureFormat, Vertex2D, VertexBufferLayout,
 };
 
 fn create_device() -> Option<Device> {

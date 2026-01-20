@@ -105,11 +105,7 @@ impl RenderState {
 
         // Create particle buffer with initial rain particles
         let particles = Self::create_particles(false);
-        let particle_buffer = Buffer::with_data(
-            &device,
-            &particles,
-            DataAccess::Scattered,
-        )?;
+        let particle_buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
 
         // Create params buffer
         let initial_params = ParticleParams {

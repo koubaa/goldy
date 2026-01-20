@@ -115,7 +115,8 @@ impl App {
 
         // Convert ClockVertex to bytes for the buffer
         let vertex_data: &[u8] = bytemuck::cast_slice(&vertices);
-        let vertex_buffer = Buffer::with_bytes(device.as_ref(), vertex_data, DataAccess::Scattered)?;
+        let vertex_buffer =
+            Buffer::with_bytes(device.as_ref(), vertex_data, DataAccess::Scattered)?;
 
         // Render directly to surface
         let frame = surface.acquire()?;

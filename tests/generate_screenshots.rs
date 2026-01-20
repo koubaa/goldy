@@ -5,9 +5,9 @@
 mod common;
 
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, Device,
-    DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget,
-    ShaderModule, TextureFormat, Vertex2D, VertexBufferLayout,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceType,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule,
+    TextureFormat, Vertex2D, VertexBufferLayout,
 };
 use std::path::Path;
 

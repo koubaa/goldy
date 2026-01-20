@@ -99,11 +99,7 @@ impl RenderState {
             });
         }
 
-        let particle_buffer = Buffer::with_data(
-            &device,
-            &particles,
-            DataAccess::Scattered,
-        )?;
+        let particle_buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

@@ -109,8 +109,7 @@ impl RenderState {
             });
         }
 
-        let line_buffer =
-            Buffer::with_data(&device, &lines, DataAccess::Scattered)?;
+        let line_buffer = Buffer::with_data(&device, &lines, DataAccess::Scattered)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
