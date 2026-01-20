@@ -10,7 +10,6 @@ use goldy::{
 };
 
 fn create_device() -> Option<goldy::Device> {
-    common::init_test_env();
     let instance = Instance::new().ok()?;
     instance.create_device(DeviceType::DiscreteGpu).ok()
 }

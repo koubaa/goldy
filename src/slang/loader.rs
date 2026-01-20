@@ -1,13 +1,19 @@
 //! Dynamic library loading for Slang compiler.
 //!
 //! Handles finding and loading the Slang shared library across platforms.
+//! Slang binaries are embedded at compile time and extracted to a cache directory.
 
 use anyhow::{Context, Result};
 use libloading::Library;
+use std::fs;
 use std::path::PathBuf;
+use std::sync::Once;
 
 use super::ffi::*;
 use crate::{goldy_event, goldy_span};
+
+// Include the generated embedded module from build.rs
+include!(concat!(env!("OUT_DIR"), "/slang_embedded.rs"));
 
 /// Loaded Slang library with function pointers.
 pub struct SlangLibrary {
@@ -63,9 +69,9 @@ impl SlangLibrary {
     /// Load the Slang library.
     ///
     /// Search order:
-    /// 1. RAG_SLANG_PATH environment variable
-    /// 2. Vendored binaries in goldy/slang/bin/{platform}/
-    /// 3. Vulkan SDK (Windows only, for development)
+    /// 1. GOLDY_SLANG_PATH environment variable (user override)
+    /// 2. Next to executable (bundled distribution)
+    /// 3. Cache directory (extracted from embedded)
     pub fn load() -> Result<Self> {
         let _span = goldy_span!("slang.library.load").entered();
 
@@ -267,13 +273,14 @@ impl SlangLibrary {
     ///
     /// Search order:
     /// 1. GOLDY_SLANG_PATH environment variable (user override)
-    /// 2. Vendored next to executable (happy path for distribution)
-    /// 3. Vulkan SDK (Windows fallback)
+    /// 2. Next to executable (bundled distribution)
+    /// 3. Cache directory (extracted from embedded binaries)
     fn find_library() -> Result<PathBuf> {
         // 1. Check GOLDY_SLANG_PATH environment variable (user override)
         if let Ok(path) = std::env::var("GOLDY_SLANG_PATH") {
             let path = PathBuf::from(path);
             if path.exists() {
+                tracing::debug!("Using Slang from GOLDY_SLANG_PATH: {}", path.display());
                 return Ok(path);
             }
             tracing::warn!(
@@ -284,90 +291,135 @@ impl SlangLibrary {
 
         // 2. Check vendored binaries next to executable
         if let Some(path) = Self::find_vendored_library() {
+            tracing::debug!("Using Slang from executable directory: {}", path.display());
             return Ok(path);
         }
 
-        // 3. Check Vulkan SDK (Windows fallback)
-        #[cfg(target_os = "windows")]
-        if let Some(path) = Self::find_vulkan_sdk_library() {
+        // 3. Check/extract from cache
+        if let Some(path) = Self::ensure_cached_library() {
+            tracing::debug!("Using Slang from cache: {}", path.display());
             return Ok(path);
         }
 
         anyhow::bail!(
-            "Could not find Slang library. Options:\n\
+            "Could not find or extract Slang library. Options:\n\
              1. Ensure slang is bundled next to the executable\n\
              2. Set GOLDY_SLANG_PATH environment variable\n\
-             3. For development: run slang/download.sh"
+             3. Slang version {} may not be embedded",
+            SLANG_VERSION
         )
     }
 
     /// Find vendored library next to the executable.
     ///
     /// This is the happy path for distribution - Slang libraries should be
-    /// copied alongside the native library (goldy_ffi.dll/so/dylib or _goldy.so).
+    /// copied alongside the executable.
     fn find_vendored_library() -> Option<PathBuf> {
-        let lib_name = Self::library_name();
-
-        // Try relative to executable (covers most deployment scenarios)
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                // Check directly in exe directory
-                let path = exe_dir.join(lib_name);
+                let path = exe_dir.join(SLANG_PRIMARY);
                 if path.exists() {
                     return Some(path);
                 }
             }
         }
-
         None
     }
 
-    /// Find Slang in Vulkan SDK (Windows only).
-    #[cfg(target_os = "windows")]
-    fn find_vulkan_sdk_library() -> Option<PathBuf> {
-        // Check VULKAN_SDK environment variable
-        if let Ok(sdk_path) = std::env::var("VULKAN_SDK") {
-            // The older slang.dll is in Bin/, newer is slang-compiler.dll
-            let path = PathBuf::from(&sdk_path).join("Bin").join("slang.dll");
-            if path.exists() {
-                return Some(path);
-            }
-            let path = PathBuf::from(&sdk_path)
-                .join("Bin")
-                .join("slang-compiler.dll");
-            if path.exists() {
-                return Some(path);
-            }
+    /// Get the cache directory for Slang libraries.
+    ///
+    /// Returns platform-idiomatic cache directory:
+    /// - Windows: %LOCALAPPDATA%\goldy\slang\{version}\
+    /// - Linux: ~/.cache/goldy/slang/{version}/
+    /// - macOS: ~/Library/Caches/goldy/slang/{version}/
+    fn cache_dir() -> Option<PathBuf> {
+        if SLANG_VERSION.is_empty() {
+            return None;
         }
-
-        // Try common Vulkan SDK locations
-        for version in ["1.3.296.0", "1.3.290.0", "1.3.283.0"] {
-            let path = PathBuf::from(format!("C:\\VulkanSDK\\{}\\Bin\\slang.dll", version));
-            if path.exists() {
-                return Some(path);
-            }
-        }
-
-        None
+        dirs::cache_dir().map(|d| d.join("goldy").join("slang").join(SLANG_VERSION))
     }
 
-    /// Get the library filename for the current platform.
-    fn library_name() -> &'static str {
-        #[cfg(target_os = "windows")]
-        {
-            "slang-compiler.dll"
+    /// Ensure Slang libraries are extracted to the cache directory.
+    ///
+    /// Returns the path to the primary library if successful.
+    fn ensure_cached_library() -> Option<PathBuf> {
+        // Check if we have embedded binaries
+        if SLANG_FILES.is_empty() {
+            tracing::debug!("No embedded Slang binaries available");
+            return None;
         }
-        #[cfg(target_os = "linux")]
-        {
-            "libslang-compiler.so"
+
+        let cache_dir = Self::cache_dir()?;
+        let primary_path = cache_dir.join(SLANG_PRIMARY);
+
+        // If already cached, return immediately
+        if primary_path.exists() {
+            return Some(primary_path);
         }
-        #[cfg(target_os = "macos")]
-        {
-            "libslang-compiler.dylib"
+
+        // Extract all embedded files to cache (only once)
+        static EXTRACT_ONCE: Once = Once::new();
+        let mut extract_result = Ok(());
+
+        EXTRACT_ONCE.call_once(|| {
+            extract_result = Self::extract_to_cache(&cache_dir);
+        });
+
+        if extract_result.is_ok() && primary_path.exists() {
+            Some(primary_path)
+        } else {
+            None
         }
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        {
-            compile_error!("Unsupported platform for Slang library")
+    }
+
+    /// Extract all embedded Slang files to the cache directory.
+    fn extract_to_cache(cache_dir: &PathBuf) -> Result<()> {
+        tracing::info!(
+            "Extracting Slang {} to cache: {}",
+            SLANG_VERSION,
+            cache_dir.display()
+        );
+
+        // Create cache directory
+        fs::create_dir_all(cache_dir).with_context(|| {
+            format!("Failed to create cache directory: {}", cache_dir.display())
+        })?;
+
+        // Extract each file
+        for (filename, bytes) in SLANG_FILES {
+            let dest_path = cache_dir.join(filename);
+
+            // Skip if already exists (in case of partial extraction)
+            if dest_path.exists() {
+                tracing::debug!("Cache file already exists: {}", dest_path.display());
+                continue;
+            }
+
+            // Write to a temp file first, then rename for atomicity
+            let temp_path = cache_dir.join(format!("{}.tmp", filename));
+
+            fs::write(&temp_path, bytes).with_context(|| {
+                format!("Failed to write Slang library: {}", temp_path.display())
+            })?;
+
+            fs::rename(&temp_path, &dest_path).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    temp_path.display(),
+                    dest_path.display()
+                )
+            })?;
+
+            tracing::debug!("Extracted: {} ({} bytes)", filename, bytes.len());
         }
+
+        goldy_event!(
+            "slang.cache.extracted",
+            version = SLANG_VERSION,
+            path = %cache_dir.display(),
+            file_count = SLANG_FILES.len()
+        );
+
+        Ok(())
     }
 }

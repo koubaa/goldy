@@ -80,7 +80,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 #[test]
 fn test_compute_pipeline_creation() {
-    common::init_test_env();
     let instance = Instance::new().expect("Failed to create instance");
     let device = instance
         .create_device(DeviceType::DiscreteGpu)
@@ -101,7 +100,6 @@ fn test_compute_pipeline_creation() {
 
 #[test]
 fn test_compute_pipeline_no_bindings() {
-    common::init_test_env();
     // A minimal compute shader with no bindings
     const MINIMAL_SHADER: &str = r#"
 [shader("compute")]
@@ -131,7 +129,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 #[test]
 fn test_compute_dispatch_empty() {
-    common::init_test_env();
     // Test dispatching a compute shader with no resources
     const MINIMAL_SHADER: &str = r#"
 [shader("compute")]
@@ -165,7 +162,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 #[test]
 fn test_compute_with_uav_buffer() {
-    common::init_test_env();
     let instance = Instance::new().expect("Failed to create instance");
     let device = instance
         .create_device(DeviceType::DiscreteGpu)
@@ -202,7 +198,6 @@ fn test_compute_with_uav_buffer() {
 
 #[test]
 fn test_compute_with_srv_and_uav() {
-    common::init_test_env();
     let instance = Instance::new().expect("Failed to create instance");
     let device = instance
         .create_device(DeviceType::DiscreteGpu)

@@ -1,6 +1,7 @@
 //! Build script for Goldy.
 //!
-//! Downloads Slang compiler binaries at compile time if not already present.
+//! Embeds Slang compiler binaries into the library using include_bytes!.
+//! Downloads Slang if vendored binaries are not present.
 //! Reads from slang/manifest.json for version and file lists.
 
 use std::env;
@@ -23,31 +24,24 @@ struct PlatformInfo {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=GOLDY_SLANG_PATH");
-    println!("cargo:rerun-if-env-changed=RAG_SLANG_PATH");
     println!("cargo:rerun-if-changed=slang/manifest.json");
 
-    // Skip Slang download for WASM targets
+    // Skip Slang embedding for WASM targets
     let target = env::var("TARGET").unwrap_or_default();
     if target.contains("wasm") {
-        return;
-    }
-
-    // Check if user already has Slang available via env var
-    if env::var("GOLDY_SLANG_PATH").is_ok() || env::var("RAG_SLANG_PATH").is_ok() {
-        println!("cargo:warning=Using user-provided Slang path");
+        generate_empty_embedded_module();
         return;
     }
 
     // Load manifest
-    let manifest_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("slang")
-        .join("manifest.json");
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_path = manifest_dir.join("slang").join("manifest.json");
 
     let manifest = match load_manifest(&manifest_path) {
         Ok(m) => m,
         Err(e) => {
             println!("cargo:warning=Failed to load slang/manifest.json: {}", e);
-            println!("cargo:warning=Slang will need to be provided at runtime");
+            generate_empty_embedded_module();
             return;
         }
     };
@@ -56,67 +50,141 @@ fn main() {
     let platform_info = match manifest.platforms.get(platform_dir) {
         Some(info) => info,
         None => {
-            println!(
-                "cargo:warning=Platform {} not in manifest, Slang will need to be provided at runtime",
-                platform_dir
-            );
+            println!("cargo:warning=Platform {} not in manifest", platform_dir);
+            generate_empty_embedded_module();
             return;
         }
     };
 
-    // Check vendored binaries first (for development)
-    let vendored_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("slang")
-        .join("bin")
-        .join(platform_dir);
+    // Check vendored binaries directory
+    let vendored_dir = manifest_dir.join("slang").join("bin").join(platform_dir);
 
-    if vendored_dir.join(&platform_info.primary).exists() {
-        println!("cargo:rustc-env=GOLDY_SLANG_DIR={}", vendored_dir.display());
-        return;
+    // Mark all vendored files as dependencies for rebuild
+    for file in &platform_info.files {
+        let file_path = vendored_dir.join(file);
+        println!("cargo:rerun-if-changed={}", file_path.display());
     }
 
-    // Download Slang binaries to OUT_DIR
+    // If vendored binaries don't exist, try to download them
+    if !vendored_dir.join(&platform_info.primary).exists() {
+        println!(
+            "cargo:warning=Vendored Slang binaries not found at {}",
+            vendored_dir.display()
+        );
+        println!(
+            "cargo:warning=Downloading Slang v{} for {}...",
+            manifest.version, platform_dir
+        );
+
+        if let Err(e) = download_slang_to_vendored(
+            &vendored_dir,
+            platform_dir,
+            &manifest.version,
+            &platform_info.files,
+        ) {
+            println!("cargo:warning=Failed to download Slang: {}", e);
+            println!("cargo:warning=Run: cd slang && ./download.sh");
+            generate_empty_embedded_module();
+            return;
+        }
+    }
+
+    // Generate the embedded module
+    generate_embedded_module(&manifest.version, &vendored_dir, platform_info);
+}
+
+/// Generate an empty embedded module (for unsupported platforms or missing binaries)
+fn generate_empty_embedded_module() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let slang_dir = out_dir.join("slang").join(platform_dir);
+    let embedded_path = out_dir.join("slang_embedded.rs");
 
-    // Check if already downloaded
-    if slang_dir.join(&platform_info.primary).exists() {
-        println!("cargo:rustc-env=GOLDY_SLANG_DIR={}", slang_dir.display());
-        return;
+    let content = r#"// Auto-generated: Slang binaries not available for this platform.
+
+/// Slang version (empty - not available)
+pub const SLANG_VERSION: &str = "";
+
+/// Embedded Slang library files (empty - not available)
+pub const SLANG_FILES: &[(&str, &[u8])] = &[];
+
+/// Primary library name (empty - not available)
+pub const SLANG_PRIMARY: &str = "";
+"#;
+
+    fs::write(&embedded_path, content).expect("Failed to write slang_embedded.rs");
+}
+
+/// Generate the embedded module with include_bytes! for all Slang files
+fn generate_embedded_module(version: &str, vendored_dir: &Path, platform_info: &PlatformInfo) {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let embedded_path = out_dir.join("slang_embedded.rs");
+
+    let mut content = String::new();
+    content.push_str("// Auto-generated: Embedded Slang compiler binaries.\n");
+    content.push_str("// Do not edit manually - regenerated by build.rs\n\n");
+
+    // Version constant
+    content.push_str(&format!(
+        "/// Slang version embedded in this build\n\
+         pub const SLANG_VERSION: &str = \"{}\";\n\n",
+        version
+    ));
+
+    // Primary library name
+    content.push_str(&format!(
+        "/// Primary Slang library filename\n\
+         pub const SLANG_PRIMARY: &str = \"{}\";\n\n",
+        platform_info.primary
+    ));
+
+    // Embedded files array
+    content.push_str("/// Embedded Slang library files (filename, bytes)\n");
+    content.push_str("pub const SLANG_FILES: &[(&str, &[u8])] = &[\n");
+
+    for file in &platform_info.files {
+        let file_path = vendored_dir.join(file);
+        if file_path.exists() {
+            // Use absolute path for include_bytes!
+            let abs_path = file_path
+                .canonicalize()
+                .unwrap_or_else(|_| file_path.clone());
+
+            // On Windows, canonicalize adds \\?\ prefix, which we need to handle
+            let path_str = abs_path.display().to_string();
+            let path_str = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str);
+
+            // Escape backslashes for the string literal
+            let escaped_path = path_str.replace('\\', "/");
+
+            content.push_str(&format!(
+                "    (\"{}\", include_bytes!(\"{}\")),\n",
+                file, escaped_path
+            ));
+        } else {
+            println!(
+                "cargo:warning=Slang file not found: {}",
+                file_path.display()
+            );
+        }
     }
 
-    // Download
+    content.push_str("];\n");
+
+    fs::write(&embedded_path, content).expect("Failed to write slang_embedded.rs");
     println!(
-        "cargo:warning=Downloading Slang v{} for {}...",
-        manifest.version, platform_dir
+        "cargo:warning=Generated slang_embedded.rs with {} files",
+        platform_info.files.len()
     );
-
-    if let Err(e) = download_slang(
-        &out_dir,
-        platform_dir,
-        &manifest.version,
-        &platform_info.files,
-    ) {
-        println!("cargo:warning=Failed to download Slang: {}", e);
-        println!("cargo:warning=Slang compiler will need to be provided at runtime.");
-        println!("cargo:warning=Options: Set GOLDY_SLANG_PATH env var, or run slang/download.sh");
-        return;
-    }
-
-    println!("cargo:rustc-env=GOLDY_SLANG_DIR={}", slang_dir.display());
 }
 
 fn load_manifest(path: &Path) -> io::Result<SlangManifest> {
     let content = fs::read_to_string(path)?;
 
     // Simple JSON parsing without serde (to avoid build dependency)
-    // Extract version
     let version = extract_json_string(&content, "version")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing version"))?;
 
     let mut platforms = std::collections::HashMap::new();
 
-    // Parse each platform
     for platform in &[
         "windows-x86_64",
         "linux-x86_64",
@@ -149,7 +217,6 @@ fn extract_platform_info(json: &str, platform: &str) -> Option<PlatformInfo> {
     let start = json.find(&pattern)?;
     let section = &json[start..];
 
-    // Find the files array
     let files_start = section.find("\"files\"")?;
     let after_files = &section[files_start..];
     let array_start = after_files.find('[')?;
@@ -168,7 +235,6 @@ fn extract_platform_info(json: &str, platform: &str) -> Option<PlatformInfo> {
         })
         .collect();
 
-    // Find primary
     let primary = extract_json_string(section, "primary")?;
 
     Some(PlatformInfo { files, primary })
@@ -216,15 +282,16 @@ fn get_platform_dir() -> &'static str {
     compile_error!("Unsupported platform for Slang")
 }
 
-fn download_slang(
-    out_dir: &Path,
+/// Download Slang binaries directly to the vendored directory
+fn download_slang_to_vendored(
+    vendored_dir: &Path,
     platform_dir: &str,
     version: &str,
     required_files: &[String],
 ) -> io::Result<()> {
-    let target_dir = out_dir.join("slang").join(platform_dir);
-    fs::create_dir_all(&target_dir)?;
+    fs::create_dir_all(vendored_dir)?;
 
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let zip_name = format!("slang-{}-{}.zip", version, platform_dir);
     let url = format!(
         "https://github.com/shader-slang/slang/releases/download/v{}/{}",
@@ -233,7 +300,7 @@ fn download_slang(
 
     let zip_path = out_dir.join(&zip_name);
 
-    // Download using curl (available on Windows, Linux, macOS)
+    // Download using curl
     let status = std::process::Command::new("curl")
         .args(["-fsSL", "-o"])
         .arg(&zip_path)
@@ -286,11 +353,11 @@ fn download_slang(
         }
     }
 
-    // Find and copy all required files
+    // Find and copy all required files to vendored directory
     let mut copied = 0;
     for file_name in required_files {
         if let Some(src_path) = find_file_recursive(&extract_dir, file_name) {
-            let dest = target_dir.join(file_name);
+            let dest = vendored_dir.join(file_name);
             fs::copy(&src_path, &dest)?;
             copied += 1;
         } else {
@@ -309,10 +376,10 @@ fn download_slang(
     }
 
     println!(
-        "cargo:warning=Copied {}/{} Slang libraries to {}",
+        "cargo:warning=Downloaded {}/{} Slang libraries to {}",
         copied,
         required_files.len(),
-        target_dir.display()
+        vendored_dir.display()
     );
 
     // Cleanup

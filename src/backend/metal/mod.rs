@@ -2549,11 +2549,9 @@ impl GpuBackend for MetalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils;
 
     #[test]
     fn test_metal_backend_creation() {
-        test_utils::init();
         let backend = MetalBackend::new();
         assert!(
             backend.is_ok(),
@@ -2566,7 +2564,6 @@ mod tests {
 
     #[test]
     fn test_metal_adapters() {
-        test_utils::init();
         let backend = MetalBackend::new().unwrap();
         let adapters = backend.enumerate_adapters();
         assert!(!adapters.is_empty(), "No Metal adapters found");
@@ -2577,7 +2574,6 @@ mod tests {
 
     #[test]
     fn test_metal_device_creation() {
-        test_utils::init();
         let mut backend = MetalBackend::new().unwrap();
         let device = backend.create_device(0);
         assert!(
@@ -2593,7 +2589,6 @@ mod tests {
 
     #[test]
     fn test_metal_buffer_operations() {
-        test_utils::init();
         let mut backend = MetalBackend::new().unwrap();
         let device = backend.create_device(0).unwrap();
 
