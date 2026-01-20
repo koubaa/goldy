@@ -2,6 +2,8 @@
 //!
 //! Run with: cargo test --test generate_screenshots -- --nocapture
 
+mod common;
+
 use goldy::{
     Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, Device,
     DeviceType, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget,
@@ -10,6 +12,7 @@ use goldy::{
 use std::path::Path;
 
 fn create_device() -> Option<Device> {
+    common::init_test_env();
     let instance = Instance::new().ok()?;
     instance.create_device(DeviceType::DiscreteGpu).ok()
 }

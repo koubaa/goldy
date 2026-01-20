@@ -49,10 +49,11 @@ module-name = "goldy._goldy"
 
 # Include Slang libraries in the wheel (platform-specific)
 # These are copied to the package directory by build-slang.py before building
+# Note: paths are relative to python-source directory (python/), not project root
 include = [
-    { path = "python/goldy/*.dll", format = "wheel" },
-    { path = "python/goldy/*.so", format = "wheel" },
-    { path = "python/goldy/*.dylib", format = "wheel" },
+    { path = "goldy/*.dll", format = "wheel" },
+    { path = "goldy/*.so", format = "wheel" },
+    { path = "goldy/*.dylib", format = "wheel" },
 ]
 
 [tool.pytest.ini_options]

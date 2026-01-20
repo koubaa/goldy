@@ -109,14 +109,6 @@ else()
 endif()
 
 # =============================================================================
-# Examples
-# =============================================================================
-
-if(GOLDY_BUILD_EXAMPLES)
-    add_subdirectory(examples)
-endif()
-
-# =============================================================================
 # Find Slang libraries
 # =============================================================================
 
@@ -145,11 +137,20 @@ set(SLANG_BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../slang/bin/${SLANG_PLATFORM}")
 # Find Slang libraries
 if(EXISTS "${SLANG_BIN_DIR}")
     file(GLOB SLANG_LIBS "${SLANG_BIN_DIR}/${SLANG_LIB_PATTERN}")
-    message(STATUS "Found ${CMAKE_LISTS_LENGTH} Slang libraries in ${SLANG_BIN_DIR}")
+    list(LENGTH SLANG_LIBS SLANG_LIBS_COUNT)
+    message(STATUS "Found ${SLANG_LIBS_COUNT} Slang libraries in ${SLANG_BIN_DIR}")
 else()
     message(WARNING "Slang binaries not found at ${SLANG_BIN_DIR}")
     message(WARNING "Run slang/download.sh to download Slang binaries")
     set(SLANG_LIBS "")
+endif()
+
+# =============================================================================
+# Examples
+# =============================================================================
+
+if(GOLDY_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 # =============================================================================
