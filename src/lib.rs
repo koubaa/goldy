@@ -28,9 +28,6 @@ pub mod surface;
 pub mod texture;
 pub mod types;
 
-// Slang compiler is only available on native targets (not WASM)
-// For web builds, use slang-wasm in JavaScript
-#[cfg(not(target_arch = "wasm32"))]
 pub mod slang;
 
 // Structured instrumentation for debugging and profiling

@@ -31,7 +31,6 @@ Choose Goldy when you need:
 - **Modern features** - Assume bindless, dynamic rendering, etc.
 - **Fast iteration** - API can evolve without committee approval
 - **Native performance** - No abstraction layers for translation
-- **WASI integration** - Designed for sandboxed GPU access
 
 ## Architecture Differences
 

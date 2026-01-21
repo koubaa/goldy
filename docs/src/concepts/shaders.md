@@ -4,8 +4,7 @@ Goldy uses [Slang](https://shader-slang.org/) as its sole shading language. Slan
 
 - **SPIR-V** for Vulkan
 - **DXIL/HLSL** for DirectX 12
-- **MSL** for Metal (future)
-- **WGSL** for documentation demos (via slang-wasm)
+- **MSL** for Metal
 
 ## Why Slang?
 

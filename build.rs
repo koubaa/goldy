@@ -26,13 +26,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GOLDY_SLANG_PATH");
     println!("cargo:rerun-if-changed=slang/manifest.json");
 
-    // Skip Slang embedding for WASM targets
-    let target = env::var("TARGET").unwrap_or_default();
-    if target.contains("wasm") {
-        generate_empty_embedded_module();
-        return;
-    }
-
     // Load manifest
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let manifest_path = manifest_dir.join("slang").join("manifest.json");

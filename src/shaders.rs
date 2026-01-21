@@ -1,9 +1,7 @@
 //! Slang shader source code - single source of truth for all shaders.
 //!
 //! All shaders are written in Slang and included at compile time from the
-//! `shaders/` directory. Native examples use these directly with the Slang
-//! compiler. Web demos expose these to JavaScript via wasm-bindgen, where
-//! slang-wasm compiles them to WGSL at runtime.
+//! `shaders/` directory. Examples use these directly with the Slang compiler.
 
 /// Simple 2D vertex + fragment shader for colored vertices.
 /// Used by: triangle, particles, starfield, bouncing_lines, spinning_cube, instancing, waveform
@@ -136,7 +134,7 @@ mod tests {
     }
 
     /// Test that PLASMA compiles via Slang for all targets
-    #[cfg(not(target_arch = "wasm32"))]
+
     #[test]
     fn test_plasma_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler};

@@ -1,7 +1,7 @@
 //! GPU backend abstraction.
 //!
 //! This module defines the `GpuBackend` trait that each graphics API
-//! (Vulkan, Metal, DX12, WebGPU) must implement.
+//! (Vulkan, Metal, DX12) must implement.
 //!
 //! ## Backend Selection
 //!
@@ -19,7 +19,7 @@
 //! # Valid values: vulkan, dx12, metal
 //! ```
 
-#[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
+#[cfg(feature = "vulkan")]
 pub mod vulkan;
 
 // DX12 backend for Windows
@@ -129,7 +129,7 @@ pub enum ComputeCommand {
     },
 }
 
-/// GPU backend trait - implemented by Vulkan, Metal, DX12, WebGPU.
+/// GPU backend trait - implemented by Vulkan, Metal, DX12.
 pub trait GpuBackend: Send + Sync {
     /// Get the backend type.
     fn backend_type(&self) -> BackendType;
@@ -355,7 +355,6 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     // Vulkan fallback on non-DX12/non-Metal platforms
     #[cfg(all(
         feature = "vulkan",
-        not(target_arch = "wasm32"),
         not(all(feature = "dx12", target_os = "windows")),
         not(all(feature = "metal", target_os = "macos"))
     ))]
@@ -368,7 +367,7 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     #[cfg(not(any(
         all(feature = "metal", target_os = "macos"),
         all(feature = "dx12", target_os = "windows"),
-        all(feature = "vulkan", not(target_arch = "wasm32"))
+        feature = "vulkan"
     )))]
     {
         anyhow::bail!("No GPU backend available - enable 'vulkan', 'dx12', or 'metal' feature")
@@ -378,7 +377,7 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 /// Create a specific backend by type.
 pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> {
     match backend_type {
-        #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
+        #[cfg(feature = "vulkan")]
         BackendType::Vulkan => {
             tracing::info!("Creating Vulkan backend");
             Ok(Box::new(vulkan::VulkanBackend::new()?))
