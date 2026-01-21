@@ -39,7 +39,6 @@ fn main() -> anyhow::Result<()> {
 | **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL |
 | **Unified** | Graphics and compute in one API |
 | **Fast-moving** | Not a standard—can iterate quickly |
-| **WASI-ready** | Designed for sandboxed GPU access |
 
 ## Installation
 

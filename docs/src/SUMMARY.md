@@ -38,7 +38,6 @@
 
 - [Backend Independence](./architecture/backends.md)
 - [Conditional Compilation](./architecture/conditional-compilation.md)
-- [WASI Integration](./architecture/wasi.md)
 
 # Python Bindings
 

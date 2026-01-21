@@ -3,13 +3,8 @@
 //! This module provides Rust bindings to the [Slang](https://shader-slang.org/) shader compiler.
 //! Slang is Goldy's sole shader language, supporting compilation to:
 //! - SPIR-V (Vulkan)
-//! - WGSL (WebGPU)
-//! - HLSL (DirectX)
+//! - DXIL (DirectX 12)
 //! - MSL (Metal)
-//! - GLSL
-//!
-//! **Note**: The native Slang compiler is not available on WASM targets.
-//! For web builds, use slang-wasm in JavaScript to compile Slang to WGSL.
 //!
 //! # Example
 //!
@@ -34,17 +29,12 @@
 //! println!("Compiled {} bytes of SPIR-V", spirv.data.len());
 //! ```
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod compiler;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod ffi;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod loader;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use compiler::{
     CompiledShader, CompiledShaderWithReflection, FieldLayout, ParameterBlockLayout, ResourceKind,
     ShaderReflection, ShaderTarget, SlangCompiler,
 };
-#[cfg(not(target_arch = "wasm32"))]
 pub use ffi::SlangStage;

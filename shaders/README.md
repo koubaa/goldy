@@ -1,6 +1,6 @@
 # Goldy Shader Library
 
-Slang shader sources shared between native (Vulkan) and web (WebGPU) platforms.
+Slang shader sources for native GPU platforms (Vulkan, DX12, Metal).
 
 ## Goldy Idioms
 
@@ -186,12 +186,6 @@ device.register_library(ShaderLibrary::from_source("myutils", r#"
 // Now your shaders can use: import myutils;
 ```
 
-**Web (JavaScript + slang-wasm):**
-```javascript
-const slangSource = SHADERS['plasma'];
-const wgsl = slangCompiler.compileToWgsl(slangSource);
-const module = device.createShaderModule({ code: wgsl });
-```
 
 ## Shader Files
 
