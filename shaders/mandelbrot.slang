@@ -3,52 +3,31 @@
 
 import goldy_exp;
 
-// Uniform structure for view parameters
 struct ViewUniforms {
     float2 center;
     float zoom;
-    float _padding;  // Align to 16 bytes
+    float _padding;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer support
-struct MandelbrotResources {
-    ConstantBuffer<ViewUniforms> uniforms;
-};
-ParameterBlock<MandelbrotResources> gResources;
-#define CENTER gResources.uniforms.center
-#define ZOOM gResources.uniforms.zoom
-
-#elif defined(__SPIRV__)
-// Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.buffer_indices;
-
-// Global descriptor array of uniform buffers
-[[vk::binding(1, 0)]] ConstantBuffer<ViewUniforms> g_UniformBuffers[];
-#define CENTER g_UniformBuffers[getBufferIndex(0)].center
-#define ZOOM g_UniformBuffers[getBufferIndex(0)].zoom
-
+// Cross-platform resource access
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+ConstantBuffer<ViewUniforms> uniforms : register(b0);
+#define CENTER uniforms.center
+#define ZOOM uniforms.zoom
 #else
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0) {
-    uint uniformsIndex;
-};
-#define CENTER (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).center
-#define ZOOM (*DescriptorHandle<ConstantBuffer<ViewUniforms>>(uint2(uniformsIndex, 0))).zoom
+#define CENTER goldy_broadcast<ViewUniforms>(0).center
+#define ZOOM goldy_broadcast<ViewUniforms>(0).zoom
 #endif
 
-// Vertex-less fullscreen triangle - generates geometry from vertex index
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
     FullscreenVarying output;
     
-    // Generate UV from vertex index: (0,0), (2,0), (0,2)
     float2 uv = float2(
         float((vertex_id << 1u) & 2u),
         float(vertex_id & 2u)
     );
     
-    // Position: UV [0,2] -> NDC [-1,3]
     output.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
     output.uv = uv;
     
@@ -57,7 +36,6 @@ FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
 
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
-    // Map UV to complex plane around center with zoom
     float2 c = CENTER + (input.uv - 0.5) * 4.0 / ZOOM;
     float2 z = float2(0.0, 0.0);
     uint i = 0;
@@ -65,7 +43,6 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
     
     for (i = 0; i < max_iter; i++) {
         if (dot(z, z) > 4.0) break;
-        // z = z^2 + c
         z = float2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
     }
     
@@ -73,7 +50,6 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
     
-    // Use palette from goldy module for smooth coloring
     float t = float(i) / float(max_iter);
     float3 color = palette(t, float3(5.0, 7.0, 11.0), float3(0.0, 1.0, 2.0));
     

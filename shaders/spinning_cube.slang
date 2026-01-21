@@ -1,36 +1,18 @@
 // Spinning 3D wireframe cube
 // Rendered entirely in fragment shader using SDF techniques
-// Uses goldy_exp module for vertex format utilities
 
 import goldy_exp;
 
-// Uniform structure
 struct TimeUniforms {
     float time;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer support
-struct SpinningCubeResources {
-    ConstantBuffer<TimeUniforms> uniforms;
-};
-ParameterBlock<SpinningCubeResources> gResources;
-#define TIME gResources.uniforms.time
-
-#elif defined(__SPIRV__)
-// Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.buffer_indices;
-
-// Global descriptor array of uniform buffers
-[[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-#define TIME g_UniformBuffers[getBufferIndex(0)].time
-
+// Cross-platform resource access
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+ConstantBuffer<TimeUniforms> uniforms : register(b0);
+#define TIME uniforms.time
 #else
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0) {
-    uint uniformsIndex;
-};
-#define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
+#define TIME goldy_broadcast<TimeUniforms>(0).time
 #endif
 
 [shader("vertex")]
@@ -68,7 +50,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
     float t = TIME;
     
-    // Cube vertices (8 corners)
+    // Cube vertices
     float3 verts[8];
     verts[0] = float3(-1.0, -1.0, -1.0);
     verts[1] = float3(1.0, -1.0, -1.0);
@@ -120,7 +102,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
     float3 glow_color = float3(0.1, 0.3, 0.6);
     
     float3 color = edge_color * edge + glow_color * glow * 0.3;
-    color += float3(0.02, 0.02, 0.04);  // Background
+    color += float3(0.02, 0.02, 0.04);
     
     return float4(color, 1.0);
 }

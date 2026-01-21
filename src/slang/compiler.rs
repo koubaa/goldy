@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
 
@@ -153,6 +154,7 @@ impl CompiledShader {
 pub struct SlangCompiler {
     library: Arc<SlangLibrary>,
     session: *mut SlangSession,
+    global_session: *mut IGlobalSession,
 }
 
 // SlangCompiler is Send + Sync because each compilation creates its own request
@@ -166,17 +168,43 @@ impl SlangCompiler {
 
         let library = Arc::new(SlangLibrary::load()?);
 
-        // Create global session
+        // Create global session using the new COM API
+        let mut global_session: *mut IGlobalSession = ptr::null_mut();
+        let global_desc = SlangGlobalSessionDesc::default();
+        tracing::debug!(
+            "Creating global session with desc size: {}",
+            std::mem::size_of::<SlangGlobalSessionDesc>()
+        );
+        let result =
+            unsafe { (library.create_global_session)(&global_desc, &mut global_session) };
+
+        if !slang_succeeded(result) || global_session.is_null() {
+            anyhow::bail!(
+                "Failed to create Slang global session (result={}, ptr={:?})",
+                result,
+                global_session
+            );
+        }
+        tracing::debug!("Global session created: {:?}", global_session);
+
+        // Also create a default session for backwards compatibility (deprecated API)
         let session = unsafe { (library.create_session)(ptr::null()) };
 
         if session.is_null() {
+            // Clean up global session
+            unsafe { global_session_release(global_session) };
             anyhow::bail!("Failed to create Slang session");
         }
+        tracing::debug!("Legacy session created: {:?}", session);
 
         goldy_event!("slang.session.create", success = true);
         tracing::info!("Slang compiler initialized");
 
-        Ok(Self { library, session })
+        Ok(Self {
+            library,
+            session,
+            global_session,
+        })
     }
 
     /// Compile Slang source code to the specified target.
@@ -262,38 +290,89 @@ impl SlangCompiler {
         search_paths: &[&str],
         defines: &[(&str, &str)],
     ) -> Result<CompiledShaderWithReflection> {
-        // Create compile request
-        let request = unsafe { (self.library.create_compile_request)(self.session) };
-        if request.is_null() {
-            anyhow::bail!("Failed to create Slang compile request");
+        // Create session with session-level preprocessor macros.
+        // This is the correct way to make defines visible to imported modules.
+        // The old approach of prepending defines or using addPreprocessorDefine only
+        // affects the main translation unit, not imported modules.
+
+        // Convert defines to PreprocessorMacroDesc array
+        let define_names: Vec<CString> = defines
+            .iter()
+            .map(|(k, _)| CString::new(*k).unwrap())
+            .collect();
+        let define_values: Vec<CString> = defines
+            .iter()
+            .map(|(_, v)| CString::new(*v).unwrap())
+            .collect();
+        let macro_descs: Vec<PreprocessorMacroDesc> = define_names
+            .iter()
+            .zip(define_values.iter())
+            .map(|(name, value)| PreprocessorMacroDesc {
+                name: name.as_ptr(),
+                value: value.as_ptr(),
+            })
+            .collect();
+
+        // Convert search paths to C strings
+        let search_path_cstrings: Vec<CString> = search_paths
+            .iter()
+            .map(|p| CString::new(*p).unwrap())
+            .collect();
+        let search_path_ptrs: Vec<*const c_char> =
+            search_path_cstrings.iter().map(|s| s.as_ptr()).collect();
+
+        // Create session description with preprocessor macros
+        let mut session_desc = SessionDesc::default();
+        if !search_path_ptrs.is_empty() {
+            session_desc.search_paths = search_path_ptrs.as_ptr();
+            session_desc.search_path_count = search_path_ptrs.len() as i64;
+        }
+        if !macro_descs.is_empty() {
+            session_desc.preprocessor_macros = macro_descs.as_ptr();
+            session_desc.preprocessor_macro_count = macro_descs.len() as i64;
         }
 
-        // Ensure cleanup on all paths
+        // Create a session with the defines
+        tracing::debug!(
+            "Creating session with {} macros, SessionDesc size: {}",
+            macro_descs.len(),
+            std::mem::size_of::<SessionDesc>()
+        );
+        let mut session: *mut ISession = ptr::null_mut();
+        let result = unsafe {
+            global_session_create_session(self.global_session, &session_desc, &mut session)
+        };
+        if !slang_succeeded(result) || session.is_null() {
+            anyhow::bail!(
+                "Failed to create Slang session with preprocessor defines (result={}, ptr={:?})",
+                result,
+                session
+            );
+        }
+        tracing::debug!("Session with defines created: {:?}", session);
+
+        // Ensure session cleanup
+        let _session_guard = scopeguard::guard(session, |s| {
+            unsafe { session_release(s) };
+        });
+
+        // Create compile request from the ISession (using proper COM interface call)
+        let mut request: *mut SlangCompileRequest = ptr::null_mut();
+        let result = unsafe { session_create_compile_request(session, &mut request) };
+        if !slang_succeeded(result) || request.is_null() {
+            anyhow::bail!(
+                "Failed to create Slang compile request (result={}, ptr={:?})",
+                result,
+                request
+            );
+        }
+        tracing::debug!("Compile request created: {:?}", request);
+
+        // Ensure request cleanup on all paths
         let library = self.library.clone();
         let _guard = scopeguard::guard(request, |req| {
             unsafe { (library.destroy_compile_request)(req) };
         });
-
-        // Add search paths for module resolution
-        for path in search_paths {
-            let path_cstr = CString::new(*path).context("Search path contains null bytes")?;
-            unsafe {
-                (self.library.add_search_path)(request, path_cstr.as_ptr());
-            }
-        }
-
-        // Add preprocessor defines
-        for (key, value) in defines {
-            let key_cstr = CString::new(*key).context("Define key contains null bytes")?;
-            let value_cstr = CString::new(*value).context("Define value contains null bytes")?;
-            unsafe {
-                (self.library.add_preprocessor_define)(
-                    request,
-                    key_cstr.as_ptr(),
-                    value_cstr.as_ptr(),
-                );
-            }
-        }
 
         // Add target
         let target_index =
@@ -305,8 +384,10 @@ impl SlangCompiler {
         // Set profile for DXIL target (SM 6.6 for bindless support)
         if target == ShaderTarget::Dxil {
             let profile_name = CString::new("sm_6_6").unwrap();
-            let profile_id =
-                unsafe { (self.library.find_profile)(self.session, profile_name.as_ptr()) };
+            // Use the global session for finding profile (works with COM API)
+            let profile_id = unsafe {
+                global_session_find_profile(self.global_session, profile_name.as_ptr())
+            };
             if profile_id > 0 {
                 unsafe {
                     (self.library.set_target_profile)(request, target_index, profile_id);
@@ -769,6 +850,13 @@ impl SlangCompiler {
             source_len = source.len()
         );
 
+        // Prepend defines directly to source code for imported modules
+        let mut source_with_defines = String::new();
+        for (key, value) in defines {
+            source_with_defines.push_str(&format!("#define {} {}\n", key, value));
+        }
+        source_with_defines.push_str(source);
+
         // Create compile request
         let request = unsafe { (self.library.create_compile_request)(self.session) };
         if request.is_null() {
@@ -836,9 +924,10 @@ impl SlangCompiler {
             anyhow::bail!("Failed to add translation unit");
         }
 
-        // Add source code
+        // Add source code (with prepended defines for imported modules)
         let source_path = CString::new("shader.slang").unwrap();
-        let source_cstr = CString::new(source).context("Source contains null bytes")?;
+        let source_cstr =
+            CString::new(source_with_defines.as_str()).context("Source contains null bytes")?;
         unsafe {
             (self.library.add_translation_unit_source_string)(
                 request,
@@ -911,6 +1000,9 @@ impl Drop for SlangCompiler {
     fn drop(&mut self) {
         if !self.session.is_null() {
             unsafe { (self.library.destroy_session)(self.session) };
+        }
+        if !self.global_session.is_null() {
+            unsafe { global_session_release(self.global_session) };
         }
     }
 }

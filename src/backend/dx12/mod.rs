@@ -1562,12 +1562,10 @@ impl GpuBackend for Dx12Backend {
                                 break;
                             }
                             if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                // Use SRV offset for render shaders (StructuredBuffer read-only access)
-                                // Render shaders only READ from buffers, so they use StructuredBuffer (SRV)
-                                // not RWStructuredBuffer (UAV). Fall back to bindless_offset for non-storage buffers.
-                                let offset = buf_state
-                                    .bindless_srv_offset
-                                    .unwrap_or_else(|| buf_state.bindless_offset.unwrap_or(0));
+                                // Shaders using goldy_dyn_scattered() return RWStructuredBuffer which needs UAV.
+                                // Always use UAV offset (bindless_offset) for storage buffers.
+                                // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
+                                let offset = buf_state.bindless_offset.unwrap_or(0);
                                 indices.indices[i] = offset;
                             }
                         }
@@ -2223,12 +2221,10 @@ impl GpuBackend for Dx12Backend {
                                 break;
                             }
                             if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                // Use SRV offset for render shaders (StructuredBuffer read-only access)
-                                // Render shaders only READ from buffers, so they use StructuredBuffer (SRV)
-                                // not RWStructuredBuffer (UAV). Fall back to bindless_offset for non-storage buffers.
-                                let offset = buf_state
-                                    .bindless_srv_offset
-                                    .unwrap_or_else(|| buf_state.bindless_offset.unwrap_or(0));
+                                // Shaders using goldy_dyn_scattered() return RWStructuredBuffer which needs UAV.
+                                // Always use UAV offset (bindless_offset) for storage buffers.
+                                // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
+                                let offset = buf_state.bindless_offset.unwrap_or(0);
                                 indices.indices[i] = offset;
                             }
                         }
@@ -2748,9 +2744,17 @@ impl GpuBackend for Dx12Backend {
         .context("Failed to create texture")?;
         let resource = resource.context("CreateCommittedResource returned null")?;
 
-        // Create SRV
-        let srv_offset = self.next_srv_offset;
-        self.next_srv_offset += 1;
+        // Get texture handle first (needed for registry)
+        let handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
+
+        // Create SRV - use unified resource registry to avoid descriptor heap collisions
+        // (textures and buffers share the same CBV/SRV/UAV heap)
+        let logical_device = self
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let srv_offset = logical_device.resource_registry.register_texture(handle);
 
         let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
             Format: format_to_dxgi(format),
@@ -2766,22 +2770,20 @@ impl GpuBackend for Dx12Backend {
             },
         };
 
-        let srv_handle = unsafe {
-            let mut handle = logical_device
+        let srv_cpu_handle = unsafe {
+            let mut cpu_handle = logical_device
                 .cbv_srv_uav_heap
                 .GetCPUDescriptorHandleForHeapStart();
-            handle.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
-            handle
+            cpu_handle.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
         };
         unsafe {
             logical_device
                 .device
-                .CreateShaderResourceView(&resource, Some(&srv_desc), srv_handle);
+                .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
         }
 
-        let handle = self.next_texture_handle;
-        self.next_texture_handle += 1;
-
+        // handle was already assigned above before registry call
         self.textures.insert(
             handle,
             TextureState {
@@ -3221,22 +3223,23 @@ impl GpuBackend for Dx12Backend {
                                 break;
                             }
                             if let Some(buf_state) = self.buffers.get(buffer_handle) {
-                                // For compute shaders with ping-pong pattern:
-                                // - First buffer (index 0) is read-only input → use SRV
-                                // - Subsequent buffers are write outputs → use UAV
-                                // This matches the common pattern: read from current, write to next
-                                let offset = if i == 0 {
-                                    // First buffer: read-only access via StructuredBuffer (SRV)
-                                    buf_state
-                                        .bindless_srv_offset
-                                        .unwrap_or_else(|| buf_state.bindless_offset.unwrap_or(0))
-                                } else {
-                                    // Subsequent buffers: read-write access via RWStructuredBuffer (UAV)
-                                    buf_state.bindless_offset.unwrap_or(0)
-                                };
+                                // Compute shaders use goldy_dyn_scattered() which returns RWStructuredBuffer.
+                                // RWStructuredBuffer requires UAV descriptors, not SRV.
+                                // Always use bindless_offset (UAV) for storage buffers in compute shaders.
+                                // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
+                                let offset = buf_state.bindless_offset.unwrap_or(0);
                                 indices.indices[i] = offset;
+                                tracing::trace!(
+                                    "Compute push constant [{}]: buffer {} -> UAV offset {}",
+                                    i, buffer_handle, offset
+                                );
                             }
                         }
+
+                        tracing::trace!(
+                            "Setting compute root constants: {:?}",
+                            &indices.indices[..buffers.len().min(types::MAX_ROOT_CONSTANT_INDICES)]
+                        );
 
                         unsafe {
                             command_list.SetComputeRoot32BitConstants(

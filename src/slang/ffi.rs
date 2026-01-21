@@ -1,13 +1,196 @@
 //! Raw FFI bindings to the Slang shader compiler.
 //!
-//! These are manual bindings to the Slang C API (sp* functions).
+//! These are manual bindings to the Slang C API (sp* functions) and COM interfaces.
 //! We use dynamic loading via libloading to avoid build-time dependencies.
 
 use std::ffi::c_void;
 use std::os::raw::{c_char, c_int};
 
-/// Opaque session handle
+/// Opaque session handle (deprecated C API)
 pub type SlangSession = c_void;
+
+/// Opaque global session handle (COM interface)
+pub type IGlobalSession = c_void;
+
+/// Opaque session handle (COM interface)
+pub type ISession = c_void;
+
+/// Slang API version
+pub const SLANG_API_VERSION: i64 = 0;
+
+// ============================================================================
+// Session Description Structures (for COM API)
+// ============================================================================
+
+/// Preprocessor macro for session-level defines
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct PreprocessorMacroDesc {
+    pub name: *const c_char,
+    pub value: *const c_char,
+}
+
+/// Target description for code generation
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct TargetDesc {
+    pub structure_size: usize,
+    pub format: SlangCompileTarget,
+    pub profile: SlangProfileID,
+    pub flags: u32,
+    pub floating_point_mode: i32,
+    pub line_directive_mode: i32,
+    pub force_glsl_scalar_buffer_layout: bool,
+    pub compiler_option_entries: *const c_void,
+    pub compiler_option_entry_count: u32,
+}
+
+impl Default for TargetDesc {
+    fn default() -> Self {
+        Self {
+            structure_size: std::mem::size_of::<TargetDesc>(),
+            format: SlangCompileTarget::Unknown,
+            profile: 0,
+            flags: 0,
+            floating_point_mode: 0,
+            line_directive_mode: 0,
+            force_glsl_scalar_buffer_layout: false,
+            compiler_option_entries: std::ptr::null(),
+            compiler_option_entry_count: 0,
+        }
+    }
+}
+
+/// Session description for creating sessions with options.
+/// This must match the C++ SessionDesc struct exactly (including padding).
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct SessionDesc {
+    pub structure_size: usize,                          // size_t (8 bytes)
+    pub targets: *const TargetDesc,                     // pointer (8 bytes)
+    pub target_count: i64,                              // SlangInt = int64_t (8 bytes)
+    pub flags: u32,                                     // SessionFlags = uint32_t (4 bytes)
+    pub default_matrix_layout_mode: i32,                // SlangMatrixLayoutMode = int (4 bytes)
+    pub search_paths: *const *const c_char,             // char const* const* (8 bytes)
+    pub search_path_count: i64,                         // SlangInt = int64_t (8 bytes)
+    pub preprocessor_macros: *const PreprocessorMacroDesc, // pointer (8 bytes)
+    pub preprocessor_macro_count: i64,                  // SlangInt = int64_t (8 bytes)
+    pub file_system: *const c_void,                     // ISlangFileSystem* (8 bytes)
+    pub enable_effect_annotations: bool,                // bool (1 byte)
+    pub allow_glsl_syntax: bool,                        // bool (1 byte)
+    _padding1: [u8; 6],                                 // padding to align next pointer
+    pub compiler_option_entries: *const c_void,         // CompilerOptionEntry* (8 bytes)
+    pub compiler_option_entry_count: u32,               // uint32_t (4 bytes)
+    pub skip_spirv_validation: bool,                    // bool (1 byte)
+    _padding2: [u8; 3],                                 // padding to reach struct alignment
+}
+
+impl Default for SessionDesc {
+    fn default() -> Self {
+        Self {
+            structure_size: std::mem::size_of::<SessionDesc>(),
+            targets: std::ptr::null(),
+            target_count: 0,
+            flags: 0,
+            default_matrix_layout_mode: 0, // SLANG_MATRIX_LAYOUT_ROW_MAJOR
+            search_paths: std::ptr::null(),
+            search_path_count: 0,
+            preprocessor_macros: std::ptr::null(),
+            preprocessor_macro_count: 0,
+            file_system: std::ptr::null(),
+            enable_effect_annotations: false,
+            allow_glsl_syntax: false,
+            _padding1: [0; 6],
+            compiler_option_entries: std::ptr::null(),
+            compiler_option_entry_count: 0,
+            skip_spirv_validation: false,
+            _padding2: [0; 3],
+        }
+    }
+}
+
+/// Global session description
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct SlangGlobalSessionDesc {
+    pub structure_size: u32,
+    pub api_version: u32,
+    pub min_language_version: u32,
+    pub enable_glsl: bool,
+    _padding: [u8; 3], // Padding after bool to align reserved array
+    pub reserved: [u32; 16],
+}
+
+impl Default for SlangGlobalSessionDesc {
+    fn default() -> Self {
+        Self {
+            structure_size: std::mem::size_of::<SlangGlobalSessionDesc>() as u32,
+            api_version: SLANG_API_VERSION as u32,
+            min_language_version: 2025, // SLANG_LANGUAGE_VERSION_2025
+            enable_glsl: false,
+            _padding: [0; 3],
+            reserved: [0; 16],
+        }
+    }
+}
+
+// ============================================================================
+// COM Interface VTables
+// ============================================================================
+
+/// IGlobalSession vtable (COM-style)
+/// The vtable layout must exactly match the C++ vtable order.
+#[repr(C)]
+pub struct IGlobalSessionVtable {
+    // ISlangUnknown methods (3 methods)
+    pub query_interface: unsafe extern "C" fn(
+        this: *mut IGlobalSession,
+        uuid: *const c_void,
+        out_object: *mut *mut c_void,
+    ) -> SlangResult,
+    pub add_ref: unsafe extern "C" fn(this: *mut IGlobalSession) -> u32,
+    pub release: unsafe extern "C" fn(this: *mut IGlobalSession) -> u32,
+    // IGlobalSession methods
+    pub create_session: unsafe extern "C" fn(
+        this: *mut IGlobalSession,
+        desc: *const SessionDesc,
+        out_session: *mut *mut ISession,
+    ) -> SlangResult,
+    pub find_profile:
+        unsafe extern "C" fn(this: *mut IGlobalSession, name: *const c_char) -> SlangProfileID,
+    // ... more methods we don't need, but we need to know about them for vtable offset
+}
+
+/// ISession vtable (COM-style)
+/// We need to include all methods up to createCompileRequest (vtable index 14)
+#[repr(C)]
+pub struct ISessionVtable {
+    // ISlangUnknown methods (3 methods, indices 0-2)
+    pub query_interface: unsafe extern "C" fn(
+        this: *mut ISession,
+        uuid: *const c_void,
+        out_object: *mut *mut c_void,
+    ) -> SlangResult,
+    pub add_ref: unsafe extern "C" fn(this: *mut ISession) -> u32,
+    pub release: unsafe extern "C" fn(this: *mut ISession) -> u32,
+    // ISession methods (indices 3-13)
+    pub get_global_session: *const c_void,              // 3
+    pub load_module: *const c_void,                     // 4
+    pub load_module_from_source: *const c_void,         // 5
+    pub create_composite_component_type: *const c_void, // 6
+    pub specialize_type: *const c_void,                 // 7
+    pub get_type_layout: *const c_void,                 // 8
+    pub get_container_type: *const c_void,              // 9
+    pub get_dynamic_type: *const c_void,                // 10
+    pub get_type_rtti_mangled_name: *const c_void,      // 11
+    pub get_type_conformance_witness_mangled_name: *const c_void, // 12
+    pub get_type_conformance_witness_sequential_id: *const c_void, // 13
+    // createCompileRequest (index 14)
+    pub create_compile_request: unsafe extern "C" fn(
+        this: *mut ISession,
+        out_compile_request: *mut *mut SlangCompileRequest,
+    ) -> SlangResult,
+}
 
 /// Opaque compile request handle  
 pub type SlangCompileRequest = c_void;
@@ -254,6 +437,12 @@ pub type FnSpGetTargetCodeBlob = unsafe extern "C" fn(
     out_blob: *mut *mut ISlangBlob,
 ) -> SlangResult;
 
+// New COM-style API function pointers
+pub type FnSlangCreateGlobalSession2 = unsafe extern "C" fn(
+    desc: *const SlangGlobalSessionDesc,
+    out_global_session: *mut *mut IGlobalSession,
+) -> SlangResult;
+
 // ============================================================================
 // Reflection API function pointer types
 // ============================================================================
@@ -398,4 +587,102 @@ pub unsafe fn blob_release(blob: *mut ISlangBlob) {
     let vtable_ptr = *(blob as *const *const ISlangBlobVtable);
     let vtable = &*vtable_ptr;
     (vtable.release)(blob);
+}
+
+// ============================================================================
+// COM Interface Helpers
+// ============================================================================
+
+/// Create a session from a global session with preprocessor macros
+///
+/// # Safety
+/// The global_session pointer must be valid.
+pub unsafe fn global_session_create_session(
+    global_session: *mut IGlobalSession,
+    desc: *const SessionDesc,
+    out_session: *mut *mut ISession,
+) -> SlangResult {
+    let vtable_ptr = *(global_session as *const *const IGlobalSessionVtable);
+    let vtable = &*vtable_ptr;
+    (vtable.create_session)(global_session, desc, out_session)
+}
+
+/// Find a profile by name using the global session
+///
+/// # Safety
+/// The global_session pointer must be valid.
+pub unsafe fn global_session_find_profile(
+    global_session: *mut IGlobalSession,
+    name: *const c_char,
+) -> SlangProfileID {
+    let vtable_ptr = *(global_session as *const *const IGlobalSessionVtable);
+    let vtable = &*vtable_ptr;
+    (vtable.find_profile)(global_session, name)
+}
+
+/// Release a global session
+///
+/// # Safety
+/// The global_session pointer must be valid.
+pub unsafe fn global_session_release(global_session: *mut IGlobalSession) -> u32 {
+    let vtable_ptr = *(global_session as *const *const IGlobalSessionVtable);
+    let vtable = &*vtable_ptr;
+    (vtable.release)(global_session)
+}
+
+/// Release a session
+///
+/// # Safety
+/// The session pointer must be valid.
+pub unsafe fn session_release(session: *mut ISession) -> u32 {
+    let vtable_ptr = *(session as *const *const ISessionVtable);
+    let vtable = &*vtable_ptr;
+    (vtable.release)(session)
+}
+
+/// Create a compile request from an ISession
+///
+/// # Safety
+/// The session pointer must be valid.
+pub unsafe fn session_create_compile_request(
+    session: *mut ISession,
+    out_compile_request: *mut *mut SlangCompileRequest,
+) -> SlangResult {
+    let vtable_ptr = *(session as *const *const ISessionVtable);
+    let vtable = &*vtable_ptr;
+    (vtable.create_compile_request)(session, out_compile_request)
+}
+
+// ============================================================================
+// Size assertions to catch FFI layout mismatches
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_struct_sizes() {
+        // SlangGlobalSessionDesc: 4 + 4 + 4 + 1 + 3(pad) + 64 = 80 bytes
+        assert_eq!(
+            std::mem::size_of::<SlangGlobalSessionDesc>(),
+            80,
+            "SlangGlobalSessionDesc size mismatch"
+        );
+
+        // SessionDesc: Expected ~96 bytes on 64-bit
+        // 8 + 8 + 8 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 6 + 8 + 4 + 1 + 3 = 96
+        assert_eq!(
+            std::mem::size_of::<SessionDesc>(),
+            96,
+            "SessionDesc size mismatch"
+        );
+
+        // PreprocessorMacroDesc: 2 pointers = 16 bytes
+        assert_eq!(
+            std::mem::size_of::<PreprocessorMacroDesc>(),
+            16,
+            "PreprocessorMacroDesc size mismatch"
+        );
+    }
 }

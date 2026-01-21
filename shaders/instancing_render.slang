@@ -1,9 +1,7 @@
 // Instancing render shader - renders quads from instance buffer
-// Demonstrates the Goldy-native pattern: no vertex buffer, reads from storage buffer
 
 import goldy_exp;
 
-// Instance data matching goldy::Instance2D
 struct QuadInstance {
     float2 position;
     float rotation;
@@ -11,34 +9,15 @@ struct QuadInstance {
     float4 color;
 };
 
-// ============================================================================
-// Platform-specific resource binding
-// ============================================================================
-
-#if defined(__METAL__)
-struct RenderResources {
-    StructuredBuffer<QuadInstance> instances;
-};
-ParameterBlock<RenderResources> gResources;
-#define INSTANCES gResources.instances
-
-#elif defined(__SPIRV__)
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] StructuredBuffer<QuadInstance> g_Storage[];
-#define INSTANCES g_Storage[getBufferIndex(0)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap (matching proven pattern)
-cbuffer BufferIndices : register(b0, space0) {
-    uint instanceBufferIndex;
-};
-#define INSTANCES (*DescriptorHandle<StructuredBuffer<QuadInstance>>(uint2(instanceBufferIndex, 0)))
-
+// Dynamic buffer selection - Rust: set_push_constants(&[instances_slot])
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1 fallback: traditional bindings
+StructuredBuffer<QuadInstance> instances : register(t0);
+#define INSTANCES instances
+#else
+// All other platforms: use unified dynamic access
+#define INSTANCES goldy_dyn_scattered<QuadInstance>(0)
 #endif
-
-// ============================================================================
-// Shaders
-// ============================================================================
 
 struct VSOutput {
     float4 position : SV_Position;

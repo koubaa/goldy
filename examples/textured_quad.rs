@@ -30,43 +30,31 @@ struct VertexOutput {
     float2 uv : TEXCOORD0;
 };
 
-// Resource access - cross-platform
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer support
-struct TexturedQuadResources {
-    Texture2D<float4> texture;
-    SamplerState sampler;
-};
-ParameterBlock<TexturedQuadResources> gResources;
-#define GET_TEXTURE() gResources.texture
-#define GET_SAMPLER() gResources.sampler
+// Cross-platform resource access via push constants
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1: Traditional binding
+Texture2D<float4> texture : register(t0);
+SamplerState texSampler : register(s0);
+#define GET_TEXTURE() texture
+#define GET_SAMPLER() texSampler
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays
-[[vk::push_constant]]
-cbuffer BufferIndices {
-    uint g_TextureIndex;
-    uint g_SamplerIndex;
-};
-
-// Vulkan: unbounded descriptor arrays
-// Binding 0: storage buffers, 1: uniform buffers, 2: sampled images, 3: samplers
+struct BufferIndices { uint indices[2]; };
+[[vk::push_constant]] ConstantBuffer<BufferIndices> g_Indices;
 [[vk::binding(2, 0)]] Texture2D<float4> g_Textures[];
-[[vk::binding(3, 0)]] SamplerState g_Samplers[];
-
-#define GET_TEXTURE() g_Textures[g_TextureIndex]
-#define GET_SAMPLER() g_Samplers[g_SamplerIndex]
+[[vk::binding(4, 0)]] SamplerState g_Samplers[];
+#define GET_TEXTURE() g_Textures[g_Indices.indices[0]]
+#define GET_SAMPLER() g_Samplers[g_Indices.indices[1]]
 
 #else
-// DX12: root constants + DescriptorHandle (Slang lowers to ResourceDescriptorHeap)
+// DX12: Root constants + DescriptorHandle
 cbuffer BufferIndices : register(b0, space0) {
-    uint g_TextureIndex;
-    uint g_SamplerIndex;
+    uint textureIndex;
+    uint samplerIndex;
 };
-
-// Slang's DescriptorHandle<T> compiles to ResourceDescriptorHeap[index]/SamplerDescriptorHeap[index]
-#define GET_TEXTURE() (*DescriptorHandle<Texture2D<float4>>(uint2(g_TextureIndex, 0)))
-#define GET_SAMPLER() (*DescriptorHandle<SamplerState>(uint2(g_SamplerIndex, 0)))
+#define GET_TEXTURE() (*DescriptorHandle<Texture2D<float4>>(uint2(textureIndex, 0)))
+#define GET_SAMPLER() (*DescriptorHandle<SamplerState>(uint2(samplerIndex, 0)))
 #endif
 
 [shader("vertex")]
@@ -170,6 +158,7 @@ impl App {
         let tex_width = 256u32;
         let tex_height = 256u32;
         let checker_data = generate_checkerboard(tex_width, tex_height, 32);
+        
         let texture = Texture::with_data(
             &device,
             &checker_data,

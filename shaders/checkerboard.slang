@@ -3,38 +3,20 @@
 
 import goldy_exp;
 
-// Uniform structure
 struct TimeUniforms {
     float time;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer support
-struct CheckerResources {
-    ConstantBuffer<TimeUniforms> uniforms;
-};
-ParameterBlock<CheckerResources> gResources;
-#define TIME gResources.uniforms.time
-
-#elif defined(__SPIRV__)
-// Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.buffer_indices;
-
-// Global descriptor array of uniform buffers
-[[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
-#define TIME g_UniformBuffers[getBufferIndex(0)].time
-
+// Cross-platform resource access
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+ConstantBuffer<TimeUniforms> uniforms : register(b0);
+#define TIME uniforms.time
 #else
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0) {
-    uint uniformsIndex;
-};
-#define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
+#define TIME goldy_broadcast<TimeUniforms>(0).time
 #endif
 
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
-    // Use vertex-less fullscreen triangle - no vertex buffer needed
     return vs_fullscreen_triangle(vertex_id);
 }
 
