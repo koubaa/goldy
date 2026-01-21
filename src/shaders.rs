@@ -163,18 +163,41 @@ mod tests {
         );
 
         // Test DXIL compilation (DX12) - needs __DX12__ define
-        let dxil_defines = vec![("__DX12__", "1")];
-        let result = compiler.compile_with_defines(
-            PLASMA,
-            ShaderTarget::Dxil,
-            &[],
-            &[&shader_path_str],
-            &dxil_defines,
-        );
-        assert!(
-            result.is_ok(),
-            "PLASMA failed to compile for DXIL: {:?}",
-            result.err()
-        );
+        // Only run on Windows since DXC compiler is not available on other platforms
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                PLASMA,
+                ShaderTarget::Dxil,
+                &[],
+                &[&shader_path_str],
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "PLASMA failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        // Test Metal compilation - needs __METAL__ define
+        // Only run on macOS since Metal is Apple-only
+        #[cfg(target_os = "macos")]
+        {
+            let metal_defines = vec![("__METAL__", "1")];
+            let result = compiler.compile_with_defines(
+                PLASMA,
+                ShaderTarget::Metal,
+                &[],
+                &[&shader_path_str],
+                &metal_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "PLASMA failed to compile for Metal: {:?}",
+                result.err()
+            );
+        }
     }
 }
