@@ -89,44 +89,32 @@ class TestColor:
         assert '0.1' in r
 
 
-class TestBufferUsage:
-    """Test BufferUsage flags."""
+class TestDataAccess:
+    """Test DataAccess enum."""
     
-    def test_single_flag(self):
+    def test_scattered(self):
         import goldy
         
-        usage = goldy.BufferUsage.VERTEX
-        assert 'VERTEX' in repr(usage)
+        access = goldy.DataAccess.SCATTERED
+        assert access == goldy.DataAccess.SCATTERED
     
-    def test_combine_flags(self):
+    def test_broadcast(self):
         import goldy
         
-        usage = goldy.BufferUsage.VERTEX | goldy.BufferUsage.COPY_DST
-        r = repr(usage)
-        assert 'VERTEX' in r
-        assert 'COPY_DST' in r
+        access = goldy.DataAccess.BROADCAST
+        assert access == goldy.DataAccess.BROADCAST
     
-    def test_multiple_flags(self):
+    def test_different_values(self):
         import goldy
         
-        usage = (goldy.BufferUsage.VERTEX 
-                | goldy.BufferUsage.INDEX 
-                | goldy.BufferUsage.UNIFORM)
-        r = repr(usage)
-        assert 'VERTEX' in r
-        assert 'INDEX' in r
-        assert 'UNIFORM' in r
+        assert goldy.DataAccess.SCATTERED != goldy.DataAccess.BROADCAST
     
-    def test_all_flags_exist(self):
+    def test_all_variants_exist(self):
         import goldy
         
-        # Verify all flags are accessible
-        _ = goldy.BufferUsage.VERTEX
-        _ = goldy.BufferUsage.INDEX
-        _ = goldy.BufferUsage.UNIFORM
-        _ = goldy.BufferUsage.STORAGE
-        _ = goldy.BufferUsage.COPY_SRC
-        _ = goldy.BufferUsage.COPY_DST
+        # Verify all variants are accessible
+        _ = goldy.DataAccess.SCATTERED
+        _ = goldy.DataAccess.BROADCAST
 
 
 class TestEnums:

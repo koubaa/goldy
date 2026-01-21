@@ -97,12 +97,11 @@ int main() {
             {-0.5f, -0.5f,  0.0f, 0.0f, 1.0f, 1.0f },  // Bottom left - Blue
         }};
 
-        // Create vertex buffer
-        auto usage = goldy::BufferUsage::Vertex | goldy::BufferUsage::CopyDst;
+        // Create vertex buffer (Scattered = any thread can access any address)
         goldy::Buffer vertex_buffer(device,
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(vertices.data()),
                                      vertices.size() * sizeof(Vertex)),
-            usage);
+            goldy::DataAccess::Scattered);
         std::cout << "Created vertex buffer: " << vertex_buffer.size() << " bytes\n";
 
         // Compile shader

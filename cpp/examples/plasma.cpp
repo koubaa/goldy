@@ -75,9 +75,8 @@ int main() {
         std::cout << "Created device on adapter " << device.adapter_id() << "\n";
         std::cout << "Has goldy_exp library: " << (device.has_library("goldy_exp") ? "yes" : "no") << "\n\n";
 
-        // Create uniform buffer for time
-        auto uniform_usage = goldy::BufferUsage::Uniform | goldy::BufferUsage::CopyDst;
-        goldy::Buffer uniform_buffer(device, sizeof(Uniforms), uniform_usage);
+        // Create uniform buffer for time (Broadcast = all threads read same address)
+        goldy::Buffer uniform_buffer(device, sizeof(Uniforms), goldy::DataAccess::Broadcast);
         std::cout << "Created uniform buffer: " << uniform_buffer.size() << " bytes\n";
 
         // Load and compile shader from shared shaders directory

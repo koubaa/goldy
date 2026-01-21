@@ -49,7 +49,7 @@ def main():
 
     # Create uniform buffer for time
     uniform_buffer = goldy.Buffer.empty(
-        device, 4, goldy.BufferUsage.UNIFORM | goldy.BufferUsage.COPY_DST
+        device, 4, goldy.DataAccess.BROADCAST
     )
 
     # Load and compile shader from shared shaders directory

@@ -148,7 +148,7 @@ impl<'a> RenderPass<'a> {
 
     /// Set an index buffer for indexed drawing.
     ///
-    /// The buffer must have been created with `BufferUsage::INDEX`.
+    /// The buffer should contain index data (u16 or u32 values).
     pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat) {
         self.encoder.commands.push(RenderCommand::SetIndexBuffer {
             buffer: buffer.handle,

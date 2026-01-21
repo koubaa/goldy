@@ -2600,7 +2600,7 @@ mod tests {
             .create_buffer(
                 device,
                 256,
-                BufferUsage::VERTEX | BufferUsage::COPY_DST,
+                DataAccess::Scattered,
                 None,
             )
             .unwrap();

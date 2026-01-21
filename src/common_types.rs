@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use goldy::{Buffer, BufferUsage, Particle2D};
+//! use goldy::{Buffer, DataAccess, Particle2D};
 //!
 //! // Create particles on CPU
 //! let particles = vec![
@@ -15,7 +15,7 @@
 //! ];
 //!
 //! // Upload directly to GPU - layout matches shader struct exactly
-//! let buffer = Buffer::with_data(&device, &particles, BufferUsage::STORAGE)?;
+//! let buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
 //! ```
 
 use bytemuck::{Pod, Zeroable};
