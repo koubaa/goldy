@@ -275,6 +275,14 @@ impl ShaderLibrary {
                     "goldy_exp/descriptor_handle",
                     include_str!("../shaders/goldy_exp/descriptor_handle.slang"),
                 ),
+                (
+                    "goldy_exp/bindless_resources",
+                    include_str!("../shaders/goldy_exp/bindless_resources.slang"),
+                ),
+                (
+                    "goldy_exp/access",
+                    include_str!("../shaders/goldy_exp/access.slang"),
+                ),
             ],
         )
     }
