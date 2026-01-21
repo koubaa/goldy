@@ -124,10 +124,10 @@ mod tests {
     /// Verify PLASMA structure
     #[test]
     fn test_plasma_structure() {
-        // Plasma should use DescriptorHandle for DX12 and descriptor arrays for SPIRV/Metal
+        // Plasma should use goldy_broadcast for unified cross-platform access
         assert!(
-            PLASMA.contains("DescriptorHandle"),
-            "PLASMA should use DescriptorHandle<T> for DX12"
+            PLASMA.contains("goldy_broadcast"),
+            "PLASMA should use goldy_broadcast<T>() for unified access"
         );
         assert!(
             PLASMA.contains("import goldy_exp"),
@@ -199,5 +199,156 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    /// Test that DescriptorHandle-based shaders compile correctly
+    /// This tests the new preprocessor-free approach using custom getDescriptorFromHandle
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_descriptor_handle_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shader_path = manifest_dir.join("shaders");
+        let shader_path_str = shader_path.to_string_lossy();
+
+        // Load the test shader
+        let test_shader = std::fs::read_to_string(shader_path.join("test_descriptor_handle.slang"))
+            .expect("Failed to read test_descriptor_handle.slang");
+
+        // Test SPIRV compilation - the key test for custom getDescriptorFromHandle
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            &test_shader,
+            ShaderTarget::Spirv,
+            &[],
+            &[&shader_path_str],
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_descriptor_handle failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        // Test DXIL compilation (DX12)
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Dxil,
+                &[],
+                &[&shader_path_str],
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_descriptor_handle failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        // Test Metal compilation
+        let metal_defines = vec![("__METAL__", "1")];
+        let result = compiler.compile_with_defines(
+            &test_shader,
+            ShaderTarget::Metal,
+            &[],
+            &[&shader_path_str],
+            &metal_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_descriptor_handle failed to compile for Metal: {:?}",
+            result.err()
+        );
+    }
+
+    /// Test the unified access pattern functions (goldy_broadcast, etc.)
+    ///
+    /// Verifies that:
+    /// - SPIRV: goldy_broadcast<T>() compiles and routes to Goldy's bindings
+    /// - DX12: goldy_broadcast<T>() compiles using DescriptorHandle
+    /// - Metal Tier 1: Traditional bindings work (without access functions)
+    /// - Metal Tier 2: goldy_broadcast<T>() works via ParameterBlock
+    #[test]
+    fn test_access_functions_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let test_shader = include_str!("../shaders/test_access_functions.slang");
+        let shader_path = std::env::current_dir()
+            .unwrap()
+            .join("shaders")
+            .to_string_lossy()
+            .to_string();
+        let shader_path_str = shader_path.as_str();
+
+        // Test SPIRV compilation - uses goldy_broadcast<T>()
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            test_shader,
+            ShaderTarget::Spirv,
+            &[],
+            &[shader_path_str],
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_access_functions failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        // Test DXIL compilation (DX12) - uses goldy_broadcast<T>()
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                test_shader,
+                ShaderTarget::Dxil,
+                &[],
+                &[shader_path_str],
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_access_functions failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        // Test Metal Tier 1 compilation - uses traditional bindings
+        let metal_tier1_defines = vec![("__METAL__", "1")];
+        let result = compiler.compile_with_defines(
+            test_shader,
+            ShaderTarget::Metal,
+            &[],
+            &[shader_path_str],
+            &metal_tier1_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_access_functions failed to compile for Metal Tier 1: {:?}",
+            result.err()
+        );
+
+        // Test Metal Tier 2 compilation - uses goldy_broadcast<T>()
+        let metal_tier2_defines = vec![("__METAL__", "1"), ("__METAL_BINDLESS__", "1")];
+        let result = compiler.compile_with_defines(
+            test_shader,
+            ShaderTarget::Metal,
+            &[],
+            &[shader_path_str],
+            &metal_tier2_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_access_functions failed to compile for Metal Tier 2: {:?}",
+            result.err()
+        );
     }
 }

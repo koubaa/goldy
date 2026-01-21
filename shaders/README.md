@@ -97,6 +97,8 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | `goldy_exp/types.slang` | Common data types: `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `Instance2D` |
 | `goldy_exp/primitives.slang` | Procedural geometry: `quad_local()`, `quad_position()`, `quad_position_rotated()`, `billboard_position()`, `fullscreen_position()`, `fullscreen_uv()` |
 | `goldy_exp/descriptor_handle.slang` | Cross-platform `DescriptorHandle<T>` support (routes by access pattern) |
+| `goldy_exp/access.slang` | Unified access functions: `goldy_broadcast<T>()`, `goldy_scattered<T>()`, etc. |
+| `goldy_exp/bindless_resources.slang` | Metal Tier 2 ParameterBlock for bindless resources |
 
 ### Vertex Formats
 
@@ -195,7 +197,7 @@ const module = device.createShaderModule({ code: wgsl });
 
 | File | Description | Uses Module |
 |------|-------------|-------------|
-| `plasma.slang` | Classic demoscene plasma (uses `DescriptorHandle<T>`) | ✓ `import goldy_exp` |
+| `plasma.slang` | Classic demoscene plasma (uses `goldy_broadcast<T>()`) | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
 | `vertex_color_2d.slang` | Basic 2D position + color | — |
 | `digital_clock.slang` | 7-segment display shader | — |
@@ -222,39 +224,104 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
 | Define | When Set | Use For |
 |--------|----------|---------|
 | `__METAL__` | Targeting Metal | Metal-specific code (ParameterBlock for argument buffers) |
+| `__METAL_BINDLESS__` | Metal + Tier 2 argument buffers | Enables `goldy_broadcast<T>()` on Metal (see below) |
 | `__SPIRV__` | Targeting Vulkan | Vulkan-specific code (push constants, descriptor arrays) |
 | `__DX12__` | Targeting DX12 | DX12-specific code (root constants, ResourceDescriptorHeap) |
 
-### Cross-Platform Resource Binding with `DescriptorHandle<T>`
+### Metal Tier 1 vs Tier 2
 
-Goldy shaders use Slang's `DescriptorHandle<T>` for cross-platform bindless resource access.
-This eliminates preprocessor directives entirely:
+Metal has two argument buffer tiers with different capabilities:
+
+| Tier | Hardware | Capabilities | Define |
+|------|----------|--------------|--------|
+| **Tier 1** | Older Intel (GitHub runners) | Traditional bindings only | `__METAL__` only |
+| **Tier 2** | Apple Silicon, Intel 2017+, AMD 2015+ | Full argument buffers, bindless | `__METAL__` + `__METAL_BINDLESS__` |
+
+Goldy automatically detects the tier at runtime and passes the appropriate defines.
+This allows CI tests to run on GitHub runners (Tier 1) while production builds
+get full bindless support on Tier 2 hardware.
+
+### Cross-Platform Resource Binding
+
+Goldy provides **unified access functions** that work across all platforms:
 
 ```slang
 import goldy_exp;
 
-// Declare resource as a DescriptorHandle - works on ALL platforms!
-uniform DescriptorHandle<ConstantBuffer<TimeUniforms>> uniforms;
+struct TimeUniforms { float time; };
 
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
-    float t = (*uniforms).time;  // Dereference to access
+    // Unified access - works on SPIRV, DX12, and Metal Tier 2!
+    float t = goldy_broadcast<TimeUniforms>(0).time;
+    return float4(rainbow(t), 1.0);
+}
+```
+
+#### Access Pattern Functions
+
+| Function | Access Pattern | Use For |
+|----------|----------------|---------|
+| `goldy_broadcast<T>(slot)` | All threads read same address | Uniforms, material params |
+| `goldy_scattered<T>(slot)` | Any thread, any address | Particle buffers, compute storage |
+| `goldy_interpolated<T>(slot)` | Hardware-filtered texture reads | Material textures |
+| `goldy_direct_spatial<T>(slot)` | Unfiltered read/write texture | Compute output, framebuffer effects |
+| `goldy_filter(slot)` | Sampler state for filtering | Texture sampling config |
+
+**Platform support:**
+- **SPIRV**: Routes to Goldy's custom binding layout (bindings 0-4)
+- **DX12**: Uses `DescriptorHandle<T>` → `ResourceDescriptorHeap`
+- **Metal Tier 2**: Uses `ParameterBlock` with typed resource arrays
+- **Metal Tier 1**: Not supported (use fallback pattern below)
+
+#### Metal Tier 1 Fallback
+
+For GitHub CI compatibility (Metal Tier 1), use the fallback pattern:
+
+```slang
+import goldy_exp;
+
+struct TimeUniforms { float time; };
+
+// Metal Tier 1 fallback for CI - traditional binding
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+ConstantBuffer<TimeUniforms> uniforms : register(b0);
+#define TIME uniforms.time
+#else
+// SPIRV, DX12, Metal Tier 2 - unified access
+#define TIME goldy_broadcast<TimeUniforms>(0).time
+#endif
+
+[shader("fragment")]
+float4 fs_main(FullscreenVarying input) : SV_Target {
+    float t = TIME;  // Works everywhere!
     // ...
 }
 ```
 
-**How it works:**
-- HLSL/DXIL: Compiles to `ResourceDescriptorHeap[index]`
-- SPIRV: Uses Goldy's custom `getDescriptorFromHandle` (auto-included from `goldy_exp`)
-- Metal: Compiles to argument buffer pointer
+This 6-line pattern replaces the old 30+ lines of platform-specific code while
+maintaining compatibility with CI runners.
 
-**See `plasma.slang` for a complete example.**
+**See `plasma.slang` and `test_access_functions.slang` for complete examples.**
+
+#### Alternative: Direct `DescriptorHandle<T>`
+
+For more control, you can also use Slang's `DescriptorHandle<T>` directly:
+
+```slang
+// Works on SPIRV and DX12 (not Metal Tier 1)
+uniform ConstantBuffer<TimeUniforms>.Handle uniforms;
+float t = (*uniforms).time;  // Dereference to access
+```
+
+The `goldy_exp` module overrides `getDescriptorFromHandle` for SPIRV to route
+to Goldy's binding layout. DX12 uses Slang's default `ResourceDescriptorHeap`.
 
 <details>
 <summary>Technical Details: Vulkan Descriptor Override</summary>
 
 The `goldy_exp` module includes `goldy_exp/descriptor_handle.slang` which provides a custom
-`getDescriptorFromHandle` override for SPIRV. Slang's default bindings don't match Goldy's
+`getDescriptorFromHandle<T>` override for SPIRV. Slang's default bindings don't match Goldy's
 Vulkan descriptor layout.
 
 **Goldy's bindings are organized by ACCESS PATTERN:**
@@ -267,9 +334,11 @@ Vulkan descriptor layout.
 | 3 | **Direct Spatial** | 2D/3D indexing, no filtering, read/write | `RWTexture2D<T>` |
 | 4 | **Filter Config** | Settings for interpolated access (not data) | `SamplerState` |
 
-The override routes `DescriptorHandle<T>` dereferences to the correct heap based on
-the resource's access pattern. This is transparent to shader code — just
-`import goldy_exp` and use `DescriptorHandle<T>`.
+The custom `getDescriptorFromHandle<T>` uses Slang's `__DynamicResource<T>` type to declare
+arrays at Goldy's specific bindings, then routes based on `T.kind` (Sampler, Texture,
+ConstantBuffer, StorageBuffer, etc.) and `T.descriptorAccess` (Read vs ReadWrite).
+
+This is transparent to shader code — just `import goldy_exp` and use `DescriptorHandle<T>`.
 
 </details>
 
