@@ -1,9 +1,10 @@
-// Classic demoscene plasma effect
-// Uses vertex-less fullscreen triangle and time uniform
+// Test shader for unified access pattern functions
 //
-// This shader demonstrates Goldy's unified cross-platform resource binding:
-// - SPIRV/DX12/Metal Tier 2: Uses goldy_broadcast<T>() for clean, unified access
-// - Metal Tier 1: Falls back to traditional bindings (GitHub CI compatibility)
+// This shader demonstrates:
+// - SPIRV/DX12/Metal Tier 2: Uses goldy_broadcast<T>() for unified access
+// - Metal Tier 1: Uses traditional bindings with fallback
+//
+// Run: cargo test --package goldy test_access_functions -- --nocapture
 
 import goldy_exp;
 
@@ -11,9 +12,9 @@ struct TimeUniforms {
     float time;
 };
 
-// Cross-platform resource access
+// Cross-platform resource access using preprocessor fallback for Metal Tier 1
 #if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1: Traditional binding for GitHub CI compatibility
+// Metal Tier 1: Traditional binding (GitHub CI compatibility)
 ConstantBuffer<TimeUniforms> uniforms : register(b0);
 #define TIME uniforms.time
 #else
@@ -28,8 +29,9 @@ FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
 
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
-    float2 uv = scale_uv(input.uv, 4.0);
     float t = TIME;
+    
+    float2 uv = scale_uv(input.uv, 4.0);
     
     // Classic plasma formula
     float v = sin(uv.x + t);

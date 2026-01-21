@@ -45,3 +45,9 @@ game_of_life_*.png
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated binaries in goldy package (built by maturin/build-slang.py)
+# These are bundled into the wheel but shouldn't be in source control
+python/goldy/*.so
+python/goldy/*.dylib
+python/goldy/*.dll
