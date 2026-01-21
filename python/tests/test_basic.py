@@ -24,7 +24,7 @@ def test_import():
     # Verify enums
     assert hasattr(goldy, 'DeviceType')
     assert hasattr(goldy, 'TextureFormat')
-    assert hasattr(goldy, 'BufferUsage')
+    assert hasattr(goldy, 'DataAccess')
     
     # Verify types
     assert hasattr(goldy, 'Color')
@@ -65,18 +65,20 @@ def test_color():
     assert list(rgba) == [255, 0, 0, 255]
 
 
-def test_buffer_usage():
-    """Test BufferUsage flags."""
+def test_data_access():
+    """Test DataAccess enum."""
     import goldy
     
-    # Single flag
-    usage = goldy.BufferUsage.VERTEX
-    assert 'VERTEX' in repr(usage)
+    # Scattered access (any thread, any address)
+    scattered = goldy.DataAccess.SCATTERED
+    assert scattered == goldy.DataAccess.SCATTERED
     
-    # Combined flags
-    combined = goldy.BufferUsage.VERTEX | goldy.BufferUsage.COPY_DST
-    assert 'VERTEX' in repr(combined)
-    assert 'COPY_DST' in repr(combined)
+    # Broadcast access (all threads same address)
+    broadcast = goldy.DataAccess.BROADCAST
+    assert broadcast == goldy.DataAccess.BROADCAST
+    
+    # Different values
+    assert scattered != broadcast
 
 
 def test_texture_format():

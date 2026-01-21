@@ -5,7 +5,7 @@
 //! Run with: cargo run --example triangle
 
 use goldy::{
-    shader::builtins, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance,
+    shader::builtins, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance,
     RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
@@ -56,7 +56,7 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+        let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
 
         // Create Surface for zero-copy presentation
         let surface = Surface::new(&device, window.as_ref())?;

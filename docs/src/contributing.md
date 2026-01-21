@@ -60,9 +60,9 @@ cargo fmt --check     # Format check
 /// # Example
 ///
 /// ```
-/// let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+/// let buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
 /// ```
-pub fn with_data<T: Pod>(device: &Device, data: &[T], usage: BufferUsage) -> Result<Self> {
+pub fn with_data<T: Pod>(device: &Device, data: &[T], access: DataAccess) -> Result<Self> {
     // ...
 }
 ```

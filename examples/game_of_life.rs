@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
     Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
     VertexBufferLayout,
 };
@@ -148,8 +148,8 @@ impl RenderState {
 
         // Create ping-pong buffers
         let initial_state = create_initial_state();
-        let buffer_a = Buffer::with_data(&device, &initial_state, BufferUsage::STORAGE)?;
-        let buffer_b = Buffer::with_data(&device, &initial_state, BufferUsage::STORAGE)?;
+        let buffer_a = Buffer::with_data(&device, &initial_state, DataAccess::Scattered)?;
+        let buffer_b = Buffer::with_data(&device, &initial_state, DataAccess::Scattered)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

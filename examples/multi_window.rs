@@ -8,7 +8,7 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
+    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
     RenderPipelineDesc, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
@@ -352,7 +352,7 @@ impl WindowState {
 
         let time = self.current_time();
         let vertices = create_quad(time);
-        let vertex_buffer = Buffer::with_data(device, &vertices, BufferUsage::VERTEX)?;
+        let vertex_buffer = Buffer::with_data(device, &vertices, DataAccess::Scattered)?;
 
         // Acquire frame - this waits for oldest in-flight frame
         let frame = self.surface.acquire()?;

@@ -22,7 +22,7 @@ vertices = np.array([
 ], dtype=np.float32)
 
 # Create GPU buffer from the array
-buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
+buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
 print(f"Buffer size: {buffer.size} bytes")  # 72 bytes (18 floats * 4)
 ```
 
@@ -42,11 +42,11 @@ Goldy accepts NumPy arrays of various types:
 ```python
 # Index buffer example
 indices = np.array([0, 1, 2, 2, 3, 0], dtype=np.uint32)
-index_buffer = goldy.Buffer(device, indices, goldy.BufferUsage.INDEX)
+index_buffer = goldy.Buffer(device, indices, goldy.DataAccess.SCATTERED)
 
 # Storage buffer for compute
 data = np.arange(1024, dtype=np.float32)
-storage_buffer = goldy.Buffer(device, data, goldy.BufferUsage.STORAGE)
+storage_buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
 ```
 
 ## Reading Back to NumPy
@@ -74,7 +74,7 @@ Update buffer contents from NumPy arrays:
 ```python
 # Create buffer with initial data
 data = np.zeros(256, dtype=np.float32)
-buffer = goldy.Buffer(device, data, goldy.BufferUsage.UNIFORM)
+buffer = goldy.Buffer(device, data, goldy.DataAccess.BROADCAST)
 
 # Update with new data
 new_data = np.random.rand(256).astype(np.float32)
@@ -94,10 +94,10 @@ Minimize buffer creation in hot loops:
 ```python
 # Bad: Creating buffer every frame
 for frame in range(1000):
-    buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)  # Slow!
+    buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)  # Slow!
 
 # Good: Create once, update as needed
-buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
+buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
 for frame in range(1000):
     if vertices_changed:
         buffer.write(0, vertices)
@@ -127,7 +127,7 @@ sliced = arr[::2]  # Not contiguous!
 
 # Make contiguous if needed
 contiguous = np.ascontiguousarray(sliced)
-buffer = goldy.Buffer(device, contiguous, goldy.BufferUsage.VERTEX)
+buffer = goldy.Buffer(device, contiguous, goldy.DataAccess.SCATTERED)
 ```
 
 

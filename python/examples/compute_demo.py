@@ -31,11 +31,11 @@ import goldy_exp.buffer_indices;
 #define DATA g_StorageBuffers[getBufferIndex(0)]
 
 #elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
+// DX12: Root constants + DescriptorHandle
 cbuffer BufferIndices : register(b0, space0) {
     uint dataIndex;
 };
-#define DATA ResourceDescriptorHeap[dataIndex]
+#define DATA (*DescriptorHandle<RWStructuredBuffer<float>>(uint2(dataIndex, 0)))
 
 #endif
 
@@ -63,7 +63,7 @@ def main():
     print(f"Input data (first 10): {input_data[:10]}")
     
     # Create GPU storage buffer
-    buffer = goldy.Buffer(device, input_data, goldy.BufferUsage.STORAGE)
+    buffer = goldy.Buffer(device, input_data, goldy.DataAccess.SCATTERED)
     print(f"Created buffer: {buffer.size} bytes")
     
     # Compile compute shader

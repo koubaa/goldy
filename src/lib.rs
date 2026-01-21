@@ -13,6 +13,7 @@
 
 pub mod backend;
 pub mod buffer;
+pub mod common_types;
 pub mod compute;
 pub mod device;
 pub mod encoder;
@@ -37,6 +38,7 @@ pub mod instrumentation;
 
 // Re-export main types
 pub use buffer::Buffer;
+pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};

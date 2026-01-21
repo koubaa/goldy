@@ -238,7 +238,7 @@ impl GpuBackend for MockBackend {
         &mut self,
         device: DeviceHandle,
         size: u64,
-        _usage: BufferUsage,
+        _access: DataAccess,
         _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
@@ -603,7 +603,8 @@ impl GpuBackend for MockBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        _usage: TextureUsage,
+        _access: SpatialAccess,
+        _flags: TextureFlags,
     ) -> Result<TextureHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -889,7 +890,7 @@ mod tests {
 
         // Create an index buffer
         let index_buffer = backend
-            .create_buffer(device, 12, BufferUsage::INDEX, None)
+            .create_buffer(device, 12, DataAccess::Scattered, None)
             .unwrap();
 
         // Write some indices (6 u16 indices for 2 triangles)
@@ -964,7 +965,7 @@ mod tests {
             .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
             .unwrap();
         let index_buffer = backend
-            .create_buffer(device, 24, BufferUsage::INDEX, None)
+            .create_buffer(device, 24, DataAccess::Scattered, None)
             .unwrap();
 
         // Test with offset and base_vertex
@@ -1175,13 +1176,13 @@ mod tests {
 
         // Create multiple buffers and verify they get sequential bindless indices
         let buffer1 = backend
-            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .create_buffer(device, 64, DataAccess::Broadcast, None)
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .create_buffer(device, 128, DataAccess::Scattered, None)
             .unwrap();
         let buffer3 = backend
-            .create_buffer(device, 256, BufferUsage::VERTEX, None)
+            .create_buffer(device, 256, DataAccess::Scattered, None)
             .unwrap();
 
         assert_eq!(backend.buffer_bindless_index(buffer1), Some(0));
@@ -1196,7 +1197,7 @@ mod tests {
 
         // Create a buffer first to verify textures share the same index namespace
         let _buffer = backend
-            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .create_buffer(device, 64, DataAccess::Broadcast, None)
             .unwrap();
 
         let texture1 = backend
@@ -1205,7 +1206,8 @@ mod tests {
                 256,
                 256,
                 TextureFormat::Rgba8Unorm,
-                TextureUsage::SAMPLED,
+                SpatialAccess::Interpolated,
+                TextureFlags::empty(),
             )
             .unwrap();
         let texture2 = backend
@@ -1214,7 +1216,8 @@ mod tests {
                 512,
                 512,
                 TextureFormat::Rgba8Unorm,
-                TextureUsage::SAMPLED,
+                SpatialAccess::Interpolated,
+                TextureFlags::empty(),
             )
             .unwrap();
 
@@ -1246,7 +1249,7 @@ mod tests {
 
         // Create resources in interleaved order to verify shared namespace
         let buffer1 = backend
-            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .create_buffer(device, 64, DataAccess::Broadcast, None)
             .unwrap();
         let texture1 = backend
             .create_texture(
@@ -1254,14 +1257,15 @@ mod tests {
                 256,
                 256,
                 TextureFormat::Rgba8Unorm,
-                TextureUsage::SAMPLED,
+                SpatialAccess::Interpolated,
+                TextureFlags::empty(),
             )
             .unwrap();
         let sampler1 = backend
             .create_sampler(device, &SamplerDesc::default())
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .create_buffer(device, 128, DataAccess::Scattered, None)
             .unwrap();
 
         // All resources share a single incrementing index
@@ -1290,10 +1294,10 @@ mod tests {
             .unwrap();
 
         let buffer1 = backend
-            .create_buffer(device, 64, BufferUsage::UNIFORM, None)
+            .create_buffer(device, 64, DataAccess::Broadcast, None)
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .create_buffer(device, 128, DataAccess::Scattered, None)
             .unwrap();
 
         // Record render commands with push constants (bindless path)
@@ -1356,10 +1360,10 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer1 = backend
-            .create_buffer(device, 64, BufferUsage::STORAGE, None)
+            .create_buffer(device, 64, DataAccess::Scattered, None)
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, BufferUsage::STORAGE, None)
+            .create_buffer(device, 128, DataAccess::Scattered, None)
             .unwrap();
 
         // Record compute commands with push constants (bindless path)

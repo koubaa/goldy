@@ -581,7 +581,7 @@ impl GpuBackend for MetalBackend {
         &mut self,
         device_handle: DeviceHandle,
         size: u64,
-        _usage: BufferUsage,
+        _access: DataAccess,
         _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         let _span = goldy_span!("resource.buffer.create", size = size).entered();
@@ -1515,7 +1515,8 @@ impl GpuBackend for MetalBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        usage: TextureUsage,
+        access: SpatialAccess,
+        flags: TextureFlags,
     ) -> Result<TextureHandle> {
         let _span = goldy_span!(
             "resource.texture.create",
@@ -1538,14 +1539,17 @@ impl GpuBackend for MetalBackend {
         descriptor.set_height(height as u64);
         descriptor.set_pixel_format(format_to_mtl(format));
 
+        // Map access pattern to Metal texture usage
         let mut mtl_usage = MTLTextureUsage::Unknown;
-        if usage.contains(TextureUsage::SAMPLED) {
-            mtl_usage |= MTLTextureUsage::ShaderRead;
+        match access {
+            SpatialAccess::Interpolated => {
+                mtl_usage |= MTLTextureUsage::ShaderRead;
+            }
+            SpatialAccess::Direct => {
+                mtl_usage |= MTLTextureUsage::ShaderWrite;
+            }
         }
-        if usage.contains(TextureUsage::STORAGE) {
-            mtl_usage |= MTLTextureUsage::ShaderWrite;
-        }
-        if usage.contains(TextureUsage::RENDER_TARGET) {
+        if flags.contains(TextureFlags::RENDER_TARGET) {
             mtl_usage |= MTLTextureUsage::RenderTarget;
         }
         descriptor.set_usage(mtl_usage);
@@ -2593,12 +2597,7 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer = backend
-            .create_buffer(
-                device,
-                256,
-                BufferUsage::VERTEX | BufferUsage::COPY_DST,
-                None,
-            )
+            .create_buffer(device, 256, DataAccess::Scattered, None)
             .unwrap();
 
         assert_eq!(backend.buffer_size(buffer), 256);

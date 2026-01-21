@@ -6,7 +6,7 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, DeviceType, IndexFormat, Instance,
+    Buffer, Color, CommandEncoder, DataAccess, DeviceType, IndexFormat, Instance,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
@@ -261,8 +261,9 @@ impl App {
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, BufferUsage::VERTEX)?;
-        let index_buffer = Buffer::with_data(device.as_ref(), &sorted_indices, BufferUsage::INDEX)?;
+        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, DataAccess::Scattered)?;
+        let index_buffer =
+            Buffer::with_data(device.as_ref(), &sorted_indices, DataAccess::Scattered)?;
 
         let frame = surface.acquire()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {

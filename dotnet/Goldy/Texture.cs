@@ -11,13 +11,19 @@ public sealed class Texture : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// Create a new texture.
+    /// Create a new texture with the specified spatial access pattern.
     /// </summary>
-    public Texture(Device device, uint width, uint height, TextureFormat format, TextureUsage usage)
+    /// <param name="device">The GPU device.</param>
+    /// <param name="width">Texture width in pixels.</param>
+    /// <param name="height">Texture height in pixels.</param>
+    /// <param name="format">Pixel format.</param>
+    /// <param name="access">Spatial access pattern (Interpolated for filtering, Direct for indexing).</param>
+    /// <param name="flags">Texture flags for copy and render operations.</param>
+    public Texture(Device device, uint width, uint height, TextureFormat format, SpatialAccess access, TextureFlags flags = TextureFlags.None)
     {
         device.ThrowIfDisposed();
         
-        Handle = NativeMethods.TextureCreate(device.Handle, width, height, format, usage);
+        Handle = NativeMethods.TextureCreate(device.Handle, width, height, format, access, flags);
         if (Handle == nint.Zero)
             throw GoldyException.FromLastError("Texture creation");
         

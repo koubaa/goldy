@@ -115,7 +115,7 @@ const COLORS: [Color; 8] = [
 ```rust
 fn render_frame(&mut self) -> anyhow::Result<()> {
     let vertices = generate_clock_vertices(elapsed, color, width, height);
-    let vertex_buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX)?;
+    let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
     
     let mut encoder = CommandEncoder::new();
     {

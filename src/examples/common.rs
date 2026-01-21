@@ -43,34 +43,6 @@ impl VertexUv {
     }
 }
 
-/// Fullscreen quad vertices (two triangles, CCW winding)
-pub const FULLSCREEN_QUAD: [VertexUv; 6] = [
-    VertexUv {
-        position: [-1.0, -1.0],
-        uv: [0.0, 1.0],
-    },
-    VertexUv {
-        position: [1.0, -1.0],
-        uv: [1.0, 1.0],
-    },
-    VertexUv {
-        position: [1.0, 1.0],
-        uv: [1.0, 0.0],
-    },
-    VertexUv {
-        position: [-1.0, -1.0],
-        uv: [0.0, 1.0],
-    },
-    VertexUv {
-        position: [1.0, 1.0],
-        uv: [1.0, 0.0],
-    },
-    VertexUv {
-        position: [-1.0, 1.0],
-        uv: [0.0, 0.0],
-    },
-];
-
 /// Vertex with 2D position, UV, and time.
 /// Used for effects that pass time via vertex attributes.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -148,32 +120,6 @@ mod tests {
         assert_eq!(layout.attributes[0].offset, 0);
         assert_eq!(layout.attributes[1].offset, 8);
         assert_eq!(layout.attributes[2].offset, 16);
-    }
-
-    #[test]
-    fn test_fullscreen_quad_coverage() {
-        // Verify the quad covers the entire NDC space
-        let min_x = FULLSCREEN_QUAD
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::INFINITY, f32::min);
-        let max_x = FULLSCREEN_QUAD
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_y = FULLSCREEN_QUAD
-            .iter()
-            .map(|v| v.position[1])
-            .fold(f32::INFINITY, f32::min);
-        let max_y = FULLSCREEN_QUAD
-            .iter()
-            .map(|v| v.position[1])
-            .fold(f32::NEG_INFINITY, f32::max);
-
-        assert_eq!(min_x, -1.0);
-        assert_eq!(max_x, 1.0);
-        assert_eq!(min_y, -1.0);
-        assert_eq!(max_y, 1.0);
     }
 
     #[test]

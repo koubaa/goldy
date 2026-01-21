@@ -114,22 +114,54 @@ impl TextureFormat {
     }
 }
 
+// ============================================================================
+// Access Pattern Types
+// ============================================================================
+
+/// Data access pattern for buffers.
+///
+/// This describes how threads will access the buffer, which determines
+/// hardware optimization strategies:
+///
+/// - `Scattered`: Any thread can access any address. No coherence assumptions.
+/// - `Broadcast`: All threads read the same address. Hardware can broadcast
+///   a single fetch to the entire wave (32-64 threads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DataAccess {
+    /// Any thread, any address, read/write. No coherence assumptions.
+    /// Maps to storage buffers (StructuredBuffer, RWStructuredBuffer in shaders).
+    #[default]
+    Scattered,
+    /// All threads read same address. Hardware broadcast optimization.
+    /// Maps to uniform/constant buffers (ConstantBuffer in shaders).
+    Broadcast,
+}
+
+/// Spatial access pattern for textures/images.
+///
+/// This describes how the texture will be accessed:
+///
+/// - `Interpolated`: Hardware filtering between neighbors (texture units).
+/// - `Direct`: Direct 2D/3D indexing without filtering, read/write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SpatialAccess {
+    /// Hardware filtering between neighbors (texture units).
+    /// Maps to sampled images (Texture2D with sampler in shaders).
+    #[default]
+    Interpolated,
+    /// Direct 2D/3D indexing, no filtering, read/write.
+    /// Maps to storage images (RWTexture2D in shaders).
+    Direct,
+}
+
 bitflags! {
-    /// Buffer usage flags.
+    /// Additional buffer flags for copy operations.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct BufferUsage: u32 {
-        /// Can be used as a vertex buffer.
-        const VERTEX = 1 << 0;
-        /// Can be used as an index buffer.
-        const INDEX = 1 << 1;
-        /// Can be used as a uniform buffer.
-        const UNIFORM = 1 << 2;
-        /// Can be used as a storage buffer.
-        const STORAGE = 1 << 3;
+    pub struct BufferFlags: u32 {
         /// Can be used as a copy source.
-        const COPY_SRC = 1 << 4;
+        const COPY_SRC = 1 << 0;
         /// Can be used as a copy destination.
-        const COPY_DST = 1 << 5;
+        const COPY_DST = 1 << 1;
     }
 }
 
@@ -322,34 +354,6 @@ impl Vertex2DUv {
     }
 }
 
-/// Fullscreen quad vertices using Vertex2DUv (position + UV)
-pub const FULLSCREEN_QUAD: [Vertex2DUv; 6] = [
-    Vertex2DUv {
-        position: [-1.0, -1.0],
-        uv: [0.0, 1.0],
-    },
-    Vertex2DUv {
-        position: [1.0, -1.0],
-        uv: [1.0, 1.0],
-    },
-    Vertex2DUv {
-        position: [1.0, 1.0],
-        uv: [1.0, 0.0],
-    },
-    Vertex2DUv {
-        position: [-1.0, -1.0],
-        uv: [0.0, 1.0],
-    },
-    Vertex2DUv {
-        position: [1.0, 1.0],
-        uv: [1.0, 0.0],
-    },
-    Vertex2DUv {
-        position: [-1.0, 1.0],
-        uv: [0.0, 0.0],
-    },
-];
-
 // ============================================================================
 // Depth Buffer Types
 // ============================================================================
@@ -427,19 +431,15 @@ impl Default for DepthStencilState {
 // ============================================================================
 
 bitflags! {
-    /// Texture usage flags.
+    /// Additional texture flags for copy and render operations.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct TextureUsage: u32 {
+    pub struct TextureFlags: u32 {
         /// Can be used as a copy source.
         const COPY_SRC = 1 << 0;
         /// Can be used as a copy destination.
         const COPY_DST = 1 << 1;
-        /// Can be sampled in a shader (e.g., texture2D).
-        const SAMPLED = 1 << 2;
-        /// Can be used as a storage texture.
-        const STORAGE = 1 << 3;
         /// Can be used as a render attachment.
-        const RENDER_TARGET = 1 << 4;
+        const RENDER_TARGET = 1 << 2;
     }
 }
 
@@ -575,29 +575,20 @@ mod tests {
     }
 
     #[test]
-    fn test_fullscreen_quad_vertices() {
-        // Check we have 6 vertices (2 triangles)
-        assert_eq!(FULLSCREEN_QUAD.len(), 6);
-
-        // Check positions span -1 to 1
-        for v in &FULLSCREEN_QUAD {
-            assert!(v.position[0] >= -1.0 && v.position[0] <= 1.0);
-            assert!(v.position[1] >= -1.0 && v.position[1] <= 1.0);
-        }
-
-        // Check UVs span 0 to 1
-        for v in &FULLSCREEN_QUAD {
-            assert!(v.uv[0] >= 0.0 && v.uv[0] <= 1.0);
-            assert!(v.uv[1] >= 0.0 && v.uv[1] <= 1.0);
-        }
+    fn test_buffer_flags() {
+        let flags = BufferFlags::COPY_SRC | BufferFlags::COPY_DST;
+        assert!(flags.contains(BufferFlags::COPY_SRC));
+        assert!(flags.contains(BufferFlags::COPY_DST));
     }
 
     #[test]
-    fn test_buffer_usage_flags() {
-        let usage = BufferUsage::VERTEX | BufferUsage::COPY_DST;
-        assert!(usage.contains(BufferUsage::VERTEX));
-        assert!(usage.contains(BufferUsage::COPY_DST));
-        assert!(!usage.contains(BufferUsage::INDEX));
+    fn test_data_access_default() {
+        assert_eq!(DataAccess::default(), DataAccess::Scattered);
+    }
+
+    #[test]
+    fn test_spatial_access_default() {
+        assert_eq!(SpatialAccess::default(), SpatialAccess::Interpolated);
     }
 
     #[test]
@@ -636,11 +627,11 @@ mod tests {
 
     // Texture types tests
     #[test]
-    fn test_texture_usage_flags() {
-        let usage = TextureUsage::SAMPLED | TextureUsage::COPY_DST;
-        assert!(usage.contains(TextureUsage::SAMPLED));
-        assert!(usage.contains(TextureUsage::COPY_DST));
-        assert!(!usage.contains(TextureUsage::STORAGE));
+    fn test_texture_flags() {
+        let flags = TextureFlags::COPY_SRC | TextureFlags::COPY_DST;
+        assert!(flags.contains(TextureFlags::COPY_SRC));
+        assert!(flags.contains(TextureFlags::COPY_DST));
+        assert!(!flags.contains(TextureFlags::RENDER_TARGET));
     }
 
     #[test]

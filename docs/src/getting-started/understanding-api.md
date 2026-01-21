@@ -8,7 +8,7 @@ All GPU resources are owned values. When dropped, resources are destroyed:
 
 ```rust
 {
-    let buffer = Buffer::with_data(&device, &data, BufferUsage::VERTEX)?;
+    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered)?;
     // buffer is valid here
 } // buffer is destroyed here
 ```
@@ -33,15 +33,15 @@ There's no hidden reference counting. If you need shared ownership, use `Arc<Buf
 ### 1. Buffers Hold Data
 
 ```rust
-// Vertex data
-let vertices = Buffer::with_data(&device, &vertex_array, BufferUsage::VERTEX)?;
+// Vertex data (scattered access - any thread, any index)
+let vertices = Buffer::with_data(&device, &vertex_array, DataAccess::Scattered)?;
 
-// Index data
-let indices = Buffer::with_data(&device, &index_array, BufferUsage::INDEX)?;
+// Index data (scattered access)
+let indices = Buffer::with_data(&device, &index_array, DataAccess::Scattered)?;
 
-// General data
-let uniforms = Buffer::new(&device, size, BufferUsage::UNIFORM)?;
-uniforms.write(&data)?;
+// Uniform data (broadcast access - all threads read same values)
+let uniforms = Buffer::new(&device, size, DataAccess::Broadcast)?;
+uniforms.write(0, &data)?;
 ```
 
 ### 2. Shaders Process Data

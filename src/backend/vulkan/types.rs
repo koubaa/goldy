@@ -23,11 +23,47 @@ pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
 pub const BINDLESS_SET_INDEX: u32 = 0;
 
 /// Binding indices within the global bindless descriptor set
+/// Organized by ACCESS PATTERN:
+///
+///   0: SCATTERED - Any thread reads/writes any address. No coherence assumptions.
+///   1: BROADCAST - All threads read same address. Hardware optimizes for this.
+///   2: INTERPOLATED - Hardware filtering between neighboring elements (texture units).
+///   3: DIRECT_SPATIAL - 2D/3D indexing without filtering. Read/write.
+///   4: FILTER_CONFIG - Not data. Configuration for interpolated access.
+///
+/// These map to Vulkan descriptor types, but the access pattern is what matters.
 pub mod bindless_bindings {
-    pub const STORAGE_BUFFERS: u32 = 0;
-    pub const UNIFORM_BUFFERS: u32 = 1;
-    pub const SAMPLED_IMAGES: u32 = 2;
-    pub const SAMPLERS: u32 = 3;
+    /// Scattered access: any thread, any address, read/write
+    /// Maps to: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+    /// Slang: StructuredBuffer<T>, RWStructuredBuffer<T>
+    pub const SCATTERED: u32 = 0;
+
+    /// Broadcast access: all threads same address, read-only (enables cache optimization)
+    /// Maps to: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+    /// Slang: ConstantBuffer<T>
+    pub const BROADCAST: u32 = 1;
+
+    /// Interpolated access: hardware filtering between neighbors (texture units)
+    /// Maps to: VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+    /// Slang: Texture2D<T> (read with sampler)
+    pub const INTERPOLATED: u32 = 2;
+
+    /// Direct spatial access: 2D/3D indexing without filtering, read/write
+    /// Maps to: VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+    /// Slang: RWTexture2D<T>
+    pub const DIRECT_SPATIAL: u32 = 3;
+
+    /// Filter configuration: settings for interpolated access (not data)
+    /// Maps to: VK_DESCRIPTOR_TYPE_SAMPLER
+    /// Slang: SamplerState
+    pub const FILTER_CONFIG: u32 = 4;
+
+    // Legacy aliases for existing code
+    pub const STORAGE_BUFFERS: u32 = SCATTERED;
+    pub const UNIFORM_BUFFERS: u32 = BROADCAST;
+    pub const SAMPLED_IMAGES: u32 = INTERPOLATED;
+    pub const STORAGE_IMAGES: u32 = DIRECT_SPATIAL;
+    pub const SAMPLERS: u32 = FILTER_CONFIG;
 }
 
 /// Maximum number of resource indices in push constants

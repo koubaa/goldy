@@ -3,8 +3,8 @@
 //! Run with: cargo run --example tunnel
 
 use goldy::{
-    shaders, Buffer, BufferUsage, Color, CommandEncoder, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, Vertex2DUv, FULLSCREEN_QUAD,
+    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
+    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -29,7 +29,6 @@ struct App {
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     uniform_buffer: Option<Buffer>,
-    vertex_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     start_time: Instant,
@@ -43,7 +42,6 @@ impl App {
             pipeline: None,
             shader: None,
             uniform_buffer: None,
-            vertex_buffer: None,
             window: None,
             surface: None,
             start_time: Instant::now(),
@@ -59,33 +57,28 @@ impl App {
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::TUNNEL)?;
 
-        // Create pipeline
+        // Create pipeline - no vertex buffer needed, shader uses SV_VertexID
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
             &shader,
             &RenderPipelineDesc {
-                vertex_layout: Vertex2DUv::layout(),
+                vertex_layout: VertexBufferLayout::empty(),
                 target_format: surface.format(),
                 ..Default::default()
             },
         )?;
 
-        // Create static vertex buffer (fullscreen quad)
-        let vertex_buffer =
-            Buffer::with_data(device.as_ref(), &FULLSCREEN_QUAD, BufferUsage::VERTEX)?;
-
         // Create uniform buffer
         let uniform_buffer = Buffer::new(
             device.as_ref(),
             std::mem::size_of::<Uniforms>() as u64,
-            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            DataAccess::Broadcast,
         )?;
 
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self.vertex_buffer = Some(vertex_buffer);
         self.uniform_buffer = Some(uniform_buffer);
         self.surface = Some(surface);
 
@@ -101,7 +94,6 @@ impl App {
 
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
 
         // Update uniform buffer with current time
@@ -119,8 +111,8 @@ impl App {
             pass.set_pipeline(pipeline);
             // Pass buffer index via push constants
             pass.set_push_constants(&[uniform_buffer]);
-            pass.set_vertex_buffer(0, vertex_buffer);
-            pass.draw(0..6, 0..1);
+            // No vertex buffer needed - shader uses SV_VertexID
+            pass.draw_fullscreen();
         }
 
         frame.render(encoder)?;

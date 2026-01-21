@@ -15,7 +15,7 @@ pub const TRIANGLE: &str = include_str!("../shaders/triangle.slang");
 /// Digital clock shader (uses vertex coloring)
 pub const DIGITAL_CLOCK: &str = include_str!("../shaders/digital_clock.slang");
 
-/// Plasma effect shader
+/// Plasma effect shader (uses preprocessor-based platform selection)
 pub const PLASMA: &str = include_str!("../shaders/plasma.slang");
 
 /// Gradient effect shader
@@ -117,6 +117,86 @@ mod tests {
                 source.contains("fs_main"),
                 "{} missing fs_main function",
                 name
+            );
+        }
+    }
+
+    /// Verify PLASMA structure
+    #[test]
+    fn test_plasma_structure() {
+        // Plasma should use DescriptorHandle for DX12 and descriptor arrays for SPIRV/Metal
+        assert!(
+            PLASMA.contains("DescriptorHandle"),
+            "PLASMA should use DescriptorHandle<T> for DX12"
+        );
+        assert!(
+            PLASMA.contains("import goldy_exp"),
+            "PLASMA should import goldy_exp module"
+        );
+    }
+
+    /// Test that PLASMA compiles via Slang for all targets
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_plasma_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shader_path = manifest_dir.join("shaders");
+        let shader_path_str = shader_path.to_string_lossy();
+
+        // Test SPIRV compilation (Vulkan) - needs __SPIRV__ define
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            PLASMA,
+            ShaderTarget::Spirv,
+            &[],
+            &[&shader_path_str],
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "PLASMA failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        // Test DXIL compilation (DX12) - needs __DX12__ define
+        // Only run on Windows since DXC compiler is not available on other platforms
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                PLASMA,
+                ShaderTarget::Dxil,
+                &[],
+                &[&shader_path_str],
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "PLASMA failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        // Test Metal compilation - needs __METAL__ define
+        // Only run on macOS since Metal is Apple-only
+        #[cfg(target_os = "macos")]
+        {
+            let metal_defines = vec![("__METAL__", "1")];
+            let result = compiler.compile_with_defines(
+                PLASMA,
+                ShaderTarget::Metal,
+                &[],
+                &[&shader_path_str],
+                &metal_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "PLASMA failed to compile for Metal: {:?}",
+                result.err()
             );
         }
     }

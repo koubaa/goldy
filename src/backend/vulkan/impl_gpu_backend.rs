@@ -120,7 +120,10 @@ impl GpuBackend for VulkanBackend {
             bindless_pipeline_layout,
         ) = {
             // Create descriptor set layout with update-after-bind flag
+            // Bindings organized by ACCESS PATTERN (see types.rs::bindless_bindings)
             let binding_flags = [
+                vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
                 vk::DescriptorBindingFlags::PARTIALLY_BOUND
                     | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
                 vk::DescriptorBindingFlags::PARTIALLY_BOUND
@@ -136,25 +139,31 @@ impl GpuBackend for VulkanBackend {
                     .binding_flags(&binding_flags);
 
             let bindings = [
-                // Storage buffers (binding 0)
+                // Binding 0: Scattered buffer access (read/write)
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::STORAGE_BUFFERS)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                     .stage_flags(vk::ShaderStageFlags::ALL),
-                // Uniform buffers (binding 1)
+                // Binding 1: Broadcast buffer access (read-only uniforms)
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::UNIFORM_BUFFERS)
                     .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                     .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                     .stage_flags(vk::ShaderStageFlags::ALL),
-                // Sampled images (binding 2)
+                // Binding 2: Filtered image reads
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::SAMPLED_IMAGES)
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                     .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                     .stage_flags(vk::ShaderStageFlags::ALL),
-                // Samplers (binding 3)
+                // Binding 3: Unfiltered image access (read/write)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::STORAGE_IMAGES)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+                // Binding 4: Filter configuration
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::SAMPLERS)
                     .descriptor_type(vk::DescriptorType::SAMPLER)
@@ -183,6 +192,10 @@ impl GpuBackend for VulkanBackend {
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: types::MAX_BINDLESS_RESOURCES,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::STORAGE_IMAGE,
                     descriptor_count: types::MAX_BINDLESS_RESOURCES,
                 },
                 vk::DescriptorPoolSize {
@@ -433,35 +446,31 @@ impl GpuBackend for VulkanBackend {
         self.devices.contains_key(&device)
     }
 
-    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, usage: BufferUsage, _element_stride: Option<u32>) -> Result<BufferHandle> {
+    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, access: DataAccess, _element_stride: Option<u32>) -> Result<BufferHandle> {
         let logical_device = self
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        let mut vk_usage = vk::BufferUsageFlags::empty();
-        if usage.contains(BufferUsage::VERTEX) {
-            vk_usage |= vk::BufferUsageFlags::VERTEX_BUFFER;
-        }
-        if usage.contains(BufferUsage::INDEX) {
-            vk_usage |= vk::BufferUsageFlags::INDEX_BUFFER;
-        }
-        if usage.contains(BufferUsage::UNIFORM) {
-            vk_usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
-        }
-        if usage.contains(BufferUsage::STORAGE) {
-            vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER;
-        }
-        if usage.contains(BufferUsage::COPY_SRC) {
-            vk_usage |= vk::BufferUsageFlags::TRANSFER_SRC;
-        }
-        if usage.contains(BufferUsage::COPY_DST) {
-            vk_usage |= vk::BufferUsageFlags::TRANSFER_DST;
-        }
+        // Map access pattern to Vulkan buffer usage flags
+        // All buffers get TRANSFER_SRC | TRANSFER_DST for flexibility
+        let mut vk_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+        
+        let is_storage = match access {
+            DataAccess::Scattered => {
+                // Scattered: any thread any address - use storage buffer
+                vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER;
+                true
+            }
+            DataAccess::Broadcast => {
+                // Broadcast: all threads same address - use uniform buffer
+                vk_usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
+                false
+            }
+        };
 
-        let is_storage = usage.contains(BufferUsage::STORAGE);
-        let is_uniform = usage.contains(BufferUsage::UNIFORM);
-        let should_register_bindless = is_storage || is_uniform; // Only register UNIFORM/STORAGE buffers
+        // All buffers are registered for bindless access
+        let should_register_bindless = true;
         let bindless_enabled = logical_device.bindless_enabled;
         let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
@@ -2554,7 +2563,8 @@ impl GpuBackend for VulkanBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        usage: crate::types::TextureUsage,
+        access: SpatialAccess,
+        flags: TextureFlags,
     ) -> Result<TextureHandle> {
         // Get physical device for memory type lookup
         let physical_device = {
@@ -2579,16 +2589,25 @@ impl GpuBackend for VulkanBackend {
         let logical_device = self.devices.get(&device_handle)
             .context("Invalid device handle")?;
 
-        // Convert usage flags
-        let mut vk_usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
-        if usage.contains(crate::types::TextureUsage::RENDER_TARGET) {
+        // Map access pattern and flags to Vulkan image usage
+        let mut vk_usage = vk::ImageUsageFlags::TRANSFER_DST;
+        
+        // Interpolated access -> sampled image, Direct access -> storage image
+        match access {
+            SpatialAccess::Interpolated => {
+                vk_usage |= vk::ImageUsageFlags::SAMPLED;
+            }
+            SpatialAccess::Direct => {
+                vk_usage |= vk::ImageUsageFlags::STORAGE;
+            }
+        }
+        
+        // Apply additional flags
+        if flags.contains(TextureFlags::RENDER_TARGET) {
             vk_usage |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
         }
-        if usage.contains(crate::types::TextureUsage::COPY_SRC) {
+        if flags.contains(TextureFlags::COPY_SRC) {
             vk_usage |= vk::ImageUsageFlags::TRANSFER_SRC;
-        }
-        if usage.contains(crate::types::TextureUsage::STORAGE) {
-            vk_usage |= vk::ImageUsageFlags::STORAGE;
         }
 
         // Create texture image

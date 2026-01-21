@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Plasma example - classic demoscene plasma effect.
 
+Uses vertex-less fullscreen triangle rendering (no vertex buffer needed).
+
 Usage:
     pip install glfw
     python plasma.py
@@ -12,6 +14,7 @@ import time
 import os
 
 import glfw
+
 
 def load_shader(name):
     """Load shader from shared shaders directory."""
@@ -45,34 +48,20 @@ def main():
 
     surface = goldy.Surface.from_glfw(device, window)
 
-    # Create fullscreen quad vertices (position + uv)
-    # Using Vertex2DUv layout: x, y, u, v
-    vertices = np.array([
-        # Triangle 1
-        -1.0, -1.0,  0.0, 1.0,  # Bottom-left
-         1.0, -1.0,  1.0, 1.0,  # Bottom-right
-         1.0,  1.0,  1.0, 0.0,  # Top-right
-        # Triangle 2
-        -1.0, -1.0,  0.0, 1.0,  # Bottom-left
-         1.0,  1.0,  1.0, 0.0,  # Top-right
-        -1.0,  1.0,  0.0, 0.0,  # Top-left
-    ], dtype=np.float32)
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
-
     # Create uniform buffer for time
     uniform_buffer = goldy.Buffer.empty(
-        device, 4, goldy.BufferUsage.UNIFORM | goldy.BufferUsage.COPY_DST
+        device, 4, goldy.DataAccess.BROADCAST
     )
 
     # Load and compile shader
     plasma_shader_src = load_shader("plasma.slang")
     shader = goldy.ShaderModule.from_slang(device, plasma_shader_src)
 
-    # Create pipeline
+    # Create pipeline - vertex-less (no vertex buffer needed)
     pipeline = goldy.RenderPipeline(
         device, shader, shader,
         goldy.RenderPipelineDesc(
-            vertex_layout=goldy.VertexBufferLayout.vertex_2d_uv(),
+            vertex_layout=goldy.VertexBufferLayout.empty(),
             target_format=surface.format,
         )
     )
@@ -114,8 +103,8 @@ def main():
             rp.set_pipeline(pipeline)
             # Pass buffer indices via push constants
             rp.set_push_constants([uniform_buffer])
-            rp.set_vertex_buffer(0, vertex_buffer)
-            rp.draw(range(6))
+            # Vertex-less fullscreen triangle: 3 vertices, no vertex buffer
+            rp.draw(range(3))
 
         # Render and present
         frame.render(encoder)

@@ -2,14 +2,16 @@
 
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
-use crate::types::PyBufferUsage;
+use crate::types::PyDataAccess;
 use numpy::{PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
 /// A GPU buffer.
 ///
-/// Buffers hold vertex data, index data, uniforms, or storage data on the GPU.
+/// Buffers hold data on the GPU with a specific access pattern:
+/// - DataAccess.SCATTERED: Any thread, any address (StructuredBuffer, RWStructuredBuffer)
+/// - DataAccess.BROADCAST: All threads same address (ConstantBuffer/uniforms)
 #[pyclass(name = "Buffer", module = "goldy")]
 pub struct PyBuffer {
     pub(crate) inner: Arc<goldy::Buffer>,
@@ -22,21 +24,21 @@ impl PyBuffer {
     /// Args:
     ///     device: The GPU device.
     ///     data: Buffer data as a numpy array (any numeric dtype) or bytes.
-    ///     usage: Buffer usage flags (e.g., BufferUsage.VERTEX).
+    ///     access: Access pattern (DataAccess.SCATTERED or DataAccess.BROADCAST).
     ///
     /// Returns:
     ///     A new Buffer instance.
     ///
     /// Example:
     ///     >>> import numpy as np
-    ///     >>> vertices = np.array([0.0, -0.5, 0.5, 0.5, -0.5, 0.5], dtype=np.float32)
-    ///     >>> buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
+    ///     >>> data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    ///     >>> buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
     #[new]
-    fn new(device: &PyDevice, data: &Bound<'_, PyAny>, usage: PyBufferUsage) -> PyResult<Self> {
+    fn new(device: &PyDevice, data: &Bound<'_, PyAny>, access: PyDataAccess) -> PyResult<Self> {
         let (bytes, element_stride) = extract_bytes_with_stride(data)?;
         // Use the correct element stride for StructuredBuffer views on DX12
         let buffer =
-            goldy::Buffer::with_bytes_stride(&device.inner, &bytes, usage.into(), element_stride)
+            goldy::Buffer::with_bytes_stride(&device.inner, &bytes, access.into(), element_stride)
                 .into_py_result()?;
 
         Ok(PyBuffer {
@@ -49,13 +51,13 @@ impl PyBuffer {
     /// Args:
     ///     device: The GPU device.
     ///     size: Size in bytes.
-    ///     usage: Buffer usage flags.
+    ///     access: Access pattern (DataAccess.SCATTERED or DataAccess.BROADCAST).
     ///
     /// Returns:
     ///     A new empty Buffer instance.
     #[staticmethod]
-    fn empty(device: &PyDevice, size: u64, usage: PyBufferUsage) -> PyResult<Self> {
-        let buffer = goldy::Buffer::new(&device.inner, size, usage.into()).into_py_result()?;
+    fn empty(device: &PyDevice, size: u64, access: PyDataAccess) -> PyResult<Self> {
+        let buffer = goldy::Buffer::new(&device.inner, size, access.into()).into_py_result()?;
         Ok(PyBuffer {
             inner: Arc::new(buffer),
         })

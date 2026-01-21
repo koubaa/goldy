@@ -132,14 +132,14 @@ static class GameOfLife
         _renderShader = new ShaderModule(_device, renderShaderSrc);
         Console.WriteLine("Compiled render shader (game_of_life_render.slang)");
 
-        // Create render pipeline
+        // Create render pipeline - vertex-less (no vertex buffer needed)
         _renderPipeline = new RenderPipeline(_device, _renderShader, _renderShader,
             new RenderPipelineDesc
             {
                 TargetFormat = _surface.Format,
-                VertexStride = 16, // Vertex2DUv layout (not used for fullscreen triangle)
+                VertexStride = 0,  // Vertex-less rendering
             });
-        Console.WriteLine("Created render pipeline");
+        Console.WriteLine("Created render pipeline (vertex-less)");
 
         Console.WriteLine();
         Console.WriteLine("Features Gosper Glider Gun + random cells");

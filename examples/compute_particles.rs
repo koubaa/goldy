@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferUsage, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
     Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
     VertexBufferLayout,
 };
@@ -99,11 +99,7 @@ impl RenderState {
             });
         }
 
-        let particle_buffer = Buffer::with_data(
-            &device,
-            &particles,
-            BufferUsage::STORAGE | BufferUsage::VERTEX,
-        )?;
+        let particle_buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

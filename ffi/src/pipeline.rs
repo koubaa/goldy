@@ -76,28 +76,30 @@ pub unsafe extern "C" fn goldy_render_pipeline_create(
     let desc = &*desc;
 
     // Build vertex layout
-    let attributes: Vec<goldy::VertexAttribute> =
-        if desc.vertex_attribute_count > 0 && !desc.vertex_attributes.is_null() {
-            slice::from_raw_parts(desc.vertex_attributes, desc.vertex_attribute_count as usize)
-                .iter()
-                .map(|a| (*a).into())
-                .collect()
-        } else {
-            // Default Vertex2DUv layout (position + uv)
-            // This matches goldy::types::Vertex2DUv and FullscreenVertex shader input
-            vec![
-                goldy::VertexAttribute {
-                    location: 0,
-                    format: goldy::VertexFormat::Float32x2, // POSITION
-                    offset: 0,
-                },
-                goldy::VertexAttribute {
-                    location: 1,
-                    format: goldy::VertexFormat::Float32x2, // TEXCOORD0 (UV)
-                    offset: 8,
-                },
-            ]
-        };
+    let attributes: Vec<goldy::VertexAttribute> = if desc.vertex_stride == 0 {
+        // Vertex-less rendering (procedural geometry from SV_VertexID)
+        vec![]
+    } else if desc.vertex_attribute_count > 0 && !desc.vertex_attributes.is_null() {
+        slice::from_raw_parts(desc.vertex_attributes, desc.vertex_attribute_count as usize)
+            .iter()
+            .map(|a| (*a).into())
+            .collect()
+    } else {
+        // Default Vertex2DUv layout (position + uv)
+        // This matches goldy::types::Vertex2DUv and FullscreenVertex shader input
+        vec![
+            goldy::VertexAttribute {
+                location: 0,
+                format: goldy::VertexFormat::Float32x2, // POSITION
+                offset: 0,
+            },
+            goldy::VertexAttribute {
+                location: 1,
+                format: goldy::VertexFormat::Float32x2, // TEXCOORD0 (UV)
+                offset: 8,
+            },
+        ]
+    };
 
     let vertex_layout = goldy::VertexBufferLayout {
         stride: desc.vertex_stride,

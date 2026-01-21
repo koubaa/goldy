@@ -95,7 +95,7 @@ pub trait GpuBackend: Send + Sync {
     fn create_device(&mut self, adapter_idx: u32) -> Result<DeviceId>;
     
     // Resources
-    fn create_buffer(&mut self, device: DeviceId, size: u64, usage: BufferUsage) -> Result<BufferId>;
+    fn create_buffer(&mut self, device: DeviceId, size: u64, access: DataAccess) -> Result<BufferId>;
     fn write_buffer(&mut self, buffer: BufferId, data: &[u8]) -> Result<()>;
     fn destroy_buffer(&mut self, buffer: BufferId);
     
@@ -203,8 +203,8 @@ impl GpuBackend for MetalBackend {
         BackendType::Metal
     }
     
-    fn create_buffer(&mut self, device: DeviceId, size: u64, usage: BufferUsage) -> Result<BufferId> {
-        let options = usage_to_metal_options(usage);
+    fn create_buffer(&mut self, device: DeviceId, size: u64, access: DataAccess) -> Result<BufferId> {
+        let options = access_to_metal_options(access);
         let buffer = self.device.new_buffer(size, options);
         // Store and return ID
     }

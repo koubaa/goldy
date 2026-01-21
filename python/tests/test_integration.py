@@ -70,12 +70,12 @@ def test_buffer_creation_numpy(device):
         0.5, 0.5, 0.0, 0.0, 1.0, 1.0,
     ], dtype=np.float32)
     
-    buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
+    buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
     assert buffer.size == vertices.nbytes
     
     # Uint16 array (indices)
     indices = np.array([0, 1, 2], dtype=np.uint16)
-    index_buffer = goldy.Buffer(device, indices, goldy.BufferUsage.INDEX)
+    index_buffer = goldy.Buffer(device, indices, goldy.DataAccess.SCATTERED)
     assert index_buffer.size == indices.nbytes
 
 
@@ -83,7 +83,7 @@ def test_buffer_empty(device):
     """Test empty Buffer creation."""
     import goldy
     
-    buffer = goldy.Buffer.empty(device, 1024, goldy.BufferUsage.UNIFORM)
+    buffer = goldy.Buffer.empty(device, 1024, goldy.DataAccess.BROADCAST)
     assert buffer.size == 1024
 
 
@@ -91,7 +91,7 @@ def test_buffer_write(device):
     """Test Buffer write."""
     import goldy
     
-    buffer = goldy.Buffer.empty(device, 1024, goldy.BufferUsage.UNIFORM)
+    buffer = goldy.Buffer.empty(device, 1024, goldy.DataAccess.BROADCAST)
     
     # Write some data
     data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
@@ -177,7 +177,7 @@ def test_full_render_pipeline(device):
         -0.5, 0.5, 0.0, 1.0, 0.0, 1.0,  # green
         0.5, 0.5, 0.0, 0.0, 1.0, 1.0,   # blue
     ], dtype=np.float32)
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferUsage.VERTEX)
+    vertex_buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
     
     # 4. Create render target
     target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)

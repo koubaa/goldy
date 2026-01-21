@@ -148,7 +148,7 @@ impl<'a> RenderPass<'a> {
 
     /// Set an index buffer for indexed drawing.
     ///
-    /// The buffer must have been created with `BufferUsage::INDEX`.
+    /// The buffer should contain index data (u16 or u32 values).
     pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat) {
         self.encoder.commands.push(RenderCommand::SetIndexBuffer {
             buffer: buffer.handle,
@@ -187,6 +187,48 @@ impl<'a> RenderPass<'a> {
             base_vertex,
             first_instance: instances.start,
         });
+    }
+
+    // ========================================================================
+    // Convenience methods for common draw patterns
+    // ========================================================================
+
+    /// Draw a fullscreen triangle (3 vertices, no vertex buffer needed).
+    ///
+    /// Use with `vs_fullscreen_triangle()` from `goldy_exp.vertex` or
+    /// `fullscreen_position()`/`fullscreen_uv()` from `goldy_exp.primitives`.
+    ///
+    /// This is more efficient than a fullscreen quad (3 verts vs 6) and
+    /// eliminates vertex buffer overhead entirely.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Shader uses: vs_fullscreen_triangle(SV_VertexID)
+    /// pass.set_pipeline(&fullscreen_pipeline);
+    /// pass.set_push_constants(&[&uniform_buffer]);
+    /// pass.draw_fullscreen();  // No vertex buffer needed!
+    /// ```
+    pub fn draw_fullscreen(&mut self) {
+        self.draw(0..3, 0..1);
+    }
+
+    /// Draw N instances of quads (6 vertices each, no vertex buffer needed).
+    ///
+    /// Use with `quad_position()` from `goldy_exp.primitives` in your shader.
+    /// Each instance draws a quad; the shader reads instance data from a buffer.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Shader reads from buffer: instances[SV_InstanceID]
+    /// // Uses: quad_position(SV_VertexID, instance.position, instance.size)
+    /// pass.set_pipeline(&instanced_pipeline);
+    /// pass.set_push_constants(&[&instance_buffer]);
+    /// pass.draw_quads(400);  // Draw 400 quads
+    /// ```
+    pub fn draw_quads(&mut self, count: u32) {
+        self.draw(0..6, 0..count);
     }
 }
 

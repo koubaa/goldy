@@ -1,9 +1,8 @@
 // Classic demoscene plasma effect
-// Uses goldy_exp module for vertex format and color utilities
+// Uses vertex-less fullscreen triangle and time uniform
 
 import goldy_exp;
 
-// Uniform structure
 struct TimeUniforms {
     float time;
 };
@@ -24,18 +23,17 @@ import goldy_exp.buffer_indices;
 [[vk::binding(1, 0)]] ConstantBuffer<TimeUniforms> g_UniformBuffers[];
 #define TIME g_UniformBuffers[getBufferIndex(0)].time
 
-#elif defined(__DX12__)
+#else
 // DX12: Root constants + ResourceDescriptorHeap
 cbuffer BufferIndices : register(b0) {
     uint uniformsIndex;
 };
 #define TIME (*DescriptorHandle<ConstantBuffer<TimeUniforms>>(uint2(uniformsIndex, 0))).time
-
 #endif
 
 [shader("vertex")]
-FullscreenVarying vs_main(FullscreenVertex input) {
-    return vs_fullscreen(input);
+FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
+    return vs_fullscreen_triangle(vertex_id);
 }
 
 [shader("fragment")]
@@ -54,6 +52,5 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
     
     v = v / 2.0;
     
-    // Use rainbow palette from goldy module
     return float4(rainbow(v), 1.0);
 }

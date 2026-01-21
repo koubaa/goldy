@@ -101,9 +101,9 @@ impl device::Host for GpuHostState {
 }
 
 impl device::HostBuffer for GpuHostState {
-    fn new(&mut self, device: Resource<Device>, size: u64, usage: BufferUsage) -> Result<Resource<Buffer>> {
+    fn new(&mut self, device: Resource<Device>, size: u64, access: DataAccess) -> Result<Resource<Buffer>> {
         let device_id = self.devices.get(device)?;
-        let buffer_id = self.backend.create_buffer(device_id, size, usage)?;
+        let buffer_id = self.backend.create_buffer(device_id, size, access)?;
         Ok(self.buffers.push(buffer_id)?)
     }
     
@@ -121,13 +121,13 @@ From a WASM guest application:
 
 ```rust
 // In guest crate (compiled to wasm32-wasip2)
-use rag_guest::{Device, Buffer, BufferUsage, Color};
+use rag_guest::{Device, Buffer, DataAccess, Color};
 
 fn render() -> Vec<u8> {
     let device = Device::new(DeviceType::DiscreteGpu);
     
     let vertices = vec![/* ... */];
-    let buffer = Buffer::with_data(&device, &vertices, BufferUsage::VERTEX);
+    let buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered);
     
     // ... render commands ...
     
