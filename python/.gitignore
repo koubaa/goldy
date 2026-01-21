@@ -45,3 +45,6 @@ game_of_life_*.png
 # OS
 .DS_Store
 Thumbs.db
+
+# intermediate files for goldy python package
+python/

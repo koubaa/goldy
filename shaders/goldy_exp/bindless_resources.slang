@@ -32,21 +32,24 @@ implementing goldy_exp;
 
 // Maximum resources per access pattern category
 static const uint GOLDY_MAX_RESOURCES = 64;
-
 #if defined(__METAL__) && defined(__METAL_BINDLESS__)
 
-// Metal Tier 2: ParameterBlock with typed resource arrays
-// The arrays are typed to enable proper Metal code generation.
+// Metal Tier 2: ParameterBlock with device pointers
+//
+// Metal argument buffers store native device pointers when using
+// ArgumentEncoder.setBuffer(). We declare these as uniform pointers which
+// Slang compiles to Metal device pointers.
+//
 // Users access resources through goldy_broadcast<T>(), goldy_scattered<T>(), etc.
 
 struct GoldyBindlessResources {
-    // Slot 0: SCATTERED - read/write storage access (any thread, any address)
-    // Uses uint as base element type - actual type is reinterpreted at access
-    Array<RWStructuredBuffer<uint>, GOLDY_MAX_RESOURCES> storageBuffers;
+    // Slot 0: SCATTERED - device pointers to storage buffers
+    // Typed as uint* and cast in access functions
+    uint* storageBuffers[GOLDY_MAX_RESOURCES];
     
-    // Slot 1: BROADCAST - uniform/constant data (all threads same address)
-    // Uses uint as base element type for flexibility
-    Array<ConstantBuffer<uint>, GOLDY_MAX_RESOURCES> uniformBuffers;
+    // Slot 1: BROADCAST - device pointers to uniform buffers  
+    // Typed as uint* and cast in access functions
+    uint* uniformBuffers[GOLDY_MAX_RESOURCES];
     
     // Slot 2: INTERPOLATED - hardware-filtered texture reads
     Array<Texture2D<float4>, GOLDY_MAX_RESOURCES> textures;
@@ -63,3 +66,4 @@ struct GoldyBindlessResources {
 ParameterBlock<GoldyBindlessResources> gGoldy;
 
 #endif // __METAL__ && __METAL_BINDLESS__
+

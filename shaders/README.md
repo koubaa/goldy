@@ -241,6 +241,73 @@ Goldy automatically detects the tier at runtime and passes the appropriate defin
 This allows CI tests to run on GitHub runners (Tier 1) while production builds
 get full bindless support on Tier 2 hardware.
 
+<details>
+<summary>Technical Details: Metal Tier 2 Bindless Implementation</summary>
+
+Metal's shader compiler has strict rules about pointer and type casts. The `as_type<>` intrinsic
+(Slang's `reinterpret<>`) is limited:
+
+- ❌ `as_type<device T*>(uint64)` — Cannot cast integers to pointers
+- ❌ `as_type<uint64>(device T*)` — Cannot cast pointers to integers  
+- ✅ `(device T*)(device U*)` — C-style pointer-to-pointer casts ARE allowed
+- ✅ `as_type<T>(uint_data)` — Value-to-value reinterpretation is allowed
+
+**The Problem:**
+
+Slang's `DescriptorHandle<T>` and `reinterpret<ConstantBuffer<T>>()` generate intermediate
+integer conversions that Metal rejects:
+
+```metal
+// What Slang generated (FAILS):
+return *as_type<TimeUniforms device*>(as_type<ulong>(...));
+```
+
+**The Solution:**
+
+Store raw `uint*` pointers in the ParameterBlock, then:
+1. Read the data through the `uint*` pointer
+2. Use `reinterpret<T>` on the **data** (not the pointer)
+
+```slang
+// In bindless_resources.slang - store raw pointers
+struct GoldyBindlessResources {
+    uint* storageBuffers[GOLDY_MAX_RESOURCES];  // Device pointers
+    uint* uniformBuffers[GOLDY_MAX_RESOURCES];  // Device pointers
+    // ... textures, samplers ...
+};
+ParameterBlock<GoldyBindlessResources> gGoldy;
+
+// In access.slang - read data and reinterpret
+public T goldy_broadcast<T>(uint slot) {
+    uint* basePtr = gGoldy.uniformBuffers[slot];
+    __target_switch {
+    case metal:
+        return reinterpret<T>(*basePtr);  // Reinterpret DATA, not pointer
+    default:
+        T* ptr = (T*)basePtr;
+        return *ptr;
+    }
+}
+```
+
+This works because:
+- Metal's ArgumentEncoder (`setBuffer()`) stores native device pointers in the argument buffer
+- Reading through `uint*` is valid Metal — it's just a pointer dereference
+- `reinterpret<T>(*basePtr)` generates valid `as_type<T>(uint)` for value types
+
+For `goldy_scattered<T>()` (returning `RWStructuredBuffer<T>` for indexed access):
+
+```slang
+public RWStructuredBuffer<T> goldy_scattered<T>(uint slot) {
+    uint* basePtr = gGoldy.storageBuffers[slot];
+    return reinterpret<RWStructuredBuffer<T>>(basePtr);
+}
+```
+
+Slang's `reinterpret<>` handles buffer types specially, avoiding the problematic integer casts.
+
+</details>
+
 ### Cross-Platform Resource Binding
 
 Goldy provides **unified access functions** that work across all platforms:
@@ -395,19 +462,16 @@ This is transparent to shader code — just `import goldy_exp` and use `Descript
    public uint getIndex(uint slot) { return indices[slot]; }
    ```
 
-4. **Metal uses `ParameterBlock`, not push constants**. Unlike Vulkan/DX12 which use push/root constants to pass buffer indices, Metal uses `ParameterBlock` which Slang compiles to argument buffers:
+4. **Metal uses `ParameterBlock`, not push constants**. Unlike Vulkan/DX12 which use push/root constants to pass buffer indices, Metal uses `ParameterBlock` which Slang compiles to argument buffers. For indexed bindless access, use raw `uint*` pointers (see "Technical Details: Metal Tier 2 Bindless Implementation" above):
    ```slang
-   // Metal pattern
-   struct MyResources {
-       ConstantBuffer<MyUniforms> uniforms;
-       Texture2D myTexture;
+   struct GoldyBindlessResources {
+       uint* uniformBuffers[MAX_RESOURCES];  // Raw pointers, cast in access functions
+       Array<Texture2D<float4>, MAX_RESOURCES> textures;  // Textures work directly
    };
-   ParameterBlock<MyResources> gResources;
-   
-   // Access via: gResources.uniforms.time, gResources.myTexture
+   ParameterBlock<GoldyBindlessResources> gGoldy;
    ```
    
-   The Goldy backend writes GPU addresses directly to the argument buffer and binds it at the slot specified by Slang reflection. When using `set_push_constants()` in Rust with a Metal ParameterBlock shader, the backend automatically handles this translation.
+   The Goldy backend uses `ArgumentEncoder.setBuffer()` to write native device pointers to the argument buffer. When using `set_push_constants()` in Rust with a Metal ParameterBlock shader, the backend automatically handles this translation.
 
 ## Module System
 

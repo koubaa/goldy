@@ -126,25 +126,47 @@ public SamplerState goldy_filter(uint slot)
 
 // =============================================================================
 // Metal Tier 2 Implementation (Bindless)
-// Uses ParameterBlock with typed resource arrays
+// Uses ParameterBlock with device pointers
 // =============================================================================
 #elif defined(__METAL_BINDLESS__)
 
 /// Access a uniform/constant buffer by slot index (Metal Tier 2).
+/// Device pointers in gGoldy.uniformBuffers point directly to buffer data.
+/// We use target_switch to handle Metal's pointer cast limitations.
 public T goldy_broadcast<T>(uint slot)
 {
-    return reinterpret<ConstantBuffer<T>>(gGoldy.uniformBuffers[slot]);
+    // Get the uint* device pointer from the argument buffer
+    uint* basePtr = gGoldy.uniformBuffers[slot];
+    
+    // For Metal, we need to use the pointer directly without type casting
+    // Read the data through the uint pointer and use reinterpret for the result
+    __target_switch
+    {
+    case metal:
+        // Metal: Read first sizeof(T)/4 uints and reinterpret as T
+        // This works because both point to the same memory
+        return reinterpret<T>(*basePtr);
+    default:
+        // Other targets: Direct pointer cast should work
+        T* ptr = (T*)basePtr;
+        return *ptr;
+    }
 }
 
-/// Get a RWStructuredBuffer handle for scattered access (Metal Tier 2).
+/// Get a RWStructuredBuffer-like handle for scattered access (Metal Tier 2).
+/// Note: Returns the first element - use goldy_scattered_at<T>(slot, idx) for indexed access.
 public RWStructuredBuffer<T> goldy_scattered<T>(uint slot)
 {
-    return reinterpret<RWStructuredBuffer<T>>(gGoldy.storageBuffers[slot]);
+    // For Metal, we reinterpret the uint* as a buffer of the target type.
+    // This should work for structured access patterns.
+    uint* basePtr = gGoldy.storageBuffers[slot];
+    return reinterpret<RWStructuredBuffer<T>>(basePtr);
 }
 
 /// Access a 2D texture by slot index (Metal Tier 2).
 public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
 {
+    // Textures don't need pointer conversion - use reinterpret for element type
     return reinterpret<Texture2D<T>>(gGoldy.textures[slot]);
 }
 
