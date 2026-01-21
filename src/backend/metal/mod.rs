@@ -2597,12 +2597,7 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer = backend
-            .create_buffer(
-                device,
-                256,
-                DataAccess::Scattered,
-                None,
-            )
+            .create_buffer(device, 256, DataAccess::Scattered, None)
             .unwrap();
 
         assert_eq!(backend.buffer_size(buffer), 256);
