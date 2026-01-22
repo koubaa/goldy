@@ -44,11 +44,11 @@ static const uint GOLDY_MAX_RESOURCES = 64;
 
 struct GoldyBindlessResources {
     // Slot 0: SCATTERED - device pointers to storage buffers
-    // Typed as uint* and cast in access functions
+    // Both arrays use uint* for consistent 8-byte layout matching Rust backend
     uint* storageBuffers[GOLDY_MAX_RESOURCES];
     
     // Slot 1: BROADCAST - device pointers to uniform buffers  
-    // Typed as uint* and cast in access functions
+    // Typed as uint* for value reading (goldy_broadcast returns T, not T*)
     uint* uniformBuffers[GOLDY_MAX_RESOURCES];
     
     // Slot 2: INTERPOLATED - hardware-filtered texture reads

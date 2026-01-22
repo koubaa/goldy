@@ -75,10 +75,19 @@ pub(crate) struct LogicalDevice {
     pub heap_texture_count: u32,
 }
 
+/// Maximum resources per access pattern category (must match GOLDY_MAX_RESOURCES in shaders)
+pub const MAX_RESOURCES_PER_CATEGORY: u32 = 64;
+
 /// Registry for tracking bindless resource indices
+/// 
+/// The layout matches GoldyBindlessResources in bindless_resources.slang:
+/// - storageBuffers[64] at indices 0-63   (Scattered access)
+/// - uniformBuffers[64] at indices 64-127 (Broadcast access)
+/// - textures, storageImages, samplers at higher offsets
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    next_buffer_index: u32,
+    next_storage_buffer_index: u32,  // Scattered: 0-63
+    next_uniform_buffer_index: u32,  // Broadcast: 64-127
     next_texture_index: u32,
     next_sampler_index: u32,
     pub buffer_indices: HashMap<BufferHandle, u32>,
@@ -89,8 +98,11 @@ pub(crate) struct ResourceRegistry {
 impl ResourceRegistry {
     pub fn new() -> Self {
         Self {
-            // Start indices at different offsets to avoid collisions
-            next_buffer_index: 0,
+            // Storage buffers (Scattered) at indices 0-63
+            next_storage_buffer_index: 0,
+            // Uniform buffers (Broadcast) at indices 64-127
+            next_uniform_buffer_index: MAX_RESOURCES_PER_CATEGORY,
+            // Textures at higher offsets
             next_texture_index: 4096,
             next_sampler_index: 8192,
             buffer_indices: HashMap::new(),
@@ -99,11 +111,25 @@ impl ResourceRegistry {
         }
     }
 
-    pub fn register_buffer(&mut self, handle: BufferHandle) -> u32 {
-        let index = self.next_buffer_index;
-        self.next_buffer_index += 1;
+    /// Register a storage buffer (Scattered access) - indices 0-63
+    pub fn register_storage_buffer(&mut self, handle: BufferHandle) -> u32 {
+        let index = self.next_storage_buffer_index;
+        self.next_storage_buffer_index += 1;
         self.buffer_indices.insert(handle, index);
         index
+    }
+
+    /// Register a uniform buffer (Broadcast access) - indices 64-127
+    pub fn register_uniform_buffer(&mut self, handle: BufferHandle) -> u32 {
+        let index = self.next_uniform_buffer_index;
+        self.next_uniform_buffer_index += 1;
+        self.buffer_indices.insert(handle, index);
+        index
+    }
+
+    /// Legacy method - defaults to storage buffer
+    pub fn register_buffer(&mut self, handle: BufferHandle) -> u32 {
+        self.register_storage_buffer(handle)
     }
 
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {

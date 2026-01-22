@@ -235,13 +235,34 @@ public SamplerState goldy_filter(uint slot)
 // =============================================================================
 #elif defined(__METAL_BINDLESS__)
 
-/// Dynamic scattered access - reads slot index from gGoldyDynamic.slots[n].
+/// Dynamic scattered read - reads element at index from dynamic slot n.
 /// Requires GOLDY_DECLARE_DYNAMIC in shader.
-public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
+public T goldy_dyn_scattered_get<T>(uint n, uint index)
 {
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.storageBuffers[slot];
-    return reinterpret<RWStructuredBuffer<T>>(basePtr);
+    // Cast to T* and read element at index
+    T* typedPtr = (T*)basePtr;
+    return typedPtr[index];
+}
+
+/// Dynamic scattered write - writes element at index to dynamic slot n.
+/// Requires GOLDY_DECLARE_DYNAMIC in shader.
+public void goldy_dyn_scattered_set<T>(uint n, uint index, T value)
+{
+    uint slot = gGoldyDynamic.slots[n];
+    uint* basePtr = gGoldy.storageBuffers[slot];
+    // Cast to T* and write element at index
+    T* typedPtr = (T*)basePtr;
+    typedPtr[index] = value;
+}
+
+/// Legacy: Dynamic scattered access - Metal Tier 2 doesn't support returning buffer types.
+/// Use goldy_dyn_scattered_get/set instead.
+/// This version only works for reading element 0.
+public T goldy_dyn_scattered<T>(uint n)
+{
+    return goldy_dyn_scattered_get<T>(n, 0);
 }
 
 /// Dynamic broadcast access - reads slot index from gGoldyDynamic.slots[n].
@@ -283,14 +304,30 @@ public T goldy_broadcast<T>(uint slot)
     }
 }
 
-/// Get a RWStructuredBuffer-like handle for scattered access (Metal Tier 2).
-/// Note: Returns the first element - use goldy_scattered_at<T>(slot, idx) for indexed access.
-public RWStructuredBuffer<T> goldy_scattered<T>(uint slot)
+/// Scattered read - reads element at index from slot.
+public T goldy_scattered_get<T>(uint slot, uint index)
 {
-    // For Metal, we reinterpret the uint* as a buffer of the target type.
-    // This should work for structured access patterns.
     uint* basePtr = gGoldy.storageBuffers[slot];
-    return reinterpret<RWStructuredBuffer<T>>(basePtr);
+    // Cast to T* and read element at index
+    T* typedPtr = (T*)basePtr;
+    return typedPtr[index];
+}
+
+/// Scattered write - writes element at index to slot.
+public void goldy_scattered_set<T>(uint slot, uint index, T value)
+{
+    uint* basePtr = gGoldy.storageBuffers[slot];
+    // Cast to T* and write element at index
+    T* typedPtr = (T*)basePtr;
+    typedPtr[index] = value;
+}
+
+/// Legacy: Get buffer for scattered access - Metal Tier 2 doesn't support returning buffer types.
+/// Use goldy_scattered_get/set instead.
+/// This version only works for reading element 0.
+public T goldy_scattered<T>(uint slot)
+{
+    return goldy_scattered_get<T>(slot, 0);
 }
 
 /// Access a 2D texture by slot index (Metal Tier 2).

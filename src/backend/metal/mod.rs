@@ -581,7 +581,7 @@ impl GpuBackend for MetalBackend {
         &mut self,
         device_handle: DeviceHandle,
         size: u64,
-        _access: DataAccess,
+        access: DataAccess,
         _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         let _span = goldy_span!("resource.buffer.create", size = size).entered();
@@ -605,8 +605,18 @@ impl GpuBackend for MetalBackend {
 
                     match heap.new_buffer(size, options) {
                         Some(buffer) => {
-                            // Register in bindless registry
-                            let index = logical_device.resource_registry.register_buffer(handle);
+                            // Register in bindless registry based on access pattern
+                            // This matches the GoldyBindlessResources layout in shaders:
+                            // - storageBuffers[64] at indices 0-63   (Scattered)
+                            // - uniformBuffers[64] at indices 64-127 (Broadcast)
+                            let index = match access {
+                                DataAccess::Broadcast => {
+                                    logical_device.resource_registry.register_uniform_buffer(handle)
+                                }
+                                DataAccess::Scattered => {
+                                    logical_device.resource_registry.register_storage_buffer(handle)
+                                }
+                            };
                             tracing::debug!(
                                 "Allocated buffer {} from heap at bindless index {}",
                                 handle,
@@ -1163,11 +1173,11 @@ impl GpuBackend for MetalBackend {
                     current_index_buffer = Some((*buffer, *offset, *format));
                 }
                 RenderCommand::SetPushConstants { buffers } => {
-                    // Check if we should use ParameterBlock-based bindless (for Metal shaders using ParameterBlock)
-                    let use_parameter_block = bindless_enabled
-                        && current_pipeline
-                            .map(|p| !p.parameter_block_layouts.is_empty())
-                            .unwrap_or(false);
+                    // For Metal Tier 2 bindless, we use the global argument buffer (gGoldy)
+                    // which is already bound at slot 0. We should NOT use per-pipeline
+                    // ParameterBlock binding as that would overwrite the global buffer.
+                    // The global buffer already has all device pointers encoded.
+                    let use_parameter_block = false;
 
                     if use_parameter_block {
                         // ParameterBlock-based bindless: write GPU addresses to pipeline's argument buffer
@@ -1927,6 +1937,14 @@ impl GpuBackend for MetalBackend {
                     encoder.use_heap_at(texture_heap, render_stages);
                 }
             }
+            
+            // Bind the global argument buffer containing all resource device pointers
+            // This is the gGoldy ParameterBlock in shaders, bound at slot 0
+            if let Some(arg_buffer) = &logical_device.argument_buffer {
+                encoder.set_vertex_buffer(0, Some(arg_buffer), 0);
+                encoder.set_fragment_buffer(0, Some(arg_buffer), 0);
+                tracing::trace!("Bound global argument buffer at slot 0");
+            }
         }
 
         // Set viewport and scissor
@@ -1983,11 +2001,11 @@ impl GpuBackend for MetalBackend {
                     current_index_buffer = Some((*buffer, *offset, *format));
                 }
                 RenderCommand::SetPushConstants { buffers } => {
-                    // Check if we should use ParameterBlock-based bindless (for Metal shaders using ParameterBlock)
-                    let use_parameter_block = bindless_enabled
-                        && current_pipeline
-                            .map(|p| !p.parameter_block_layouts.is_empty())
-                            .unwrap_or(false);
+                    // For Metal Tier 2 bindless, we use the global argument buffer (gGoldy)
+                    // which is already bound at slot 0. We should NOT use per-pipeline
+                    // ParameterBlock binding as that would overwrite the global buffer.
+                    // The global buffer already has all device pointers encoded.
+                    let use_parameter_block = false;
 
                     if use_parameter_block {
                         // ParameterBlock-based bindless: write GPU addresses to pipeline's argument buffer
@@ -2431,10 +2449,17 @@ impl GpuBackend for MetalBackend {
                     encoder.use_heap(texture_heap);
                 }
             }
+            
+            // Bind the global argument buffer containing all resource device pointers
+            // This is the gGoldy ParameterBlock in shaders, bound at slot 0
+            if let Some(arg_buffer) = &logical_device.argument_buffer {
+                encoder.set_buffer(0, Some(arg_buffer), 0);
+                tracing::trace!("Bound global argument buffer at slot 0 for compute");
+            }
         }
 
-        // Cache bindless state for use in loop
-        let bindless_enabled = logical_device.bindless_enabled;
+        // Cache bindless state for use in loop (currently unused after removing ParameterBlock path)
+        let _bindless_enabled = logical_device.bindless_enabled;
 
         let mut current_pipeline: Option<&ComputePipelineState> = None;
 
@@ -2447,11 +2472,11 @@ impl GpuBackend for MetalBackend {
                     }
                 }
                 ComputeCommand::SetPushConstants { buffers } => {
-                    // Check if we should use ParameterBlock-based bindless (for Metal shaders using ParameterBlock)
-                    let use_parameter_block = bindless_enabled
-                        && current_pipeline
-                            .map(|p| !p.parameter_block_layouts.is_empty())
-                            .unwrap_or(false);
+                    // For Metal Tier 2 bindless, we use the global argument buffer (gGoldy)
+                    // which is already bound at slot 0. We should NOT use per-pipeline
+                    // ParameterBlock binding as that would overwrite the global buffer.
+                    // The global buffer already has all device pointers encoded.
+                    let use_parameter_block = false;
 
                     if use_parameter_block {
                         // ParameterBlock-based bindless: write GPU addresses to pipeline's argument buffer
