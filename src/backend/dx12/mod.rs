@@ -2778,9 +2778,11 @@ impl GpuBackend for Dx12Backend {
             cpu_handle
         };
         unsafe {
-            logical_device
-                .device
-                .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
+            logical_device.device.CreateShaderResourceView(
+                &resource,
+                Some(&srv_desc),
+                srv_cpu_handle,
+            );
         }
 
         // handle was already assigned above before registry call
@@ -3231,7 +3233,9 @@ impl GpuBackend for Dx12Backend {
                                 indices.indices[i] = offset;
                                 tracing::trace!(
                                     "Compute push constant [{}]: buffer {} -> UAV offset {}",
-                                    i, buffer_handle, offset
+                                    i,
+                                    buffer_handle,
+                                    offset
                                 );
                             }
                         }

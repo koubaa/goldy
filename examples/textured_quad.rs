@@ -158,7 +158,7 @@ impl App {
         let tex_width = 256u32;
         let tex_height = 256u32;
         let checker_data = generate_checkerboard(tex_width, tex_height, 32);
-        
+
         let texture = Texture::with_data(
             &device,
             &checker_data,

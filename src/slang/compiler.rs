@@ -175,8 +175,7 @@ impl SlangCompiler {
             "Creating global session with desc size: {}",
             std::mem::size_of::<SlangGlobalSessionDesc>()
         );
-        let result =
-            unsafe { (library.create_global_session)(&global_desc, &mut global_session) };
+        let result = unsafe { (library.create_global_session)(&global_desc, &mut global_session) };
 
         if !slang_succeeded(result) || global_session.is_null() {
             anyhow::bail!(
@@ -385,9 +384,8 @@ impl SlangCompiler {
         if target == ShaderTarget::Dxil {
             let profile_name = CString::new("sm_6_6").unwrap();
             // Use the global session for finding profile (works with COM API)
-            let profile_id = unsafe {
-                global_session_find_profile(self.global_session, profile_name.as_ptr())
-            };
+            let profile_id =
+                unsafe { global_session_find_profile(self.global_session, profile_name.as_ptr()) };
             if profile_id > 0 {
                 unsafe {
                     (self.library.set_target_profile)(request, target_index, profile_id);

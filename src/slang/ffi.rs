@@ -66,23 +66,23 @@ impl Default for TargetDesc {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct SessionDesc {
-    pub structure_size: usize,                          // size_t (8 bytes)
-    pub targets: *const TargetDesc,                     // pointer (8 bytes)
-    pub target_count: i64,                              // SlangInt = int64_t (8 bytes)
-    pub flags: u32,                                     // SessionFlags = uint32_t (4 bytes)
-    pub default_matrix_layout_mode: i32,                // SlangMatrixLayoutMode = int (4 bytes)
-    pub search_paths: *const *const c_char,             // char const* const* (8 bytes)
-    pub search_path_count: i64,                         // SlangInt = int64_t (8 bytes)
+    pub structure_size: usize,                             // size_t (8 bytes)
+    pub targets: *const TargetDesc,                        // pointer (8 bytes)
+    pub target_count: i64,                                 // SlangInt = int64_t (8 bytes)
+    pub flags: u32,                                        // SessionFlags = uint32_t (4 bytes)
+    pub default_matrix_layout_mode: i32,                   // SlangMatrixLayoutMode = int (4 bytes)
+    pub search_paths: *const *const c_char,                // char const* const* (8 bytes)
+    pub search_path_count: i64,                            // SlangInt = int64_t (8 bytes)
     pub preprocessor_macros: *const PreprocessorMacroDesc, // pointer (8 bytes)
-    pub preprocessor_macro_count: i64,                  // SlangInt = int64_t (8 bytes)
-    pub file_system: *const c_void,                     // ISlangFileSystem* (8 bytes)
-    pub enable_effect_annotations: bool,                // bool (1 byte)
-    pub allow_glsl_syntax: bool,                        // bool (1 byte)
-    _padding1: [u8; 6],                                 // padding to align next pointer
-    pub compiler_option_entries: *const c_void,         // CompilerOptionEntry* (8 bytes)
-    pub compiler_option_entry_count: u32,               // uint32_t (4 bytes)
-    pub skip_spirv_validation: bool,                    // bool (1 byte)
-    _padding2: [u8; 3],                                 // padding to reach struct alignment
+    pub preprocessor_macro_count: i64,                     // SlangInt = int64_t (8 bytes)
+    pub file_system: *const c_void,                        // ISlangFileSystem* (8 bytes)
+    pub enable_effect_annotations: bool,                   // bool (1 byte)
+    pub allow_glsl_syntax: bool,                           // bool (1 byte)
+    _padding1: [u8; 6],                                    // padding to align next pointer
+    pub compiler_option_entries: *const c_void,            // CompilerOptionEntry* (8 bytes)
+    pub compiler_option_entry_count: u32,                  // uint32_t (4 bytes)
+    pub skip_spirv_validation: bool,                       // bool (1 byte)
+    _padding2: [u8; 3],                                    // padding to reach struct alignment
 }
 
 impl Default for SessionDesc {
