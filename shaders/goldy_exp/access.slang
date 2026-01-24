@@ -250,38 +250,29 @@ public SamplerState goldy_filter(uint slot)
 // =============================================================================
 #elif defined(__METAL_BINDLESS__)
 
-/// Dynamic scattered read - reads element at index from dynamic slot n.
-/// Requires GOLDY_DECLARE_DYNAMIC in shader.
-public T goldy_dyn_scattered_get<T>(uint n, uint index)
+// -----------------------------------------------------------------------------
+// Public access functions - return typed device pointer
+// Using Ptr<T, Access, AddressSpace> syntax for generic pointer return
+// -----------------------------------------------------------------------------
+
+/// Dynamic scattered access - returns typed pointer for read/write access.
+/// Usage: goldy_dyn_scattered<Particle>(0)[idx]
+public Ptr<T, Access.ReadWrite, AddressSpace.Device> goldy_dyn_scattered<T>(uint n)
 {
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.storageBuffers[slot];
-    // Cast to T* and read element at index
-    T* typedPtr = (T*)basePtr;
-    return typedPtr[index];
+    return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
 }
 
-/// Dynamic scattered write - writes element at index to dynamic slot n.
-/// Requires GOLDY_DECLARE_DYNAMIC in shader.
-public void goldy_dyn_scattered_set<T>(uint n, uint index, T value)
+/// Static scattered access - returns typed pointer for read/write access.
+/// Usage: goldy_scattered<Particle>(0)[idx]
+public Ptr<T, Access.ReadWrite, AddressSpace.Device> goldy_scattered<T>(uint slot)
 {
-    uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.storageBuffers[slot];
-    // Cast to T* and write element at index
-    T* typedPtr = (T*)basePtr;
-    typedPtr[index] = value;
-}
-
-/// Legacy: Dynamic scattered access - Metal Tier 2 doesn't support returning buffer types.
-/// Use goldy_dyn_scattered_get/set instead.
-/// This version only works for reading element 0.
-public T goldy_dyn_scattered<T>(uint n)
-{
-    return goldy_dyn_scattered_get<T>(n, 0);
+    return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
 }
 
 /// Dynamic broadcast access - reads slot index from gGoldyDynamic.slots[n].
-/// Requires GOLDY_DECLARE_DYNAMIC in shader.
 public T goldy_dyn_broadcast<T>(uint n)
 {
     uint slot = gGoldyDynamic.slots[n];
@@ -319,31 +310,6 @@ public T goldy_broadcast<T>(uint slot)
     }
 }
 
-/// Scattered read - reads element at index from slot.
-public T goldy_scattered_get<T>(uint slot, uint index)
-{
-    uint* basePtr = gGoldy.storageBuffers[slot];
-    // Cast to T* and read element at index
-    T* typedPtr = (T*)basePtr;
-    return typedPtr[index];
-}
-
-/// Scattered write - writes element at index to slot.
-public void goldy_scattered_set<T>(uint slot, uint index, T value)
-{
-    uint* basePtr = gGoldy.storageBuffers[slot];
-    // Cast to T* and write element at index
-    T* typedPtr = (T*)basePtr;
-    typedPtr[index] = value;
-}
-
-/// Legacy: Get buffer for scattered access - Metal Tier 2 doesn't support returning buffer types.
-/// Use goldy_scattered_get/set instead.
-/// This version only works for reading element 0.
-public T goldy_scattered<T>(uint slot)
-{
-    return goldy_scattered_get<T>(slot, 0);
-}
 
 /// Access a 2D texture by slot index (Metal Tier 2).
 public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
