@@ -359,6 +359,18 @@ impl VulkanBackend {
             spirv_u32.len()
         );
 
+        // Dump SPIR-V for debugging when GOLDY_DUMP_SHADERS is set
+        if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
+            use std::io::Write;
+            let path =
+                std::path::Path::new(&dump_dir).join(format!("{}_vulkan.spv", entry_point_name));
+            if let Ok(mut file) = std::fs::File::create(&path) {
+                let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
+                let _ = file.write_all(spirv_bytes);
+                tracing::info!("Dumped SPIR-V bytecode to {}", path.display());
+            }
+        }
+
         // Cache the module and reflection data
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
         match stage {

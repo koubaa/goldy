@@ -761,31 +761,18 @@ impl GpuBackend for VulkanBackend {
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
             .dynamic_states(&dynamic_states);
 
-        // Pipeline layout - includes bindless descriptor set if enabled
-        let layout = if logical_device.bindless_enabled {
-            // Bindless mode: include the bindless descriptor set layout and push constants
-            let bindless_set_layout = logical_device.bindless_descriptor_set_layout
-                .context("Bindless enabled but no descriptor set layout")?;
-            let layouts = [bindless_set_layout];
-            
-            // Push constant range for resource indices (16 x u32 = 64 bytes)
-            let push_constant_range = vk::PushConstantRange {
-                stage_flags: vk::ShaderStageFlags::ALL,
-                offset: 0,
-                size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
-            };
-            
-            let layout_info = vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&layouts)
-                .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-            
-            unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-                .context("Failed to create bindless pipeline layout")?
+        // Pipeline layout - reuse global bindless layout when enabled
+        let (layout, owns_layout) = if logical_device.bindless_enabled {
+            // Bindless mode: reuse the device's shared bindless pipeline layout
+            let shared_layout = logical_device.bindless_pipeline_layout
+                .context("Bindless enabled but no pipeline layout")?;
+            (shared_layout, false) // Don't own - it's the global layout
         } else {
-            // Traditional mode: empty layout
+            // Traditional mode: create empty layout (rare code path)
             let layout_info = vk::PipelineLayoutCreateInfo::default();
-            unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-                .context("Failed to create pipeline layout")?
+            let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+                .context("Failed to create pipeline layout")?;
+            (layout, true) // Own this layout
         };
 
         // Dynamic rendering info (Vulkan 1.4)
@@ -824,7 +811,7 @@ impl GpuBackend for VulkanBackend {
                 device_handle,
                 pipeline: pipelines[0],
                 layout,
-                owns_layout: true, // Simple create_pipeline always owns its layout
+                owns_layout,
                 parameter_block_layouts: Vec::new(),
             },
         );

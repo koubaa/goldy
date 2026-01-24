@@ -18,10 +18,6 @@ use std::collections::HashMap;
 /// Maximum number of descriptors per resource type in the global bindless set
 pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
 
-/// Descriptor set index for the global bindless set
-#[allow(dead_code)]
-pub const BINDLESS_SET_INDEX: u32 = 0;
-
 /// Binding indices within the global bindless descriptor set
 /// Organized by ACCESS PATTERN:
 ///
@@ -190,7 +186,6 @@ pub(crate) struct BufferState {
     pub memory: vk::DeviceMemory,
     pub size: u64,
     /// Index in the global bindless descriptor set (if bindless enabled)
-    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
     /// Whether this is a storage buffer (vs uniform buffer)
     #[allow(dead_code)]
@@ -275,7 +270,6 @@ pub(crate) struct TextureState {
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
     /// Index in the global bindless descriptor set (if bindless enabled)
-    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
 }
 
@@ -284,7 +278,6 @@ pub(crate) struct SamplerState {
     pub device_handle: DeviceHandle,
     pub sampler: vk::Sampler,
     /// Index in the global bindless descriptor set (if bindless enabled)
-    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
 }
 

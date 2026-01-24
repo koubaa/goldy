@@ -84,14 +84,29 @@ public struct GoldyDynamicSlots {
 
 #elif defined(__DX12__)
 // DX12: Root constants in b0 space0 - functions read from this
-cbuffer __GoldyDynamic : register(b0, space0) { uint __gGoldyDynamicSlots[4]; };
-// Wrapper for function access
+// IMPORTANT: Use uint4 instead of uint[4] to ensure all values are in a single
+// cbuffer register. Dynamic array indexing with uint[4] causes Slang to generate
+// cbufferLoadLegacy calls with regIndex=n, treating each element as a separate
+// 16-byte register, which reads out-of-bounds garbage for indices > 0.
+cbuffer __GoldyDynamic : register(b0, space0) { uint4 __gGoldyDynamicSlots; };
+// Direct access function that uses proper component indexing
+uint __goldy_get_slot(uint n) {
+    // Use explicit switch to ensure compiler generates correct component access
+    switch (n) {
+        case 0: return __gGoldyDynamicSlots.x;
+        case 1: return __gGoldyDynamicSlots.y;
+        case 2: return __gGoldyDynamicSlots.z;
+        case 3: return __gGoldyDynamicSlots.w;
+        default: return 0;
+    }
+}
+// Wrapper for struct-based access (for compatibility with existing code)
 GoldyDynamicSlots __goldy_get_dynamic() {
     GoldyDynamicSlots result;
-    result.slots[0] = __gGoldyDynamicSlots[0];
-    result.slots[1] = __gGoldyDynamicSlots[1];
-    result.slots[2] = __gGoldyDynamicSlots[2];
-    result.slots[3] = __gGoldyDynamicSlots[3];
+    result.slots[0] = __gGoldyDynamicSlots.x;
+    result.slots[1] = __gGoldyDynamicSlots.y;
+    result.slots[2] = __gGoldyDynamicSlots.z;
+    result.slots[3] = __gGoldyDynamicSlots.w;
     return result;
 }
 #define gGoldyDynamic __goldy_get_dynamic()
@@ -168,21 +183,21 @@ public SamplerState goldy_filter(uint slot)
 // =============================================================================
 #elif defined(__DX12__)
 
-/// Dynamic scattered access - reads slot index from gGoldyDynamic.slots[n].
-/// Requires GOLDY_DECLARE_DYNAMIC in shader.
+/// Dynamic scattered access - reads slot index from push constants.
+/// Uses __goldy_get_slot for proper cbuffer component access.
 public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
 {
-    uint slot = gGoldyDynamic.slots[n];
+    uint slot = __goldy_get_slot(n);
     DescriptorHandle<RWStructuredBuffer<T>> handle;
     handle = DescriptorHandle<RWStructuredBuffer<T>>(uint2(slot, 0));
     return *handle;
 }
 
-/// Dynamic broadcast access - reads slot index from gGoldyDynamic.slots[n].
-/// Requires GOLDY_DECLARE_DYNAMIC in shader.
+/// Dynamic broadcast access - reads slot index from push constants.
+/// Uses __goldy_get_slot for proper cbuffer component access.
 public T goldy_dyn_broadcast<T>(uint n)
 {
-    uint slot = gGoldyDynamic.slots[n];
+    uint slot = __goldy_get_slot(n);
     DescriptorHandle<ConstantBuffer<T>> handle;
     handle = DescriptorHandle<ConstantBuffer<T>>(uint2(slot, 0));
     return *handle;

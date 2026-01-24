@@ -66,10 +66,6 @@ pub struct Dx12Backend {
     next_rtv_offset: u32,
     /// Next DSV descriptor offset
     next_dsv_offset: u32,
-    /// Next SRV descriptor offset in CBV/SRV/UAV heap
-    next_srv_offset: u32,
-    /// Next sampler descriptor offset
-    next_sampler_offset: u32,
     /// Per-backend Slang compiler instance
     slang_compiler: crate::slang::SlangCompiler,
 }
@@ -164,10 +160,24 @@ impl Dx12Backend {
             next_sampler_handle: 1,
             next_rtv_offset: 0,
             next_dsv_offset: 0,
-            next_srv_offset: 0,
-            next_sampler_offset: 0,
             slang_compiler,
         })
+    }
+
+    /// Wait for a fence to reach the specified value.
+    /// This is a low-level helper for GPU synchronization.
+    fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
+        if unsafe { fence.GetCompletedValue() } < value {
+            let event = unsafe { CreateEventA(None, false, false, None) }
+                .context("Failed to create event")?;
+
+            unsafe { fence.SetEventOnCompletion(value, event) }
+                .context("Failed to set event on completion")?;
+
+            unsafe { WaitForSingleObject(event, INFINITE) };
+            unsafe { CloseHandle(event) }.ok();
+        }
+        Ok(())
     }
 
     /// Wait for the GPU to finish all work on a device.
@@ -175,19 +185,7 @@ impl Dx12Backend {
         let fence_value = device.fence_value;
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
-
-        if unsafe { device.fence.GetCompletedValue() } < fence_value {
-            let event = unsafe { CreateEventA(None, false, false, None) }
-                .context("Failed to create event")?;
-
-            unsafe { device.fence.SetEventOnCompletion(fence_value, event) }
-                .context("Failed to set event on completion")?;
-
-            unsafe { WaitForSingleObject(event, INFINITE) };
-            unsafe { CloseHandle(event) }.ok();
-        }
-
-        Ok(())
+        Self::wait_for_fence(&device.fence, fence_value)
     }
 
     /// Compile a shader for a specific stage on demand.
@@ -289,6 +287,17 @@ impl Dx12Backend {
             bytecode.len(),
             bindless_enabled
         );
+
+        // Dump DXIL for debugging when GOLDY_DUMP_SHADERS is set
+        if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
+            use std::io::Write;
+            let path =
+                std::path::Path::new(&dump_dir).join(format!("{}_dx12.dxil", entry_point_name));
+            if let Ok(mut file) = std::fs::File::create(&path) {
+                let _ = file.write_all(&bytecode);
+                tracing::info!("Dumped DXIL bytecode to {}", path.display());
+            }
+        }
 
         // Cache the bytecode and reflection data
         let shader = self.shaders.get_mut(&shader_handle).unwrap();
@@ -971,18 +980,11 @@ impl GpuBackend for Dx12Backend {
             let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast()?)];
             unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-            // Wait for completion using a simple fence signal/wait
+            // Wait for completion using fence
             let fence_value = device.fence_value + 1;
             unsafe { device.command_queue.Signal(&device.fence, fence_value) }
                 .context("Failed to signal fence")?;
-
-            // Create a temporary event for waiting
-            let wait_event = unsafe { CreateEventA(None, false, false, None) }
-                .context("Failed to create wait event")?;
-            unsafe { device.fence.SetEventOnCompletion(fence_value, wait_event) }
-                .context("Failed to set fence event")?;
-            unsafe { WaitForSingleObject(wait_event, INFINITE) };
-            unsafe { CloseHandle(wait_event) }.ok();
+            Self::wait_for_fence(&device.fence, fence_value)?;
 
             // Update fence value for next operation (must be done after wait completes)
             // Note: device_handle is captured before this block, so we can use get_mut here
@@ -1673,19 +1675,7 @@ impl GpuBackend for Dx12Backend {
                 .Signal(&logical_device.fence, fence_value)
         }
         .context("Failed to signal fence")?;
-
-        if unsafe { logical_device.fence.GetCompletedValue() } < fence_value {
-            let event = unsafe { CreateEventA(None, false, false, None) }
-                .context("Failed to create event")?;
-            unsafe {
-                logical_device
-                    .fence
-                    .SetEventOnCompletion(fence_value, event)
-            }
-            .context("Failed to set event")?;
-            unsafe { WaitForSingleObject(event, INFINITE) };
-            unsafe { CloseHandle(event) }.ok();
-        }
+        Self::wait_for_fence(&logical_device.fence, fence_value)?;
 
         // Increment fence value for next operation
         if let Some(dev) = self.devices.get_mut(&device_handle) {
@@ -1836,19 +1826,7 @@ impl GpuBackend for Dx12Backend {
                 .Signal(&logical_device.fence, fence_value)
         }
         .context("Failed to signal fence")?;
-
-        if unsafe { logical_device.fence.GetCompletedValue() } < fence_value {
-            let event = unsafe { CreateEventA(None, false, false, None) }
-                .context("Failed to create event")?;
-            unsafe {
-                logical_device
-                    .fence
-                    .SetEventOnCompletion(fence_value, event)
-            }
-            .context("Failed to set event")?;
-            unsafe { WaitForSingleObject(event, INFINITE) };
-            unsafe { CloseHandle(event) }.ok();
-        }
+        Self::wait_for_fence(&logical_device.fence, fence_value)?;
 
         // Increment fence value for next operation (CRITICAL: was missing, causing race condition)
         let logical_device = self
@@ -2359,18 +2337,7 @@ impl GpuBackend for Dx12Backend {
                 .context("Surface's device is invalid")?;
 
             let fence_value = logical_device.fence_value.saturating_sub(1);
-            if unsafe { logical_device.fence.GetCompletedValue() } < fence_value {
-                let event = unsafe { CreateEventA(None, false, false, None) }
-                    .context("Failed to create event")?;
-                unsafe {
-                    logical_device
-                        .fence
-                        .SetEventOnCompletion(fence_value, event)
-                }
-                .context("Failed to set event on completion")?;
-                unsafe { WaitForSingleObject(event, INFINITE) };
-                unsafe { CloseHandle(event) }.ok();
-            }
+            Self::wait_for_fence(&logical_device.fence, fence_value)?;
         }
 
         // Present
@@ -2985,13 +2952,16 @@ impl GpuBackend for Dx12Backend {
         device_handle: DeviceHandle,
         desc: &crate::types::SamplerDesc,
     ) -> Result<SamplerHandle> {
+        let handle = self.next_sampler_handle;
+        self.next_sampler_handle += 1;
+
         let logical_device = self
             .devices
-            .get(&device_handle)
+            .get_mut(&device_handle)
             .context("Invalid device handle")?;
 
-        let sampler_offset = self.next_sampler_offset;
-        self.next_sampler_offset += 1;
+        // Use ResourceRegistry for sampler offset tracking
+        let sampler_offset = logical_device.resource_registry.register_sampler(handle);
 
         let sampler_desc = D3D12_SAMPLER_DESC {
             Filter: utils::filter_to_d3d12(desc.min_filter, desc.mag_filter, desc.mipmap_filter),
@@ -3021,9 +2991,6 @@ impl GpuBackend for Dx12Backend {
                 .device
                 .CreateSampler(&sampler_desc, sampler_handle);
         }
-
-        let handle = self.next_sampler_handle;
-        self.next_sampler_handle += 1;
 
         self.samplers.insert(
             handle,
@@ -3064,9 +3031,11 @@ impl GpuBackend for Dx12Backend {
             .context("Invalid device handle")?;
 
         // Create root signature - always use bindless mode with root constants
-        let root_constants = D3D12_ROOT_PARAMETER {
+        // NOTE: Use Root Signature 1.1 for consistency with graphics pipelines and
+        // to enable the HEAP_DIRECTLY_INDEXED flags properly
+        let root_constants = D3D12_ROOT_PARAMETER1 {
             ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-            Anonymous: D3D12_ROOT_PARAMETER_0 {
+            Anonymous: D3D12_ROOT_PARAMETER1_0 {
                 Constants: D3D12_ROOT_CONSTANTS {
                     ShaderRegister: 0,
                     RegisterSpace: 0,
@@ -3078,7 +3047,7 @@ impl GpuBackend for Dx12Backend {
 
         let root_params = [root_constants];
 
-        let desc = D3D12_ROOT_SIGNATURE_DESC {
+        let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
             NumParameters: 1,
             pParameters: root_params.as_ptr(),
             NumStaticSamplers: 0,
@@ -3087,18 +3056,22 @@ impl GpuBackend for Dx12Backend {
                 | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
         };
 
+        let versioned_desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
+            Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
+            Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
+        };
+
         let mut signature_blob: Option<ID3DBlob> = None;
         let mut error_blob: Option<ID3DBlob> = None;
 
         unsafe {
-            D3D12SerializeRootSignature(
-                &desc,
-                D3D_ROOT_SIGNATURE_VERSION_1,
+            D3D12SerializeVersionedRootSignature(
+                &versioned_desc,
                 &mut signature_blob,
                 Some(&mut error_blob),
             )
         }
-        .context("Failed to serialize bindless compute root signature")?;
+        .context("Failed to serialize bindless compute root signature (requires RS 1.1)")?;
 
         let blob = signature_blob.context("Root signature serialization produced no output")?;
         let root_signature: ID3D12RootSignature = unsafe {
@@ -3265,6 +3238,19 @@ impl GpuBackend for Dx12Backend {
             }
         }
 
+        // Add UAV barrier to ensure compute writes are visible to subsequent operations
+        // This is critical for ping-pong buffers where compute writes are read by render
+        let uav_barrier = D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                    pResource: std::mem::ManuallyDrop::new(None), // NULL means barrier on all UAVs
+                }),
+            },
+        };
+        unsafe { command_list.ResourceBarrier(&[uav_barrier]) };
+
         // Close and execute
         unsafe { command_list.Close() }.context("Failed to close command list")?;
 
@@ -3286,19 +3272,7 @@ impl GpuBackend for Dx12Backend {
                 .Signal(&logical_device.fence, fence_value)
         }
         .context("Failed to signal fence")?;
-
-        if unsafe { logical_device.fence.GetCompletedValue() } < fence_value {
-            let event = unsafe { CreateEventA(None, false, false, None) }
-                .context("Failed to create event")?;
-            unsafe {
-                logical_device
-                    .fence
-                    .SetEventOnCompletion(fence_value, event)
-            }
-            .context("Failed to set event")?;
-            unsafe { WaitForSingleObject(event, INFINITE) };
-            unsafe { CloseHandle(event) }.ok();
-        }
+        Self::wait_for_fence(&logical_device.fence, fence_value)?;
 
         // Increment fence value for next operation
         if let Some(dev) = self.devices.get_mut(&device_handle) {

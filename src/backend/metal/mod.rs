@@ -610,12 +610,12 @@ impl GpuBackend for MetalBackend {
                             // - storageBuffers[64] at indices 0-63   (Scattered)
                             // - uniformBuffers[64] at indices 64-127 (Broadcast)
                             let index = match access {
-                                DataAccess::Broadcast => {
-                                    logical_device.resource_registry.register_uniform_buffer(handle)
-                                }
-                                DataAccess::Scattered => {
-                                    logical_device.resource_registry.register_storage_buffer(handle)
-                                }
+                                DataAccess::Broadcast => logical_device
+                                    .resource_registry
+                                    .register_uniform_buffer(handle),
+                                DataAccess::Scattered => logical_device
+                                    .resource_registry
+                                    .register_storage_buffer(handle),
                             };
                             tracing::debug!(
                                 "Allocated buffer {} from heap at bindless index {}",
@@ -1937,7 +1937,7 @@ impl GpuBackend for MetalBackend {
                     encoder.use_heap_at(texture_heap, render_stages);
                 }
             }
-            
+
             // Bind the global argument buffer containing all resource device pointers
             // This is the gGoldy ParameterBlock in shaders, bound at slot 0
             if let Some(arg_buffer) = &logical_device.argument_buffer {
@@ -2449,7 +2449,7 @@ impl GpuBackend for MetalBackend {
                     encoder.use_heap(texture_heap);
                 }
             }
-            
+
             // Bind the global argument buffer containing all resource device pointers
             // This is the gGoldy ParameterBlock in shaders, bound at slot 0
             if let Some(arg_buffer) = &logical_device.argument_buffer {

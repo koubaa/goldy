@@ -79,15 +79,15 @@ pub(crate) struct LogicalDevice {
 pub const MAX_RESOURCES_PER_CATEGORY: u32 = 64;
 
 /// Registry for tracking bindless resource indices
-/// 
+///
 /// The layout matches GoldyBindlessResources in bindless_resources.slang:
 /// - storageBuffers[64] at indices 0-63   (Scattered access)
 /// - uniformBuffers[64] at indices 64-127 (Broadcast access)
 /// - textures, storageImages, samplers at higher offsets
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    next_storage_buffer_index: u32,  // Scattered: 0-63
-    next_uniform_buffer_index: u32,  // Broadcast: 64-127
+    next_storage_buffer_index: u32, // Scattered: 0-63
+    next_uniform_buffer_index: u32, // Broadcast: 64-127
     next_texture_index: u32,
     next_sampler_index: u32,
     pub buffer_indices: HashMap<BufferHandle, u32>,
