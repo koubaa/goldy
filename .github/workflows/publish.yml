@@ -36,7 +36,7 @@ jobs:
           working-directory: python
           manylinux: auto
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-x86_64
           path: python/dist
@@ -69,7 +69,7 @@ jobs:
           args: --release --out dist
           working-directory: python
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-windows-x64
           path: python/dist
@@ -97,7 +97,7 @@ jobs:
           args: --release --out dist
           working-directory: python
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-macos-x86_64
           path: python/dist
@@ -125,7 +125,7 @@ jobs:
           args: --release --out dist
           working-directory: python
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-macos-aarch64
           path: python/dist
