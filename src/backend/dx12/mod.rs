@@ -610,6 +610,68 @@ impl GpuBackend for Dx12Backend {
         let bindless_enabled = true;
         tracing::info!("DX12 bindless enabled (SM 6.6 via Slang DXIL)");
 
+        // Create shared bindless root signature
+        // This will be reused by all graphics and compute pipelines
+        let bindless_root_signature = if bindless_enabled {
+            let root_constants = D3D12_ROOT_PARAMETER1 {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                    Constants: D3D12_ROOT_CONSTANTS {
+                        ShaderRegister: 0,
+                        RegisterSpace: 0,
+                        Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
+                    },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            };
+
+            let root_params = [root_constants];
+
+            let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
+                NumParameters: 1,
+                pParameters: root_params.as_ptr(),
+                NumStaticSamplers: 0,
+                pStaticSamplers: std::ptr::null(),
+                Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
+                    | D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+                    | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+            };
+
+            let versioned_desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
+                Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
+                Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
+            };
+
+            let mut signature_blob: Option<ID3DBlob> = None;
+            let mut error_blob: Option<ID3DBlob> = None;
+
+            unsafe {
+                D3D12SerializeVersionedRootSignature(
+                    &versioned_desc,
+                    &mut signature_blob,
+                    Some(&mut error_blob),
+                )
+            }
+            .context("Failed to serialize shared bindless root signature")?;
+
+            let blob = signature_blob.context("Root signature serialization produced no output")?;
+            let root_sig: ID3D12RootSignature = unsafe {
+                device.CreateRootSignature(
+                    0,
+                    std::slice::from_raw_parts(
+                        blob.GetBufferPointer() as *const u8,
+                        blob.GetBufferSize(),
+                    ),
+                )
+            }
+            .context("Failed to create shared bindless root signature")?;
+
+            tracing::debug!("Created shared bindless root signature");
+            Some(root_sig)
+        } else {
+            None
+        };
+
         // Create fence
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
             .context("Failed to create fence")?;
@@ -635,6 +697,7 @@ impl GpuBackend for Dx12Backend {
                 fence,
                 fence_value: 1,
                 bindless_enabled,
+                bindless_root_signature,
                 resource_registry: types::ResourceRegistry::new(),
             },
         );
@@ -1225,68 +1288,14 @@ impl GpuBackend for Dx12Backend {
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        // Create root signature - always use bindless mode with root constants
-        // Slang's DescriptorHandle<T> uses ResourceDescriptorHeap[index] with HEAP_DIRECTLY_INDEXED
-        // NOTE: The HEAP_DIRECTLY_INDEXED flags require Root Signature version 1.1
-        let root_constants = D3D12_ROOT_PARAMETER1 {
-            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-            Anonymous: D3D12_ROOT_PARAMETER1_0 {
-                Constants: D3D12_ROOT_CONSTANTS {
-                    ShaderRegister: 0,
-                    RegisterSpace: 0,
-                    Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
-                },
-            },
-            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-        };
+        // Use the shared bindless root signature from the device
+        let root_signature = logical_device
+            .bindless_root_signature
+            .as_ref()
+            .context("Bindless root signature not available")?
+            .clone();
 
-        let root_params = [root_constants];
-
-        let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
-            NumParameters: 1,
-            pParameters: root_params.as_ptr(),
-            NumStaticSamplers: 0,
-            pStaticSamplers: std::ptr::null(),
-            Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
-                | D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
-                | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
-        };
-
-        let versioned_desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
-            Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
-            Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
-        };
-
-        let mut signature_blob: Option<ID3DBlob> = None;
-        let mut error_blob: Option<ID3DBlob> = None;
-
-        let serialize_result = unsafe {
-            D3D12SerializeVersionedRootSignature(
-                &versioned_desc,
-                &mut signature_blob,
-                Some(&mut error_blob),
-            )
-        };
-
-        serialize_result
-            .context("Failed to serialize bindless root signature (requires RS 1.1)")?;
-
-        let blob = signature_blob.context("Root signature serialization produced no output")?;
-        let root_signature: ID3D12RootSignature = unsafe {
-            logical_device.device.CreateRootSignature(
-                0,
-                std::slice::from_raw_parts(
-                    blob.GetBufferPointer() as *const u8,
-                    blob.GetBufferSize(),
-                ),
-            )
-        }
-        .context("Failed to create bindless root signature")?;
-
-        tracing::debug!(
-            "Created bindless root signature with {} root constants",
-            types::MAX_ROOT_CONSTANT_INDICES
-        );
+        tracing::debug!("Using shared bindless root signature for graphics pipeline");
 
         // Build input layout
         // We use semantic conventions based on location and format:
@@ -2907,65 +2916,14 @@ impl GpuBackend for Dx12Backend {
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        // Create root signature - always use bindless mode with root constants
-        // NOTE: Use Root Signature 1.1 for consistency with graphics pipelines and
-        // to enable the HEAP_DIRECTLY_INDEXED flags properly
-        let root_constants = D3D12_ROOT_PARAMETER1 {
-            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-            Anonymous: D3D12_ROOT_PARAMETER1_0 {
-                Constants: D3D12_ROOT_CONSTANTS {
-                    ShaderRegister: 0,
-                    RegisterSpace: 0,
-                    Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
-                },
-            },
-            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-        };
+        // Use the shared bindless root signature from the device
+        let root_signature = logical_device
+            .bindless_root_signature
+            .as_ref()
+            .context("Bindless root signature not available")?
+            .clone();
 
-        let root_params = [root_constants];
-
-        let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
-            NumParameters: 1,
-            pParameters: root_params.as_ptr(),
-            NumStaticSamplers: 0,
-            pStaticSamplers: std::ptr::null(),
-            Flags: D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
-                | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
-        };
-
-        let versioned_desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
-            Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
-            Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
-        };
-
-        let mut signature_blob: Option<ID3DBlob> = None;
-        let mut error_blob: Option<ID3DBlob> = None;
-
-        unsafe {
-            D3D12SerializeVersionedRootSignature(
-                &versioned_desc,
-                &mut signature_blob,
-                Some(&mut error_blob),
-            )
-        }
-        .context("Failed to serialize bindless compute root signature (requires RS 1.1)")?;
-
-        let blob = signature_blob.context("Root signature serialization produced no output")?;
-        let root_signature: ID3D12RootSignature = unsafe {
-            logical_device.device.CreateRootSignature(
-                0,
-                std::slice::from_raw_parts(
-                    blob.GetBufferPointer() as *const u8,
-                    blob.GetBufferSize(),
-                ),
-            )
-        }
-        .context("Failed to create bindless compute root signature")?;
-
-        tracing::debug!(
-            "Created bindless compute root signature with {} root constants",
-            types::MAX_ROOT_CONSTANT_INDICES
-        );
+        tracing::debug!("Using shared bindless root signature for compute pipeline");
 
         // Create compute PSO
         let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {

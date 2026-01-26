@@ -152,6 +152,8 @@ pub(crate) struct LogicalDevice {
     // Bindless infrastructure
     /// Whether bindless descriptor heap indexing is enabled
     pub bindless_enabled: bool,
+    /// Shared root signature for all bindless pipelines (graphics and compute)
+    pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
     /// Registry tracking resource offsets in descriptor heaps
     pub resource_registry: ResourceRegistry,
 }
