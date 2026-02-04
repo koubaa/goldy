@@ -1,0 +1,365 @@
+//! Graphics pipeline management logic.
+
+use super::types::{self, PipelineState};
+use super::utils::{compare_to_vk, depth_format_to_vk, format_to_vk, topology_to_vk, vertex_format_to_vk};
+use super::{DeviceHandle, PipelineHandle};
+use crate::types::{CompareFunction, DepthStencilState, PrimitiveTopology, TextureFormat, VertexBufferLayout};
+use anyhow::{Context, Result};
+use ash::vk;
+use std::collections::HashMap;
+
+/// Create a graphics pipeline without depth testing.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn create(
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    pipelines: &mut HashMap<PipelineHandle, PipelineState>,
+    next_pipeline_handle: &mut PipelineHandle,
+    device_handle: DeviceHandle,
+    vs_module: vk::ShaderModule,
+    fs_module: vk::ShaderModule,
+    vertex_layout: &VertexBufferLayout,
+    topology: PrimitiveTopology,
+    target_format: TextureFormat,
+) -> Result<PipelineHandle> {
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    // Shader stages - Slang outputs "main" as the entry point name in SPIR-V
+    let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vs_module)
+        .name(c"main");
+
+    let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(fs_module)
+        .name(c"main");
+
+    let shader_stages = [vs_stage, fs_stage];
+
+    // Vertex input
+    let binding_desc = vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(vertex_layout.stride)
+        .input_rate(vk::VertexInputRate::VERTEX);
+
+    let attribute_descs: Vec<_> = vertex_layout
+        .attributes
+        .iter()
+        .map(|attr| {
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(attr.location)
+                .format(vertex_format_to_vk(attr.format))
+                .offset(attr.offset)
+        })
+        .collect();
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
+        .vertex_attribute_descriptions(&attribute_descs);
+
+    // Input assembly
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(topology_to_vk(topology))
+        .primitive_restart_enable(false);
+
+    // Viewport/scissor (dynamic)
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+
+    // Rasterization
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .line_width(1.0)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .depth_bias_enable(false);
+
+    // Multisampling
+    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+        .sample_shading_enable(false)
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+    // Color blending
+    let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(false);
+
+    let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .attachments(std::slice::from_ref(&color_blend_attachment));
+
+    // Dynamic state
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state =
+        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    // Pipeline layout - reuse global bindless layout when enabled
+    let (layout, owns_layout) = if logical_device.bindless_enabled {
+        // Bindless mode: reuse the device's shared bindless pipeline layout
+        let shared_layout = logical_device
+            .bindless_pipeline_layout
+            .context("Bindless enabled but no pipeline layout")?;
+        (shared_layout, false) // Don't own - it's the global layout
+    } else {
+        // Traditional mode: create empty layout (rare code path)
+        let layout_info = vk::PipelineLayoutCreateInfo::default();
+        let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+            .context("Failed to create pipeline layout")?;
+        (layout, true) // Own this layout
+    };
+
+    // Dynamic rendering info (Vulkan 1.4)
+    let color_format = format_to_vk(target_format);
+    let mut rendering_info =
+        vk::PipelineRenderingCreateInfo::default().color_attachment_formats(std::slice::from_ref(&color_format));
+
+    // Create pipeline
+    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&shader_stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisampling)
+        .color_blend_state(&color_blending)
+        .dynamic_state(&dynamic_state)
+        .layout(layout)
+        .push_next(&mut rendering_info);
+
+    let vk_pipelines = unsafe {
+        logical_device.device.create_graphics_pipelines(
+            vk::PipelineCache::null(),
+            std::slice::from_ref(&pipeline_info),
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("Failed to create pipeline: {:?}", e.1))?;
+
+    let handle = *next_pipeline_handle;
+    *next_pipeline_handle += 1;
+
+    pipelines.insert(
+        handle,
+        PipelineState {
+            device_handle,
+            pipeline: vk_pipelines[0],
+            layout,
+            owns_layout,
+            parameter_block_layouts: Vec::new(),
+        },
+    );
+
+    tracing::debug!("Created render pipeline {}", handle);
+    Ok(handle)
+}
+
+/// Create a graphics pipeline with depth testing support.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn create_with_depth(
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    pipelines: &mut HashMap<PipelineHandle, PipelineState>,
+    next_pipeline_handle: &mut PipelineHandle,
+    device_handle: DeviceHandle,
+    vs_module: vk::ShaderModule,
+    fs_module: vk::ShaderModule,
+    vertex_layout: &VertexBufferLayout,
+    topology: PrimitiveTopology,
+    target_format: TextureFormat,
+    depth_stencil: Option<&DepthStencilState>,
+) -> Result<PipelineHandle> {
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    // Shader stages
+    let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vs_module)
+        .name(c"main");
+
+    let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(fs_module)
+        .name(c"main");
+
+    let shader_stages = [vs_stage, fs_stage];
+
+    // Vertex input
+    let binding_desc = vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(vertex_layout.stride)
+        .input_rate(vk::VertexInputRate::VERTEX);
+
+    let attribute_descs: Vec<_> = vertex_layout
+        .attributes
+        .iter()
+        .map(|attr| {
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(attr.location)
+                .format(vertex_format_to_vk(attr.format))
+                .offset(attr.offset)
+        })
+        .collect();
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
+        .vertex_attribute_descriptions(&attribute_descs);
+
+    // Input assembly
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(topology_to_vk(topology))
+        .primitive_restart_enable(false);
+
+    // Viewport/scissor (dynamic)
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+
+    // Rasterization
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .line_width(1.0)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .depth_bias_enable(false);
+
+    // Multisampling
+    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+        .sample_shading_enable(false)
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+    // Depth stencil state
+    let depth_stencil_state = if let Some(ds) = depth_stencil {
+        vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(ds.depth_write_enabled || ds.depth_compare != CompareFunction::Always)
+            .depth_write_enable(ds.depth_write_enabled)
+            .depth_compare_op(compare_to_vk(ds.depth_compare))
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false)
+    } else {
+        vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(false)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::ALWAYS)
+    };
+
+    // Color blending
+    let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(false);
+
+    let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .attachments(std::slice::from_ref(&color_blend_attachment));
+
+    // Dynamic state
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state =
+        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    // Pipeline layout - always use bindless with push constants
+    let bindless_set_layout = logical_device
+        .bindless_descriptor_set_layout
+        .context("Bindless descriptor set layout required")?;
+
+    let all_layouts = vec![bindless_set_layout];
+
+    // Push constant range for resource indices (16 x u32 = 64 bytes)
+    let push_constant_range = vk::PushConstantRange {
+        stage_flags: vk::ShaderStageFlags::ALL,
+        offset: 0,
+        size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+    };
+
+    let layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&all_layouts)
+        .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+
+    let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+        .context("Failed to create bindless pipeline layout")?;
+    let owns_layout = true;
+
+    // Dynamic rendering info (Vulkan 1.4)
+    let color_format = format_to_vk(target_format);
+    let depth_format_vk = depth_stencil
+        .map(|ds| depth_format_to_vk(ds.format))
+        .unwrap_or(vk::Format::UNDEFINED);
+
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(std::slice::from_ref(&color_format))
+        .depth_attachment_format(depth_format_vk);
+
+    // Create pipeline with depth stencil state
+    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&shader_stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisampling)
+        .depth_stencil_state(&depth_stencil_state)
+        .color_blend_state(&color_blending)
+        .dynamic_state(&dynamic_state)
+        .layout(layout)
+        .push_next(&mut rendering_info);
+
+    let vk_pipelines = unsafe {
+        logical_device.device.create_graphics_pipelines(
+            vk::PipelineCache::null(),
+            std::slice::from_ref(&pipeline_info),
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("Failed to create pipeline: {:?}", e.1))?;
+
+    let handle = *next_pipeline_handle;
+    *next_pipeline_handle += 1;
+
+    pipelines.insert(
+        handle,
+        PipelineState {
+            device_handle,
+            pipeline: vk_pipelines[0],
+            layout,
+            owns_layout,
+            parameter_block_layouts: Vec::new(),
+        },
+    );
+
+    tracing::debug!(
+        "Created pipeline with depth stencil (handle={}, bindless={})",
+        handle,
+        !owns_layout
+    );
+    Ok(handle)
+}
+
+/// Destroy a graphics pipeline and clean up GPU resources.
+pub(super) fn destroy(
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    pipelines: &mut HashMap<PipelineHandle, PipelineState>,
+    pipeline_handle: PipelineHandle,
+) {
+    if let Some(pipeline) = pipelines.remove(&pipeline_handle) {
+        if let Some(device) = devices.get(&pipeline.device_handle) {
+            unsafe {
+                if pipeline.pipeline != vk::Pipeline::null() {
+                    device.device.destroy_pipeline(pipeline.pipeline, None);
+                }
+                // Only destroy layout if we own it (not the global bindless layout)
+                if pipeline.owns_layout && pipeline.layout != vk::PipelineLayout::null() {
+                    device.device.destroy_pipeline_layout(pipeline.layout, None);
+                }
+            }
+        }
+    }
+}

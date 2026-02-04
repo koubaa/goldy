@@ -10,7 +10,10 @@
 //! - Shaders access resources by index using nonuniformEXT qualifier
 //! - Update-after-bind allows descriptor updates without pipeline barriers
 
-use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
+use super::super::{
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+};
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::HashMap;
@@ -443,4 +446,32 @@ impl DeletionQueue {
             }
         }
     }
+}
+
+/// Consolidated Vulkan backend state.
+/// This holds all the resources and state for the Vulkan backend.
+pub(super) struct VulkanState {
+    pub entry: ash::Entry,
+    pub instance: ash::Instance,
+    pub physical_devices: Vec<PhysicalDeviceInfo>,
+    pub devices: HashMap<DeviceHandle, LogicalDevice>,
+    pub next_device_handle: DeviceHandle,
+    pub buffers: HashMap<BufferHandle, BufferState>,
+    pub next_buffer_handle: BufferHandle,
+    pub shaders: HashMap<ShaderHandle, ShaderState>,
+    pub next_shader_handle: ShaderHandle,
+    pub pipelines: HashMap<PipelineHandle, PipelineState>,
+    pub next_pipeline_handle: PipelineHandle,
+    pub compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
+    pub next_compute_pipeline_handle: ComputePipelineHandle,
+    pub render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
+    pub next_render_target_handle: RenderTargetHandle,
+    pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
+    pub next_surface_handle: SurfaceHandle,
+    pub textures: HashMap<TextureHandle, TextureState>,
+    pub next_texture_handle: TextureHandle,
+    pub samplers: HashMap<SamplerHandle, SamplerState>,
+    pub next_sampler_handle: SamplerHandle,
+    /// Per-backend Slang compiler instance (avoids global state issues in tests)
+    pub slang_compiler: crate::slang::SlangCompiler,
 }

@@ -11,50 +11,30 @@
 // Allow isize casts needed for FFI with raw-window-handle and ash
 #![allow(clippy::unnecessary_cast)]
 
+mod buffer;
+mod compute;
+mod device;
+mod pipeline;
+mod render_commands;
+mod render_target;
+mod sampler;
+mod shader;
+mod surface;
+mod texture;
 mod types;
 mod utils;
 
 use types::*;
-use utils::{format_to_vk, index_format_to_vk, topology_to_vk, vertex_format_to_vk};
 
 use super::*;
-use crate::types::Color;
 use anyhow::{Context, Result};
 use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::CStr;
 
-#[cfg(target_os = "windows")]
-use raw_window_handle::RawWindowHandle;
-
-#[cfg(target_os = "linux")]
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-
 /// Vulkan backend.
 pub struct VulkanBackend {
-    entry: ash::Entry,
-    instance: ash::Instance,
-    physical_devices: Vec<PhysicalDeviceInfo>,
-    devices: HashMap<DeviceHandle, LogicalDevice>,
-    next_device_handle: DeviceHandle,
-    buffers: HashMap<BufferHandle, BufferState>,
-    next_buffer_handle: BufferHandle,
-    shaders: HashMap<ShaderHandle, ShaderState>,
-    next_shader_handle: ShaderHandle,
-    pipelines: HashMap<PipelineHandle, PipelineState>,
-    next_pipeline_handle: PipelineHandle,
-    compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
-    next_compute_pipeline_handle: ComputePipelineHandle,
-    render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
-    next_render_target_handle: RenderTargetHandle,
-    surfaces: HashMap<SurfaceHandle, SurfaceState>,
-    next_surface_handle: SurfaceHandle,
-    textures: HashMap<TextureHandle, TextureState>,
-    next_texture_handle: TextureHandle,
-    samplers: HashMap<SamplerHandle, SamplerState>,
-    next_sampler_handle: SamplerHandle,
-    /// Per-backend Slang compiler instance (avoids global state issues in tests)
-    slang_compiler: crate::slang::SlangCompiler,
+    state: VulkanState,
 }
 
 impl VulkanBackend {
@@ -178,7 +158,7 @@ impl VulkanBackend {
         let slang_compiler =
             crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
-        Ok(Self {
+        let state = VulkanState {
             entry,
             instance,
             physical_devices,
@@ -201,85 +181,9 @@ impl VulkanBackend {
             samplers: HashMap::new(),
             next_sampler_handle: 1,
             slang_compiler,
-        })
-    }
+        };
 
-    /// Find a suitable memory type for allocation.
-    fn find_memory_type(
-        &self,
-        physical_device: vk::PhysicalDevice,
-        type_filter: u32,
-        properties: vk::MemoryPropertyFlags,
-    ) -> Option<u32> {
-        utils::find_memory_type(&self.instance, physical_device, type_filter, properties)
-    }
-
-    /// Create a platform-specific Vulkan surface.
-    fn create_platform_surface(
-        &self,
-        window: &dyn raw_window_handle::HasWindowHandle,
-        _display: &dyn raw_window_handle::HasDisplayHandle,
-    ) -> Result<vk::SurfaceKHR> {
-        #[cfg(target_os = "windows")]
-        let window_handle = window
-            .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
-
-        #[cfg(target_os = "linux")]
-        let window_handle = window
-            .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
-
-        // Silence unused warning on platforms where surface creation isn't supported
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        let _ = window;
-
-        #[cfg(target_os = "windows")]
-        {
-            match window_handle.as_raw() {
-                RawWindowHandle::Win32(h) => {
-                    let create_info = vk::Win32SurfaceCreateInfoKHR::default()
-                        .hwnd(h.hwnd.get() as isize)
-                        .hinstance(h.hinstance.map(|i| i.get() as isize).unwrap_or(0));
-
-                    let win32_surface =
-                        khr::win32_surface::Instance::new(&self.entry, &self.instance);
-                    unsafe { win32_surface.create_win32_surface(&create_info, None) }
-                        .context("Failed to create Win32 surface")
-                }
-                _ => anyhow::bail!("Expected Win32 window handle on Windows"),
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let display_handle = _display
-                .display_handle()
-                .map_err(|e| anyhow::anyhow!("Failed to get display handle: {:?}", e))?;
-
-            match (window_handle.as_raw(), display_handle.as_raw()) {
-                (RawWindowHandle::Wayland(w), RawDisplayHandle::Wayland(d)) => {
-                    let create_info = vk::WaylandSurfaceCreateInfoKHR::default()
-                        .display(d.display.as_ptr())
-                        .surface(w.surface.as_ptr());
-
-                    let wayland_surface =
-                        khr::wayland_surface::Instance::new(&self.entry, &self.instance);
-                    unsafe { wayland_surface.create_wayland_surface(&create_info, None) }
-                        .context("Failed to create Wayland surface")
-                }
-                _ => anyhow::bail!(
-                    "Expected Wayland window/display handles on Linux (X11 not supported)"
-                ),
-            }
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        {
-            anyhow::bail!(
-                "Surface creation not supported on this platform - use Metal backend on macOS"
-            )
-        }
+        Ok(Self { state })
     }
 
     /// Compile a shader for a specific stage on demand.
@@ -288,277 +192,400 @@ impl VulkanBackend {
         shader_handle: ShaderHandle,
         stage: crate::slang::SlangStage,
     ) -> Result<vk::ShaderModule> {
-        let shader = self
-            .shaders
-            .get_mut(&shader_handle)
-            .context("Invalid shader handle")?;
+        shader::ensure_stage_compiled(
+            &self.state.slang_compiler,
+            &self.state.devices,
+            &mut self.state.shaders,
+            shader_handle,
+            stage,
+        )
+    }
+}
 
-        // Check if already compiled for this stage
-        let cached_module = match stage {
-            crate::slang::SlangStage::Vertex => shader.vertex_module,
-            crate::slang::SlangStage::Fragment => shader.fragment_module,
-            crate::slang::SlangStage::Compute => shader.compute_module,
-            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-        };
+// GpuBackend trait implementation - thin wrapper delegating to domain modules
+#[allow(clippy::manual_find)]
+impl GpuBackend for VulkanBackend {
+    fn backend_type(&self) -> BackendType {
+        BackendType::Vulkan
+    }
 
-        if let Some(module) = cached_module {
-            return Ok(module);
-        }
+    fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
+        device::enumerate(&self.state.physical_devices)
+    }
 
-        // Get the entry point name based on stage
-        let entry_point_name = match stage {
-            crate::slang::SlangStage::Vertex => "vs_main",
-            crate::slang::SlangStage::Fragment => "fs_main",
-            crate::slang::SlangStage::Compute => "cs_main",
-            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-        };
+    fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
+        device::create(&mut self.state, adapter_id)
+    }
 
-        // Clone source and search paths to avoid borrow issues
-        let slang_source = shader.slang_source.clone();
-        let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
-        let device_handle = shader.device_handle;
+    fn destroy_device(&mut self, device_handle: DeviceHandle) {
+        device::destroy(&mut self.state, device_handle);
+    }
 
-        // Compile shader with reflection data for resource binding
-        let result = self
-            .slang_compiler
-            .compile_bindless_with_reflection(
-                &slang_source,
-                crate::slang::ShaderTarget::Spirv,
-                &[(entry_point_name, stage)],
-                &search_paths,
-            )
-            .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
+    fn is_device_valid(&self, device: DeviceHandle) -> bool {
+        device::is_valid(&self.state, device)
+    }
 
-        let spirv_data = result
-            .shader
-            .as_spirv()
-            .context("Invalid SPIR-V output")?
-            .to_vec();
-        let reflection = Some(result.reflection);
+    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, access: DataAccess, element_stride: Option<u32>) -> Result<BufferHandle> {
+        buffer::create(
+            &mut self.state.devices,
+            &mut self.state.buffers,
+            &mut self.state.next_buffer_handle,
+            &self.state.instance,
+            device_handle,
+            size,
+            access,
+            element_stride,
+        )
+    }
 
-        // Get device
-        let logical_device = self
-            .devices
-            .get(&device_handle)
-            .context("Shader's device no longer valid")?;
+    fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
+        buffer::destroy(&mut self.state.devices, &mut self.state.buffers, buffer_handle);
+    }
 
-        // Create Vulkan shader module
-        // Convert Vec<u8> to &[u32] for SPIR-V
-        let spirv_u32: &[u32] = bytemuck::cast_slice(&spirv_data);
-        let create_info = vk::ShaderModuleCreateInfo::default().code(spirv_u32);
-        let module = unsafe {
-            logical_device
-                .device
-                .create_shader_module(&create_info, None)
-        }
-        .context("Failed to create Vulkan shader module")?;
+    fn write_buffer(&mut self, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+        buffer::write(&self.state.devices, &self.state.buffers, buffer_handle, offset, data)
+    }
 
-        tracing::debug!(
-            "Compiled {} ({} SPIR-V words)",
-            entry_point_name,
-            spirv_u32.len()
+    fn buffer_size(&self, buffer_handle: BufferHandle) -> u64 {
+        buffer::size(&self.state.buffers, buffer_handle)
+    }
+
+    fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
+        buffer::bindless_index(&self.state.buffers, buffer_handle)
+    }
+
+    fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
+        shader::create(
+            &self.state.devices,
+            &mut self.state.shaders,
+            &mut self.state.next_shader_handle,
+            device_handle,
+            slang_source,
+            &[],
+        )
+    }
+
+    fn create_shader_with_paths(&mut self, device_handle: DeviceHandle, slang_source: &str, search_paths: &[&str]) -> Result<ShaderHandle> {
+        shader::create(
+            &self.state.devices,
+            &mut self.state.shaders,
+            &mut self.state.next_shader_handle,
+            device_handle,
+            slang_source,
+            search_paths,
+        )
+    }
+
+    fn destroy_shader(&mut self, shader_handle: ShaderHandle) {
+        shader::destroy(&self.state.devices, &mut self.state.shaders, shader_handle);
+    }
+
+    fn create_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+    ) -> Result<PipelineHandle> {
+        // Compile shaders on-demand
+        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+
+        pipeline::create(
+            &self.state.devices,
+            &mut self.state.pipelines,
+            &mut self.state.next_pipeline_handle,
+            device_handle,
+            vs_module,
+            fs_module,
+            vertex_layout,
+            topology,
+            target_format,
+        )
+    }
+
+    fn destroy_pipeline(&mut self, pipeline_handle: PipelineHandle) {
+        pipeline::destroy(&self.state.devices, &mut self.state.pipelines, pipeline_handle);
+    }
+
+    fn create_render_target(&mut self, device_handle: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle> {
+        render_target::create(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.render_targets,
+            &mut self.state.next_render_target_handle,
+            device_handle,
+            width,
+            height,
+            format,
+        )
+    }
+
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        render_target::destroy(&self.state.devices, &mut self.state.render_targets, target);
+    }
+
+    fn render_to_target(&mut self, device_handle: DeviceHandle, target: RenderTargetHandle, commands: &[RenderCommand]) -> Result<()> {
+        render_target::render_to(
+            &self.state.devices,
+            &mut self.state.render_targets,
+            device_handle,
+            target,
+            commands,
+            |cmd, cmds, logical_device, current_pipeline| {
+                render_commands::record(
+                    cmd,
+                    cmds,
+                    logical_device,
+                    &self.state.pipelines,
+                    &self.state.buffers,
+                    current_pipeline,
+                );
+            },
+        )
+    }
+
+    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
+        render_target::read_to_cpu(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.render_targets,
+            target,
+            output,
+        )
+    }
+
+    fn create_surface(
+        &mut self,
+        device_handle: DeviceHandle,
+        window: &dyn raw_window_handle::HasWindowHandle,
+        display: &dyn raw_window_handle::HasDisplayHandle,
+    ) -> Result<SurfaceHandle> {
+        surface::create(
+            &self.state.entry,
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.surfaces,
+            &mut self.state.next_surface_handle,
+            device_handle,
+            window,
+            display,
+        )
+    }
+
+    fn destroy_surface(&mut self, surface_handle: SurfaceHandle) {
+        surface::destroy(
+            &self.state.entry,
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.surfaces,
+            surface_handle,
         );
-
-        // Dump SPIR-V for debugging when GOLDY_DUMP_SHADERS is set
-        if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
-            use std::io::Write;
-            let path =
-                std::path::Path::new(&dump_dir).join(format!("{}_vulkan.spv", entry_point_name));
-            if let Ok(mut file) = std::fs::File::create(&path) {
-                let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
-                let _ = file.write_all(spirv_bytes);
-                tracing::info!("Dumped SPIR-V bytecode to {}", path.display());
-            }
-        }
-
-        // Cache the module and reflection data
-        let shader = self.shaders.get_mut(&shader_handle).unwrap();
-        match stage {
-            crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
-            crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
-            crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
-            _ => {} // Already validated above, shouldn't reach here
-        }
-
-        // Store reflection data (merge with existing if any)
-        if let Some(ref new_reflection) = reflection {
-            if let Some(ref mut existing) = shader.reflection {
-                // Merge parameter blocks
-                for pb in &new_reflection.parameter_blocks {
-                    if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
-                        existing.parameter_blocks.push(pb.clone());
-                    }
-                }
-            } else {
-                shader.reflection = reflection;
-            }
-        }
-
-        Ok(module)
     }
 
-    /// Record render commands into a command buffer.
-    /// This is shared between render_to_target and surface_render to avoid duplication.
-    fn record_render_commands(
-        &self,
-        cmd: vk::CommandBuffer,
-        commands: &[RenderCommand],
-        logical_device: &types::LogicalDevice,
-        current_pipeline: &mut Option<PipelineHandle>,
-    ) {
-        for command in commands {
-            match command {
-                RenderCommand::Clear(_) => {
-                    // Already handled via load op
-                }
-                RenderCommand::ClearDepth(_) => {
-                    // TODO: Implement depth clear when depth buffer is supported
-                }
-                RenderCommand::SetPipeline(pipeline_handle) => {
-                    *current_pipeline = Some(*pipeline_handle);
-                    if let Some(pipeline) = self.pipelines.get(pipeline_handle) {
-                        unsafe {
-                            logical_device.device.cmd_bind_pipeline(
-                                cmd,
-                                vk::PipelineBindPoint::GRAPHICS,
-                                pipeline.pipeline,
-                            );
+    fn surface_acquire(&mut self, surface_handle: SurfaceHandle) -> Result<SwapchainImageHandle> {
+        surface::acquire(
+            &self.state.instance,
+            &mut self.state.devices,
+            &mut self.state.surfaces,
+            surface_handle,
+        )
+    }
 
-                            // Bind the global bindless descriptor set if enabled
-                            // Use the PIPELINE's layout (not the global bindless_pipeline_layout)
-                            // because the pipeline has a hybrid layout with both bindless + user sets
-                            if logical_device.bindless_enabled {
-                                if let Some(bindless_set) = logical_device.bindless_descriptor_set {
-                                    logical_device.device.cmd_bind_descriptor_sets(
-                                        cmd,
-                                        vk::PipelineBindPoint::GRAPHICS,
-                                        pipeline.layout,  // Use pipeline's own layout
-                                        0,
-                                        std::slice::from_ref(&bindless_set),
-                                        &[],
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
-                    if let Some(buf_state) = self.buffers.get(buffer) {
-                        unsafe {
-                            logical_device.device.cmd_bind_vertex_buffers(
-                                cmd,
-                                *slot,
-                                std::slice::from_ref(&buf_state.buffer),
-                                std::slice::from_ref(offset),
-                            );
-                        }
-                    }
-                }
-                RenderCommand::SetPushConstants { buffers } => {
-                    // Fully bindless mode: push buffer indices directly (no bind groups needed)
-                    if logical_device.bindless_enabled {
-                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
-                            let mut indices = types::BindlessIndices::default();
-                            for (i, buffer_handle) in buffers.iter().enumerate() {
-                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
-                                indices.indices[i] = self.buffers.get(buffer_handle)
-                                    .and_then(|b| b.bindless_index)
-                                    .unwrap_or(0);
-                            }
-                            unsafe {
-                                logical_device.device.cmd_push_constants(
-                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
-                                    bytemuck::bytes_of(&indices),
-                                );
-                            }
-                        }
-                    }
-                }
-                RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
-                    // Fully bindless mode: push raw indices directly (for textures/samplers)
-                    if logical_device.bindless_enabled {
-                        if let Some(pipeline) = current_pipeline.and_then(|p| self.pipelines.get(&p)) {
-                            let mut indices = types::BindlessIndices::default();
-                            for (i, &idx) in raw_indices.iter().enumerate() {
-                                if i >= types::MAX_PUSH_CONSTANT_INDICES { break; }
-                                indices.indices[i] = idx;
-                            }
-                            unsafe {
-                                logical_device.device.cmd_push_constants(
-                                    cmd, pipeline.layout, vk::ShaderStageFlags::ALL, 0,
-                                    bytemuck::bytes_of(&indices),
-                                );
-                            }
-                        }
-                    }
-                }
-                RenderCommand::SetIndexBuffer { buffer, offset, format } => {
-                    if let Some(buf_state) = self.buffers.get(buffer) {
-                        unsafe {
-                            logical_device.device.cmd_bind_index_buffer(
-                                cmd,
-                                buf_state.buffer,
-                                *offset,
-                                index_format_to_vk(*format),
-                            );
-                        }
-                    }
-                }
-                RenderCommand::Draw {
-                    vertex_count,
-                    instance_count,
-                    first_vertex,
-                    first_instance,
-                } => {
-                    unsafe {
-                        logical_device.device.cmd_draw(
-                            cmd,
-                            *vertex_count,
-                            *instance_count,
-                            *first_vertex,
-                            *first_instance,
-                        );
-                    }
-                }
-                RenderCommand::DrawIndexed {
-                    index_count,
-                    instance_count,
-                    first_index,
-                    base_vertex,
-                    first_instance,
-                } => {
-                    unsafe {
-                        logical_device.device.cmd_draw_indexed(
-                            cmd,
-                            *index_count,
-                            *instance_count,
-                            *first_index,
-                            *base_vertex,
-                            *first_instance,
-                        );
-                    }
-                }
-            }
-        }
+    fn surface_render(&mut self, surface_handle: SurfaceHandle, _image: SwapchainImageHandle, commands: &[RenderCommand]) -> Result<()> {
+        surface::render(
+            &self.state.devices,
+            &self.state.surfaces,
+            surface_handle,
+            _image,
+            commands,
+            |cmd, cmds, logical_device, current_pipeline| {
+                render_commands::record(
+                    cmd,
+                    cmds,
+                    logical_device,
+                    &self.state.pipelines,
+                    &self.state.buffers,
+                    current_pipeline,
+                );
+            },
+        )
+    }
+
+    fn surface_present(&mut self, surface_handle: SurfaceHandle, _image: SwapchainImageHandle) -> Result<()> {
+        surface::present(
+            &self.state.instance,
+            &mut self.state.devices,
+            &mut self.state.surfaces,
+            surface_handle,
+            _image,
+        )
+    }
+
+    fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+        surface::resize(
+            &self.state.entry,
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.surfaces,
+            surface_handle,
+            width,
+            height,
+        )
+    }
+
+    fn surface_size(&self, surface_handle: SurfaceHandle) -> (u32, u32) {
+        surface::size(&self.state.surfaces, surface_handle)
+    }
+
+    fn surface_format(&self, surface_handle: SurfaceHandle) -> TextureFormat {
+        surface::format(&self.state.surfaces, surface_handle)
+    }
+
+    fn create_pipeline_with_depth(
+        &mut self,
+        device_handle: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+    ) -> Result<PipelineHandle> {
+        // Compile shaders on-demand
+        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+
+        pipeline::create_with_depth(
+            &self.state.devices,
+            &mut self.state.pipelines,
+            &mut self.state.next_pipeline_handle,
+            device_handle,
+            vs_module,
+            fs_module,
+            vertex_layout,
+            topology,
+            target_format,
+            depth_stencil,
+        )
+    }
+
+    fn create_render_target_with_depth(
+        &mut self,
+        device_handle: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<crate::types::DepthFormat>,
+    ) -> Result<RenderTargetHandle> {
+        render_target::create_with_depth(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.render_targets,
+            &mut self.state.next_render_target_handle,
+            device_handle,
+            width,
+            height,
+            color_format,
+            depth_format,
+        )
+    }
+
+    fn create_texture(
+        &mut self,
+        device_handle: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: SpatialAccess,
+        flags: TextureFlags,
+    ) -> Result<TextureHandle> {
+        texture::create(
+            &self.state.instance,
+            &mut self.state.devices,
+            &mut self.state.textures,
+            &mut self.state.next_texture_handle,
+            device_handle,
+            width,
+            height,
+            format,
+            access,
+            flags,
+        )
+    }
+
+    fn write_texture(&mut self, texture_handle: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
+        texture::write(
+            &self.state.instance,
+            &self.state.devices,
+            &self.state.textures,
+            texture_handle,
+            data,
+            width,
+            height,
+        )
+    }
+
+    fn destroy_texture(&mut self, texture_handle: TextureHandle) {
+        texture::destroy(&mut self.state.devices, &mut self.state.textures, texture_handle);
+    }
+
+    fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
+        texture::bindless_index(&self.state.textures, texture_handle)
+    }
+
+    fn create_sampler(&mut self, device_handle: DeviceHandle, desc: &crate::types::SamplerDesc) -> Result<SamplerHandle> {
+        sampler::create(
+            &mut self.state.devices,
+            &mut self.state.samplers,
+            &mut self.state.next_sampler_handle,
+            device_handle,
+            desc,
+        )
+    }
+
+    fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
+        sampler::destroy(&mut self.state.devices, &mut self.state.samplers, sampler_handle);
+    }
+
+    fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
+        sampler::bindless_index(&self.state.samplers, sampler_handle)
+    }
+
+    fn create_compute_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        compute_shader: ShaderHandle,
+    ) -> Result<ComputePipelineHandle> {
+        // Compile shader on-demand
+        let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
+
+        compute::create(
+            &self.state.devices,
+            &mut self.state.compute_pipelines,
+            &mut self.state.next_compute_pipeline_handle,
+            device_handle,
+            cs_module,
+        )
+    }
+
+    fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
+        compute::destroy(
+            &self.state.devices,
+            &mut self.state.compute_pipelines,
+            pipeline_handle,
+        );
+    }
+
+    fn dispatch_compute(&mut self, device_handle: DeviceHandle, commands: &[ComputeCommand]) -> Result<()> {
+        compute::dispatch(
+            &self.state.devices,
+            &self.state.compute_pipelines,
+            &self.state.buffers,
+            device_handle,
+            commands,
+        )
     }
 }
-
-impl Drop for VulkanBackend {
-    fn drop(&mut self) {
-        tracing::info!("Shutting down Vulkan backend");
-
-        // Destroy all devices (which will clean up their resources)
-        let device_handles: Vec<_> = self.devices.keys().copied().collect();
-        for handle in device_handles {
-            self.destroy_device(handle);
-        }
-
-        unsafe {
-            self.instance.destroy_instance(None);
-        }
-    }
-}
-
-// Include the GpuBackend implementation from the old file
-// This is kept inline for now but could be further modularized
-include!("impl_gpu_backend.rs");
