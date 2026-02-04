@@ -54,7 +54,7 @@ pub mod bindless_bindings {
     /// Slang: SamplerState
     pub const FILTER_CONFIG: u32 = 4;
 
-    // Legacy aliases for existing code
+    // Legacy aliases for legitibility to graphics programmers
     pub const STORAGE_BUFFERS: u32 = SCATTERED;
     pub const UNIFORM_BUFFERS: u32 = BROADCAST;
     pub const SAMPLED_IMAGES: u32 = INTERPOLATED;
