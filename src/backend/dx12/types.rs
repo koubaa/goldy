@@ -10,7 +10,10 @@
 //! - Resources are registered at creation time and assigned heap offsets
 //! - Shaders access resources by indexing into the descriptor heaps
 
-use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
+use super::super::{
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+};
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
@@ -288,4 +291,35 @@ pub(crate) struct SurfaceState {
     pub current_image_index: Option<u32>,
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
+}
+
+/// Consolidated DX12 backend state.
+/// This holds all the resources and state for the DX12 backend.
+pub(super) struct Dx12State {
+    pub factory: Dxgi::IDXGIFactory4,
+    pub adapters: Vec<DxgiAdapterInfo>,
+    pub devices: HashMap<DeviceHandle, LogicalDevice>,
+    pub next_device_handle: DeviceHandle,
+    pub buffers: HashMap<BufferHandle, BufferState>,
+    pub next_buffer_handle: BufferHandle,
+    pub shaders: HashMap<ShaderHandle, ShaderState>,
+    pub next_shader_handle: ShaderHandle,
+    pub pipelines: HashMap<PipelineHandle, PipelineState>,
+    pub next_pipeline_handle: PipelineHandle,
+    pub compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
+    pub next_compute_pipeline_handle: ComputePipelineHandle,
+    pub render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
+    pub next_render_target_handle: RenderTargetHandle,
+    pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
+    pub next_surface_handle: SurfaceHandle,
+    pub textures: HashMap<TextureHandle, TextureState>,
+    pub next_texture_handle: TextureHandle,
+    pub samplers: HashMap<SamplerHandle, SamplerState>,
+    pub next_sampler_handle: SamplerHandle,
+    /// Next RTV descriptor offset
+    pub next_rtv_offset: u32,
+    /// Next DSV descriptor offset
+    pub next_dsv_offset: u32,
+    /// Per-backend Slang compiler instance
+    pub slang_compiler: crate::slang::SlangCompiler,
 }
