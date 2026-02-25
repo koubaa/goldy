@@ -186,11 +186,12 @@ impl MetalBackend {
         } else {
             let result = self
                 .slang_compiler
-                .compile_with_options(
+                .compile_with_defines(
                     slang_source,
                     crate::slang::ShaderTarget::Metal,
                     &[(entry_point, stage)],
                     &search_path_refs,
+                    &[("__METAL__", "1")],
                 )
                 .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
             (result, None)
