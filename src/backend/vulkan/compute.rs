@@ -154,7 +154,9 @@ pub(super) fn dispatch(
                     current_pipeline = Some(*handle);
                 }
             }
-            ComputeCommand::SetPushConstants { buffers: buffer_handles } => {
+            ComputeCommand::SetPushConstants {
+                buffers: buffer_handles,
+            } => {
                 // Fully bindless mode: push buffer indices directly
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                     let mut indices = BindlessIndices::default();
@@ -183,9 +185,12 @@ pub(super) fn dispatch(
                 workgroups_y,
                 workgroups_z,
             } => unsafe {
-                logical_device
-                    .device
-                    .cmd_dispatch(cmd, *workgroups_x, *workgroups_y, *workgroups_z);
+                logical_device.device.cmd_dispatch(
+                    cmd,
+                    *workgroups_x,
+                    *workgroups_y,
+                    *workgroups_z,
+                );
             },
         }
     }

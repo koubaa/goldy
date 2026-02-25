@@ -70,7 +70,9 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::SetPushConstants { buffers: buf_handles } => {
+            RenderCommand::SetPushConstants {
+                buffers: buf_handles,
+            } => {
                 // Fully bindless mode: push buffer indices directly (no bind groups needed)
                 if logical_device.bindless_enabled {
                     if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
@@ -96,7 +98,9 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::SetPushConstantsRaw { indices: raw_indices } => {
+            RenderCommand::SetPushConstantsRaw {
+                indices: raw_indices,
+            } => {
                 // Fully bindless mode: push raw indices directly (for textures/samplers)
                 if logical_device.bindless_enabled {
                     if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
@@ -140,35 +144,31 @@ pub(super) fn record(
                 instance_count,
                 first_vertex,
                 first_instance,
-            } => {
-                unsafe {
-                    logical_device.device.cmd_draw(
-                        cmd,
-                        *vertex_count,
-                        *instance_count,
-                        *first_vertex,
-                        *first_instance,
-                    );
-                }
-            }
+            } => unsafe {
+                logical_device.device.cmd_draw(
+                    cmd,
+                    *vertex_count,
+                    *instance_count,
+                    *first_vertex,
+                    *first_instance,
+                );
+            },
             RenderCommand::DrawIndexed {
                 index_count,
                 instance_count,
                 first_index,
                 base_vertex,
                 first_instance,
-            } => {
-                unsafe {
-                    logical_device.device.cmd_draw_indexed(
-                        cmd,
-                        *index_count,
-                        *instance_count,
-                        *first_index,
-                        *base_vertex,
-                        *first_instance,
-                    );
-                }
-            }
+            } => unsafe {
+                logical_device.device.cmd_draw_indexed(
+                    cmd,
+                    *index_count,
+                    *instance_count,
+                    *first_index,
+                    *base_vertex,
+                    *first_instance,
+                );
+            },
         }
     }
 }

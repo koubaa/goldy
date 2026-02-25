@@ -95,11 +95,9 @@ pub(super) fn create(
         cpu_handle
     };
     unsafe {
-        logical_device.device.CreateShaderResourceView(
-            &resource,
-            Some(&srv_desc),
-            srv_cpu_handle,
-        );
+        logical_device
+            .device
+            .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
     }
 
     state.textures.insert(
@@ -273,8 +271,7 @@ pub(super) fn write(
     }
     .context("Failed to close command list")?;
 
-    let cmd_list: ID3D12CommandList =
-        command_list.cast().context("Failed to cast command list")?;
+    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = state.devices.get(&device_handle).unwrap();
     unsafe {
@@ -304,7 +301,8 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
 
 /// Get the bindless index for a texture.
 pub(super) fn bindless_index(state: &Dx12State, texture_handle: TextureHandle) -> Option<u32> {
-    state.textures
+    state
+        .textures
         .get(&texture_handle)
         .and_then(|t| t.bindless_offset)
 }

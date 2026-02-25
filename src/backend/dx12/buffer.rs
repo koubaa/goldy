@@ -293,12 +293,12 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
 /// Wait for a fence to reach the specified value.
 /// This is a low-level helper for GPU synchronization.
 fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
     use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
 
     if unsafe { fence.GetCompletedValue() } < value {
-        let event = unsafe { CreateEventA(None, false, false, None) }
-            .context("Failed to create event")?;
+        let event =
+            unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
         unsafe { fence.SetEventOnCompletion(value, event) }
             .context("Failed to set event on completion")?;
@@ -310,7 +310,12 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 }
 
 /// Write data to a buffer at the specified offset.
-pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+pub(super) fn write(
+    state: &mut Dx12State,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    data: &[u8],
+) -> Result<()> {
     let buffer = state
         .buffers
         .get(&buffer_handle)
@@ -435,10 +440,17 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
 
 /// Get the size of a buffer in bytes.
 pub(super) fn size(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
-    state.buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
+    state
+        .buffers
+        .get(&buffer_handle)
+        .map(|b| b.size)
+        .unwrap_or(0)
 }
 
 /// Get the bindless descriptor index for a buffer, if any.
 pub(super) fn bindless_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
-    state.buffers.get(&buffer_handle).and_then(|b| b.bindless_offset)
+    state
+        .buffers
+        .get(&buffer_handle)
+        .and_then(|b| b.bindless_offset)
 }

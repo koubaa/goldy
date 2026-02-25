@@ -133,9 +133,7 @@ pub(super) fn ensure_stage_compiled(
                 &[(entry_point_name, stage)],
                 &search_path_refs,
             )
-            .with_context(|| {
-                format!("Failed to compile {} shader to DXIL", entry_point_name)
-            })?;
+            .with_context(|| format!("Failed to compile {} shader to DXIL", entry_point_name))?;
 
         let dxil = dxil_compiled
             .as_dxil()
@@ -154,8 +152,7 @@ pub(super) fn ensure_stage_compiled(
     // Dump DXIL for debugging when GOLDY_DUMP_SHADERS is set
     if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
         use std::io::Write;
-        let path =
-            std::path::Path::new(&dump_dir).join(format!("{}_dx12.dxil", entry_point_name));
+        let path = std::path::Path::new(&dump_dir).join(format!("{}_dx12.dxil", entry_point_name));
         if let Ok(mut file) = std::fs::File::create(&path) {
             let _ = file.write_all(&bytecode);
             tracing::info!("Dumped DXIL bytecode to {}", path.display());

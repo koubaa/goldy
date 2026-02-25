@@ -16,7 +16,9 @@ pub(super) fn create(
     search_paths: &[&str],
 ) -> Result<ShaderHandle> {
     // Just validate the device exists - actual compilation happens at pipeline creation
-    let _ = devices.get(&device_handle).context("Invalid device handle")?;
+    let _ = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
 
     let handle = *next_shader_handle;
     *next_shader_handle += 1;
@@ -141,8 +143,7 @@ pub(super) fn ensure_stage_compiled(
     // Dump SPIR-V for debugging when GOLDY_DUMP_SHADERS is set
     if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
         use std::io::Write;
-        let path =
-            std::path::Path::new(&dump_dir).join(format!("{}_vulkan.spv", entry_point_name));
+        let path = std::path::Path::new(&dump_dir).join(format!("{}_vulkan.spv", entry_point_name));
         if let Ok(mut file) = std::fs::File::create(&path) {
             let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
             let _ = file.write_all(spirv_bytes);

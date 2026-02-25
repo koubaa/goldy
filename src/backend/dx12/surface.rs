@@ -90,8 +90,8 @@ pub(super) fn create(
     let mut rtv_offsets = Vec::new();
 
     for i in 0..MAX_FRAMES_IN_FLIGHT {
-        let buffer: ID3D12Resource = unsafe { swapchain.GetBuffer(i as u32) }
-            .context("Failed to get swapchain buffer")?;
+        let buffer: ID3D12Resource =
+            unsafe { swapchain.GetBuffer(i as u32) }.context("Failed to get swapchain buffer")?;
 
         let rtv_offset = state.next_rtv_offset;
         state.next_rtv_offset += 1;
@@ -175,7 +175,10 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
 }
 
 /// Acquire the next swapchain image.
-pub(super) fn acquire(state: &mut Dx12State, surface_handle: SurfaceHandle) -> Result<SwapchainImageHandle> {
+pub(super) fn acquire(
+    state: &mut Dx12State,
+    surface_handle: SurfaceHandle,
+) -> Result<SwapchainImageHandle> {
     let surface = state
         .surfaces
         .get_mut(&surface_handle)
@@ -220,8 +223,7 @@ pub(super) fn render(
 
     // Reset command allocator and list
     unsafe { frame.command_allocator.Reset() }.context("Failed to reset command allocator")?;
-    unsafe { cmd.Reset(&frame.command_allocator, None) }
-        .context("Failed to reset command list")?;
+    unsafe { cmd.Reset(&frame.command_allocator, None) }.context("Failed to reset command list")?;
 
     // Transition to render target
     let barrier = D3D12_RESOURCE_BARRIER {
@@ -495,8 +497,8 @@ pub(super) fn format(state: &Dx12State, surface_handle: SurfaceHandle) -> Textur
 // Helper functions
 
 fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    let event = unsafe { CreateEventA(None, false, false, None) }
-        .context("Failed to create event")?;
+    let event =
+        unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
     unsafe { fence.SetEventOnCompletion(value, event) }
         .context("Failed to set event on completion")?;
     unsafe { WaitForSingleObject(event, INFINITE) };
@@ -506,11 +508,7 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 
 fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
     let fence_value = device.fence_value;
-    unsafe {
-        device
-            .command_queue
-            .Signal(&device.fence, fence_value)
-    }
-    .context("Failed to signal fence")?;
+    unsafe { device.command_queue.Signal(&device.fence, fence_value) }
+        .context("Failed to signal fence")?;
     wait_for_fence(&device.fence, fence_value)
 }

@@ -8,18 +8,18 @@
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
 //! - `utils`: Format conversion and helpers
 
-mod types;
-mod utils;
-mod render_commands;
 mod buffer;
-mod shader;
+mod compute;
 mod device;
 mod pipeline;
+mod render_commands;
 mod render_target;
-mod surface;
-mod compute;
-mod texture;
 mod sampler;
+mod shader;
+mod surface;
+mod texture;
+mod types;
+mod utils;
 
 use types::{Dx12State, DxgiAdapterInfo, LogicalDevice};
 
@@ -169,7 +169,8 @@ impl GpuBackend for Dx12Backend {
             let _ = self.wait_for_gpu(&logical_device);
 
             // Destroy buffers owned by this device
-            let buffer_handles: Vec<_> = self.state
+            let buffer_handles: Vec<_> = self
+                .state
                 .buffers
                 .iter()
                 .filter(|(_, b)| b.device_handle == device_handle)
@@ -180,7 +181,8 @@ impl GpuBackend for Dx12Backend {
             }
 
             // Destroy shaders owned by this device
-            let shader_handles: Vec<_> = self.state
+            let shader_handles: Vec<_> = self
+                .state
                 .shaders
                 .iter()
                 .filter(|(_, s)| s.device_handle == device_handle)
@@ -191,7 +193,8 @@ impl GpuBackend for Dx12Backend {
             }
 
             // Destroy pipelines owned by this device
-            let pipeline_handles: Vec<_> = self.state
+            let pipeline_handles: Vec<_> = self
+                .state
                 .pipelines
                 .iter()
                 .filter(|(_, p)| p.device_handle == device_handle)
@@ -202,7 +205,8 @@ impl GpuBackend for Dx12Backend {
             }
 
             // Destroy render targets owned by this device
-            let target_handles: Vec<_> = self.state
+            let target_handles: Vec<_> = self
+                .state
                 .render_targets
                 .iter()
                 .filter(|(_, t)| t.device_handle == device_handle)
@@ -213,7 +217,8 @@ impl GpuBackend for Dx12Backend {
             }
 
             // Destroy surfaces owned by this device
-            let surface_handles: Vec<_> = self.state
+            let surface_handles: Vec<_> = self
+                .state
                 .surfaces
                 .iter()
                 .filter(|(_, s)| s.device_handle == device_handle)
@@ -224,7 +229,8 @@ impl GpuBackend for Dx12Backend {
             }
 
             // Destroy textures owned by this device
-            let texture_handles: Vec<_> = self.state
+            let texture_handles: Vec<_> = self
+                .state
                 .textures
                 .iter()
                 .filter(|(_, t)| t.device_handle == device_handle)
@@ -235,7 +241,8 @@ impl GpuBackend for Dx12Backend {
             }
 
             // Destroy samplers owned by this device
-            let sampler_handles: Vec<_> = self.state
+            let sampler_handles: Vec<_> = self
+                .state
                 .samplers
                 .iter()
                 .filter(|(_, s)| s.device_handle == device_handle)
@@ -430,7 +437,14 @@ impl GpuBackend for Dx12Backend {
         color_format: TextureFormat,
         depth_format: Option<crate::types::DepthFormat>,
     ) -> Result<RenderTargetHandle> {
-        render_target::create_with_depth(&mut self.state, device_handle, width, height, color_format, depth_format)
+        render_target::create_with_depth(
+            &mut self.state,
+            device_handle,
+            width,
+            height,
+            color_format,
+            depth_format,
+        )
     }
     fn create_texture(
         &mut self,
@@ -441,7 +455,15 @@ impl GpuBackend for Dx12Backend {
         access: SpatialAccess,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
-        texture::create(&mut self.state, device_handle, width, height, format, access, flags)
+        texture::create(
+            &mut self.state,
+            device_handle,
+            width,
+            height,
+            format,
+            access,
+            flags,
+        )
     }
 
     fn write_texture(

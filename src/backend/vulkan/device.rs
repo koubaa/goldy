@@ -4,8 +4,8 @@ use super::types::{self, PhysicalDeviceInfo};
 use super::{DeviceHandle, VulkanState};
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
-use ash::vk;
 use ash::khr;
+use ash::vk;
 use std::ffi::CStr;
 
 /// Enumerate available physical devices/adapters.
@@ -54,8 +54,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let physical_device_handle = physical_device.handle;
 
     // Find a graphics queue family
-    let queue_families =
-        unsafe { state.instance.get_physical_device_queue_family_properties(physical_device_handle) };
+    let queue_families = unsafe {
+        state
+            .instance
+            .get_physical_device_queue_family_properties(physical_device_handle)
+    };
 
     let queue_family_index = queue_families
         .iter()
@@ -72,16 +75,15 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     // Enable Vulkan 1.2 descriptor indexing features.
     // Goldy requires these features - they've been core since Vulkan 1.2 (2020)
     // and are supported by all modern GPUs and software implementations (lavapipe).
-    let mut descriptor_indexing_features =
-        vk::PhysicalDeviceDescriptorIndexingFeatures::default()
-            .descriptor_binding_partially_bound(true)
-            .descriptor_binding_sampled_image_update_after_bind(true)
-            .descriptor_binding_storage_buffer_update_after_bind(true)
-            .descriptor_binding_uniform_buffer_update_after_bind(true)
-            .runtime_descriptor_array(true)
-            .shader_storage_buffer_array_non_uniform_indexing(true)
-            .shader_sampled_image_array_non_uniform_indexing(true)
-            .shader_uniform_buffer_array_non_uniform_indexing(true);
+    let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
+        .descriptor_binding_partially_bound(true)
+        .descriptor_binding_sampled_image_update_after_bind(true)
+        .descriptor_binding_storage_buffer_update_after_bind(true)
+        .descriptor_binding_uniform_buffer_update_after_bind(true)
+        .runtime_descriptor_array(true)
+        .shader_storage_buffer_array_non_uniform_indexing(true)
+        .shader_sampled_image_array_non_uniform_indexing(true)
+        .shader_uniform_buffer_array_non_uniform_indexing(true);
 
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut vulkan_13_features)
@@ -140,8 +142,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
                 | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
         ];
 
-        let mut binding_flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
-            .binding_flags(&binding_flags);
+        let mut binding_flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
 
         let bindings = [
             // Binding 0: Scattered buffer access (read/write)
@@ -181,8 +183,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
             .push_next(&mut binding_flags_info);
 
-        let descriptor_set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
-            .context("Failed to create bindless descriptor set layout")?;
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_info, None) }
+                .context("Failed to create bindless descriptor set layout")?;
 
         // Create descriptor pool with update-after-bind flag
         let pool_sizes = [
@@ -281,7 +284,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         },
     );
 
-    tracing::info!("Created Vulkan device {} for adapter {}", handle, adapter_id);
+    tracing::info!(
+        "Created Vulkan device {} for adapter {}",
+        handle,
+        adapter_id
+    );
     Ok(handle)
 }
 
@@ -293,7 +300,9 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             logical_device.device.device_wait_idle().ok();
 
             // Flush any pending deferred deletions
-            logical_device.deletion_queue.flush_all(&logical_device.device);
+            logical_device
+                .deletion_queue
+                .flush_all(&logical_device.device);
 
             // Destroy buffers owned by this device
             let buffer_handles: Vec<_> = state
@@ -389,9 +398,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                         .device
                         .destroy_image_view(target.image_view, None);
                     logical_device.device.destroy_image(target.image, None);
-                    logical_device
-                        .device
-                        .free_memory(target.image_memory, None);
+                    logical_device.device.free_memory(target.image_memory, None);
                     // Clean up depth buffer if present
                     if let Some(depth_view) = target.depth_view {
                         logical_device.device.destroy_image_view(depth_view, None);
@@ -403,9 +410,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                         logical_device.device.free_memory(depth_memory, None);
                     }
                     if let Some(staging_buffer) = target.staging_buffer {
-                        logical_device
-                            .device
-                            .destroy_buffer(staging_buffer, None);
+                        logical_device.device.destroy_buffer(staging_buffer, None);
                     }
                     if let Some(staging_memory) = target.staging_memory {
                         logical_device.device.free_memory(staging_memory, None);
@@ -426,9 +431,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     logical_device.device.destroy_image(texture.image, None);
                     logical_device.device.free_memory(texture.memory, None);
                     if let Some(staging_buffer) = texture.staging_buffer {
-                        logical_device
-                            .device
-                            .destroy_buffer(staging_buffer, None);
+                        logical_device.device.destroy_buffer(staging_buffer, None);
                     }
                     if let Some(staging_memory) = texture.staging_memory {
                         logical_device.device.free_memory(staging_memory, None);
@@ -445,9 +448,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 .collect();
             for handle in sampler_handles {
                 if let Some(sampler) = state.samplers.remove(&handle) {
-                    logical_device
-                        .device
-                        .destroy_sampler(sampler.sampler, None);
+                    logical_device.device.destroy_sampler(sampler.sampler, None);
                 }
             }
 

@@ -108,9 +108,7 @@ pub(super) fn destroy(
 
             unsafe {
                 logical_device.device.device_wait_idle().ok();
-                logical_device
-                    .device
-                    .destroy_sampler(sampler.sampler, None);
+                logical_device.device.destroy_sampler(sampler.sampler, None);
             }
         }
     }
@@ -121,7 +119,5 @@ pub(super) fn bindless_index(
     samplers: &HashMap<SamplerHandle, SamplerState>,
     sampler_handle: SamplerHandle,
 ) -> Option<u32> {
-    samplers
-        .get(&sampler_handle)
-        .and_then(|s| s.bindless_index)
+    samplers.get(&sampler_handle).and_then(|s| s.bindless_index)
 }

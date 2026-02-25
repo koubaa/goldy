@@ -152,11 +152,7 @@ pub(super) fn create(
                     .update_descriptor_sets(std::slice::from_ref(&write), &[]);
             }
 
-            tracing::trace!(
-                "Registered texture {} at bindless index {}",
-                handle,
-                index
-            );
+            tracing::trace!("Registered texture {} at bindless index {}", handle, index);
         }
 
         Some(index)
@@ -248,8 +244,12 @@ pub(super) fn write(
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_buffer_info, None) }
-        .context("Failed to create staging buffer")?;
+    let staging_buffer = unsafe {
+        logical_device
+            .device
+            .create_buffer(&staging_buffer_info, None)
+    }
+    .context("Failed to create staging buffer")?;
 
     let staging_mem_reqs = unsafe {
         logical_device
@@ -284,12 +284,7 @@ pub(super) fn write(
     unsafe {
         let ptr = logical_device
             .device
-            .map_memory(
-                staging_memory,
-                0,
-                buffer_size,
-                vk::MemoryMapFlags::empty(),
-            )
+            .map_memory(staging_memory, 0, buffer_size, vk::MemoryMapFlags::empty())
             .context("Failed to map staging memory")?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
         logical_device.device.unmap_memory(staging_memory);
@@ -332,7 +327,8 @@ pub(super) fn write(
                 layer_count: 1,
             });
 
-        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
         logical_device
             .device
             .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
@@ -380,7 +376,8 @@ pub(super) fn write(
                 layer_count: 1,
             });
 
-        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
         logical_device
             .device
             .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
@@ -439,9 +436,7 @@ pub(super) fn destroy(
                 logical_device.device.destroy_image(texture.image, None);
                 logical_device.device.free_memory(texture.memory, None);
                 if let Some(staging_buffer) = texture.staging_buffer {
-                    logical_device
-                        .device
-                        .destroy_buffer(staging_buffer, None);
+                    logical_device.device.destroy_buffer(staging_buffer, None);
                 }
                 if let Some(staging_memory) = texture.staging_memory {
                     logical_device.device.free_memory(staging_memory, None);
@@ -456,7 +451,5 @@ pub(super) fn bindless_index(
     textures: &HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
 ) -> Option<u32> {
-    textures
-        .get(&texture_handle)
-        .and_then(|t| t.bindless_index)
+    textures.get(&texture_handle).and_then(|t| t.bindless_index)
 }

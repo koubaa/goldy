@@ -217,7 +217,5 @@ pub(super) fn bindless_index(
     buffers: &HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
 ) -> Option<u32> {
-    buffers
-        .get(&buffer_handle)
-        .and_then(|b| b.bindless_index)
+    buffers.get(&buffer_handle).and_then(|b| b.bindless_index)
 }

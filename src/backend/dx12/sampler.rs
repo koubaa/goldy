@@ -74,7 +74,8 @@ pub(super) fn destroy(state: &mut Dx12State, sampler_handle: SamplerHandle) {
 
 /// Get the bindless index for a sampler.
 pub(super) fn bindless_index(state: &Dx12State, sampler_handle: SamplerHandle) -> Option<u32> {
-    state.samplers
+    state
+        .samplers
         .get(&sampler_handle)
         .and_then(|s| s.bindless_offset)
 }

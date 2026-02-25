@@ -110,16 +110,13 @@ pub(super) fn create(
     .context("Failed to get surface capabilities")?;
 
     // Choose surface format (prefer BGRA8 for better compatibility)
-    let formats = unsafe {
-        surface_loader.get_physical_device_surface_formats(physical_device, surface)
-    }
-    .context("Failed to get surface formats")?;
+    let formats =
+        unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface) }
+            .context("Failed to get surface formats")?;
 
     let format = formats
         .iter()
-        .find(|f| {
-            f.format == vk::Format::B8G8R8A8_SRGB || f.format == vk::Format::B8G8R8A8_UNORM
-        })
+        .find(|f| f.format == vk::Format::B8G8R8A8_SRGB || f.format == vk::Format::B8G8R8A8_UNORM)
         .or_else(|| formats.first())
         .context("No suitable surface format")?;
 
@@ -208,16 +205,21 @@ pub(super) fn create(
     for _ in 0..MAX_FRAMES_IN_FLIGHT {
         // Create semaphores
         let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let image_available_semaphore =
-            unsafe { logical_device.device.create_semaphore(&semaphore_info, None) }
-                .context("Failed to create image available semaphore")?;
-        let render_finished_semaphore =
-            unsafe { logical_device.device.create_semaphore(&semaphore_info, None) }
-                .context("Failed to create render finished semaphore")?;
+        let image_available_semaphore = unsafe {
+            logical_device
+                .device
+                .create_semaphore(&semaphore_info, None)
+        }
+        .context("Failed to create image available semaphore")?;
+        let render_finished_semaphore = unsafe {
+            logical_device
+                .device
+                .create_semaphore(&semaphore_info, None)
+        }
+        .context("Failed to create render finished semaphore")?;
 
         // Create fence (signaled so first wait succeeds)
-        let fence_info =
-            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let in_flight_fence = unsafe { logical_device.device.create_fence(&fence_info, None) }
             .context("Failed to create in-flight fence")?;
 
@@ -413,12 +415,7 @@ pub(super) fn render<F>(
     record_commands_fn: F,
 ) -> Result<()>
 where
-    F: FnOnce(
-        vk::CommandBuffer,
-        &[RenderCommand],
-        &LogicalDevice,
-        &mut Option<PipelineHandle>,
-    ),
+    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>),
 {
     let surface_state = surfaces
         .get(&surface_handle)
@@ -473,7 +470,8 @@ where
             layer_count: 1,
         });
 
-    let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+    let dep_info =
+        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
 
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
@@ -508,7 +506,7 @@ where
     // This requires VK_KHR_maintenance1 (core in Vulkan 1.1+)
     let viewport = vk::Viewport {
         x: 0.0,
-        y: height as f32,         // Start from bottom
+        y: height as f32, // Start from bottom
         width: width as f32,
         height: -(height as f32), // Negative height flips Y
         min_depth: 0.0,
@@ -556,7 +554,8 @@ where
             layer_count: 1,
         });
 
-    let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+    let dep_info =
+        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
 
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 

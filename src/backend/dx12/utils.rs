@@ -185,8 +185,8 @@ pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADD
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     if unsafe { fence.GetCompletedValue() } < value {
-        let event = unsafe { CreateEventA(None, false, false, None) }
-            .context("Failed to create event")?;
+        let event =
+            unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
         unsafe { fence.SetEventOnCompletion(value, event) }
             .context("Failed to set event on completion")?;

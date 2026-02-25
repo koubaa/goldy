@@ -1,13 +1,10 @@
 //! Pipeline creation and management.
 
-use super::types::{PipelineState};
-use super::{shader, utils, DeviceHandle, PipelineHandle, ShaderHandle, Dx12State};
+use super::types::PipelineState;
+use super::{shader, utils, DeviceHandle, Dx12State, PipelineHandle, ShaderHandle};
 use crate::types::{PrimitiveTopology, TextureFormat, VertexBufferLayout};
 use anyhow::{Context, Result};
-use windows::Win32::Graphics::{
-    Direct3D12::*,
-    Dxgi::Common::*,
-};
+use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
 /// Create a graphics pipeline state object.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]

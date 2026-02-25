@@ -66,10 +66,7 @@ pub(super) fn create(
 }
 
 /// Destroy a compute pipeline.
-pub(super) fn destroy(
-    state: &mut Dx12State,
-    pipeline_handle: ComputePipelineHandle,
-) {
+pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHandle) {
     state.compute_pipelines.remove(&pipeline_handle);
 }
 
@@ -201,8 +198,7 @@ pub(super) fn dispatch(
     // Close and execute
     unsafe { command_list.Close() }.context("Failed to close command list")?;
 
-    let cmd_list: ID3D12CommandList =
-        command_list.cast().context("Failed to cast command list")?;
+    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = state.devices.get(&device_handle).unwrap();
     unsafe {

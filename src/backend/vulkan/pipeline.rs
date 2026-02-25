@@ -1,9 +1,13 @@
 //! Graphics pipeline management logic.
 
 use super::types::{self, PipelineState};
-use super::utils::{compare_to_vk, depth_format_to_vk, format_to_vk, topology_to_vk, vertex_format_to_vk};
+use super::utils::{
+    compare_to_vk, depth_format_to_vk, format_to_vk, topology_to_vk, vertex_format_to_vk,
+};
 use super::{DeviceHandle, PipelineHandle};
-use crate::types::{CompareFunction, DepthStencilState, PrimitiveTopology, TextureFormat, VertexBufferLayout};
+use crate::types::{
+    CompareFunction, DepthStencilState, PrimitiveTopology, TextureFormat, VertexBufferLayout,
+};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -109,15 +113,19 @@ pub(super) fn create(
     } else {
         // Traditional mode: create empty layout (rare code path)
         let layout_info = vk::PipelineLayoutCreateInfo::default();
-        let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-            .context("Failed to create pipeline layout")?;
+        let layout = unsafe {
+            logical_device
+                .device
+                .create_pipeline_layout(&layout_info, None)
+        }
+        .context("Failed to create pipeline layout")?;
         (layout, true) // Own this layout
     };
 
     // Dynamic rendering info (Vulkan 1.4)
     let color_format = format_to_vk(target_format);
-    let mut rendering_info =
-        vk::PipelineRenderingCreateInfo::default().color_attachment_formats(std::slice::from_ref(&color_format));
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(std::slice::from_ref(&color_format));
 
     // Create pipeline
     let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -240,7 +248,9 @@ pub(super) fn create_with_depth(
     // Depth stencil state
     let depth_stencil_state = if let Some(ds) = depth_stencil {
         vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(ds.depth_write_enabled || ds.depth_compare != CompareFunction::Always)
+            .depth_test_enable(
+                ds.depth_write_enabled || ds.depth_compare != CompareFunction::Always,
+            )
             .depth_write_enable(ds.depth_write_enabled)
             .depth_compare_op(compare_to_vk(ds.depth_compare))
             .depth_bounds_test_enable(false)
@@ -284,8 +294,12 @@ pub(super) fn create_with_depth(
         .set_layouts(&all_layouts)
         .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-    let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
-        .context("Failed to create bindless pipeline layout")?;
+    let layout = unsafe {
+        logical_device
+            .device
+            .create_pipeline_layout(&layout_info, None)
+    }
+    .context("Failed to create bindless pipeline layout")?;
     let owns_layout = true;
 
     // Dynamic rendering info (Vulkan 1.4)

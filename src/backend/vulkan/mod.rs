@@ -225,7 +225,13 @@ impl GpuBackend for VulkanBackend {
         device::is_valid(&self.state, device)
     }
 
-    fn create_buffer(&mut self, device_handle: DeviceHandle, size: u64, access: DataAccess, element_stride: Option<u32>) -> Result<BufferHandle> {
+    fn create_buffer(
+        &mut self,
+        device_handle: DeviceHandle,
+        size: u64,
+        access: DataAccess,
+        element_stride: Option<u32>,
+    ) -> Result<BufferHandle> {
         buffer::create(
             &mut self.state.devices,
             &mut self.state.buffers,
@@ -239,11 +245,26 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
-        buffer::destroy(&mut self.state.devices, &mut self.state.buffers, buffer_handle);
+        buffer::destroy(
+            &mut self.state.devices,
+            &mut self.state.buffers,
+            buffer_handle,
+        );
     }
 
-    fn write_buffer(&mut self, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
-        buffer::write(&self.state.devices, &self.state.buffers, buffer_handle, offset, data)
+    fn write_buffer(
+        &mut self,
+        buffer_handle: BufferHandle,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        buffer::write(
+            &self.state.devices,
+            &self.state.buffers,
+            buffer_handle,
+            offset,
+            data,
+        )
     }
 
     fn buffer_size(&self, buffer_handle: BufferHandle) -> u64 {
@@ -254,7 +275,11 @@ impl GpuBackend for VulkanBackend {
         buffer::bindless_index(&self.state.buffers, buffer_handle)
     }
 
-    fn create_shader(&mut self, device_handle: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
+    fn create_shader(
+        &mut self,
+        device_handle: DeviceHandle,
+        slang_source: &str,
+    ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
             &mut self.state.shaders,
@@ -265,7 +290,12 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn create_shader_with_paths(&mut self, device_handle: DeviceHandle, slang_source: &str, search_paths: &[&str]) -> Result<ShaderHandle> {
+    fn create_shader_with_paths(
+        &mut self,
+        device_handle: DeviceHandle,
+        slang_source: &str,
+        search_paths: &[&str],
+    ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
             &mut self.state.shaders,
@@ -290,8 +320,10 @@ impl GpuBackend for VulkanBackend {
         target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
         // Compile shaders on-demand
-        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
-        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+        let vs_module =
+            self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module =
+            self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
         pipeline::create(
             &self.state.devices,
@@ -307,10 +339,20 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_pipeline(&mut self, pipeline_handle: PipelineHandle) {
-        pipeline::destroy(&self.state.devices, &mut self.state.pipelines, pipeline_handle);
+        pipeline::destroy(
+            &self.state.devices,
+            &mut self.state.pipelines,
+            pipeline_handle,
+        );
     }
 
-    fn create_render_target(&mut self, device_handle: DeviceHandle, width: u32, height: u32, format: TextureFormat) -> Result<RenderTargetHandle> {
+    fn create_render_target(
+        &mut self,
+        device_handle: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Result<RenderTargetHandle> {
         render_target::create(
             &self.state.instance,
             &self.state.devices,
@@ -327,7 +369,12 @@ impl GpuBackend for VulkanBackend {
         render_target::destroy(&self.state.devices, &mut self.state.render_targets, target);
     }
 
-    fn render_to_target(&mut self, device_handle: DeviceHandle, target: RenderTargetHandle, commands: &[RenderCommand]) -> Result<()> {
+    fn render_to_target(
+        &mut self,
+        device_handle: DeviceHandle,
+        target: RenderTargetHandle,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
         render_target::render_to(
             &self.state.devices,
             &mut self.state.render_targets,
@@ -394,7 +441,12 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn surface_render(&mut self, surface_handle: SurfaceHandle, _image: SwapchainImageHandle, commands: &[RenderCommand]) -> Result<()> {
+    fn surface_render(
+        &mut self,
+        surface_handle: SurfaceHandle,
+        _image: SwapchainImageHandle,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
         surface::render(
             &self.state.devices,
             &self.state.surfaces,
@@ -414,7 +466,11 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn surface_present(&mut self, surface_handle: SurfaceHandle, _image: SwapchainImageHandle) -> Result<()> {
+    fn surface_present(
+        &mut self,
+        surface_handle: SurfaceHandle,
+        _image: SwapchainImageHandle,
+    ) -> Result<()> {
         surface::present(
             &self.state.instance,
             &mut self.state.devices,
@@ -424,7 +480,12 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+    fn surface_resize(
+        &mut self,
+        surface_handle: SurfaceHandle,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
         surface::resize(
             &self.state.entry,
             &self.state.instance,
@@ -455,8 +516,10 @@ impl GpuBackend for VulkanBackend {
         depth_stencil: Option<&crate::types::DepthStencilState>,
     ) -> Result<PipelineHandle> {
         // Compile shaders on-demand
-        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
-        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+        let vs_module =
+            self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module =
+            self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
         pipeline::create_with_depth(
             &self.state.devices,
@@ -516,7 +579,13 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn write_texture(&mut self, texture_handle: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
+    fn write_texture(
+        &mut self,
+        texture_handle: TextureHandle,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
         texture::write(
             &self.state.instance,
             &self.state.devices,
@@ -529,14 +598,22 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
-        texture::destroy(&mut self.state.devices, &mut self.state.textures, texture_handle);
+        texture::destroy(
+            &mut self.state.devices,
+            &mut self.state.textures,
+            texture_handle,
+        );
     }
 
     fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
         texture::bindless_index(&self.state.textures, texture_handle)
     }
 
-    fn create_sampler(&mut self, device_handle: DeviceHandle, desc: &crate::types::SamplerDesc) -> Result<SamplerHandle> {
+    fn create_sampler(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: &crate::types::SamplerDesc,
+    ) -> Result<SamplerHandle> {
         sampler::create(
             &mut self.state.devices,
             &mut self.state.samplers,
@@ -547,7 +624,11 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
-        sampler::destroy(&mut self.state.devices, &mut self.state.samplers, sampler_handle);
+        sampler::destroy(
+            &mut self.state.devices,
+            &mut self.state.samplers,
+            sampler_handle,
+        );
     }
 
     fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
@@ -560,7 +641,8 @@ impl GpuBackend for VulkanBackend {
         compute_shader: ShaderHandle,
     ) -> Result<ComputePipelineHandle> {
         // Compile shader on-demand
-        let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
+        let cs_module =
+            self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
         compute::create(
             &self.state.devices,
@@ -579,7 +661,11 @@ impl GpuBackend for VulkanBackend {
         );
     }
 
-    fn dispatch_compute(&mut self, device_handle: DeviceHandle, commands: &[ComputeCommand]) -> Result<()> {
+    fn dispatch_compute(
+        &mut self,
+        device_handle: DeviceHandle,
+        commands: &[ComputeCommand],
+    ) -> Result<()> {
         compute::dispatch(
             &self.state.devices,
             &self.state.compute_pipelines,

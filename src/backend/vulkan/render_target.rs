@@ -5,8 +5,8 @@
 use super::types::{LogicalDevice, RenderTargetState};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk};
 use super::{DeviceHandle, PipelineHandle, RenderTargetHandle};
-use crate::types::{Color, TextureFormat};
 use crate::backend::RenderCommand;
+use crate::types::{Color, TextureFormat};
 use anyhow::{Context, Result};
 use ash::{vk, Instance};
 use std::collections::HashMap;
@@ -89,8 +89,12 @@ pub(super) fn create(
     let image_memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
         .context("Failed to allocate render target memory")?;
 
-    unsafe { logical_device.device.bind_image_memory(image, image_memory, 0) }
-        .context("Failed to bind render target memory")?;
+    unsafe {
+        logical_device
+            .device
+            .bind_image_memory(image, image_memory, 0)
+    }
+    .context("Failed to bind render target memory")?;
 
     // Create image view
     let view_info = vk::ImageViewCreateInfo::default()
@@ -212,8 +216,12 @@ pub(super) fn create_with_depth(
     let image_memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
         .context("Failed to allocate render target memory")?;
 
-    unsafe { logical_device.device.bind_image_memory(image, image_memory, 0) }
-        .context("Failed to bind render target memory")?;
+    unsafe {
+        logical_device
+            .device
+            .bind_image_memory(image, image_memory, 0)
+    }
+    .context("Failed to bind render target memory")?;
 
     // Create color image view
     let view_info = vk::ImageViewCreateInfo::default()
@@ -269,8 +277,12 @@ pub(super) fn create_with_depth(
         let d_memory = unsafe { logical_device.device.allocate_memory(&d_alloc_info, None) }
             .context("Failed to allocate depth buffer memory")?;
 
-        unsafe { logical_device.device.bind_image_memory(d_image, d_memory, 0) }
-            .context("Failed to bind depth buffer memory")?;
+        unsafe {
+            logical_device
+                .device
+                .bind_image_memory(d_image, d_memory, 0)
+        }
+        .context("Failed to bind depth buffer memory")?;
 
         let d_view_info = vk::ImageViewCreateInfo::default()
             .image(d_image)
@@ -360,9 +372,7 @@ pub(super) fn destroy(
                     logical_device.device.free_memory(depth_memory, None);
                 }
                 if let Some(staging_buffer) = state.staging_buffer {
-                    logical_device
-                        .device
-                        .destroy_buffer(staging_buffer, None);
+                    logical_device.device.destroy_buffer(staging_buffer, None);
                 }
                 if let Some(staging_memory) = state.staging_memory {
                     logical_device.device.free_memory(staging_memory, None);
@@ -383,12 +393,7 @@ pub(super) fn render_to<F>(
     record_commands_fn: F,
 ) -> Result<()>
 where
-    F: FnOnce(
-        vk::CommandBuffer,
-        &[RenderCommand],
-        &LogicalDevice,
-        &mut Option<PipelineHandle>,
-    ),
+    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>),
 {
     let logical_device = devices
         .get(&device_handle)
@@ -536,7 +541,7 @@ where
     // This requires VK_KHR_maintenance1 (core in Vulkan 1.1+)
     let viewport = vk::Viewport {
         x: 0.0,
-        y: height as f32,         // Start from bottom
+        y: height as f32, // Start from bottom
         width: width as f32,
         height: -(height as f32), // Negative height flips Y
         min_depth: 0.0,
@@ -584,7 +589,8 @@ where
             layer_count: 1,
         });
 
-    let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+    let dep_info =
+        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
 
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 

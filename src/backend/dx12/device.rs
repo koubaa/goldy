@@ -4,11 +4,7 @@ use super::types::{self, DxgiAdapterInfo, LogicalDevice};
 use super::{utils, DeviceHandle, Dx12State};
 use crate::backend::{AdapterInfo, BackendType};
 use anyhow::{Context, Result};
-use windows::Win32::Graphics::{
-    Direct3D::*,
-    Direct3D12::*,
-    Dxgi::*,
-};
+use windows::Win32::Graphics::{Direct3D::*, Direct3D12::*, Dxgi::*};
 
 /// Enumerate available adapters.
 pub(super) fn enumerate(adapters: &[DxgiAdapterInfo]) -> Vec<AdapterInfo> {
@@ -105,9 +101,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         unsafe { device.CreateDescriptorHeap(&cbv_srv_uav_heap_desc) }
             .context("Failed to create CBV/SRV/UAV heap")?;
 
-    let cbv_srv_uav_descriptor_size = unsafe {
-        device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
-    };
+    let cbv_srv_uav_descriptor_size =
+        unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
 
     // Create sampler descriptor heap (large for bindless rendering)
     let sampler_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
@@ -236,9 +231,13 @@ pub(super) fn destroy(state: &mut Dx12State, device_handle: DeviceHandle) {
     if let Some(logical_device) = state.devices.remove(&device_handle) {
         // Wait for GPU to finish
         let fence_value = logical_device.fence_value;
-        let _ = unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) };
+        let _ = unsafe {
+            logical_device
+                .command_queue
+                .Signal(&logical_device.fence, fence_value)
+        };
         // Note: no event handle - we're just doing a simple GPU wait
-        
+
         tracing::info!("Destroyed DX12 device {}", device_handle);
     }
 }

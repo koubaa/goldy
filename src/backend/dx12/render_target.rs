@@ -4,7 +4,7 @@
 
 use super::types::RenderTargetState;
 use super::utils::{depth_format_to_dxgi, format_to_dxgi};
-use super::{render_commands, DeviceHandle, RenderTargetHandle, Dx12State};
+use super::{render_commands, DeviceHandle, Dx12State, RenderTargetHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
@@ -515,7 +515,11 @@ pub(super) fn read_to_cpu(
     // Map and copy data
     let mut mapped_data: *mut u8 = std::ptr::null_mut();
     unsafe {
-        staging_buffer.Map(0, None, Some(&mut mapped_data as *mut *mut u8 as *mut *mut _))
+        staging_buffer.Map(
+            0,
+            None,
+            Some(&mut mapped_data as *mut *mut u8 as *mut *mut _),
+        )
     }
     .context("Failed to map staging buffer")?;
 
@@ -548,11 +552,11 @@ pub(super) fn read_to_cpu(
 
 /// Helper to wait for a fence value.
 fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
     use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
 
-    let event = unsafe { CreateEventA(None, false, false, None) }
-        .context("Failed to create event")?;
+    let event =
+        unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
     unsafe { fence.SetEventOnCompletion(value, event) }
         .context("Failed to set event on completion")?;
     unsafe { WaitForSingleObject(event, INFINITE) };
