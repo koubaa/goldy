@@ -193,16 +193,19 @@ device.register_library(ShaderLibrary::from_source("myutils", r#"
 |------|-------------|-------------|
 | `plasma.slang` | Classic demoscene plasma (uses `goldy_broadcast<T>()`) | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
+| `gradient.slang` | Animated color gradient | ✓ `import goldy_exp` |
+| `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
+| `checkerboard.slang` | Animated checker pattern | ✓ `import goldy_exp` |
+| `metaballs.slang` | Blending distance fields | ✓ `import goldy_exp` |
+| `spinning_cube.slang` | Wireframe 3D cube | ✓ `import goldy_exp` |
+| `particles.slang` | Rain/snow particle rendering | ✓ `import goldy_exp` |
+| `starfield_*.slang` | 3D starfield (compute + render) | ✓ `import goldy_exp` |
+| `game_of_life*.slang` | Conway's Game of Life (compute + render) | ✓ `import goldy_exp` |
+| `instancing_*.slang` | Instanced quad rendering (compute + render) | ✓ `import goldy_exp` |
+| `bouncing_lines_*.slang` | Bouncing lines demo (compute + render) | ✓ `import goldy_exp` |
 | `vertex_color_2d.slang` | Basic 2D position + color | — |
 | `digital_clock.slang` | 7-segment display shader | — |
 | `triangle.slang` | Procedural triangle from vertex ID | — |
-| `gradient.slang` | Animated color gradient | — |
-| `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
-| `checkerboard.slang` | Animated checker pattern | — |
-| `metaballs.slang` | Blending distance fields | — |
-| `starfield.slang` | 3D starfield flying forward | — |
-| `particles.slang` | Particle system rendering | — |
-| `game_of_life.slang` | Conway's Game of Life compute | — |
 
 ## Compilation Targets
 

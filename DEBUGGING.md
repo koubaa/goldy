@@ -50,18 +50,11 @@ Python buffers automatically detect stride from numpy dtype. If using raw bytes,
 
 ### Shader Not Working (Static Output, No Animation)
 
-When a shader works on DX12 but not Vulkan, check these common causes:
+Dump the SPIR-V using `GOLDY_DUMP_SHADERS` (see [Inspecting Compiled Shader Assembly](#inspecting-compiled-shader-assembly)) and check:
 
-1. **SPIR-V Inspection**: Dump the generated SPIR-V and use `spirv-dis` to inspect:
-   ```rust
-   let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv);
-   std::fs::write("debug.spv", spirv_bytes).ok();
-   ```
-   Then: `spirv-dis debug.spv`
+1. **Push Constants Not Generated**: Verify the SPIR-V contains `OpVariable ... PushConstant`. If it shows `Uniform` storage class instead, the shader isn't correctly declaring push constants.
 
-2. **Push Constants Not Generated**: Verify the SPIR-V contains `OpVariable ... PushConstant` for push constant data. If it shows `Uniform` or a different storage class, the shader isn't correctly declaring push constants.
-
-3. **Descriptor Set/Binding Mismatch**: Check `OpDecorate` lines in SPIR-V for `Binding` and `DescriptorSet`. These must match what the backend expects:
+2. **Descriptor Set/Binding Mismatch**: Check `OpDecorate` lines for `Binding` and `DescriptorSet`. Expected bindings:
    - Binding 0: Storage buffers
    - Binding 1: Uniform buffers  
    - Binding 2: Sampled images
@@ -70,6 +63,51 @@ When a shader works on DX12 but not Vulkan, check these common causes:
 ### Slang Preprocessor Issues
 
 See [shaders/README.md](shaders/README.md#preprocessor-defines) for Slang-specific preprocessor behavior that can cause cross-platform issues.
+
+## Inspecting Compiled Shader Assembly
+
+When a shader produces unexpected results, inspecting the compiled bytecode can reveal codegen issues that aren't visible in the source. This is useful when:
+- Push constants/uniforms show wrong values
+- Resource bindings don't work as expected
+- Shader logic appears correct but output is wrong
+
+### Dumping Compiled Shaders
+
+Set the `GOLDY_DUMP_SHADERS` environment variable to a directory path:
+
+```bash
+GOLDY_DUMP_SHADERS=/tmp/shaders cargo run --example game_of_life
+```
+
+This writes compiled bytecode for each shader entry point:
+- `{entry}_dx12.dxil` - DirectX 12 (DXIL)
+- `{entry}_vulkan.spv` - Vulkan (SPIR-V)
+
+### Disassembling DXIL
+
+Use `dxc` (DirectX Shader Compiler) to disassemble:
+
+```bash
+dxc -dumpbin cs_main_dx12.dxil > cs_main.txt
+```
+
+Key things to check:
+- **Buffer Definitions**: Verify struct layouts and sizes match expectations
+- **cbufferLoadLegacy**: Each call loads a 16-byte register; check `regIndex` values
+- **extractvalue**: Which component (0-3) is extracted from loaded data
+
+### Disassembling SPIR-V
+
+Use `spirv-dis` from the Vulkan SDK:
+
+```bash
+spirv-dis cs_main_vulkan.spv > cs_main.txt
+```
+
+Key things to check:
+- **OpVariable storage class**: Push constants should use `PushConstant`, not `Uniform`
+- **OpAccessChain**: Array/struct element access - verify indices are correct
+- **OpCompositeExtract**: Component extraction from vectors/structs
 
 ## Runtime Logging
 

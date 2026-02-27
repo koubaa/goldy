@@ -18,9 +18,11 @@ include!(concat!(env!("OUT_DIR"), "/slang_embedded.rs"));
 /// Loaded Slang library with function pointers.
 pub struct SlangLibrary {
     _library: Library,
-    // Core session management
+    // Core session management (deprecated C API)
     pub create_session: FnSpCreateSession,
     pub destroy_session: FnSpDestroySession,
+    // New COM-style API for session-level preprocessor macros
+    pub create_global_session: FnSlangCreateGlobalSession2,
     // Compile request management
     pub create_compile_request: FnSpCreateCompileRequest,
     pub destroy_compile_request: FnSpDestroyCompileRequest,
@@ -97,6 +99,9 @@ impl SlangLibrary {
             let destroy_session: FnSpDestroySession = *library
                 .get(b"spDestroySession\0")
                 .context("Failed to load spDestroySession")?;
+            let create_global_session: FnSlangCreateGlobalSession2 = *library
+                .get(b"slang_createGlobalSession2\0")
+                .context("Failed to load slang_createGlobalSession2")?;
             let create_compile_request: FnSpCreateCompileRequest = *library
                 .get(b"spCreateCompileRequest\0")
                 .context("Failed to load spCreateCompileRequest")?;
@@ -229,6 +234,7 @@ impl SlangLibrary {
                 _library: library,
                 create_session,
                 destroy_session,
+                create_global_session,
                 create_compile_request,
                 destroy_compile_request,
                 add_code_gen_target,

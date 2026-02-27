@@ -1,42 +1,28 @@
 // Conway's Game of Life compute shader
 // Uses ping-pong buffers: reads from one, writes to the other
 
-// Grid dimensions (must match the example)
+import goldy_exp;
+
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer
-struct GameOfLifeResources {
-    StructuredBuffer<uint> currentState;
-    RWStructuredBuffer<uint> nextState;
-};
-ParameterBlock<GameOfLifeResources> gResources;
-#define CURRENT_STATE gResources.currentState
-#define NEXT_STATE gResources.nextState
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.buffer_indices;
-// Binding 0 = RW storage buffers, but we access read-only from currentState
-[[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
-#define CURRENT_STATE g_StorageBuffers[getBufferIndex(0)]
-#define NEXT_STATE g_StorageBuffers[getBufferIndex(1)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0, space0) {
-    uint currentStateIndex;
-    uint nextStateIndex;
-};
-#define CURRENT_STATE (*DescriptorHandle<StructuredBuffer<uint>>(uint2(currentStateIndex, 0)))
-#define NEXT_STATE (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(nextStateIndex, 0)))
-
+// Dynamic buffer selection for ping-pong pattern
+// Rust side: set_push_constants(&[read_buffer_slot, write_buffer_slot])
+// Note: Push constant resources are auto-declared in goldy_exp module.
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1 fallback: traditional bindings
+StructuredBuffer<uint> currentState : register(t0);
+RWStructuredBuffer<uint> nextState : register(u0);
+#define CURRENT_STATE currentState
+#define NEXT_STATE nextState
+#else
+// All other platforms: use unified dynamic access
+#define CURRENT_STATE goldy_dyn_scattered<uint>(0)
+#define NEXT_STATE goldy_dyn_scattered<uint>(1)
 #endif
 
 // Get cell state (1 = alive, 0 = dead)
 uint getCell(int x, int y) {
-    // Wrap around edges (toroidal grid)
     x = (x + GRID_WIDTH) % GRID_WIDTH;
     y = (y + GRID_HEIGHT) % GRID_HEIGHT;
     return CURRENT_STATE[y * GRID_WIDTH + x];
@@ -65,16 +51,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     uint cell = CURRENT_STATE[idx];
     uint neighbors = countNeighbors(int(id.x), int(id.y));
     
-    // Conway's rules:
-    // - Living cell with 2-3 neighbors survives
-    // - Dead cell with exactly 3 neighbors becomes alive
-    // - All other cells die or stay dead
+    // Conway's rules
     uint newState = 0;
     if (cell == 1) {
-        // Living cell
         newState = (neighbors == 2 || neighbors == 3) ? 1 : 0;
     } else {
-        // Dead cell
         newState = (neighbors == 3) ? 1 : 0;
     }
     

@@ -1,32 +1,21 @@
 // Particle rendering shader
 // Visualizes particles as colored quads using instancing
 
+import goldy_exp;
+
 struct Particle {
     float2 position;
     float2 velocity;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer
-struct RenderResources {
-    StructuredBuffer<Particle> particles;
-};
-ParameterBlock<RenderResources> gResources;
-#define PARTICLES gResources.particles
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] StructuredBuffer<Particle> g_StorageBuffers[];
-#define PARTICLES g_StorageBuffers[getBufferIndex(0)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0, space0) {
-    uint particleBufferIndex;
-};
-#define PARTICLES (*DescriptorHandle<StructuredBuffer<Particle>>(uint2(particleBufferIndex, 0)))
-
+// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot])
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1 fallback: traditional bindings
+StructuredBuffer<Particle> particles : register(t0);
+#define PARTICLES particles
+#else
+// All other platforms: use unified dynamic access
+#define PARTICLES goldy_dyn_scattered<Particle>(0)
 #endif
 
 struct VSOutput {
@@ -34,7 +23,6 @@ struct VSOutput {
     float4 color : COLOR;
 };
 
-// Quad vertices (two triangles)
 static const float2 quadVerts[6] = {
     float2(-1, -1), float2( 1, -1), float2( 1,  1),
     float2(-1, -1), float2( 1,  1), float2(-1,  1)
@@ -44,28 +32,20 @@ static const float2 quadVerts[6] = {
 VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
     VSOutput output;
     
-    // Read particle from buffer
     Particle p = PARTICLES[instanceID];
     
-    // Quad size (in clip space, -1 to 1 range)
     float size = 0.015;
-    
-    // Get quad vertex and scale
     float2 localPos = quadVerts[vertexID] * size;
     
-    // Position in clip space
     output.position = float4(p.position + localPos, 0.0, 1.0);
     
-    // Color based on velocity (speed = saturation, direction = hue)
     float speed = length(p.velocity);
     float angle = atan2(p.velocity.y, p.velocity.x);
     
-    // Simple HSV to RGB conversion (hue from angle)
-    float h = (angle + 3.14159) / (2.0 * 3.14159); // 0-1
+    float h = (angle + 3.14159) / (2.0 * 3.14159);
     float3 rgb = abs(h * 6.0 - float3(3, 2, 4)) * float3(1, -1, -1) + float3(-1, 2, 2);
     rgb = clamp(rgb, 0.0, 1.0);
     
-    // Blend with white based on speed
     float brightness = clamp(speed * 2.0 + 0.3, 0.3, 1.0);
     output.color = float4(rgb * brightness, 1.0);
     
