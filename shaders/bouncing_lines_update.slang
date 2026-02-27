@@ -1,38 +1,27 @@
 // Bouncing lines compute shader
 // Updates line endpoint positions with wall bouncing physics
 
+import goldy_exp;
+
 struct Line {
-    float2 p1;        // First endpoint position
-    float2 v1;        // First endpoint velocity
-    float2 p2;        // Second endpoint position
-    float2 v2;        // Second endpoint velocity
-    uint color_index; // Color lookup index
+    float2 p1;
+    float2 v1;
+    float2 p2;
+    float2 v2;
+    uint color_index;
     uint _pad1;
     uint _pad2;
     uint _pad3;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer
-struct ComputeResources {
-    RWStructuredBuffer<Line> lines;
-};
-ParameterBlock<ComputeResources> gResources;
-#define LINES gResources.lines
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] RWStructuredBuffer<Line> g_StorageBuffers[];
-#define LINES g_StorageBuffers[getBufferIndex(0)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0, space0) {
-    uint lineBufferIndex;
-};
-#define LINES (*DescriptorHandle<RWStructuredBuffer<Line>>(uint2(lineBufferIndex, 0)))
-
+// Dynamic buffer selection - Rust: set_push_constants(&[lines_slot])
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1 fallback: traditional bindings
+RWStructuredBuffer<Line> lines : register(u0);
+#define LINES lines
+#else
+// All other platforms: use unified dynamic access
+#define LINES goldy_dyn_scattered<Line>(0)
 #endif
 
 static const uint NUM_LINES = 20;

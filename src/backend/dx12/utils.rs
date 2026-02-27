@@ -2,6 +2,13 @@
 //!
 //! Format conversions and helpers.
 
+use anyhow::{Context, Result};
+use windows::Win32::{
+    Foundation::CloseHandle,
+    Graphics::Direct3D12::ID3D12Fence,
+    System::Threading::{CreateEventA, WaitForSingleObject, INFINITE},
+};
+
 use crate::types::{
     AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
     TextureFormat, VertexFormat,
@@ -172,4 +179,20 @@ pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADD
         AddressMode::Repeat => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_WRAP,
         AddressMode::MirrorRepeat => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
     }
+}
+
+/// Wait for a fence to reach the specified value.
+/// This is a low-level helper for GPU synchronization.
+pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
+    if unsafe { fence.GetCompletedValue() } < value {
+        let event =
+            unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+
+        unsafe { fence.SetEventOnCompletion(value, event) }
+            .context("Failed to set event on completion")?;
+
+        unsafe { WaitForSingleObject(event, INFINITE) };
+        unsafe { CloseHandle(event) }.ok();
+    }
+    Ok(())
 }

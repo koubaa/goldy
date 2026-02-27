@@ -14,29 +14,22 @@ import numpy as np
 
 # Simple compute shader that doubles each value
 COMPUTE_SHADER = """
-// Cross-platform compute shader
+import goldy_exp;
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1: traditional register bindings
+RWStructuredBuffer<float> data : register(u0);
+#define DATA data
+#elif defined(__METAL_BINDLESS__)
+// Metal Tier 2: ParameterBlock (goldy_dyn_scattered blocked by Slang issue #9716)
 struct ComputeResources {
     RWStructuredBuffer<float> data;
 };
 ParameterBlock<ComputeResources> gResources;
 #define DATA gResources.data
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] RWStructuredBuffer<float> g_StorageBuffers[];
-#define DATA g_StorageBuffers[getBufferIndex(0)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + DescriptorHandle
-cbuffer BufferIndices : register(b0, space0) {
-    uint dataIndex;
-};
-#define DATA (*DescriptorHandle<RWStructuredBuffer<float>>(uint2(dataIndex, 0)))
-
+#else
+// SPIRV / DX12: unified bindless API
+#define DATA goldy_dyn_scattered<float>(0)
 #endif
 
 [shader("compute")]

@@ -10,27 +10,20 @@ use goldy::{
 
 /// Simple compute shader that doubles each value in a buffer.
 const DOUBLE_SHADER: &str = r#"
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer
-struct ComputeResources {
-    RWStructuredBuffer<uint> data;
-};
+import goldy_exp;
+
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1: traditional register bindings
+RWStructuredBuffer<uint> data : register(u0);
+#define DATA data
+#elif defined(__METAL_BINDLESS__)
+// Metal Tier 2: ParameterBlock (goldy_dyn_scattered blocked by Slang issue #9716)
+struct ComputeResources { RWStructuredBuffer<uint> data; };
 ParameterBlock<ComputeResources> gResources;
 #define DATA gResources.data
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
-#define DATA g_StorageBuffers[getBufferIndex(0)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0, space0) {
-    uint dataBufferIndex;
-};
-#define DATA (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(dataBufferIndex, 0)))
-
+#else
+// SPIRV / DX12: unified bindless API
+#define DATA goldy_dyn_scattered<uint>(0)
 #endif
 
 [shader("compute")]
@@ -42,35 +35,24 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 /// Compute shader that reads from one buffer and writes to another.
 const COPY_SHADER: &str = r#"
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer
-struct ComputeResources {
-    StructuredBuffer<uint> input;
-    RWStructuredBuffer<uint> output;
-};
+import goldy_exp;
+
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1: traditional register bindings
+StructuredBuffer<uint> inputBuf : register(t0);
+RWStructuredBuffer<uint> outputBuf : register(u0);
+#define INPUT inputBuf
+#define OUTPUT outputBuf
+#elif defined(__METAL_BINDLESS__)
+// Metal Tier 2: ParameterBlock (goldy_dyn_scattered blocked by Slang issue #9716)
+struct ComputeResources { StructuredBuffer<uint> inputBuf; RWStructuredBuffer<uint> outputBuf; };
 ParameterBlock<ComputeResources> gResources;
-#define INPUT gResources.input
-#define OUTPUT gResources.output
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-// NOTE: Both StructuredBuffer and RWStructuredBuffer use binding 0 (STORAGE_BUFFERS)
-// Binding 1 is reserved for UNIFORM_BUFFERS (ConstantBuffer)
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] StructuredBuffer<uint> g_ReadBuffers[];
-[[vk::binding(0, 0)]] RWStructuredBuffer<uint> g_StorageBuffers[];
-#define INPUT g_ReadBuffers[getBufferIndex(0)]
-#define OUTPUT g_StorageBuffers[getBufferIndex(1)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0, space0) {
-    uint inputBufferIndex;
-    uint outputBufferIndex;
-};
-#define INPUT (*DescriptorHandle<StructuredBuffer<uint>>(uint2(inputBufferIndex, 0)))
-#define OUTPUT (*DescriptorHandle<RWStructuredBuffer<uint>>(uint2(outputBufferIndex, 0)))
-
+#define INPUT gResources.inputBuf
+#define OUTPUT gResources.outputBuf
+#else
+// SPIRV / DX12: unified bindless API
+#define INPUT goldy_dyn_scattered<uint>(0)
+#define OUTPUT goldy_dyn_scattered<uint>(1)
 #endif
 
 [shader("compute")]

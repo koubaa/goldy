@@ -1,9 +1,7 @@
 // Instancing compute shader - updates rotation and color for each quad instance
-// Demonstrates the Goldy-native pattern: compute shader updates data, graphics shader renders
 
 import goldy_exp;
 
-// Instance data matching goldy::Instance2D
 struct QuadInstance {
     float2 position;
     float rotation;
@@ -11,7 +9,6 @@ struct QuadInstance {
     float4 color;
 };
 
-// Uniforms for animation
 struct AnimParams {
     float time;
     float delta_time;
@@ -19,40 +16,18 @@ struct AnimParams {
     uint _pad;
 };
 
-// ============================================================================
-// Platform-specific resource binding  
-// ============================================================================
-
-#if defined(__METAL__)
-struct ComputeResources {
-    RWStructuredBuffer<QuadInstance> instances;
-    ConstantBuffer<AnimParams> params;
-};
-ParameterBlock<ComputeResources> gResources;
-#define INSTANCES gResources.instances
-#define PARAMS gResources.params
-
-#elif defined(__SPIRV__)
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] RWStructuredBuffer<QuadInstance> g_Storage[];
-[[vk::binding(1, 0)]] ConstantBuffer<AnimParams> g_Uniforms[];
-#define INSTANCES g_Storage[getBufferIndex(0)]
-#define PARAMS g_Uniforms[getBufferIndex(1)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap (matching proven pattern)
-cbuffer BufferIndices : register(b0, space0) {
-    uint instanceBufferIndex;
-    uint paramsBufferIndex;
-};
-#define INSTANCES (*DescriptorHandle<RWStructuredBuffer<QuadInstance>>(uint2(instanceBufferIndex, 0)))
-#define PARAMS (*DescriptorHandle<ConstantBuffer<AnimParams>>(uint2(paramsBufferIndex, 0)))
-
+// Dynamic buffer selection - Rust: set_push_constants(&[instances_slot, params_slot])
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1 fallback: traditional bindings
+RWStructuredBuffer<QuadInstance> instances : register(u0);
+ConstantBuffer<AnimParams> params : register(b0);
+#define INSTANCES instances
+#define PARAMS params
+#else
+// All other platforms: use unified dynamic access
+#define INSTANCES goldy_dyn_scattered<QuadInstance>(0)
+#define PARAMS goldy_dyn_broadcast<AnimParams>(1)
 #endif
-
-// ============================================================================
-// Compute shader
-// ============================================================================
 
 float3 hsv_to_rgb(float h, float s, float v) {
     float4 K = float4(1.0, 2.0/3.0, 1.0/3.0, 3.0);

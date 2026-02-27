@@ -8,23 +8,21 @@
 //
 // Use access pattern functions for unified resource binding:
 //
-//   float t = goldy_broadcast<TimeUniforms>(0).time;     // Uniform data
-//   Particle p = goldy_scattered_read<Particle>(0, idx); // Storage buffers
-//   float4 c = goldy_interpolated<float4>(0).Sample(s, uv); // Textures
+//   // Uniforms (ConstantBuffer)
+//   float t = goldy_broadcast<TimeUniforms>(0).time;
 //
-// These work on SPIRV, DX12, and Metal Tier 2. For Metal Tier 1, use
-// traditional bindings with preprocessor fallback (see access.slang).
+//   // Storage buffers (RWStructuredBuffer)
+//   RWStructuredBuffer<Particle> buf = goldy_scattered<Particle>(0);
 //
-// == Alternative: DescriptorHandle<T> ==
+// These work on SPIRV, DX12, and Metal Tier 2. For Metal Tier 1 (GitHub CI),
+// use traditional bindings with preprocessor fallback:
 //
-// For direct handle-based access, use Slang's DescriptorHandle<T>.
-// See plasma.slang for a complete example with Goldy's Vulkan binding override.
-//
-// == Legacy Resource Access ==
-//
-// For manual control with preprocessor directives, import:
-//   import goldy_exp.buffer_indices;  // For push/root constants indices
-//   import goldy_exp.bindless;        // For Metal ParameterBlock documentation
+//   #if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+//   ConstantBuffer<TimeUniforms> uniforms : register(b0);
+//   #define TIME uniforms.time
+//   #else
+//   #define TIME goldy_broadcast<TimeUniforms>(0).time
+//   #endif
 
 module goldy_exp;
 
@@ -36,6 +34,3 @@ __include "goldy_exp/primitives";
 __include "goldy_exp/descriptor_handle";
 __include "goldy_exp/bindless_resources";
 __include "goldy_exp/access";
-
-// Note: buffer_indices and bindless are NOT auto-included.
-// Import them explicitly when needed.
