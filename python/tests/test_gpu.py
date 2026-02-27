@@ -348,9 +348,18 @@ class TestComputePipeline:
 import goldy_exp;
 
 #if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1: traditional register bindings
 RWStructuredBuffer<float> data : register(u0);
 #define DATA data
+#elif defined(__METAL_BINDLESS__)
+// Metal Tier 2: ParameterBlock (goldy_dyn_scattered blocked by Slang issue #9716)
+struct ComputeResources {
+    RWStructuredBuffer<float> data;
+};
+ParameterBlock<ComputeResources> gResources;
+#define DATA gResources.data
 #else
+// SPIRV / DX12: unified bindless API
 #define DATA goldy_dyn_scattered<float>(0)
 #endif
 
