@@ -181,6 +181,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Log macOS runner + Metal tier
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=${RUNNER_ARCH:-}"
+          uname -a || true
+          uname -m || true
+          sw_vers || true
+          system_profiler SPHardwareDataType || true
+          # Print Metal argument buffer tier (Tier1/Tier2) if available.
+          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); print("argumentBuffersSupport:", d.argumentBuffersSupport) } else { print("No MTLDevice") }' || true
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -390,6 +403,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Log macOS runner + Metal tier
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=${RUNNER_ARCH:-}"
+          uname -a || true
+          uname -m || true
+          sw_vers || true
+          system_profiler SPHardwareDataType || true
+          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); print("argumentBuffersSupport:", d.argumentBuffersSupport) } else { print("No MTLDevice") }' || true
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -570,6 +595,18 @@ jobs:
     needs: [check, test-mock]
     steps:
       - uses: actions/checkout@v6
+
+      - name: Log macOS runner + Metal tier
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=${RUNNER_ARCH:-}"
+          uname -a || true
+          uname -m || true
+          sw_vers || true
+          system_profiler SPHardwareDataType || true
+          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); print("argumentBuffersSupport:", d.argumentBuffersSupport) } else { print("No MTLDevice") }' || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
