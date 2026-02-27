@@ -193,7 +193,7 @@ jobs:
           sw_vers || true
           system_profiler SPHardwareDataType || true
           # Print Metal argument buffer tier (Tier1/Tier2) if available.
-          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); print("argumentBuffersSupport:", d.argumentBuffersSupport) } else { print("No MTLDevice") }' || true
+          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); let t = d.argumentBuffersSupport; print("argumentBuffersSupport:", t, "rawValue:", t.rawValue); print("isTier2:", t == .tier2) } else { print("No MTLDevice") }' || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -414,7 +414,7 @@ jobs:
           uname -m || true
           sw_vers || true
           system_profiler SPHardwareDataType || true
-          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); print("argumentBuffersSupport:", d.argumentBuffersSupport) } else { print("No MTLDevice") }' || true
+          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); let t = d.argumentBuffersSupport; print("argumentBuffersSupport:", t, "rawValue:", t.rawValue); print("isTier2:", t == .tier2) } else { print("No MTLDevice") }' || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -607,7 +607,7 @@ jobs:
           uname -m || true
           sw_vers || true
           system_profiler SPHardwareDataType || true
-          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); print("argumentBuffersSupport:", d.argumentBuffersSupport) } else { print("No MTLDevice") }' || true
+          xcrun swift -e 'import Metal; if let d = MTLCreateSystemDefaultDevice() { print("MTLDevice:", d.name); let t = d.argumentBuffersSupport; print("argumentBuffersSupport:", t, "rawValue:", t.rawValue); print("isTier2:", t == .tier2) } else { print("No MTLDevice") }' || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
