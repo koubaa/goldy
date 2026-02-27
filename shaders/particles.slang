@@ -1,10 +1,8 @@
 // Particle rain/snow demo
 // Toggle between rain and snow modes via uniform
-// Uses goldy_exp module for vertex format utilities
 
 import goldy_exp;
 
-// Uniform structure for particle parameters
 struct ParticleParams {
     float time;
     float is_snow;  // 0.0 = rain, 1.0 = snow
@@ -12,31 +10,14 @@ struct ParticleParams {
     float _pad2;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer support
-struct ParticlesResources {
-    ConstantBuffer<ParticleParams> params;
-};
-ParameterBlock<ParticlesResources> gResources;
-#define TIME gResources.params.time
-#define IS_SNOW gResources.params.is_snow
-
-#elif defined(__SPIRV__)
-// Vulkan: Use push constants for indices + descriptor array
-import goldy_exp.buffer_indices;
-
-// Global descriptor array of uniform buffers
-[[vk::binding(1, 0)]] ConstantBuffer<ParticleParams> g_ParamBuffers[];
-#define TIME g_ParamBuffers[getBufferIndex(0)].time
-#define IS_SNOW g_ParamBuffers[getBufferIndex(0)].is_snow
-
+// Cross-platform resource access
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+ConstantBuffer<ParticleParams> params : register(b0);
+#define TIME params.time
+#define IS_SNOW params.is_snow
 #else
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0) {
-    uint paramsIndex;
-};
-#define TIME (*DescriptorHandle<ConstantBuffer<ParticleParams>>(uint2(paramsIndex, 0))).time
-#define IS_SNOW (*DescriptorHandle<ConstantBuffer<ParticleParams>>(uint2(paramsIndex, 0))).is_snow
+#define TIME goldy_broadcast<ParticleParams>(0).time
+#define IS_SNOW goldy_broadcast<ParticleParams>(0).is_snow
 #endif
 
 [shader("vertex")]
@@ -73,24 +54,21 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
         float fi = float(i);
         float x = hash(fi);
         
-        // Snow drifts horizontally
         if (snow) {
             x += sin(TIME * 0.5 + fi * 0.3) * 0.05;
             x = frac(x);
         }
         
-        // Snow is slower
         float base_speed = snow ? 0.12 : 0.3;
         float speed = base_speed + hash(fi + 100.0) * (snow ? 0.08 : 0.4);
         float phase = hash(fi + 200.0) * 10.0;
         
         float t = frac(TIME * speed + phase);
-        float particle_y = t;  // t goes 0->1, y=0 is top, so particles fall down
+        float particle_y = t;
         
         float2 particle_pos = float2(x, particle_y);
         float dist = length(uv - particle_pos);
         
-        // Snow has bigger particles
         float base_size = snow ? 0.004 : 0.002;
         float size = base_size + hash(fi + 300.0) * (snow ? 0.004 : 0.002);
         float brightness = size / (dist + 0.001);
@@ -98,7 +76,6 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
         
         color += particle_color * brightness * fade * 0.06;
         
-        // Trail (shorter for snow) - trail is above particle (smaller y = higher on screen)
         float trail_len = snow ? 0.03 : 0.08;
         float trail_top = particle_y - trail_len;
         

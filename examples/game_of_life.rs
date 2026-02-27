@@ -273,7 +273,7 @@ impl ApplicationHandler for App {
                     window.request_redraw(); // Trigger initial render
                 }
                 Err(e) => {
-                    eprintln!("Failed to create render state: {}", e);
+                    eprintln!("Failed to create render state: {:#}", e);
                     event_loop.exit();
                 }
             }

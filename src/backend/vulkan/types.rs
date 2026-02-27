@@ -10,17 +10,16 @@
 //! - Shaders access resources by index using nonuniformEXT qualifier
 //! - Update-after-bind allows descriptor updates without pipeline barriers
 
-use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
+use super::super::{
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+};
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::HashMap;
 
 /// Maximum number of descriptors per resource type in the global bindless set
 pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
-
-/// Descriptor set index for the global bindless set
-#[allow(dead_code)]
-pub const BINDLESS_SET_INDEX: u32 = 0;
 
 /// Binding indices within the global bindless descriptor set
 /// Organized by ACCESS PATTERN:
@@ -58,7 +57,7 @@ pub mod bindless_bindings {
     /// Slang: SamplerState
     pub const FILTER_CONFIG: u32 = 4;
 
-    // Legacy aliases for existing code
+    // Legacy aliases for legitibility to graphics programmers
     pub const STORAGE_BUFFERS: u32 = SCATTERED;
     pub const UNIFORM_BUFFERS: u32 = BROADCAST;
     pub const SAMPLED_IMAGES: u32 = INTERPOLATED;
@@ -190,7 +189,6 @@ pub(crate) struct BufferState {
     pub memory: vk::DeviceMemory,
     pub size: u64,
     /// Index in the global bindless descriptor set (if bindless enabled)
-    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
     /// Whether this is a storage buffer (vs uniform buffer)
     #[allow(dead_code)]
@@ -275,7 +273,6 @@ pub(crate) struct TextureState {
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
     /// Index in the global bindless descriptor set (if bindless enabled)
-    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
 }
 
@@ -284,7 +281,6 @@ pub(crate) struct SamplerState {
     pub device_handle: DeviceHandle,
     pub sampler: vk::Sampler,
     /// Index in the global bindless descriptor set (if bindless enabled)
-    #[allow(dead_code)]
     pub bindless_index: Option<u32>,
 }
 
@@ -450,4 +446,32 @@ impl DeletionQueue {
             }
         }
     }
+}
+
+/// Consolidated Vulkan backend state.
+/// This holds all the resources and state for the Vulkan backend.
+pub(super) struct VulkanState {
+    pub entry: ash::Entry,
+    pub instance: ash::Instance,
+    pub physical_devices: Vec<PhysicalDeviceInfo>,
+    pub devices: HashMap<DeviceHandle, LogicalDevice>,
+    pub next_device_handle: DeviceHandle,
+    pub buffers: HashMap<BufferHandle, BufferState>,
+    pub next_buffer_handle: BufferHandle,
+    pub shaders: HashMap<ShaderHandle, ShaderState>,
+    pub next_shader_handle: ShaderHandle,
+    pub pipelines: HashMap<PipelineHandle, PipelineState>,
+    pub next_pipeline_handle: PipelineHandle,
+    pub compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
+    pub next_compute_pipeline_handle: ComputePipelineHandle,
+    pub render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
+    pub next_render_target_handle: RenderTargetHandle,
+    pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
+    pub next_surface_handle: SurfaceHandle,
+    pub textures: HashMap<TextureHandle, TextureState>,
+    pub next_texture_handle: TextureHandle,
+    pub samplers: HashMap<SamplerHandle, SamplerState>,
+    pub next_sampler_handle: SamplerHandle,
+    /// Per-backend Slang compiler instance (avoids global state issues in tests)
+    pub slang_compiler: crate::slang::SlangCompiler,
 }

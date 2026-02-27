@@ -6,6 +6,10 @@ Cargo.lock
 *.png
 !tests/screenshots/*.png
 
+
+# no idea
+.DS_Store
+
 # Documentation build output
 /docs/book/
 

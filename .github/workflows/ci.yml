@@ -2,7 +2,7 @@
 # Runs GPU tests on:
 # - Linux: lavapipe (Mesa's Vulkan software renderer)
 #          Requires Mesa 25.0+ for Vulkan 1.4 support in lavapipe. 
-# - macOS: Native Metal backend (Apple Silicon GPU)
+# - macOS: Native Metal backend (Apple Silicon GPU, Tier 2, pinned macos-15)
 
 name: CI
 
@@ -177,7 +177,7 @@ jobs:
   # Full GPU tests using native Metal backend (macOS)
   test-metal:
     name: Metal Tests (macOS)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
 
@@ -385,7 +385,7 @@ jobs:
   # Python bindings build and test (macOS with native Metal)
   python-macos:
     name: Python Bindings (macOS)
-    runs-on: macos-latest
+    runs-on: macos-15
     needs: [check, test-mock]
     steps:
       - uses: actions/checkout@v6
@@ -566,7 +566,7 @@ jobs:
   # C++ bindings build and test (macOS with native Metal)
   cpp-macos:
     name: C++ Bindings (macOS)
-    runs-on: macos-latest
+    runs-on: macos-15
     needs: [check, test-mock]
     steps:
       - uses: actions/checkout@v6

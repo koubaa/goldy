@@ -1,6 +1,8 @@
 // Bouncing lines rendering shader
 // Visualizes lines using instancing with LineList topology
 
+import goldy_exp;
+
 struct Line {
     float2 p1;
     float2 v1;
@@ -12,27 +14,14 @@ struct Line {
     uint _pad3;
 };
 
-#if defined(__METAL__)
-// Metal: Use ParameterBlock for argument buffer
-struct RenderResources {
-    StructuredBuffer<Line> lines;
-};
-ParameterBlock<RenderResources> gResources;
-#define LINES gResources.lines
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-import goldy_exp.buffer_indices;
-[[vk::binding(0, 0)]] StructuredBuffer<Line> g_StorageBuffers[];
-#define LINES g_StorageBuffers[getBufferIndex(0)]
-
-#elif defined(__DX12__)
-// DX12: Root constants + ResourceDescriptorHeap
-cbuffer BufferIndices : register(b0, space0) {
-    uint lineBufferIndex;
-};
-#define LINES (*DescriptorHandle<StructuredBuffer<Line>>(uint2(lineBufferIndex, 0)))
-
+// Dynamic buffer selection - Rust: set_push_constants(&[lines_slot])
+#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
+// Metal Tier 1 fallback: traditional bindings
+StructuredBuffer<Line> lines : register(t0);
+#define LINES lines
+#else
+// All other platforms: use unified dynamic access
+#define LINES goldy_dyn_scattered<Line>(0)
 #endif
 
 struct VSOutput {
@@ -40,7 +29,6 @@ struct VSOutput {
     float4 color : COLOR;
 };
 
-// Color palette matching the original example
 static const float4 colors[6] = {
     float4(1.0, 0.0, 0.0, 1.0),  // Red
     float4(0.0, 1.0, 0.0, 1.0),  // Green
@@ -56,7 +44,6 @@ VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
     
     Line line = LINES[instanceID];
     
-    // vertexID is 0 for p1, 1 for p2
     float2 pos = (vertexID == 0) ? line.p1 : line.p2;
     
     output.position = float4(pos, 0.0, 1.0);

@@ -349,4 +349,52 @@ mod tests {
             result.err()
         );
     }
+
+    #[test]
+    fn test_rain_snow_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let test_shader = include_str!("../shaders/rain_snow_update.slang");
+        let shader_path = std::env::current_dir()
+            .unwrap()
+            .join("shaders")
+            .to_string_lossy()
+            .to_string();
+        let shader_path_str = shader_path.as_str();
+
+        // Test SPIRV compilation
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            test_shader,
+            ShaderTarget::Spirv,
+            &[("cs_main", SlangStage::Compute)],
+            &[shader_path_str],
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "rain_snow_update failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        // Test DXIL compilation (DX12)
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                test_shader,
+                ShaderTarget::Dxil,
+                &[("cs_main", SlangStage::Compute)],
+                &[shader_path_str],
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "rain_snow_update failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+    }
 }
