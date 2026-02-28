@@ -9,15 +9,8 @@ struct ViewUniforms {
     float _padding;
 };
 
-// Cross-platform resource access
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-ConstantBuffer<ViewUniforms> uniforms : register(b0);
-#define CENTER uniforms.center
-#define ZOOM uniforms.zoom
-#else
 #define CENTER goldy_broadcast<ViewUniforms>(0).center
 #define ZOOM goldy_broadcast<ViewUniforms>(0).zoom
-#endif
 
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {

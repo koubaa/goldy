@@ -47,19 +47,7 @@
 //
 // - SPIRV:  Routes to Goldy's custom binding layout (bindings 0-4)
 // - DX12:   Uses DescriptorHandle which maps to ResourceDescriptorHeap
-// - Metal Tier 2: Uses gGoldy ParameterBlock arrays
-// - Metal Tier 1: Not supported - use traditional bindings with fallback
-//
-// == Metal Tier 1 Fallback ==
-//
-// For Metal Tier 1 (GitHub CI), use preprocessor fallback:
-//
-//   #if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-//   ConstantBuffer<MyUniforms> uniforms : register(b0);
-//   #define UNIFORMS uniforms
-//   #else
-//   #define UNIFORMS goldy_broadcast<MyUniforms>(0)
-//   #endif
+// - Metal:  Uses gGoldy ParameterBlock arrays (Argument Buffers Tier 2 required)
 
 implementing goldy_exp;
 
@@ -113,16 +101,9 @@ GoldyDynamicSlots __goldy_get_dynamic() {
 // Macro is no-op - cbuffer is already declared
 #define GOLDY_DECLARE_DYNAMIC static const bool __goldy_dynamic_decl = true
 
-#elif defined(__METAL_BINDLESS__)
-// Metal Tier 2: Push constants
+#elif defined(__METAL__)
+// Metal: Push constants for runtime slot indices
 [[vk::push_constant]] ConstantBuffer<GoldyDynamicSlots> gGoldyDynamic;
-// Macro is no-op - gGoldyDynamic is already declared
-#define GOLDY_DECLARE_DYNAMIC static const bool __goldy_dynamic_decl = true
-
-#else
-// Metal Tier 1: Static dummy (dynamic access not really supported)
-// Zero-initialized by default
-static GoldyDynamicSlots gGoldyDynamic;
 // Macro is no-op - gGoldyDynamic is already declared
 #define GOLDY_DECLARE_DYNAMIC static const bool __goldy_dynamic_decl = true
 #endif
@@ -245,10 +226,10 @@ public SamplerState goldy_filter(uint slot)
 }
 
 // =============================================================================
-// Metal Tier 2 Implementation (Bindless)
+// Metal Implementation (Bindless via Argument Buffers Tier 2)
 // Uses ParameterBlock with device pointers
 // =============================================================================
-#elif defined(__METAL_BINDLESS__)
+#elif defined(__METAL__)
 
 // -----------------------------------------------------------------------------
 // Public access functions - return typed device pointer
@@ -277,77 +258,34 @@ public T goldy_dyn_broadcast<T>(uint n)
 {
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.uniformBuffers[slot];
-    __target_switch
-    {
-    case metal:
-        return reinterpret<T>(*basePtr);
-    default:
-        T* ptr = (T*)basePtr;
-        return *ptr;
-    }
+    return reinterpret<T>(*basePtr);
 }
 
-/// Access a uniform/constant buffer by slot index (Metal Tier 2).
+/// Access a uniform/constant buffer by slot index (Metal).
 /// Device pointers in gGoldy.uniformBuffers point directly to buffer data.
-/// We use target_switch to handle Metal's pointer cast limitations.
+/// Use reinterpret to handle Metal's pointer cast limitations.
 public T goldy_broadcast<T>(uint slot)
 {
-    // Get the uint* device pointer from the argument buffer
     uint* basePtr = gGoldy.uniformBuffers[slot];
-    
-    // For Metal, we need to use the pointer directly without type casting
-    // Read the data through the uint pointer and use reinterpret for the result
-    __target_switch
-    {
-    case metal:
-        // Metal: Read first sizeof(T)/4 uints and reinterpret as T
-        // This works because both point to the same memory
-        return reinterpret<T>(*basePtr);
-    default:
-        // Other targets: Direct pointer cast should work
-        T* ptr = (T*)basePtr;
-        return *ptr;
-    }
+    return reinterpret<T>(*basePtr);
 }
 
-
-/// Access a 2D texture by slot index (Metal Tier 2).
+/// Access a 2D texture by slot index (Metal).
 public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
 {
-    // Textures don't need pointer conversion - use reinterpret for element type
     return reinterpret<Texture2D<T>>(gGoldy.textures[slot]);
 }
 
-/// Access a read-write 2D texture by slot index (Metal Tier 2).
+/// Access a read-write 2D texture by slot index (Metal).
 public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 {
     return reinterpret<RWTexture2D<T>>(gGoldy.storageImages[slot]);
 }
 
-/// Access a sampler state by slot index (Metal Tier 2).
+/// Access a sampler state by slot index (Metal).
 public SamplerState goldy_filter(uint slot)
 {
     return gGoldy.samplers[slot];
 }
-
-// =============================================================================
-// Metal Tier 1 / Fallback
-// =============================================================================
-#else
-
-// Metal Tier 1 does not support indexed bindless access.
-// The access functions are intentionally NOT defined for Tier 1.
-//
-// Use traditional bindings with preprocessor fallback instead:
-//
-//   #if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-//   ConstantBuffer<MyUniforms> uniforms : register(b0);
-//   #define MY_UNIFORM uniforms
-//   #else
-//   #define MY_UNIFORM goldy_broadcast<MyUniforms>(0)
-//   #endif
-//
-// This ensures a clear compile error if someone tries to use goldy_broadcast()
-// on Metal Tier 1, rather than silent failures.
 
 #endif

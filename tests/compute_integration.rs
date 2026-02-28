@@ -12,19 +12,7 @@ use goldy::{
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
 
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1: traditional register bindings
-RWStructuredBuffer<uint> data : register(u0);
-#define DATA data
-#elif defined(__METAL_BINDLESS__)
-// Metal Tier 2: ParameterBlock (goldy_dyn_scattered blocked by Slang issue #9716)
-struct ComputeResources { RWStructuredBuffer<uint> data; };
-ParameterBlock<ComputeResources> gResources;
-#define DATA gResources.data
-#else
-// SPIRV / DX12: unified bindless API
 #define DATA goldy_dyn_scattered<uint>(0)
-#endif
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -37,23 +25,8 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const COPY_SHADER: &str = r#"
 import goldy_exp;
 
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1: traditional register bindings
-StructuredBuffer<uint> inputBuf : register(t0);
-RWStructuredBuffer<uint> outputBuf : register(u0);
-#define INPUT inputBuf
-#define OUTPUT outputBuf
-#elif defined(__METAL_BINDLESS__)
-// Metal Tier 2: ParameterBlock (goldy_dyn_scattered blocked by Slang issue #9716)
-struct ComputeResources { StructuredBuffer<uint> inputBuf; RWStructuredBuffer<uint> outputBuf; };
-ParameterBlock<ComputeResources> gResources;
-#define INPUT gResources.inputBuf
-#define OUTPUT gResources.outputBuf
-#else
-// SPIRV / DX12: unified bindless API
 #define INPUT goldy_dyn_scattered<uint>(0)
 #define OUTPUT goldy_dyn_scattered<uint>(1)
-#endif
 
 [shader("compute")]
 [numthreads(64, 1, 1)]

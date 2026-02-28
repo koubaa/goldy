@@ -264,16 +264,11 @@ impl SlangCompiler {
     }
 
     /// Get preprocessor defines for the given target.
-    ///
-    /// For Metal bindless compilation, we add `__METAL_BINDLESS__` to indicate
-    /// Tier 2 argument buffer support. Shaders can use this to conditionally
-    /// enable advanced bindless features while maintaining Tier 1 fallbacks.
     fn bindless_defines_for_target(target: ShaderTarget) -> Vec<(&'static str, &'static str)> {
         match target {
             ShaderTarget::Spirv => vec![("__SPIRV__", "1")],
             ShaderTarget::Dxil => vec![("__DX12__", "1")],
-            // __METAL_BINDLESS__ indicates Tier 2 argument buffer support
-            ShaderTarget::Metal => vec![("__METAL__", "1"), ("__METAL_BINDLESS__", "1")],
+            ShaderTarget::Metal => vec![("__METAL__", "1")],
         }
     }
 

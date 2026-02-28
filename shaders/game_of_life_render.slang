@@ -7,14 +7,7 @@ static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
 // Dynamic buffer selection - Rust: set_push_constants(&[cells_buffer_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-StructuredBuffer<uint> cells : register(t0);
-#define CELLS cells
-#else
-// All other platforms: use unified dynamic access
 #define CELLS goldy_dyn_scattered<uint>(0)
-#endif
 
 struct VSOutput {
     float4 position : SV_Position;

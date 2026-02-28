@@ -10,14 +10,7 @@ struct QuadInstance {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[instances_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-StructuredBuffer<QuadInstance> instances : register(t0);
-#define INSTANCES instances
-#else
-// All other platforms: use unified dynamic access
 #define INSTANCES goldy_dyn_scattered<QuadInstance>(0)
-#endif
 
 struct VSOutput {
     float4 position : SV_Position;

@@ -8,18 +8,8 @@ static const uint GRID_HEIGHT = 128;
 
 // Dynamic buffer selection for ping-pong pattern
 // Rust side: set_push_constants(&[read_buffer_slot, write_buffer_slot])
-// Note: Push constant resources are auto-declared in goldy_exp module.
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-StructuredBuffer<uint> currentState : register(t0);
-RWStructuredBuffer<uint> nextState : register(u0);
-#define CURRENT_STATE currentState
-#define NEXT_STATE nextState
-#else
-// All other platforms: use unified dynamic access
 #define CURRENT_STATE goldy_dyn_scattered<uint>(0)
 #define NEXT_STATE goldy_dyn_scattered<uint>(1)
-#endif
 
 // Get cell state (1 = alive, 0 = dead)
 uint getCell(int x, int y) {

@@ -9,14 +9,7 @@ struct Particle {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[particles_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-RWStructuredBuffer<Particle> particles : register(u0);
-#define PARTICLES particles
-#else
-// All other platforms: use unified dynamic access
 #define PARTICLES goldy_dyn_scattered<Particle>(0)
-#endif
 
 static const float deltaTime = 0.016;
 static const float2 gravity = float2(0.0, -0.3);

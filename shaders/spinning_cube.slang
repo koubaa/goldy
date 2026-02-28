@@ -7,13 +7,7 @@ struct TimeUniforms {
     float time;
 };
 
-// Cross-platform resource access
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-ConstantBuffer<TimeUniforms> uniforms : register(b0);
-#define TIME uniforms.time
-#else
 #define TIME goldy_broadcast<TimeUniforms>(0).time
-#endif
 
 [shader("vertex")]
 FullscreenVarying vs_main(FullscreenVertex input) {

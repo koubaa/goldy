@@ -9,14 +9,7 @@ struct Particle {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[particles_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-StructuredBuffer<Particle> particles : register(t0);
-#define PARTICLES particles
-#else
-// All other platforms: use unified dynamic access
 #define PARTICLES goldy_dyn_scattered<Particle>(0)
-#endif
 
 struct VSOutput {
     float4 position : SV_Position;
