@@ -16,10 +16,10 @@ crate-type = ["cdylib"]
 goldy = { path = "..", default-features = false }
 
 # Python bindings
-pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 
 # NumPy interop for zero-copy buffer access
-numpy = "0.27"
+numpy = "0.28"
 
 # Error handling
 anyhow = "1.0"
