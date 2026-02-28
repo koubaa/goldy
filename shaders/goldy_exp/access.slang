@@ -258,16 +258,17 @@ public T goldy_dyn_broadcast<T>(uint n)
 {
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.uniformBuffers[slot];
-    return reinterpret<T>(*basePtr);
+    return ((Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr)[0];
 }
 
 /// Access a uniform/constant buffer by slot index (Metal).
-/// Device pointers in gGoldy.uniformBuffers point directly to buffer data.
-/// Use reinterpret to handle Metal's pointer cast limitations.
+/// Cast the device pointer to T* and index [0] to read sizeof(T) bytes.
+/// reinterpret<T>(*basePtr) is WRONG: it only reads 4 bytes (one uint) and
+/// zero-fills the rest, corrupting any T larger than 4 bytes.
 public T goldy_broadcast<T>(uint slot)
 {
     uint* basePtr = gGoldy.uniformBuffers[slot];
-    return reinterpret<T>(*basePtr);
+    return ((Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr)[0];
 }
 
 /// Access a 2D texture by slot index (Metal).

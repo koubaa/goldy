@@ -93,13 +93,14 @@ pub(crate) struct ResourceRegistry {
 impl ResourceRegistry {
     pub fn new() -> Self {
         Self {
-            // Storage buffers (Scattered) at indices 0-63
+            // Storage buffers (Scattered) at indices 0-63, bytes 0-511
             next_storage_buffer_index: 0,
-            // Uniform buffers (Broadcast) at indices 64-127
+            // Uniform buffers (Broadcast) at indices 64-127, bytes 512-1023
             next_uniform_buffer_index: MAX_RESOURCES_PER_CATEGORY,
-            // Textures at higher offsets
-            next_texture_index: 4096,
-            next_sampler_index: 8192,
+            // Textures at indices 128-191, bytes 1024-1535 (after storageBuffers[64]+uniformBuffers[64])
+            next_texture_index: 2 * MAX_RESOURCES_PER_CATEGORY,
+            // Samplers at indices 256-319, bytes 2048-2559 (after textures[64]+storageImages[64])
+            next_sampler_index: 4 * MAX_RESOURCES_PER_CATEGORY,
             buffer_indices: HashMap::new(),
             texture_indices: HashMap::new(),
             sampler_indices: HashMap::new(),

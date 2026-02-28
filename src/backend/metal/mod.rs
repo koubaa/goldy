@@ -38,6 +38,8 @@ use std::collections::HashMap;
 
 // Re-import metal crate with explicit path to avoid name collision
 use ::metal as mtl;
+
+
 use mtl::{
     Device as MTLDevice, HeapDescriptor, Library, MTLCPUCacheMode, MTLClearColor, MTLHeapType,
     MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLResourceOptions,
@@ -1569,6 +1571,7 @@ impl GpuBackend for MetalBackend {
         encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
         encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
         tracing::trace!("Bound global argument buffer at slot 0");
+
 
         // Set viewport and scissor
         encoder.set_viewport(mtl::MTLViewport {
