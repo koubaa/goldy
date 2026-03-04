@@ -194,3 +194,72 @@ fn test_compute_with_srv_and_uav() {
         result.err()
     );
 }
+
+/// Test that uses a struct type (like Particle) - exercises same Metal code path as compute_particles.
+#[test]
+fn test_compute_with_struct_buffer() {
+    const PARTICLE_SHADER: &str = r#"
+import goldy_exp;
+
+struct Particle {
+    float2 position;
+    float2 velocity;
+};
+
+#define PARTICLES goldy_dyn_scattered<Particle>(0)
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    uint idx = id.x;
+    if (idx >= 4) return;
+    Particle p = PARTICLES[idx];
+    p.position += float2(0.01, 0.01);
+    PARTICLES[idx] = p;
+}
+"#;
+
+    let instance = Instance::new().expect("Failed to create instance");
+    let device = instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .expect("Failed to create device");
+
+    let shader =
+        ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("Failed to compile shader");
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Particle {
+        position: [f32; 2],
+        velocity: [f32; 2],
+    }
+
+    let particles = vec![
+        Particle {
+            position: [0.0, 0.0],
+            velocity: [0.1, 0.0],
+        };
+        4
+    ];
+    let buffer =
+        Buffer::with_data(&device, &particles, DataAccess::Scattered).expect("Failed to create buffer");
+
+    let pipeline =
+        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buffer]);
+        pass.dispatch(1, 1, 1);
+    }
+
+    let result = encoder.dispatch(&device);
+    assert!(
+        result.is_ok(),
+        "Failed to dispatch with struct buffer: {:?}",
+        result.err()
+    );
+}
