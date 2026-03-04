@@ -10,8 +10,10 @@
 //! - At render time, useHeap() declares residency for all resources
 //! - Shaders access resources by index into the argument buffer
 
-
-use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
+use super::super::{
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+};
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
 // Use explicit crate path to avoid collision with our module name
@@ -243,3 +245,27 @@ pub(crate) struct SurfaceState {
 // Safety: Metal objects are thread-safe when properly synchronized
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
+
+/// Consolidated Metal backend state.
+/// Holds all resources and state for the Metal backend.
+pub(super) struct MetalState {
+    pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
+    pub next_device_handle: DeviceHandle,
+    pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
+    pub next_buffer_handle: BufferHandle,
+    pub shaders: std::collections::HashMap<ShaderHandle, ShaderState>,
+    pub next_shader_handle: ShaderHandle,
+    pub pipelines: std::collections::HashMap<PipelineHandle, PipelineState>,
+    pub next_pipeline_handle: PipelineHandle,
+    pub compute_pipelines: std::collections::HashMap<ComputePipelineHandle, ComputePipelineState>,
+    pub next_compute_pipeline_handle: ComputePipelineHandle,
+    pub render_targets: std::collections::HashMap<RenderTargetHandle, RenderTargetState>,
+    pub next_render_target_handle: RenderTargetHandle,
+    pub surfaces: std::collections::HashMap<SurfaceHandle, SurfaceState>,
+    pub next_surface_handle: SurfaceHandle,
+    pub textures: std::collections::HashMap<TextureHandle, TextureState>,
+    pub next_texture_handle: TextureHandle,
+    pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
+    pub next_sampler_handle: SamplerHandle,
+    pub slang_compiler: crate::slang::SlangCompiler,
+}
