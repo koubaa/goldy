@@ -17,6 +17,7 @@ use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
 
@@ -121,6 +122,7 @@ impl RenderState {
             "Created compute particles example with {} particles",
             NUM_PARTICLES
         );
+        println!("Press Escape or close window to exit");
 
         Ok(Self {
             window,
@@ -212,6 +214,11 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {

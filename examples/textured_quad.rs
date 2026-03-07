@@ -20,6 +20,8 @@ use winit::{
 
 // Simple shader that samples a texture
 const TEXTURED_SHADER: &str = r#"
+import goldy_exp;
+
 struct VertexInput {
     float2 position : POSITION;
     float2 uv : TEXCOORD0;
@@ -31,12 +33,10 @@ struct VertexOutput {
 };
 
 // Cross-platform resource access via push constants
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1: Traditional binding
-Texture2D<float4> texture : register(t0);
-SamplerState texSampler : register(s0);
-#define GET_TEXTURE() texture
-#define GET_SAMPLER() texSampler
+#if defined(__METAL__)
+// Metal: bindless via goldy_exp (static slots 0)
+#define GET_TEXTURE() goldy_interpolated<float4>(0)
+#define GET_SAMPLER() goldy_filter(0)
 
 #elif defined(__SPIRV__)
 // Vulkan: Push constants for indices + global descriptor arrays

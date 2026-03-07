@@ -15,14 +15,7 @@ struct Line {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[lines_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-RWStructuredBuffer<Line> lines : register(u0);
-#define LINES lines
-#else
-// All other platforms: use unified dynamic access
 #define LINES goldy_dyn_scattered<Line>(0)
-#endif
 
 static const uint NUM_LINES = 20;
 

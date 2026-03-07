@@ -270,8 +270,7 @@ mod tests {
     /// Verifies that:
     /// - SPIRV: goldy_broadcast<T>() compiles and routes to Goldy's bindings
     /// - DX12: goldy_broadcast<T>() compiles using DescriptorHandle
-    /// - Metal Tier 1: Traditional bindings work (without access functions)
-    /// - Metal Tier 2: goldy_broadcast<T>() works via ParameterBlock
+    /// - Metal: goldy_broadcast<T>() works via ParameterBlock (Tier 2 required)
     #[test]
     fn test_access_functions_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler};
@@ -319,33 +318,18 @@ mod tests {
             );
         }
 
-        // Test Metal Tier 1 compilation - uses traditional bindings
-        let metal_tier1_defines = vec![("__METAL__", "1")];
+        // Test Metal compilation (bindless) - uses goldy_broadcast<T>()
+        let metal_defines = vec![("__METAL__", "1")];
         let result = compiler.compile_with_defines(
             test_shader,
             ShaderTarget::Metal,
             &[],
             &[shader_path_str],
-            &metal_tier1_defines,
+            &metal_defines,
         );
         assert!(
             result.is_ok(),
-            "test_access_functions failed to compile for Metal Tier 1: {:?}",
-            result.err()
-        );
-
-        // Test Metal Tier 2 compilation - uses goldy_broadcast<T>()
-        let metal_tier2_defines = vec![("__METAL__", "1"), ("__METAL_BINDLESS__", "1")];
-        let result = compiler.compile_with_defines(
-            test_shader,
-            ShaderTarget::Metal,
-            &[],
-            &[shader_path_str],
-            &metal_tier2_defines,
-        );
-        assert!(
-            result.is_ok(),
-            "test_access_functions failed to compile for Metal Tier 2: {:?}",
+            "test_access_functions failed to compile for Metal: {:?}",
             result.err()
         );
     }

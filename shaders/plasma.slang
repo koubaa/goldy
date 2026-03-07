@@ -1,9 +1,5 @@
 // Classic demoscene plasma effect
 // Uses vertex-less fullscreen triangle and time uniform
-//
-// This shader demonstrates Goldy's unified cross-platform resource binding:
-// - SPIRV/DX12/Metal Tier 2: Uses goldy_broadcast<T>() for clean, unified access
-// - Metal Tier 1: Falls back to traditional bindings (GitHub CI compatibility)
 
 import goldy_exp;
 
@@ -11,15 +7,7 @@ struct TimeUniforms {
     float time;
 };
 
-// Cross-platform resource access
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1: Traditional binding for GitHub CI compatibility
-ConstantBuffer<TimeUniforms> uniforms : register(b0);
-#define TIME uniforms.time
-#else
-// SPIRV, DX12, Metal Tier 2: Unified access function
 #define TIME goldy_broadcast<TimeUniforms>(0).time
-#endif
 
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {

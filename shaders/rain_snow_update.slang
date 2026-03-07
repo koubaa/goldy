@@ -20,19 +20,8 @@ struct ParticleParams {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[particles_slot, params_slot])
-// Note: Push constant resources are declared in goldy_exp module; GOLDY_DECLARE_DYNAMIC is
-// no longer needed (the resources are auto-declared per platform in access.slang).
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-RWStructuredBuffer<Particle> particles : register(u0);
-ConstantBuffer<ParticleParams> params : register(b0);
-#define PARTICLES particles
-#define PARAMS params
-#else
-// All other platforms: use unified dynamic access
 #define PARTICLES goldy_dyn_scattered<Particle>(0)
 #define PARAMS goldy_dyn_broadcast<ParticleParams>(1)
-#endif
 
 static const uint NUM_PARTICLES = 1000;
 

@@ -27,7 +27,7 @@ Run the download script to fetch pre-built binaries for all platforms:
 
 ```bash
 ./download.sh           # Latest pinned version
-./download.sh 2025.24.3 # Specific version
+./download.sh 2026.4 # Specific version
 ```
 
 ## Development Fallback
@@ -40,7 +40,7 @@ For development, Goldy will automatically fall back to using Slang from:
 
 ## Version
 
-Current pinned version: **2025.24.3**
+Current pinned version: **2026.4**
 
 ## License
 

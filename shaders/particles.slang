@@ -10,15 +10,8 @@ struct ParticleParams {
     float _pad2;
 };
 
-// Cross-platform resource access
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-ConstantBuffer<ParticleParams> params : register(b0);
-#define TIME params.time
-#define IS_SNOW params.is_snow
-#else
 #define TIME goldy_broadcast<ParticleParams>(0).time
 #define IS_SNOW goldy_broadcast<ParticleParams>(0).is_snow
-#endif
 
 [shader("vertex")]
 FullscreenVarying vs_main(FullscreenVertex input) {

@@ -17,17 +17,8 @@ struct AnimParams {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[instances_slot, params_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-RWStructuredBuffer<QuadInstance> instances : register(u0);
-ConstantBuffer<AnimParams> params : register(b0);
-#define INSTANCES instances
-#define PARAMS params
-#else
-// All other platforms: use unified dynamic access
 #define INSTANCES goldy_dyn_scattered<QuadInstance>(0)
 #define PARAMS goldy_dyn_broadcast<AnimParams>(1)
-#endif
 
 float3 hsv_to_rgb(float h, float s, float v) {
     float4 K = float4(1.0, 2.0/3.0, 1.0/3.0, 3.0);

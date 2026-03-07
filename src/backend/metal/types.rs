@@ -10,9 +10,10 @@
 //! - At render time, useHeap() declares residency for all resources
 //! - Shaders access resources by index into the argument buffer
 
-#![allow(dead_code)] // Some fields are for future use
-
-use super::super::{BufferHandle, DeviceHandle, SamplerHandle, TextureHandle};
+use super::super::{
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+};
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
 // Use explicit crate path to avoid collision with our module name
@@ -33,39 +34,38 @@ pub const PUSH_CONSTANTS_SLOT: u64 = 29;
 /// Maximum number of resource indices in push constants
 pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
 
-/// Push constants structure for passing bindless resource indices to shaders
+/// Push constants structure for passing bindless resource indices to shaders.
+///
+/// Matches the flat layout used by DX12 (`SetGraphicsRoot32BitConstants`) and
+/// Vulkan (`vkCmdPushConstants`). Indices are packed sequentially: the caller
+/// decides what each slot means (buffer, texture, or sampler index).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct BindlessIndices {
-    /// Buffer indices into the argument buffer (slot 30)
-    pub buffer_indices: [u32; MAX_PUSH_CONSTANT_INDICES],
-    /// Texture indices into the argument buffer
-    pub texture_indices: [u32; MAX_PUSH_CONSTANT_INDICES],
-    /// Sampler indices into the argument buffer
-    pub sampler_indices: [u32; MAX_PUSH_CONSTANT_INDICES],
+    pub indices: [u32; MAX_PUSH_CONSTANT_INDICES],
 }
 
 /// A logical Metal device with associated resources.
+///
+/// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
 pub(crate) struct LogicalDevice {
     pub device: MTLDevice,
     pub command_queue: CommandQueue,
     pub adapter_id: u32,
 
-    // Bindless infrastructure
-    /// Heap for buffer allocations (bindless)
-    pub buffer_heap: Option<Heap>,
-    /// Heap for texture allocations (bindless)
-    pub texture_heap: Option<Heap>,
+    // Bindless infrastructure (always present — Tier 2 required)
+    /// Heap for buffer allocations
+    pub buffer_heap: Heap,
+    /// Heap for texture allocations
+    pub texture_heap: Heap,
     /// Global argument buffer containing resource IDs
-    pub argument_buffer: Option<MTLBuffer>,
+    pub argument_buffer: MTLBuffer,
     /// Encoder for writing buffers to the argument buffer
-    pub argument_encoder: Option<ArgumentEncoder>,
+    pub argument_encoder: ArgumentEncoder,
     /// Encoder for writing textures to the argument buffer
-    pub texture_encoder: Option<ArgumentEncoder>,
+    pub texture_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
-    /// Whether bindless is enabled (Argument Buffers Tier 2)
-    pub bindless_enabled: bool,
     /// Count of buffers allocated from heap (for use_heap_at safety)
     pub heap_buffer_count: u32,
     /// Count of textures allocated from heap (for use_heap_at safety)
@@ -95,13 +95,14 @@ pub(crate) struct ResourceRegistry {
 impl ResourceRegistry {
     pub fn new() -> Self {
         Self {
-            // Storage buffers (Scattered) at indices 0-63
+            // Storage buffers (Scattered) at indices 0-63, bytes 0-511
             next_storage_buffer_index: 0,
-            // Uniform buffers (Broadcast) at indices 64-127
+            // Uniform buffers (Broadcast) at indices 64-127, bytes 512-1023
             next_uniform_buffer_index: MAX_RESOURCES_PER_CATEGORY,
-            // Textures at higher offsets
-            next_texture_index: 4096,
-            next_sampler_index: 8192,
+            // Textures at indices 128-191, bytes 1024-1535 (after storageBuffers[64]+uniformBuffers[64])
+            next_texture_index: 2 * MAX_RESOURCES_PER_CATEGORY,
+            // Samplers at indices 256-319, bytes 2048-2559 (after textures[64]+storageImages[64])
+            next_sampler_index: 4 * MAX_RESOURCES_PER_CATEGORY,
             buffer_indices: HashMap::new(),
             texture_indices: HashMap::new(),
             sampler_indices: HashMap::new(),
@@ -149,44 +150,15 @@ impl ResourceRegistry {
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
         self.sampler_indices.remove(&handle);
     }
-
-    /// Check if an index is in the texture range (4096-8191)
-    pub fn is_texture_index(&self, index: u32) -> bool {
-        (4096..8192).contains(&index)
-    }
-
-    /// Check if an index is in the sampler range (8192+)
-    pub fn is_sampler_index(&self, index: u32) -> bool {
-        index >= 8192
-    }
-
-    /// Reverse lookup: find texture handle by its bindless index
-    pub fn texture_handle_by_index(&self, index: u32) -> Option<TextureHandle> {
-        self.texture_indices
-            .iter()
-            .find(|(_, &idx)| idx == index)
-            .map(|(&handle, _)| handle)
-    }
-
-    /// Reverse lookup: find sampler handle by its bindless index
-    pub fn sampler_handle_by_index(&self, index: u32) -> Option<SamplerHandle> {
-        self.sampler_indices
-            .iter()
-            .find(|(_, &idx)| idx == index)
-            .map(|(&handle, _)| handle)
-    }
 }
 
 /// GPU buffer state.
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
-    /// The actual GPU buffer (may be heap-allocated with Private storage)
     pub buffer: MTLBuffer,
     pub size: u64,
-    /// Index in the global argument buffer (bindless)
-    pub arg_buffer_index: Option<u32>,
-    /// Whether this buffer was allocated from a heap
-    pub is_heap_allocated: bool,
+    /// Index in the global argument buffer (always present — heap required).
+    pub arg_buffer_index: u32,
 }
 
 /// Shader module state with cached compiled stages.
@@ -242,20 +214,17 @@ pub(crate) struct TextureState {
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
-    /// The actual GPU texture (may be heap-allocated with Private storage)
     pub texture: MTLTexture,
-    /// Index in the global argument buffer (bindless)
-    pub arg_buffer_index: Option<u32>,
-    /// Whether this texture was allocated from a heap
-    pub is_heap_allocated: bool,
+    /// Index in the global argument buffer (always present — heap required).
+    pub arg_buffer_index: u32,
 }
 
 /// GPU sampler state.
 pub(crate) struct SamplerState_ {
     pub device_handle: DeviceHandle,
     pub sampler: SamplerState,
-    /// Index in the global argument buffer (bindless)
-    pub arg_buffer_index: Option<u32>,
+    /// Index in the global argument buffer (always present).
+    pub arg_buffer_index: u32,
 }
 
 /// Maximum number of frames that can be in-flight at once.
@@ -276,3 +245,27 @@ pub(crate) struct SurfaceState {
 // Safety: Metal objects are thread-safe when properly synchronized
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
+
+/// Consolidated Metal backend state.
+/// Holds all resources and state for the Metal backend.
+pub(super) struct MetalState {
+    pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
+    pub next_device_handle: DeviceHandle,
+    pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
+    pub next_buffer_handle: BufferHandle,
+    pub shaders: std::collections::HashMap<ShaderHandle, ShaderState>,
+    pub next_shader_handle: ShaderHandle,
+    pub pipelines: std::collections::HashMap<PipelineHandle, PipelineState>,
+    pub next_pipeline_handle: PipelineHandle,
+    pub compute_pipelines: std::collections::HashMap<ComputePipelineHandle, ComputePipelineState>,
+    pub next_compute_pipeline_handle: ComputePipelineHandle,
+    pub render_targets: std::collections::HashMap<RenderTargetHandle, RenderTargetState>,
+    pub next_render_target_handle: RenderTargetHandle,
+    pub surfaces: std::collections::HashMap<SurfaceHandle, SurfaceState>,
+    pub next_surface_handle: SurfaceHandle,
+    pub textures: std::collections::HashMap<TextureHandle, TextureState>,
+    pub next_texture_handle: TextureHandle,
+    pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
+    pub next_sampler_handle: SamplerHandle,
+    pub slang_compiler: crate::slang::SlangCompiler,
+}

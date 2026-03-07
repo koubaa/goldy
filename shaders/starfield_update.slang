@@ -22,17 +22,8 @@ struct StarfieldParams {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[stars_slot, params_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-RWStructuredBuffer<Star> stars : register(u0);
-ConstantBuffer<StarfieldParams> params : register(b0);
-#define STARS stars
-#define PARAMS params
-#else
-// All other platforms: use unified dynamic access
 #define STARS goldy_dyn_scattered<Star>(0)
 #define PARAMS goldy_dyn_broadcast<StarfieldParams>(1)
-#endif
 
 static const uint NUM_STARS = 500;
 

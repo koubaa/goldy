@@ -15,13 +15,16 @@ set(GOLDY_EXAMPLES triangle plasma)
 if(GOLDY_FFI_LIB)
     foreach(example IN LISTS GOLDY_EXAMPLES)
         if(WIN32)
-            # Copy DLL to output directory on Windows
-            add_custom_command(TARGET ${example} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${GOLDY_FFI_LIB}"
-                    "$<TARGET_FILE_DIR:${example}>"
-                COMMENT "Copying goldy_ffi.dll to output directory"
-            )
+            # Copy DLL to output directory on Windows (GOLDY_FFI_DLL is the runtime DLL;
+            # GOLDY_FFI_LIB is the import lib used only at link time)
+            if(GOLDY_FFI_DLL)
+                add_custom_command(TARGET ${example} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${GOLDY_FFI_DLL}"
+                        "$<TARGET_FILE_DIR:${example}>"
+                    COMMENT "Copying goldy_ffi.dll to output directory"
+                )
+            endif()
         elseif(APPLE)
             # Set rpath for macOS to find the dylib at runtime
             set_target_properties(${example} PROPERTIES

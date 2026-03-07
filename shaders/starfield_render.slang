@@ -16,14 +16,7 @@ struct Star {
 };
 
 // Dynamic buffer selection - Rust: set_push_constants(&[stars_slot])
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-// Metal Tier 1 fallback: traditional bindings
-StructuredBuffer<Star> stars : register(t0);
-#define STARS stars
-#else
-// All other platforms: use unified dynamic access
 #define STARS goldy_dyn_scattered<Star>(0)
-#endif
 
 struct VSOutput {
     float4 position : SV_Position;

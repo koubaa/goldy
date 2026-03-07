@@ -14,15 +14,7 @@
 //   // Storage buffers (RWStructuredBuffer)
 //   RWStructuredBuffer<Particle> buf = goldy_scattered<Particle>(0);
 //
-// These work on SPIRV, DX12, and Metal Tier 2. For Metal Tier 1 (GitHub CI),
-// use traditional bindings with preprocessor fallback:
-//
-//   #if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-//   ConstantBuffer<TimeUniforms> uniforms : register(b0);
-//   #define TIME uniforms.time
-//   #else
-//   #define TIME goldy_broadcast<TimeUniforms>(0).time
-//   #endif
+// These work on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
 
 module goldy_exp;
 

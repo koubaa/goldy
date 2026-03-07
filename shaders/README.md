@@ -221,25 +221,19 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
 | Define | When Set | Use For |
 |--------|----------|---------|
 | `__METAL__` | Targeting Metal | Metal-specific code (ParameterBlock for argument buffers) |
-| `__METAL_BINDLESS__` | Metal + Tier 2 argument buffers | Enables `goldy_broadcast<T>()` on Metal (see below) |
 | `__SPIRV__` | Targeting Vulkan | Vulkan-specific code (push constants, descriptor arrays) |
 | `__DX12__` | Targeting DX12 | DX12-specific code (root constants, ResourceDescriptorHeap) |
 
-### Metal Tier 1 vs Tier 2
+### Metal Requirements
 
-Metal has two argument buffer tiers with different capabilities:
+Goldy requires **Argument Buffers Tier 2**, supported on:
+- Apple Silicon (all models)
+- Intel Macs 2017+
+- AMD GPUs 2015+
 
-| Tier | Hardware | Capabilities | Define |
-|------|----------|--------------|--------|
-| **Tier 1** | Older Intel (GitHub runners) | Traditional bindings only | `__METAL__` only |
-| **Tier 2** | Apple Silicon, Intel 2017+, AMD 2015+ | Full argument buffers, bindless | `__METAL__` + `__METAL_BINDLESS__` |
-
-Goldy automatically detects the tier at runtime and passes the appropriate defines.
-This allows CI tests to run on GitHub runners (Tier 1) while production builds
-get full bindless support on Tier 2 hardware.
+Older Intel hardware (pre-2017) is not supported.
 
 <details>
-<summary>Technical Details: Metal Tier 2 Bindless Implementation</summary>
 
 Metal's shader compiler has strict rules about pointer and type casts. The `as_type<>` intrinsic
 (Slang's `reinterpret<>`) is limited:
@@ -316,7 +310,7 @@ struct TimeUniforms { float time; };
 
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
-    // Unified access - works on SPIRV, DX12, and Metal Tier 2!
+    // Unified access - works on SPIRV, DX12, and Metal!
     float t = goldy_broadcast<TimeUniforms>(0).time;
     return float4(rainbow(t), 1.0);
 }
@@ -335,36 +329,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 **Platform support:**
 - **SPIRV**: Routes to Goldy's custom binding layout (bindings 0-4)
 - **DX12**: Uses `DescriptorHandle<T>` → `ResourceDescriptorHeap`
-- **Metal Tier 2**: Uses `ParameterBlock` with typed resource arrays
-- **Metal Tier 1**: Not supported (use fallback pattern below)
-
-#### Metal Tier 1 Fallback
-
-For GitHub CI compatibility (Metal Tier 1), use the fallback pattern:
-
-```slang
-import goldy_exp;
-
-struct TimeUniforms { float time; };
-
-// Metal Tier 1 fallback for CI - traditional binding
-#if defined(__METAL__) && !defined(__METAL_BINDLESS__)
-ConstantBuffer<TimeUniforms> uniforms : register(b0);
-#define TIME uniforms.time
-#else
-// SPIRV, DX12, Metal Tier 2 - unified access
-#define TIME goldy_broadcast<TimeUniforms>(0).time
-#endif
-
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    float t = TIME;  // Works everywhere!
-    // ...
-}
-```
-
-This 6-line pattern replaces the old 30+ lines of platform-specific code while
-maintaining compatibility with CI runners.
+- **Metal**: Uses `ParameterBlock` with typed resource arrays (Tier 2 required)
 
 **See `plasma.slang` and `test_access_functions.slang` for complete examples.**
 
@@ -373,7 +338,7 @@ maintaining compatibility with CI runners.
 For more control, you can also use Slang's `DescriptorHandle<T>` directly:
 
 ```slang
-// Works on SPIRV and DX12 (not Metal Tier 1)
+// Works on SPIRV and DX12 (Metal uses goldy_broadcast instead)
 uniform ConstantBuffer<TimeUniforms>.Handle uniforms;
 float t = (*uniforms).time;  // Dereference to access
 ```
