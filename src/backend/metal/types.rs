@@ -118,12 +118,22 @@ impl ResourceRegistry {
         index
     }
 
-    /// Register a uniform buffer (Broadcast access) - indices 64-127
+    /// Register a uniform buffer (Broadcast access) - local indices 0-63 (shader slot),
+    /// global indices 64-127 (argument buffer encoding offset).
+    /// Returns the LOCAL index so push constants pass 0-63 to the shader
+    /// (which indexes into uniformBuffers[0..63]).
     pub fn register_uniform_buffer(&mut self, handle: BufferHandle) -> u32 {
-        let index = self.next_uniform_buffer_index;
+        let global_index = self.next_uniform_buffer_index;
+        let local_index = global_index - MAX_RESOURCES_PER_CATEGORY;
         self.next_uniform_buffer_index += 1;
-        self.buffer_indices.insert(handle, index);
-        index
+        self.buffer_indices.insert(handle, local_index);
+        local_index
+    }
+
+    /// Returns the global argument buffer index for a uniform buffer
+    /// (local + MAX_RESOURCES_PER_CATEGORY), needed for encoding offsets.
+    pub fn uniform_global_index(local_index: u32) -> u32 {
+        local_index + MAX_RESOURCES_PER_CATEGORY
     }
 
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {

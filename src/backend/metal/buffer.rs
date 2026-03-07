@@ -1,7 +1,7 @@
 //! Buffer management logic.
 
 use super::super::{BufferHandle, DeviceHandle};
-use super::types::{BufferState, MetalState, ARGUMENT_BUFFER_SIZE};
+use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE};
 use crate::backend::DataAccess;
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -33,6 +33,8 @@ pub(super) fn create(
         .context("Metal buffer heap is full — increase heap size")?;
 
     // Register in bindless registry based on access pattern.
+    // arg_buffer_index is the LOCAL shader slot (0-63 for both Scattered and Broadcast).
+    // For encoding into the flat argument buffer, Broadcast buffers need the global index.
     let arg_buffer_index = match access {
         DataAccess::Broadcast => logical_device
             .resource_registry
@@ -41,15 +43,21 @@ pub(super) fn create(
             .resource_registry
             .register_storage_buffer(handle),
     };
+    let encoding_index = match access {
+        DataAccess::Broadcast => ResourceRegistry::uniform_global_index(arg_buffer_index),
+        DataAccess::Scattered => arg_buffer_index,
+    };
     tracing::debug!(
         "Allocated buffer {} from heap at bindless index {}",
         handle,
         arg_buffer_index
     );
 
-    // Encode buffer into argument buffer using ArgumentEncoder
+    // Encode buffer into argument buffer using ArgumentEncoder.
+    // Use encoding_index (global) for offset so the buffer lands at the correct
+    // position in the flat argument buffer (Broadcast buffers start at slot 64).
     let encoded_length = logical_device.argument_encoder.encoded_length();
-    let offset = (arg_buffer_index as u64) * encoded_length;
+    let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
         logical_device
             .argument_encoder
