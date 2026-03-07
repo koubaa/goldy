@@ -59,7 +59,7 @@ jobs:
           cd release-package
           tar czf ../goldy_ffi-linux-x64.tar.gz *
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: goldy_ffi-linux-x64
           path: goldy_ffi-linux-x64.tar.gz
@@ -106,7 +106,7 @@ jobs:
         run: |
           Compress-Archive -Path release-package\* -DestinationPath goldy_ffi-windows-x64.zip -Force
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: goldy_ffi-windows-x64
           path: goldy_ffi-windows-x64.zip
@@ -153,7 +153,7 @@ jobs:
           cd release-package
           tar czf ../goldy_ffi-macos-x64.tar.gz *
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: goldy_ffi-macos-x64
           path: goldy_ffi-macos-x64.tar.gz
@@ -200,7 +200,7 @@ jobs:
           cd release-package
           tar czf ../goldy_ffi-macos-arm64.tar.gz *
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: goldy_ffi-macos-arm64
           path: goldy_ffi-macos-arm64.tar.gz
@@ -218,7 +218,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: goldy_ffi-*
           merge-multiple: false

@@ -79,7 +79,7 @@ jobs:
         esac
 
     - name: Upload native artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: native-${{ matrix.runtime }}
         path: dotnet/Goldy/runtimes/${{ matrix.runtime }}/native/*
@@ -98,7 +98,7 @@ jobs:
         dotnet-version: 8.0.x
 
     - name: Download all native artifacts
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         path: native-libs
 
@@ -126,7 +126,7 @@ jobs:
       run: dotnet pack dotnet/Goldy/Goldy.csproj --configuration Release --output ./nupkg
 
     - name: Upload NuGet package
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: nuget-package
         path: ./nupkg/*.nupkg
@@ -139,7 +139,7 @@ jobs:
 
     steps:
     - name: Download NuGet package
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nuget-package
         path: ./nupkg
