@@ -4,7 +4,7 @@ This document explains how Goldy packages its dependencies, particularly the Sla
 
 ## The Problem
 
-Goldy requires a specific version of [Slang](https://github.com/shader-slang/slang) (currently **2025.24.3**) for SM 6.6 bindless support. Without bundling, users may encounter runtime failures because:
+Goldy requires a specific version of [Slang](https://github.com/shader-slang/slang) (currently **2026.4**) for SM 6.6 bindless support. Without bundling, users may encounter runtime failures because:
 
 1. **Version mismatch**: The Vulkan SDK often includes an older Slang version that lacks required features like `DescriptorHandle`
 2. **Missing libraries**: Slang consists of multiple DLLs (`slang-compiler.dll`, `slang.dll`, `slang-rt.dll`, etc.) that must all be present
@@ -17,7 +17,7 @@ Goldy requires a specific version of [Slang](https://github.com/shader-slang/sla
 │                     slang/manifest.json                                  │
 │                   (Single Source of Truth)                               │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  version: "2025.24.3"                                           │   │
+│  │  version: "2026.4"                                           │   │
 │  │  platforms:                                                      │   │
 │  │    windows-x86_64: [slang-compiler.dll, slang.dll, ...]         │   │
 │  │    linux-x86_64:   [libslang-compiler.so, libslang.so, ...]     │   │

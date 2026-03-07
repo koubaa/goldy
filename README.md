@@ -49,7 +49,7 @@ goldy = "0.1"
 
 ### Slang Compiler
 
-Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation. The build script automatically downloads Slang 2025.24.3 during compilation. You can also:
+Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation. The build script automatically downloads Slang 2026.4 during compilation. You can also:
 
 - Set `GOLDY_SLANG_PATH` to use a custom Slang installation
 - Run `slang/download.sh` to manually download vendored binaries
