@@ -357,13 +357,19 @@ impl SlangLibrary {
 
         let cache_dir = Self::cache_dir()?;
         let primary_path = cache_dir.join(SLANG_PRIMARY);
+        let sentinel_path = cache_dir.join("version.txt");
 
-        // If already cached, return immediately
-        if primary_path.exists() {
+        // Cache is valid only if the sentinel matches the embedded version.
+        // This prevents stale caches from surviving a version bump.
+        let cache_valid = fs::read_to_string(&sentinel_path)
+            .map(|v| v.trim() == SLANG_VERSION)
+            .unwrap_or(false);
+
+        if cache_valid && primary_path.exists() {
             return Some(primary_path);
         }
 
-        // Extract all embedded files to cache (only once)
+        // Cache is missing or stale — extract everything from scratch
         static EXTRACT_ONCE: Once = Once::new();
         let mut extract_result = Ok(());
 
@@ -391,15 +397,9 @@ impl SlangLibrary {
             format!("Failed to create cache directory: {}", cache_dir.display())
         })?;
 
-        // Extract each file
+        // Extract each file (always overwrite — we only get here when cache is stale)
         for (filename, bytes) in SLANG_FILES {
             let dest_path = cache_dir.join(filename);
-
-            // Skip if already exists (in case of partial extraction)
-            if dest_path.exists() {
-                tracing::debug!("Cache file already exists: {}", dest_path.display());
-                continue;
-            }
 
             // Write to a temp file first, then rename for atomicity
             let temp_path = cache_dir.join(format!("{}.tmp", filename));
@@ -418,6 +418,10 @@ impl SlangLibrary {
 
             tracing::debug!("Extracted: {} ({} bytes)", filename, bytes.len());
         }
+
+        // Write the sentinel last so a partial extraction never leaves a valid marker
+        fs::write(cache_dir.join("version.txt"), SLANG_VERSION)
+            .context("Failed to write Slang version sentinel")?;
 
         goldy_event!(
             "slang.cache.extracted",

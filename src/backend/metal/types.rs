@@ -28,8 +28,9 @@ use mtl::{
 /// Maximum size of the argument buffer (supports up to 16K resources)
 pub const ARGUMENT_BUFFER_SIZE: u64 = 16 * 1024 * 8; // 8 bytes per resource ID
 
-/// Buffer slot for push constants (resource indices) in shaders
-pub const PUSH_CONSTANTS_SLOT: u64 = 29;
+/// Buffer slot for push constants (resource indices) in shaders.
+/// Slang assigns gGoldyDynamic to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
+pub const PUSH_CONSTANTS_SLOT: u64 = 1;
 
 /// Maximum number of resource indices in push constants
 pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;

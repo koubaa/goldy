@@ -102,28 +102,48 @@ pub(super) fn dispatch(
         .context("Invalid device handle")?;
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
-    let mut encoder = begin_compute_encoder(command_buffer, logical_device);
 
+    // Defer creating the first compute encoder until the first non-ClearBuffer
+    // command so we never emit an empty encoder before a leading blit.
+    let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
     let mut current_pipeline: Option<&ComputePipelineState> = None;
-    let mut in_compute = true;
+
+    /// End the active compute encoder, if any.
+    macro_rules! end_compute {
+        () => {
+            if let Some(enc) = encoder.take() {
+                enc.end_encoding();
+            }
+        };
+    }
+
+    /// Ensure a compute encoder is active, (re-)creating one if needed and
+    /// rebinding the pipeline state that was set before the last blit.
+    macro_rules! ensure_compute {
+        () => {
+            if encoder.is_none() {
+                let enc = begin_compute_encoder(command_buffer, logical_device);
+                if let Some(pipeline) = current_pipeline {
+                    enc.set_compute_pipeline_state(&pipeline.pipeline);
+                }
+                encoder = Some(enc);
+            }
+        };
+    }
 
     for cmd in commands {
         match cmd {
             ComputeCommand::SetPipeline(handle) => {
-                if !in_compute {
-                    encoder = begin_compute_encoder(command_buffer, logical_device);
-                    in_compute = true;
-                }
+                ensure_compute!();
                 if let Some(pipeline) = state.compute_pipelines.get(handle) {
-                    encoder.set_compute_pipeline_state(&pipeline.pipeline);
+                    encoder
+                        .unwrap()
+                        .set_compute_pipeline_state(&pipeline.pipeline);
                     current_pipeline = Some(pipeline);
                 }
             }
             ComputeCommand::SetPushConstants { buffers } => {
-                if !in_compute {
-                    encoder = begin_compute_encoder(command_buffer, logical_device);
-                    in_compute = true;
-                }
+                ensure_compute!();
                 let mut indices = BindlessIndices::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
                     if i >= MAX_PUSH_CONSTANT_INDICES {
@@ -139,7 +159,7 @@ pub(super) fn dispatch(
                         std::mem::size_of::<BindlessIndices>(),
                     )
                 };
-                encoder.set_bytes(
+                encoder.unwrap().set_bytes(
                     PUSH_CONSTANTS_SLOT,
                     indices_bytes.len() as u64,
                     indices_bytes.as_ptr() as *const _,
@@ -150,13 +170,7 @@ pub(super) fn dispatch(
                 workgroups_y,
                 workgroups_z,
             } => {
-                if !in_compute {
-                    encoder = begin_compute_encoder(command_buffer, logical_device);
-                    in_compute = true;
-                    if let Some(pipeline) = current_pipeline {
-                        encoder.set_compute_pipeline_state(&pipeline.pipeline);
-                    }
-                }
+                ensure_compute!();
                 if let Some(pipeline) = current_pipeline {
                     let threads_per_group = MTLSize {
                         width: pipeline.workgroup_size[0] as u64,
@@ -168,28 +182,33 @@ pub(super) fn dispatch(
                         height: *workgroups_y as u64,
                         depth: *workgroups_z as u64,
                     };
-                    encoder.dispatch_thread_groups(threadgroups, threads_per_group);
+                    encoder
+                        .unwrap()
+                        .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
             }
             ComputeCommand::DispatchIndirect { buffer, offset } => {
-                if !in_compute {
-                    encoder = begin_compute_encoder(command_buffer, logical_device);
-                    in_compute = true;
-                    if let Some(pipeline) = current_pipeline {
-                        encoder.set_compute_pipeline_state(&pipeline.pipeline);
+                ensure_compute!();
+                let buf_state = match state.buffers.get(buffer) {
+                    Some(b) => b,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("DispatchIndirect: invalid buffer handle");
                     }
-                }
-                let buf_state = state
-                    .buffers
-                    .get(buffer)
-                    .context("DispatchIndirect: invalid buffer handle")?;
-                let pipeline = current_pipeline.context("DispatchIndirect: no pipeline bound")?;
+                };
+                let pipeline = match current_pipeline {
+                    Some(p) => p,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("DispatchIndirect: no pipeline bound");
+                    }
+                };
                 let threads_per_group = MTLSize {
                     width: pipeline.workgroup_size[0] as u64,
                     height: pipeline.workgroup_size[1] as u64,
                     depth: pipeline.workgroup_size[2] as u64,
                 };
-                encoder.dispatch_thread_groups_indirect(
+                encoder.unwrap().dispatch_thread_groups_indirect(
                     &buf_state.buffer,
                     *offset,
                     threads_per_group,
@@ -200,10 +219,13 @@ pub(super) fn dispatch(
                 offset,
                 size,
             } => {
-                let buf_state = state
-                    .buffers
-                    .get(buffer)
-                    .context("ClearBuffer: invalid buffer handle")?;
+                let buf_state = match state.buffers.get(buffer) {
+                    Some(b) => b,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("ClearBuffer: invalid buffer handle");
+                    }
+                };
                 let clear_size = if *size == 0 {
                     buf_state.size.saturating_sub(*offset)
                 } else {
@@ -212,10 +234,7 @@ pub(super) fn dispatch(
                 if clear_size > 0 {
                     // End compute encoder, issue GPU-ordered fill via blit encoder,
                     // then lazily resume compute on the next non-clear command.
-                    if in_compute {
-                        encoder.end_encoding();
-                        in_compute = false;
-                    }
+                    end_compute!();
                     let blit = command_buffer.new_blit_command_encoder();
                     let range = mtl::NSRange::new(*offset, clear_size);
                     blit.fill_buffer(&buf_state.buffer, range, 0);
@@ -225,9 +244,7 @@ pub(super) fn dispatch(
         }
     }
 
-    if in_compute {
-        encoder.end_encoding();
-    }
+    end_compute!();
     command_buffer.commit();
     command_buffer.wait_until_completed();
 
