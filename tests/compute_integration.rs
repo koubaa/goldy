@@ -242,8 +242,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         };
         4
     ];
-    let buffer =
-        Buffer::with_data(&device, &particles, DataAccess::Scattered).expect("Failed to create buffer");
+
+    let buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)
+        .expect("Failed to create buffer");
 
     let pipeline =
         ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
