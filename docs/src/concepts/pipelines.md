@@ -209,6 +209,32 @@ impl Default for RenderPipelineDesc {
 }
 ```
 
+## Why Goldy Has Fewer Pipelines
+
+PSO (Pipeline State Object) explosion is one of the biggest pain points in modern graphics. Game engines routinely manage thousands of pipeline permutations and ship 100GB+ shader caches. The combinatorial dimensions that drive this are:
+
+| Dimension | Traditional Vulkan/DX12 | Goldy |
+|-----------|------------------------|-------|
+| Render pass compatibility | N render passes × M subpasses | Eliminated — dynamic rendering |
+| Descriptor set layouts | Per-material layout permutations | One global bindless layout |
+| Pipeline layouts | Per-material | One shared layout |
+| Viewport / scissor | Baked into PSO | Dynamic state |
+| Vertex format | Baked | Baked (unavoidable) |
+| Target format | Baked | Baked (unavoidable) |
+
+In a traditional engine, the pipeline count scales as `shaders × render_passes × descriptor_layouts × blend_modes × ...`. In Goldy, render passes, descriptor layouts, and pipeline layouts are no longer combinatorial dimensions. The description has just four fields:
+
+```rust
+pub struct RenderPipelineDesc {
+    pub vertex_layout: VertexBufferLayout,
+    pub topology: PrimitiveTopology,
+    pub target_format: TextureFormat,
+    pub depth_stencil: Option<DepthStencilState>,
+}
+```
+
+This is a deliberately small permutation space. Goldy's answer to PSO churn is architectural — eliminate the dimensions that cause combinatorial growth — rather than better tooling for managing many variants.
+
 ## Performance
 
 Pipelines are expensive to create but cheap to use. Create them once at startup:

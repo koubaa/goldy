@@ -45,8 +45,9 @@ Goldy takes the position that **we can do better by doing less**. By targeting o
 
 1. **Drop compatibility complexity** - No fallback paths for 10-year-old GPUs
 2. **Use modern defaults** - Bindless, dynamic rendering, unified memory
-3. **Stay simple** - Fewer concepts, less API surface
-4. **Move fast** - Not bound by standards committees
+3. **Collapse pipeline permutations** - Dynamic rendering, a single global bindless layout, and dynamic state eliminate most of the combinatorial dimensions that cause PSO explosion in traditional engines (see [Pipelines](../concepts/pipelines.md#why-goldy-has-fewer-pipelines))
+4. **Stay simple** - Fewer concepts, less API surface
+5. **Move fast** - Not bound by standards committees
 
 ### The HAL Lesson
 

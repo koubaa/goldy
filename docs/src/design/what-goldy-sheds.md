@@ -60,14 +60,14 @@ Buffer device address in shaders. Pointers just work:
 let data = buffer_ptr[index];
 ```
 
-### 5. Dynamic State
-Most pipeline state is changeable at runtime. No PSO explosion:
+### 5. Collapsed Pipeline Permutations
+The industry's PSO explosion comes from the *product* of many baked-in dimensions: render pass × descriptor layout × pipeline layout × viewport state × blend mode × .... Goldy collapses most of these:
 
-```rust
-// Change viewport, scissor, blend state dynamically
-pass.set_viewport(viewport);
-pass.set_scissor(scissor);
-```
+- **Dynamic rendering** eliminates render pass compatibility as a pipeline dimension.
+- **One global bindless layout** eliminates descriptor set layout and pipeline layout permutations.
+- **Dynamic state** (viewport, scissor) removes those from the baked PSO.
+
+What remains — shader × vertex format × target format × depth config — is a small, manageable space. Goldy addresses PSO churn by having fewer pipelines, not by building infrastructure to manage many variants.
 
 ## The Simplicity Dividend
 
