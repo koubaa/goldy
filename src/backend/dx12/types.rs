@@ -157,6 +157,8 @@ pub(crate) struct LogicalDevice {
     pub bindless_enabled: bool,
     /// Shared root signature for all bindless pipelines (graphics and compute)
     pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
+    /// Command signature for indirect compute dispatch (ExecuteIndirect)
+    pub compute_dispatch_indirect_signature: Option<Direct3D12::ID3D12CommandSignature>,
     /// Registry tracking resource offsets in descriptor heaps
     pub resource_registry: ResourceRegistry,
 }

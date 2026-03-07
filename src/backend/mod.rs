@@ -127,6 +127,14 @@ pub enum ComputeCommand {
         workgroups_y: u32,
         workgroups_z: u32,
     },
+    /// Indirect dispatch: workgroup counts read from buffer at offset (3× u32: x, y, z).
+    DispatchIndirect { buffer: BufferHandle, offset: u64 },
+    /// Fill a buffer region with zeros. Batched into the same command stream as dispatches.
+    ClearBuffer {
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    },
 }
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
@@ -152,6 +160,21 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<BufferHandle>;
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
+    /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
+    fn read_buffer_to_cpu(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        output: &mut [u8],
+    ) -> Result<()>;
+    /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
+    fn clear_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<()>;
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
     /// Get the buffer's index in the global bindless descriptor set.
     /// Returns None if bindless is not enabled or the buffer is not registered.

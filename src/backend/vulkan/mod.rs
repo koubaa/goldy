@@ -275,6 +275,38 @@ impl GpuBackend for VulkanBackend {
         buffer::bindless_index(&self.state.buffers, buffer_handle)
     }
 
+    fn read_buffer_to_cpu(
+        &mut self,
+        device_handle: DeviceHandle,
+        buffer_handle: BufferHandle,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_to_cpu(
+            &self.state.devices,
+            &self.state.buffers,
+            device_handle,
+            buffer_handle,
+            output,
+        )
+    }
+
+    fn clear_buffer(
+        &mut self,
+        device_handle: DeviceHandle,
+        buffer_handle: BufferHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        buffer::clear(
+            &mut self.state.devices,
+            &self.state.buffers,
+            device_handle,
+            buffer_handle,
+            offset,
+            size,
+        )
+    }
+
     fn create_shader(
         &mut self,
         device_handle: DeviceHandle,

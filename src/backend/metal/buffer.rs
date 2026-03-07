@@ -1,7 +1,7 @@
 //! Buffer management logic.
 
 use super::super::{BufferHandle, DeviceHandle};
-use super::types::{BufferState, MetalState, ARGUMENT_BUFFER_SIZE};
+use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE};
 use crate::backend::DataAccess;
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -33,6 +33,8 @@ pub(super) fn create(
         .context("Metal buffer heap is full — increase heap size")?;
 
     // Register in bindless registry based on access pattern.
+    // arg_buffer_index is the LOCAL shader slot (0-63 for both Scattered and Broadcast).
+    // For encoding into the flat argument buffer, Broadcast buffers need the global index.
     let arg_buffer_index = match access {
         DataAccess::Broadcast => logical_device
             .resource_registry
@@ -41,15 +43,21 @@ pub(super) fn create(
             .resource_registry
             .register_storage_buffer(handle),
     };
+    let encoding_index = match access {
+        DataAccess::Broadcast => ResourceRegistry::uniform_global_index(arg_buffer_index),
+        DataAccess::Scattered => arg_buffer_index,
+    };
     tracing::debug!(
         "Allocated buffer {} from heap at bindless index {}",
         handle,
         arg_buffer_index
     );
 
-    // Encode buffer into argument buffer using ArgumentEncoder
+    // Encode buffer into argument buffer using ArgumentEncoder.
+    // Use encoding_index (global) for offset so the buffer lands at the correct
+    // position in the flat argument buffer (Broadcast buffers start at slot 64).
     let encoded_length = logical_device.argument_encoder.encoded_length();
-    let offset = (arg_buffer_index as u64) * encoded_length;
+    let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
         logical_device
             .argument_encoder
@@ -126,4 +134,66 @@ pub(super) fn bindless_index(state: &MetalState, buffer_handle: BufferHandle) ->
         .buffers
         .get(&buffer_handle)
         .map(|b| b.arg_buffer_index)
+}
+
+/// Read buffer contents back to CPU memory.
+/// Metal buffers use StorageModeShared so contents() is always valid.
+pub(super) fn read_to_cpu(
+    state: &MetalState,
+    _device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = state
+        .buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+
+    let len = output.len() as u64;
+    if len > buffer.size {
+        anyhow::bail!("Read would exceed buffer bounds");
+    }
+
+    unsafe {
+        let ptr = buffer.buffer.contents() as *const u8;
+        std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
+    }
+
+    Ok(())
+}
+
+/// Fill buffer region with zeros.
+/// Metal buffers use StorageModeShared so we can memset via contents().
+pub(super) fn clear(
+    state: &MetalState,
+    _device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    size: u64,
+) -> Result<()> {
+    let buffer = state
+        .buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+
+    let clear_size = if size == 0 {
+        buffer.size.saturating_sub(offset)
+    } else {
+        size
+    };
+
+    if offset + clear_size > buffer.size {
+        anyhow::bail!("Clear would exceed buffer bounds");
+    }
+
+    if clear_size == 0 {
+        return Ok(());
+    }
+
+    unsafe {
+        let ptr = (buffer.buffer.contents() as *mut u8).add(offset as usize);
+        std::ptr::write_bytes(ptr, 0, clear_size as usize);
+    }
+
+    Ok(())
 }

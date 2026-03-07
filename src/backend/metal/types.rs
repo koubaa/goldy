@@ -28,8 +28,9 @@ use mtl::{
 /// Maximum size of the argument buffer (supports up to 16K resources)
 pub const ARGUMENT_BUFFER_SIZE: u64 = 16 * 1024 * 8; // 8 bytes per resource ID
 
-/// Buffer slot for push constants (resource indices) in shaders
-pub const PUSH_CONSTANTS_SLOT: u64 = 29;
+/// Buffer slot for push constants (resource indices) in shaders.
+/// Slang assigns gGoldyDynamic to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
+pub const PUSH_CONSTANTS_SLOT: u64 = 1;
 
 /// Maximum number of resource indices in push constants
 pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
@@ -117,12 +118,22 @@ impl ResourceRegistry {
         index
     }
 
-    /// Register a uniform buffer (Broadcast access) - indices 64-127
+    /// Register a uniform buffer (Broadcast access) - local indices 0-63 (shader slot),
+    /// global indices 64-127 (argument buffer encoding offset).
+    /// Returns the LOCAL index so push constants pass 0-63 to the shader
+    /// (which indexes into uniformBuffers[0..63]).
     pub fn register_uniform_buffer(&mut self, handle: BufferHandle) -> u32 {
-        let index = self.next_uniform_buffer_index;
+        let global_index = self.next_uniform_buffer_index;
+        let local_index = global_index - MAX_RESOURCES_PER_CATEGORY;
         self.next_uniform_buffer_index += 1;
-        self.buffer_indices.insert(handle, index);
-        index
+        self.buffer_indices.insert(handle, local_index);
+        local_index
+    }
+
+    /// Returns the global argument buffer index for a uniform buffer
+    /// (local + MAX_RESOURCES_PER_CATEGORY), needed for encoding offsets.
+    pub fn uniform_global_index(local_index: u32) -> u32 {
+        local_index + MAX_RESOURCES_PER_CATEGORY
     }
 
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {

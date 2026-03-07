@@ -292,6 +292,46 @@ impl GpuBackend for MockBackend {
         self.buffers.get(&buffer).map(|b| b.bindless_index)
     }
 
+    fn read_buffer_to_cpu(
+        &mut self,
+        _device: DeviceHandle,
+        buffer: BufferHandle,
+        output: &mut [u8],
+    ) -> Result<()> {
+        let buf = self
+            .buffers
+            .get(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+
+        let len = output.len().min(buf.data.len());
+        output[..len].copy_from_slice(&buf.data[..len]);
+        Ok(())
+    }
+
+    fn clear_buffer(
+        &mut self,
+        _device: DeviceHandle,
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        let buf = self
+            .buffers
+            .get_mut(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+
+        let clear_size = if size == 0 {
+            buf.data.len().saturating_sub(offset as usize)
+        } else {
+            size as usize
+        };
+
+        let start = offset as usize;
+        let end = (start + clear_size).min(buf.data.len());
+        buf.data[start..end].fill(0);
+        Ok(())
+    }
+
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
         self.create_shader_with_paths(device, slang_source, &[])
     }

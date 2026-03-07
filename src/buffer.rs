@@ -134,6 +134,20 @@ impl Buffer {
         let backend = self.backend.lock().unwrap();
         backend.buffer_bindless_index(self.handle)
     }
+
+    /// Read buffer contents back to CPU memory.
+    ///
+    /// The `output` slice must be at least `size` bytes. Reads from offset 0.
+    pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
+        let mut backend = self.backend.lock().unwrap();
+        backend.read_buffer_to_cpu(device.handle, self.handle, output)
+    }
+
+    /// Clear the buffer (fill with zeros) from offset for size bytes.
+    pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
+        let mut backend = self.backend.lock().unwrap();
+        backend.clear_buffer(device.handle, self.handle, offset, size)
+    }
 }
 
 impl Drop for Buffer {

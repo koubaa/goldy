@@ -192,6 +192,41 @@ pub(super) fn dispatch(
                     *workgroups_z,
                 );
             },
+            ComputeCommand::DispatchIndirect { buffer, offset } => {
+                let buf_state = buffers
+                    .get(buffer)
+                    .context("DispatchIndirect: invalid buffer handle")?;
+                unsafe {
+                    logical_device
+                        .device
+                        .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
+                }
+            }
+            ComputeCommand::ClearBuffer {
+                buffer,
+                offset,
+                size,
+            } => {
+                let buf_state = buffers
+                    .get(buffer)
+                    .context("ClearBuffer: invalid buffer handle")?;
+                let clear_size = if *size == 0 {
+                    buf_state.size.saturating_sub(*offset)
+                } else {
+                    *size
+                };
+                if clear_size > 0 {
+                    unsafe {
+                        logical_device.device.cmd_fill_buffer(
+                            cmd,
+                            buf_state.buffer,
+                            *offset,
+                            clear_size,
+                            0,
+                        );
+                    }
+                }
+            }
         }
     }
 
