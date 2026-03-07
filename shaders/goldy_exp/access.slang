@@ -57,10 +57,10 @@ implementing goldy_exp;
 // =============================================================================
 
 /// Standard push constant structure for dynamic slot indices.
-/// Provides 4 slots for buffer indices that can be swapped at runtime.
+/// Provides 16 slots for buffer indices that can be swapped at runtime.
 /// Automatically declared at module scope when you import goldy_exp.
 public struct GoldyDynamicSlots {
-    uint slots[4];  // Up to 4 dynamic buffer indices
+    uint slots[16];  // Up to 16 dynamic buffer indices
 };
 
 // Module-level gGoldyDynamic for function compilation
@@ -72,29 +72,56 @@ public struct GoldyDynamicSlots {
 
 #elif defined(__DX12__)
 // DX12: Root constants in b0 space0 - functions read from this
-// IMPORTANT: Use uint4 instead of uint[4] to ensure all values are in a single
-// cbuffer register. Dynamic array indexing with uint[4] causes Slang to generate
-// cbufferLoadLegacy calls with regIndex=n, treating each element as a separate
-// 16-byte register, which reads out-of-bounds garbage for indices > 0.
-cbuffer __GoldyDynamic : register(b0, space0) { uint4 __gGoldyDynamicSlots; };
+// IMPORTANT: Use uint4 instead of uint[16] to ensure correct component access.
+// Dynamic array indexing causes Slang to generate cbufferLoadLegacy with wrong
+// register indexing. Four uint4s = 16 slots.
+cbuffer __GoldyDynamic : register(b0, space0) {
+    uint4 __gGoldyDynamicSlots0;  // slots 0-3
+    uint4 __gGoldyDynamicSlots1;  // slots 4-7
+    uint4 __gGoldyDynamicSlots2;  // slots 8-11
+    uint4 __gGoldyDynamicSlots3;  // slots 12-15
+};
 // Direct access function that uses proper component indexing
 uint __goldy_get_slot(uint n) {
-    // Use explicit switch to ensure compiler generates correct component access
     switch (n) {
-        case 0: return __gGoldyDynamicSlots.x;
-        case 1: return __gGoldyDynamicSlots.y;
-        case 2: return __gGoldyDynamicSlots.z;
-        case 3: return __gGoldyDynamicSlots.w;
+        case 0: return __gGoldyDynamicSlots0.x;
+        case 1: return __gGoldyDynamicSlots0.y;
+        case 2: return __gGoldyDynamicSlots0.z;
+        case 3: return __gGoldyDynamicSlots0.w;
+        case 4: return __gGoldyDynamicSlots1.x;
+        case 5: return __gGoldyDynamicSlots1.y;
+        case 6: return __gGoldyDynamicSlots1.z;
+        case 7: return __gGoldyDynamicSlots1.w;
+        case 8: return __gGoldyDynamicSlots2.x;
+        case 9: return __gGoldyDynamicSlots2.y;
+        case 10: return __gGoldyDynamicSlots2.z;
+        case 11: return __gGoldyDynamicSlots2.w;
+        case 12: return __gGoldyDynamicSlots3.x;
+        case 13: return __gGoldyDynamicSlots3.y;
+        case 14: return __gGoldyDynamicSlots3.z;
+        case 15: return __gGoldyDynamicSlots3.w;
         default: return 0;
     }
 }
 // Wrapper for struct-based access (for compatibility with existing code)
 GoldyDynamicSlots __goldy_get_dynamic() {
     GoldyDynamicSlots result;
-    result.slots[0] = __gGoldyDynamicSlots.x;
-    result.slots[1] = __gGoldyDynamicSlots.y;
-    result.slots[2] = __gGoldyDynamicSlots.z;
-    result.slots[3] = __gGoldyDynamicSlots.w;
+    result.slots[0] = __gGoldyDynamicSlots0.x;
+    result.slots[1] = __gGoldyDynamicSlots0.y;
+    result.slots[2] = __gGoldyDynamicSlots0.z;
+    result.slots[3] = __gGoldyDynamicSlots0.w;
+    result.slots[4] = __gGoldyDynamicSlots1.x;
+    result.slots[5] = __gGoldyDynamicSlots1.y;
+    result.slots[6] = __gGoldyDynamicSlots1.z;
+    result.slots[7] = __gGoldyDynamicSlots1.w;
+    result.slots[8] = __gGoldyDynamicSlots2.x;
+    result.slots[9] = __gGoldyDynamicSlots2.y;
+    result.slots[10] = __gGoldyDynamicSlots2.z;
+    result.slots[11] = __gGoldyDynamicSlots2.w;
+    result.slots[12] = __gGoldyDynamicSlots3.x;
+    result.slots[13] = __gGoldyDynamicSlots3.y;
+    result.slots[14] = __gGoldyDynamicSlots3.z;
+    result.slots[15] = __gGoldyDynamicSlots3.w;
     return result;
 }
 #define gGoldyDynamic __goldy_get_dynamic()
@@ -126,6 +153,13 @@ public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
 public T goldy_dyn_broadcast<T>(uint n)
 {
     return g_GoldyUniformHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<ConstantBuffer<T>>();
+}
+
+/// Dynamic byte-address buffer access for InterlockedMin/Max (e.g. path_bboxes).
+/// Same buffer as goldy_dyn_scattered but with byte-address view.
+public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
+{
+    return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWByteAddressBuffer>();
 }
 
 /// Access a uniform/constant buffer by slot index (SPIRV).
@@ -225,6 +259,15 @@ public SamplerState goldy_filter(uint slot)
     return *handle;
 }
 
+/// Dynamic byte-address buffer access for InterlockedMin/Max (e.g. path_bboxes).
+public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
+{
+    uint slot = __goldy_get_slot(n);
+    DescriptorHandle<RWByteAddressBuffer> handle;
+    handle = DescriptorHandle<RWByteAddressBuffer>(uint2(slot, 0));
+    return *handle;
+}
+
 // =============================================================================
 // Metal Implementation (Bindless via Argument Buffers Tier 2)
 // Uses ParameterBlock with device pointers
@@ -287,6 +330,16 @@ public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 public SamplerState goldy_filter(uint slot)
 {
     return gGoldy.samplers[slot];
+}
+
+/// Dynamic byte-address buffer access for InterlockedMin/Max on Metal.
+/// Returns device pointer reinterpreted as RWByteAddressBuffer; Slang compiles
+/// .Store/.Load/InterlockedMin/Max into Metal atomic_* intrinsics on the pointer.
+public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
+{
+    uint slot = gGoldyDynamic.slots[n];
+    uint* basePtr = gGoldy.storageBuffers[slot];
+    return reinterpret<RWByteAddressBuffer>(basePtr);
 }
 
 #endif

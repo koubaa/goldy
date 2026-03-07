@@ -186,6 +186,34 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         None
     };
 
+    // Create compute indirect dispatch command signature (for ExecuteIndirect)
+    // Dispatch-only indirect command signatures must pass pRootSignature = NULL
+    // because they contain no root-argument-changing commands.
+    let compute_dispatch_indirect_signature = {
+        let arg_desc = D3D12_INDIRECT_ARGUMENT_DESC {
+            Type: D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+            Anonymous: unsafe { std::mem::zeroed() },
+        };
+        let arg_descs = [arg_desc];
+        let cmd_sig_desc = D3D12_COMMAND_SIGNATURE_DESC {
+            ByteStride: 12, // 3 * sizeof(uint32) for x, y, z
+            NumArgumentDescs: 1,
+            pArgumentDescs: arg_descs.as_ptr(),
+            NodeMask: 0,
+        };
+        let mut sig: Option<ID3D12CommandSignature> = None;
+        unsafe {
+            device.CreateCommandSignature(
+                &cmd_sig_desc,
+                None, // NULL root signature for dispatch-only
+                &mut sig,
+            )
+        }
+        .context("Failed to create compute indirect command signature")?;
+        tracing::debug!("Created compute indirect dispatch command signature");
+        sig
+    };
+
     // Create fence
     let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create fence")?;
@@ -212,6 +240,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             fence_value: 1,
             bindless_enabled,
             bindless_root_signature,
+            compute_dispatch_indirect_signature,
             resource_registry: types::ResourceRegistry::new(),
         },
     );

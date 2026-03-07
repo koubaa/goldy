@@ -8,6 +8,53 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 
+/// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
+fn submit_copy(
+    device: &types::LogicalDevice,
+    src: vk::Buffer,
+    dst: vk::Buffer,
+    src_offset: u64,
+    dst_offset: u64,
+    size: u64,
+) -> Result<()> {
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(device.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+
+    let cmd_buffers = unsafe { device.device.allocate_command_buffers(&alloc_info) }
+        .context("Failed to allocate transfer command buffer")?;
+    let cmd = cmd_buffers[0];
+
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    let region = vk::BufferCopy {
+        src_offset,
+        dst_offset,
+        size,
+    };
+
+    unsafe {
+        device.device.begin_command_buffer(cmd, &begin_info)?;
+        device
+            .device
+            .cmd_copy_buffer(cmd, src, dst, std::slice::from_ref(&region));
+        device.device.end_command_buffer(cmd)?;
+
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        device
+            .device
+            .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
+        device.device.queue_wait_idle(device.queue)?;
+        device
+            .device
+            .free_command_buffers(device.command_pool, &cmd_buffers);
+    }
+
+    Ok(())
+}
+
 /// Create a buffer with the given size and access pattern.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create(
@@ -30,12 +77,14 @@ pub(super) fn create(
 
     let is_storage = match access {
         DataAccess::Scattered => {
-            // Scattered: any thread any address - use storage buffer
             vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER;
+            // Indirect dispatch reads 3× u32 (12 bytes) from a storage buffer
+            if size >= 12 {
+                vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
+            }
             true
         }
         DataAccess::Broadcast => {
-            // Broadcast: all threads same address - use uniform buffer
             vk_usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
             false
         }
@@ -56,11 +105,19 @@ pub(super) fn create(
 
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };
 
+    // Storage buffers → DEVICE_LOCAL for GPU compute performance.
+    // Uniform buffers → HOST_VISIBLE|HOST_COHERENT for frequent CPU writes.
+    let desired_flags = if is_storage {
+        vk::MemoryPropertyFlags::DEVICE_LOCAL
+    } else {
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+    };
+
     let memory_type = find_memory_type(
         instance,
         logical_device.physical_device,
         mem_requirements.memory_type_bits,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        desired_flags,
     )
     .context("Failed to find suitable memory type")?;
 
@@ -73,6 +130,50 @@ pub(super) fn create(
 
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
         .context("Failed to bind buffer memory")?;
+
+    // For storage buffers, create a HOST_VISIBLE staging buffer for CPU upload/readback
+    let (staging_buffer, staging_memory) = if is_storage {
+        let staging_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+        let staging_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(staging_usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let stg_buf = unsafe { logical_device.device.create_buffer(&staging_info, None) }
+            .context("Failed to create staging buffer")?;
+
+        let stg_reqs = unsafe {
+            logical_device
+                .device
+                .get_buffer_memory_requirements(stg_buf)
+        };
+
+        let stg_mem_type = find_memory_type(
+            instance,
+            logical_device.physical_device,
+            stg_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .context("Failed to find HOST_VISIBLE memory type for staging buffer")?;
+
+        let stg_alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(stg_reqs.size)
+            .memory_type_index(stg_mem_type);
+
+        let stg_mem = unsafe { logical_device.device.allocate_memory(&stg_alloc, None) }
+            .context("Failed to allocate staging buffer memory")?;
+
+        unsafe {
+            logical_device
+                .device
+                .bind_buffer_memory(stg_buf, stg_mem, 0)
+        }
+        .context("Failed to bind staging buffer memory")?;
+
+        (Some(stg_buf), Some(stg_mem))
+    } else {
+        (None, None)
+    };
 
     let handle = *next_buffer_handle;
     *next_buffer_handle += 1;
@@ -139,6 +240,8 @@ pub(super) fn create(
             size,
             bindless_index,
             is_storage,
+            staging_buffer,
+            staging_memory,
         },
     );
 
@@ -160,12 +263,17 @@ pub(super) fn destroy(
             device.deletion_queue.queue(types::PendingDeletion::Buffer {
                 buffer: buffer.buffer,
                 memory: buffer.memory,
+                staging_buffer: buffer.staging_buffer,
+                staging_memory: buffer.staging_memory,
             });
         }
     }
 }
 
 /// Write data to a buffer at the specified offset.
+///
+/// For DEVICE_LOCAL storage buffers, writes go through the staging buffer then
+/// a GPU copy. For HOST_VISIBLE uniform buffers, maps directly.
 pub(super) fn write(
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,
     buffers: &HashMap<BufferHandle, BufferState>,
@@ -185,20 +293,45 @@ pub(super) fn write(
         anyhow::bail!("Write would exceed buffer bounds");
     }
 
-    unsafe {
-        let ptr = device
-            .device
-            .map_memory(
-                buffer.memory,
-                offset,
-                data.len() as u64,
-                vk::MemoryMapFlags::empty(),
-            )
-            .context("Failed to map buffer memory")?;
+    if let (Some(stg_buf), Some(stg_mem)) = (buffer.staging_buffer, buffer.staging_memory) {
+        // DEVICE_LOCAL path: write to staging, then GPU copy
+        unsafe {
+            let ptr = device
+                .device
+                .map_memory(
+                    stg_mem,
+                    offset,
+                    data.len() as u64,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .context("Failed to map staging buffer")?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            device.device.unmap_memory(stg_mem);
+        }
 
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-
-        device.device.unmap_memory(buffer.memory);
+        submit_copy(
+            device,
+            stg_buf,
+            buffer.buffer,
+            offset,
+            offset,
+            data.len() as u64,
+        )?;
+    } else {
+        // HOST_VISIBLE path: direct map
+        unsafe {
+            let ptr = device
+                .device
+                .map_memory(
+                    buffer.memory,
+                    offset,
+                    data.len() as u64,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .context("Failed to map buffer memory")?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            device.device.unmap_memory(buffer.memory);
+        }
     }
 
     Ok(())
@@ -218,4 +351,131 @@ pub(super) fn bindless_index(
     buffer_handle: BufferHandle,
 ) -> Option<u32> {
     buffers.get(&buffer_handle).and_then(|b| b.bindless_index)
+}
+
+/// Read buffer contents to CPU. Copies from offset 0 for length output.len().
+///
+/// For DEVICE_LOCAL storage buffers, issues a GPU copy to the staging buffer
+/// then maps the staging buffer. For HOST_VISIBLE uniform buffers, maps directly.
+pub(super) fn read_to_cpu(
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &HashMap<BufferHandle, BufferState>,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+
+    let device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    if buffer.device_handle != device_handle {
+        anyhow::bail!("Buffer belongs to different device");
+    }
+
+    let len = output.len() as u64;
+    if len > buffer.size {
+        anyhow::bail!("Read would exceed buffer bounds");
+    }
+
+    if let (Some(stg_buf), Some(stg_mem)) = (buffer.staging_buffer, buffer.staging_memory) {
+        // DEVICE_LOCAL path: GPU copy to staging, then map staging
+        submit_copy(device, buffer.buffer, stg_buf, 0, 0, len)?;
+
+        unsafe {
+            let ptr = device
+                .device
+                .map_memory(stg_mem, 0, len, vk::MemoryMapFlags::empty())
+                .context("Failed to map staging buffer for readback")?;
+            std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), output.len());
+            device.device.unmap_memory(stg_mem);
+        }
+    } else {
+        // HOST_VISIBLE path: direct map
+        unsafe {
+            let ptr = device
+                .device
+                .map_memory(buffer.memory, 0, len, vk::MemoryMapFlags::empty())
+                .context("Failed to map buffer memory")?;
+            std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), output.len());
+            device.device.unmap_memory(buffer.memory);
+        }
+    }
+
+    Ok(())
+}
+
+/// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
+pub(super) fn clear(
+    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &HashMap<BufferHandle, BufferState>,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    size: u64,
+) -> Result<()> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+
+    let device = devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
+
+    if buffer.device_handle != device_handle {
+        anyhow::bail!("Buffer belongs to different device");
+    }
+
+    let clear_size = if size == 0 {
+        buffer.size.saturating_sub(offset)
+    } else {
+        size
+    };
+
+    if offset + clear_size > buffer.size {
+        anyhow::bail!("Clear would exceed buffer bounds");
+    }
+
+    if clear_size == 0 {
+        return Ok(());
+    }
+
+    // Allocate command buffer
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(device.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+
+    let cmd_buffers = unsafe { device.device.allocate_command_buffers(&alloc_info) }
+        .context("Failed to allocate command buffer")?;
+    let cmd = cmd_buffers[0];
+
+    // Record fill command
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    unsafe {
+        device.device.begin_command_buffer(cmd, &begin_info)?;
+        device
+            .device
+            .cmd_fill_buffer(cmd, buffer.buffer, offset, clear_size, 0);
+        device.device.end_command_buffer(cmd)?;
+    }
+
+    // Submit and wait
+    let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+    unsafe {
+        device
+            .device
+            .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
+        device.device.queue_wait_idle(device.queue)?;
+        device
+            .device
+            .free_command_buffers(device.command_pool, &cmd_buffers);
+    }
+
+    Ok(())
 }

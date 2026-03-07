@@ -193,6 +193,9 @@ pub(crate) struct BufferState {
     /// Whether this is a storage buffer (vs uniform buffer)
     #[allow(dead_code)]
     pub is_storage: bool,
+    /// HOST_VISIBLE staging buffer for DEVICE_LOCAL storage buffers (CPU upload/readback)
+    pub staging_buffer: Option<vk::Buffer>,
+    pub staging_memory: Option<vk::DeviceMemory>,
 }
 
 /// Shader module state with cached compiled stages.
@@ -329,6 +332,8 @@ pub(crate) enum PendingDeletion {
     Buffer {
         buffer: vk::Buffer,
         memory: vk::DeviceMemory,
+        staging_buffer: Option<vk::Buffer>,
+        staging_memory: Option<vk::DeviceMemory>,
     },
     Texture {
         image: vk::Image,
@@ -384,9 +389,20 @@ impl DeletionQueue {
         for (_, resource) in to_delete {
             unsafe {
                 match resource {
-                    PendingDeletion::Buffer { buffer, memory } => {
+                    PendingDeletion::Buffer {
+                        buffer,
+                        memory,
+                        staging_buffer,
+                        staging_memory,
+                    } => {
                         device.destroy_buffer(buffer, None);
                         device.free_memory(memory, None);
+                        if let Some(buf) = staging_buffer {
+                            device.destroy_buffer(buf, None);
+                        }
+                        if let Some(mem) = staging_memory {
+                            device.free_memory(mem, None);
+                        }
                     }
                     PendingDeletion::Texture {
                         image,
@@ -418,9 +434,20 @@ impl DeletionQueue {
         for (_, resource) in self.pending.drain(..) {
             unsafe {
                 match resource {
-                    PendingDeletion::Buffer { buffer, memory } => {
+                    PendingDeletion::Buffer {
+                        buffer,
+                        memory,
+                        staging_buffer,
+                        staging_memory,
+                    } => {
                         device.destroy_buffer(buffer, None);
                         device.free_memory(memory, None);
+                        if let Some(buf) = staging_buffer {
+                            device.destroy_buffer(buf, None);
+                        }
+                        if let Some(mem) = staging_memory {
+                            device.free_memory(mem, None);
+                        }
                     }
                     PendingDeletion::Texture {
                         image,

@@ -195,6 +195,381 @@ fn test_compute_with_srv_and_uav() {
     );
 }
 
+/// Compute shader that increments each value by 1.
+const INCREMENT_SHADER: &str = r#"
+import goldy_exp;
+
+#define DATA goldy_dyn_scattered<uint>(0)
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    DATA[id.x] = DATA[id.x] + 1;
+}
+"#;
+
+/// Compute shader that sums six input buffers into an output buffer.
+/// Exercises bindless slots 0–5 (slot indices 4+ were broken before the 16-slot fix).
+const SIX_SLOT_SUM_SHADER: &str = r#"
+import goldy_exp;
+
+#define A   goldy_dyn_scattered<uint>(0)
+#define B   goldy_dyn_scattered<uint>(1)
+#define C   goldy_dyn_scattered<uint>(2)
+#define D   goldy_dyn_scattered<uint>(3)
+#define E   goldy_dyn_scattered<uint>(4)
+#define OUT goldy_dyn_scattered<uint>(5)
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    uint idx = id.x;
+    if (idx >= 16) return;
+    OUT[idx] = A[idx] + B[idx] + C[idx] + D[idx] + E[idx];
+}
+"#;
+
+/// Helper: create a device (discrete or integrated).
+fn make_device() -> goldy::Device {
+    let instance = goldy::Instance::new().expect("Failed to create instance");
+    instance
+        .create_device(goldy::DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(goldy::DeviceType::IntegratedGpu))
+        .expect("Failed to create device")
+}
+
+// ─── Buffer read_to_cpu / clear tests ────────────────────────────────────────
+
+/// Write data via a compute shader then read it back, verifying correctness
+/// of the full GPU staging round-trip (write → dispatch → readback).
+#[test]
+fn test_compute_write_and_readback() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let initial: Vec<u32> = (0..64).collect();
+    let buffer =
+        Buffer::with_data(&device, &initial, DataAccess::Scattered).expect("create buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buffer]);
+        pass.dispatch(1, 1, 1); // 64 threads, each doubles one element
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; 64 * 4];
+    buffer
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            (i as u32) * 2,
+            "element {} expected {} got {}",
+            i,
+            i * 2,
+            val
+        );
+    }
+}
+
+/// `Buffer::clear` (standalone, immediate) zeros the whole buffer.
+#[test]
+fn test_buffer_clear_standalone() {
+    let device = make_device();
+
+    let data: Vec<u32> = vec![0xDEAD_BEEF; 64];
+    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+
+    buffer.clear(&device, 0, 0).expect("clear (full)");
+
+    let mut output = vec![0u8; 64 * 4];
+    buffer
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val, 0,
+            "element {} should be 0 after clear, got {:#x}",
+            i, val
+        );
+    }
+}
+
+/// `Buffer::clear` with an explicit range zeros only that slice.
+#[test]
+fn test_buffer_clear_partial() {
+    let device = make_device();
+
+    // 64 u32s = 256 bytes. Clear bytes 64–128 (elements 16–31).
+    let sentinel = 0xDEAD_BEEFu32;
+    let data: Vec<u32> = vec![sentinel; 64];
+    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+
+    buffer.clear(&device, 64, 64).expect("partial clear");
+
+    let mut output = vec![0u8; 64 * 4];
+    buffer
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = if i >= 16 && i < 32 { 0 } else { sentinel };
+        assert_eq!(
+            val, expected,
+            "element {} expected {:#x} got {:#x}",
+            i, expected, val
+        );
+    }
+}
+
+/// `Buffer::clear` with `size = 0` clears from offset to end of buffer.
+#[test]
+fn test_buffer_clear_to_end() {
+    let device = make_device();
+
+    // Fill with sentinel, then clear from element 32 to end (offset 128, size 0).
+    let sentinel = 0xCAFE_BABEu32;
+    let data: Vec<u32> = vec![sentinel; 64];
+    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+
+    buffer.clear(&device, 128, 0).expect("clear to end");
+
+    let mut output = vec![0u8; 64 * 4];
+    buffer
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = if i < 32 { sentinel } else { 0 };
+        assert_eq!(
+            val, expected,
+            "element {} expected {:#x} got {:#x}",
+            i, expected, val
+        );
+    }
+}
+
+// ─── Batched ClearBuffer in compute encoder ───────────────────────────────────
+
+/// `ComputePass::clear_buffer` batches the clear into the command stream.
+/// Clears input before the copy dispatch; output should be all zeros.
+#[test]
+fn test_compute_batched_clear_before_dispatch() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let input: Vec<u32> = vec![0xDEAD_BEEF; 64];
+    let input_buf =
+        Buffer::with_data(&device, &input, DataAccess::Scattered).expect("input buffer");
+    let output_buf = Buffer::with_data(&device, &vec![0xFFFF_FFFFu32; 64], DataAccess::Scattered)
+        .expect("output buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        // Clear input before the copy — output should receive zeros.
+        pass.clear_buffer(&input_buf, 0, 0);
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut out = vec![0u8; 64 * 4];
+    output_buf.read_to_cpu(&device, &mut out).expect("readback");
+
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val, 0,
+            "output[{}] should be 0 (copied from cleared input), got {:#x}",
+            i, val
+        );
+    }
+}
+
+/// GPU ordering: Dispatch A writes values → ClearBuffer → Dispatch B increments.
+/// Correct result is 1 (0 + 1). An ordering bug would give 43 (42 + 1 without the clear).
+#[test]
+fn test_compute_clear_between_dispatches() {
+    let device = make_device();
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
+
+    let inc_shader = ShaderModule::from_slang(&device, INCREMENT_SHADER).expect("compile inc");
+    let inc_pipeline = ComputePipeline::new(&device, &inc_shader).expect("inc pipeline");
+
+    // Input with 42s; output starts empty.
+    let input_buf =
+        Buffer::with_data(&device, &vec![42u32; 64], DataAccess::Scattered).expect("input");
+    let output_buf =
+        Buffer::with_data(&device, &vec![0u32; 64], DataAccess::Scattered).expect("output");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        // Pass 1: copy 42s into output.
+        pass.set_pipeline(&copy_pipeline);
+        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.dispatch(1, 1, 1);
+        // Clear output — must happen AFTER the copy dispatch.
+        pass.clear_buffer(&output_buf, 0, 0);
+        // Pass 2: increment output (zeros → 1s).
+        pass.set_pipeline(&inc_pipeline);
+        pass.set_push_constants(&[&output_buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut out = vec![0u8; 64 * 4];
+    output_buf.read_to_cpu(&device, &mut out).expect("readback");
+
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val, 1,
+            "output[{}]: expected 1 (clear was ordered after copy), got {} \
+             (if 43: clear happened before copy; ordering broken)",
+            i, val
+        );
+    }
+}
+
+// ─── Indirect dispatch ────────────────────────────────────────────────────────
+
+/// `dispatch_indirect` reads workgroup counts from a buffer.
+/// Write [1,1,1] as the dispatch args → shader runs 64 threads → doubles values.
+#[test]
+fn test_compute_dispatch_indirect() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    // Dispatch args: 1 workgroup in each dimension (3 × u32 = 12 bytes).
+    let args: [u32; 3] = [1, 1, 1];
+    let args_buf = Buffer::with_data(&device, &args, DataAccess::Scattered).expect("args buffer");
+
+    let data: Vec<u32> = (0..64).collect();
+    let data_buf = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("data buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&data_buf]);
+        pass.dispatch_indirect(&args_buf, 0);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; 64 * 4];
+    data_buf
+        .read_to_cpu(&device, &mut output)
+        .expect("readback");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            (i as u32) * 2,
+            "element {} expected {} got {}",
+            i,
+            i * 2,
+            val
+        );
+    }
+}
+
+/// `dispatch_indirect` returns an error when the args buffer has been destroyed.
+#[test]
+fn test_dispatch_indirect_invalid_buffer() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let data_buf =
+        Buffer::with_data(&device, &vec![1u32; 64], DataAccess::Scattered).expect("data");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&data_buf]);
+
+        // Record indirect dispatch with a temp buffer, then drop the buffer.
+        // The encoder stores the raw handle; after drop it's stale.
+        {
+            let temp = Buffer::with_data(&device, &[1u32, 1, 1], DataAccess::Scattered)
+                .expect("temp buffer");
+            pass.dispatch_indirect(&temp, 0);
+        } // temp dropped — backend destroys the buffer here
+    }
+
+    let result = encoder.dispatch(&device);
+    assert!(
+        result.is_err(),
+        "Expected error dispatching with a destroyed indirect args buffer"
+    );
+}
+
+// ─── Many push-constant slots (>4, exercises 16-slot expansion) ───────────────
+
+/// Shader using 6 bindless slots (0–5). Before the 16-slot expansion, slots 4+
+/// were mapped to garbage indices and this test would produce wrong results.
+#[test]
+fn test_compute_many_push_constant_slots() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, SIX_SLOT_SUM_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    // Each input buffer contains a constant value; OUT[i] = sum = 1+2+3+4+5 = 15.
+    const N: usize = 16;
+    let a = Buffer::with_data(&device, &[1u32; N], DataAccess::Scattered).expect("a");
+    let b = Buffer::with_data(&device, &[2u32; N], DataAccess::Scattered).expect("b");
+    let c = Buffer::with_data(&device, &[3u32; N], DataAccess::Scattered).expect("c");
+    let d = Buffer::with_data(&device, &[4u32; N], DataAccess::Scattered).expect("d");
+    let e = Buffer::with_data(&device, &[5u32; N], DataAccess::Scattered).expect("e");
+    let out = Buffer::with_data(&device, &[0u32; N], DataAccess::Scattered).expect("out");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&a, &b, &c, &d, &e, &out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; N * 4];
+    out.read_to_cpu(&device, &mut output).expect("readback");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val, 15,
+            "out[{}] expected 15 (1+2+3+4+5), got {} — slot index 4+ may be misbound",
+            i, val
+        );
+    }
+}
+
 /// Test that uses a struct type (like Particle) - exercises same Metal code path as compute_particles.
 #[test]
 fn test_compute_with_struct_buffer() {

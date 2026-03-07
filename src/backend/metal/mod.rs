@@ -131,6 +131,25 @@ impl GpuBackend for MetalBackend {
         buffer::bindless_index(&self.state, buffer)
     }
 
+    fn read_buffer_to_cpu(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_to_cpu(&self.state, device, buffer, output)
+    }
+
+    fn clear_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        buffer::clear(&self.state, device, buffer, offset, size)
+    }
+
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,

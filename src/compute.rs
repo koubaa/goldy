@@ -174,6 +174,33 @@ impl<'a> ComputePass<'a> {
             workgroups_z,
         });
     }
+
+    /// Indirect dispatch: workgroup counts read from buffer at offset.
+    ///
+    /// The buffer must contain 3 consecutive `u32` values (x, y, z) at the given
+    /// byte offset. This allows the GPU to determine dispatch size from a prior
+    /// compute pass (e.g. a setup shader that writes the counts).
+    pub fn dispatch_indirect(&mut self, buffer: &Buffer, offset: u64) {
+        self.encoder
+            .commands
+            .push(ComputeCommand::DispatchIndirect {
+                buffer: buffer.handle,
+                offset,
+            });
+    }
+
+    /// Fill a buffer region with zeros, batched into the compute command stream.
+    ///
+    /// Unlike `Buffer::clear()` which submits immediately, this records the clear
+    /// into the encoder so it's submitted alongside dispatches in a single batch.
+    /// If `size` is 0, clears from `offset` to end of buffer.
+    pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
+        self.encoder.commands.push(ComputeCommand::ClearBuffer {
+            buffer: buffer.handle,
+            offset,
+            size,
+        });
+    }
 }
 
 #[cfg(test)]

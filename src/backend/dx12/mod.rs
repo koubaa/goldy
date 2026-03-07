@@ -26,7 +26,9 @@ use types::{Dx12State, DxgiAdapterInfo, LogicalDevice};
 use super::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use windows::Win32::Graphics::{Direct3D12::*, Dxgi::*};
+#[cfg(debug_assertions)]
+use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug};
+use windows::Win32::Graphics::Dxgi::*;
 
 /// DirectX 12 backend.
 pub struct Dx12Backend {
@@ -289,6 +291,25 @@ impl GpuBackend for Dx12Backend {
 
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
         buffer::bindless_index(&self.state, buffer_handle)
+    }
+
+    fn read_buffer_to_cpu(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_to_cpu(&mut self.state, device, buffer, output)
+    }
+
+    fn clear_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        buffer::clear(&mut self.state, device, buffer, offset, size)
     }
 
     fn create_shader(

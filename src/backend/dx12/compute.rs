@@ -179,6 +179,125 @@ pub(super) fn dispatch(
             } => unsafe {
                 command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
             },
+            ComputeCommand::DispatchIndirect { buffer, offset } => {
+                let buf_state = state
+                    .buffers
+                    .get(buffer)
+                    .context("DispatchIndirect: invalid buffer handle")?;
+                let signature = logical_device
+                    .compute_dispatch_indirect_signature
+                    .as_ref()
+                    .context("DispatchIndirect: compute indirect signature not available")?;
+                unsafe {
+                    command_list.ExecuteIndirect(
+                        signature,
+                        1,
+                        &buf_state.resource,
+                        *offset,
+                        None,
+                        0,
+                    );
+                }
+            }
+            ComputeCommand::ClearBuffer {
+                buffer,
+                offset,
+                size,
+            } => {
+                let buf_state = state
+                    .buffers
+                    .get(buffer)
+                    .context("ClearBuffer: invalid buffer handle")?;
+                let clear_size = if *size == 0 {
+                    buf_state.size.saturating_sub(*offset)
+                } else {
+                    *size
+                };
+                if clear_size > 0 {
+                    if let Some(upload_buf) = &buf_state.upload_buffer {
+                        // Storage buffer (DEFAULT heap): zero the upload buffer region, then copy
+                        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                        unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
+                            .context("ClearBuffer: failed to map upload buffer")?;
+                        unsafe {
+                            std::ptr::write_bytes(
+                                (mapped as *mut u8).add(*offset as usize),
+                                0,
+                                clear_size as usize,
+                            );
+                        }
+                        let written = D3D12_RANGE {
+                            Begin: *offset as usize,
+                            End: (*offset + clear_size) as usize,
+                        };
+                        unsafe { upload_buf.Unmap(0, Some(&written)) };
+
+                        // Transition to COPY_DEST, copy, transition back to UAV
+                        let to_copy = D3D12_RESOURCE_BARRIER {
+                            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                                Transition: std::mem::ManuallyDrop::new(
+                                    D3D12_RESOURCE_TRANSITION_BARRIER {
+                                        pResource: unsafe {
+                                            std::mem::transmute_copy(&buf_state.resource)
+                                        },
+                                        Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                        StateBefore: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                        StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
+                                    },
+                                ),
+                            },
+                        };
+                        unsafe { command_list.ResourceBarrier(&[to_copy]) };
+                        unsafe {
+                            command_list.CopyBufferRegion(
+                                &buf_state.resource,
+                                *offset,
+                                upload_buf,
+                                *offset,
+                                clear_size,
+                            );
+                        }
+                        let to_uav = D3D12_RESOURCE_BARRIER {
+                            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                                Transition: std::mem::ManuallyDrop::new(
+                                    D3D12_RESOURCE_TRANSITION_BARRIER {
+                                        pResource: unsafe {
+                                            std::mem::transmute_copy(&buf_state.resource)
+                                        },
+                                        Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                        StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
+                                        StateAfter: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                    },
+                                ),
+                            },
+                        };
+                        unsafe { command_list.ResourceBarrier(&[to_uav]) };
+                    } else {
+                        // UPLOAD heap buffer: CPU-accessible, just memset
+                        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                        unsafe { buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+                            .context("ClearBuffer: failed to map buffer")?;
+                        unsafe {
+                            std::ptr::write_bytes(
+                                (mapped as *mut u8).add(*offset as usize),
+                                0,
+                                clear_size as usize,
+                            );
+                        }
+                        let written = D3D12_RANGE {
+                            Begin: *offset as usize,
+                            End: (*offset + clear_size) as usize,
+                        };
+                        unsafe { buf_state.resource.Unmap(0, Some(&written)) };
+                    }
+                }
+            }
         }
     }
 

@@ -127,3 +127,65 @@ pub(super) fn bindless_index(state: &MetalState, buffer_handle: BufferHandle) ->
         .get(&buffer_handle)
         .map(|b| b.arg_buffer_index)
 }
+
+/// Read buffer contents back to CPU memory.
+/// Metal buffers use StorageModeShared so contents() is always valid.
+pub(super) fn read_to_cpu(
+    state: &MetalState,
+    _device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = state
+        .buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+
+    let len = output.len() as u64;
+    if len > buffer.size {
+        anyhow::bail!("Read would exceed buffer bounds");
+    }
+
+    unsafe {
+        let ptr = buffer.buffer.contents() as *const u8;
+        std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
+    }
+
+    Ok(())
+}
+
+/// Fill buffer region with zeros.
+/// Metal buffers use StorageModeShared so we can memset via contents().
+pub(super) fn clear(
+    state: &MetalState,
+    _device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    size: u64,
+) -> Result<()> {
+    let buffer = state
+        .buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+
+    let clear_size = if size == 0 {
+        buffer.size.saturating_sub(offset)
+    } else {
+        size
+    };
+
+    if offset + clear_size > buffer.size {
+        anyhow::bail!("Clear would exceed buffer bounds");
+    }
+
+    if clear_size == 0 {
+        return Ok(());
+    }
+
+    unsafe {
+        let ptr = (buffer.buffer.contents() as *mut u8).add(offset as usize);
+        std::ptr::write_bytes(ptr, 0, clear_size as usize);
+    }
+
+    Ok(())
+}
