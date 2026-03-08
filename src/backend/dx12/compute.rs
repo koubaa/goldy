@@ -204,9 +204,22 @@ pub(super) fn dispatch(
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
-            } => unsafe {
-                command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
-            },
+            } => {
+                // UAV barrier so previous dispatch's writes (e.g. path_tiling -> ptcl) are visible
+                let uav_barrier = D3D12_RESOURCE_BARRIER {
+                    Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                    Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                        UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                            pResource: std::mem::ManuallyDrop::new(None),
+                        }),
+                    },
+                };
+                unsafe { command_list.ResourceBarrier(&[uav_barrier]) };
+                unsafe {
+                    command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
+                }
+            }
             ComputeCommand::DispatchIndirect { buffer, offset } => {
                 let buf_state = state
                     .buffers
@@ -216,6 +229,26 @@ pub(super) fn dispatch(
                     .compute_dispatch_indirect_signature
                     .as_ref()
                     .context("DispatchIndirect: compute indirect signature not available")?;
+
+                // Transition: UAV → INDIRECT_ARGUMENT (setup shader wrote args as UAV)
+                let to_indirect = D3D12_RESOURCE_BARRIER {
+                    Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                    Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                        Transition: std::mem::ManuallyDrop::new(
+                            D3D12_RESOURCE_TRANSITION_BARRIER {
+                                pResource: unsafe {
+                                    std::mem::transmute_copy(&buf_state.resource)
+                                },
+                                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                StateBefore: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                StateAfter: D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                            },
+                        ),
+                    },
+                };
+                unsafe { command_list.ResourceBarrier(&[to_indirect]) };
+
                 unsafe {
                     command_list.ExecuteIndirect(
                         signature,
@@ -226,6 +259,25 @@ pub(super) fn dispatch(
                         0,
                     );
                 }
+
+                // Transition back: INDIRECT_ARGUMENT → UAV (buffer may be reused)
+                let to_uav = D3D12_RESOURCE_BARRIER {
+                    Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                    Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                        Transition: std::mem::ManuallyDrop::new(
+                            D3D12_RESOURCE_TRANSITION_BARRIER {
+                                pResource: unsafe {
+                                    std::mem::transmute_copy(&buf_state.resource)
+                                },
+                                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                StateBefore: D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                                StateAfter: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            },
+                        ),
+                    },
+                };
+                unsafe { command_list.ResourceBarrier(&[to_uav]) };
             }
             ComputeCommand::ClearBuffer {
                 buffer,
