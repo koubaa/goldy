@@ -149,11 +149,11 @@ public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
 }
 
 /// Dynamic read-only scattered access - reads slot index from gGoldyDynamic.slots[n].
-/// Use when binding a buffer as StructuredBuffer<T> (read-only / SRV).
-/// On SPIRV, identical to goldy_dyn_scattered (storage buffer, same descriptor).
-public StructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+/// On SPIRV, SSBOs are inherently read-write; returns RWStructuredBuffer for API
+/// consistency with DX12 (which also returns RWStructuredBuffer to avoid SRV barriers).
+public RWStructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
-    return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<StructuredBuffer<T>>();
+    return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWStructuredBuffer<T>>();
 }
 
 /// Dynamic broadcast access - reads slot index from gGoldyDynamic.slots[n].
