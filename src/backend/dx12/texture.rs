@@ -15,8 +15,8 @@ pub(super) fn create(
     width: u32,
     height: u32,
     format: TextureFormat,
-    _access: SpatialAccess,
-    _flags: TextureFlags,
+    access: SpatialAccess,
+    flags: TextureFlags,
 ) -> Result<TextureHandle> {
     let logical_device = state
         .devices
@@ -29,6 +29,13 @@ pub(super) fn create(
         MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
         CreationNodeMask: 0,
         VisibleNodeMask: 0,
+    };
+
+    let is_storage = matches!(access, SpatialAccess::Direct);
+    let resource_flags = if is_storage {
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+    } else {
+        D3D12_RESOURCE_FLAG_NONE
     };
 
     let resource_desc = D3D12_RESOURCE_DESC {
@@ -44,7 +51,13 @@ pub(super) fn create(
             Quality: 0,
         },
         Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        Flags: D3D12_RESOURCE_FLAG_NONE,
+        Flags: resource_flags,
+    };
+
+    let initial_state = if is_storage {
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+    } else {
+        D3D12_RESOURCE_STATE_COPY_DEST
     };
 
     let mut resource: Option<ID3D12Resource> = None;
@@ -53,7 +66,7 @@ pub(super) fn create(
             &heap_properties,
             D3D12_HEAP_FLAG_NONE,
             &resource_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST,
+            initial_state,
             None,
             &mut resource,
         )
@@ -100,6 +113,37 @@ pub(super) fn create(
             .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
     }
 
+    // For storage images (Direct access): create UAV so compute shaders can write via RWTexture2D.
+    // bindless_offset must point to UAV for goldy_dyn_direct_spatial.
+    let bindless_offset = if is_storage {
+        let uav_offset = logical_device.resource_registry.register_texture_uav(handle);
+        let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: format_to_dxgi(format),
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_UAV {
+                    MipSlice: 0,
+                    PlaneSlice: 0,
+                },
+            },
+        };
+        let uav_cpu_handle = unsafe {
+            let mut cpu_handle = logical_device
+                .cbv_srv_uav_heap
+                .GetCPUDescriptorHandleForHeapStart();
+            cpu_handle.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
+        };
+        unsafe {
+            logical_device
+                .device
+                .CreateUnorderedAccessView(Some(&resource), None, Some(&uav_desc), uav_cpu_handle);
+        }
+        Some(uav_offset)
+    } else {
+        Some(srv_offset)
+    };
+
     state.textures.insert(
         handle,
         TextureState {
@@ -109,12 +153,13 @@ pub(super) fn create(
             format,
             resource,
             srv_offset,
-            bindless_offset: Some(srv_offset), // SRV offset is the bindless offset
-            current_state: D3D12_RESOURCE_STATE_COPY_DEST,
+            bindless_offset,
+            current_state: initial_state,
         },
     );
 
-    tracing::debug!("Created texture {}x{} (handle={})", width, height, handle);
+    let _ = flags; // reserved for future use
+    tracing::debug!("Created texture {}x{} (handle={}, storage={})", width, height, handle, is_storage);
     Ok(handle)
 }
 
@@ -225,6 +270,22 @@ pub(super) fn write(
     .context("Failed to create command list")?;
 
     let texture = state.textures.get(&texture_handle).unwrap();
+    let state_before = texture.current_state;
+
+    // Transition to COPY_DEST (required for CopyTextureRegion; storage textures start as UNORDERED_ACCESS)
+    let barrier_to_copy = D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                StateBefore: state_before,
+                StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
+            }),
+        },
+    };
+    unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&staging) },
@@ -263,7 +324,7 @@ pub(super) fn write(
                     pResource: std::mem::transmute_copy(&texture.resource),
                     Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                     StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
-                    StateAfter: D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    StateAfter: D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 }),
             },
         };
@@ -273,7 +334,7 @@ pub(super) fn write(
     .context("Failed to close command list")?;
 
     if let Some(tex) = state.textures.get_mut(&texture_handle) {
-        tex.current_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        tex.current_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
@@ -476,7 +537,7 @@ pub(super) fn write_region(
                 pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
                 Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                 StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
-                StateAfter: D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                StateAfter: D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             }),
         },
     };
@@ -505,7 +566,7 @@ pub(super) fn write_region(
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(tex) = state.textures.get_mut(&texture_handle) {
-        tex.current_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        tex.current_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
 
     tracing::debug!("Wrote {}x{} region at ({},{})", width, height, x, y);
@@ -586,6 +647,10 @@ pub(super) fn read_to_cpu(
     .context("Failed to create staging buffer")?;
     let staging_buffer = staging_buffer.context("CreateCommittedResource returned null")?;
 
+    // Reset allocator before reuse (required after prior compute/render work that used it)
+    unsafe { logical_device.command_allocator.Reset() }
+        .context("Failed to reset command allocator")?;
+
     let command_list: ID3D12GraphicsCommandList = unsafe {
         logical_device.device.CreateCommandList(
             0,
@@ -596,8 +661,7 @@ pub(super) fn read_to_cpu(
     }
     .context("Failed to create command list")?;
 
-    unsafe { command_list.Reset(&logical_device.command_allocator, None) }
-        .context("Failed to reset command list")?;
+    // Newly created list is already in recording state; Reset is for reusing a closed list
 
     let state_before = texture.current_state;
 

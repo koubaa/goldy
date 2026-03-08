@@ -128,10 +128,11 @@ pub(super) fn create(
     let handle = *next_texture_handle;
     *next_texture_handle += 1;
 
+    let is_storage_image = matches!(access, SpatialAccess::Direct);
+
     // Register texture in bindless descriptor set if enabled
     let bindless_index = if bindless_enabled {
         let logical_device = devices.get_mut(&device_handle).unwrap();
-        let is_storage_image = matches!(access, SpatialAccess::Direct);
         let index = logical_device
             .resource_registry
             .register_texture(handle, is_storage_image);
@@ -186,6 +187,14 @@ pub(super) fn create(
         None
     };
 
+    let initial_layout = if is_storage_image {
+        let logical_device = devices.get(&device_handle).unwrap();
+        transition_image_layout(logical_device, image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL)?;
+        vk::ImageLayout::GENERAL
+    } else {
+        vk::ImageLayout::UNDEFINED
+    };
+
     textures.insert(
         handle,
         TextureState {
@@ -199,7 +208,7 @@ pub(super) fn create(
             staging_buffer: None,
             staging_memory: None,
             bindless_index,
-            current_layout: vk::ImageLayout::UNDEFINED,
+            current_layout: initial_layout,
         },
     );
 
@@ -974,6 +983,100 @@ pub(super) fn destroy(
             }
         }
     }
+}
+
+/// Transition an image between layouts using a one-shot command buffer.
+fn transition_image_layout(
+    logical_device: &types::LogicalDevice,
+    image: vk::Image,
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> Result<()> {
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(logical_device.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+
+    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+        .context("Failed to allocate command buffer for layout transition")?;
+    let cmd = cmd_buffers[0];
+
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    unsafe {
+        logical_device.device.begin_command_buffer(cmd, &begin_info)
+            .context("Failed to begin command buffer")?;
+
+        let (src_stage, src_access) = match old_layout {
+            vk::ImageLayout::UNDEFINED => (
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+            vk::ImageLayout::GENERAL => (
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+            ),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_READ,
+            ),
+            _ => (
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
+            ),
+        };
+
+        let (dst_stage, dst_access) = match new_layout {
+            vk::ImageLayout::GENERAL => (
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+            ),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_READ,
+            ),
+            _ => (
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
+            ),
+        };
+
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(dst_stage)
+            .dst_access_mask(dst_access)
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
+        logical_device.device.end_command_buffer(cmd)
+            .context("Failed to end command buffer")?;
+
+        let cmd_buffers_arr = [cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
+        logical_device.device
+            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+            .context("Failed to submit layout transition")?;
+        logical_device.device.queue_wait_idle(logical_device.queue)
+            .context("Failed to wait for layout transition")?;
+
+        logical_device.device.free_command_buffers(logical_device.command_pool, &cmd_buffers_arr);
+    }
+
+    Ok(())
 }
 
 /// Get the bindless descriptor index for a texture, if any.

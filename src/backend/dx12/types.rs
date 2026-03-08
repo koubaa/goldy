@@ -52,6 +52,8 @@ pub(crate) struct ResourceRegistry {
     /// Maps buffer handle to its secondary SRV offset (for storage buffers that need read access)
     pub buffer_srv_offsets: HashMap<BufferHandle, u32>,
     pub texture_offsets: HashMap<TextureHandle, u32>,
+    /// Maps texture handle to UAV offset (for storage textures / SpatialAccess::Direct)
+    pub texture_uav_offsets: HashMap<TextureHandle, u32>,
     pub sampler_offsets: HashMap<SamplerHandle, u32>,
 }
 
@@ -66,6 +68,7 @@ impl ResourceRegistry {
             buffer_offsets: HashMap::new(),
             buffer_srv_offsets: HashMap::new(),
             texture_offsets: HashMap::new(),
+            texture_uav_offsets: HashMap::new(),
             sampler_offsets: HashMap::new(),
         }
     }
@@ -99,6 +102,14 @@ impl ResourceRegistry {
         offset
     }
 
+    /// Register a UAV descriptor for a texture (e.g. storage image / SpatialAccess::Direct).
+    pub fn register_texture_uav(&mut self, handle: TextureHandle) -> u32 {
+        let offset = self.next_cbv_srv_uav_offset;
+        self.next_cbv_srv_uav_offset += 1;
+        self.texture_uav_offsets.insert(handle, offset);
+        offset
+    }
+
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
         let offset = self.next_sampler_offset;
         self.next_sampler_offset += 1;
@@ -118,6 +129,7 @@ impl ResourceRegistry {
 
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
         self.texture_offsets.remove(&handle);
+        self.texture_uav_offsets.remove(&handle);
     }
 
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
