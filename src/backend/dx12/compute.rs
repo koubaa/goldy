@@ -172,6 +172,34 @@ pub(super) fn dispatch(
                     }
                 }
             }
+            ComputeCommand::SetPushConstantsRaw {
+                indices: raw_indices,
+            } => {
+                // Fully bindless mode: push raw indices directly (for textures/samplers)
+                let bindless_enabled = state
+                    .devices
+                    .get(&device_handle)
+                    .map(|d| d.bindless_enabled)
+                    .unwrap_or(false);
+
+                if bindless_enabled {
+                    let mut indices = types::BindlessIndices::default();
+                    for (i, &idx) in raw_indices.iter().enumerate() {
+                        if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                            break;
+                        }
+                        indices.indices[i] = idx;
+                    }
+                    unsafe {
+                        command_list.SetComputeRoot32BitConstants(
+                            0,
+                            types::MAX_ROOT_CONSTANT_INDICES as u32,
+                            indices.indices.as_ptr() as *const std::ffi::c_void,
+                            0,
+                        );
+                    }
+                }
+            }
             ComputeCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,

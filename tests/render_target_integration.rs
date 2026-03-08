@@ -5,8 +5,9 @@
 mod common;
 
 use goldy::{
-    Buffer, Color, CommandEncoder, DataAccess, DeviceType, IndexFormat, Instance, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, ShaderModule, TextureFormat, Vertex2D,
+    Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
+    DeviceType, IndexFormat, Instance, RenderPipeline, RenderPipelineDesc, RenderTarget,
+    ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 fn create_device() -> Option<goldy::Device> {
@@ -378,5 +379,255 @@ fn test_indexed_drawing_uint32() {
         red_pixel_count > 100,
         "Expected red triangle pixels, got {}",
         red_pixel_count
+    );
+}
+
+// ============================================================================
+// Depth occlusion tests
+//
+// These tests assert known pixel colors directly rather than comparing against
+// a self-generated reference image.  A self-generated reference can mask bugs:
+// if depth is silently disabled, both generation and comparison produce the
+// same wrong color, FLIP = 0, and the test "passes" despite being incorrect.
+// Hard-coded color assertions catch that class of bug immediately.
+// ============================================================================
+
+/// Vertex type carrying (x, y, z) position and RGBA color.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct Depth3DVertex {
+    position: [f32; 3],
+    color: [f32; 4],
+}
+
+fn depth_vertex_layout() -> VertexBufferLayout {
+    VertexBufferLayout {
+        stride: std::mem::size_of::<Depth3DVertex>() as u32,
+        attributes: vec![
+            VertexAttribute {
+                location: 0,
+                format: VertexFormat::Float32x3,
+                offset: 0,
+            },
+            VertexAttribute {
+                location: 1,
+                format: VertexFormat::Float32x4,
+                offset: 12,
+            },
+        ],
+    }
+}
+
+/// Depth occlusion: near geometry (red, z=0.2) must block far geometry (green,
+/// z=0.6) even when the green quad is submitted to the GPU second.
+///
+/// Expected output: every pixel is red.
+/// If depth testing is disabled the green quad overwrites the red one and
+/// every pixel is green — this test catches that regression.
+#[test]
+fn test_depth_occlusion_red_beats_green() {
+    let Some(device) = create_device() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+
+    let target = RenderTarget::new_with_depth(
+        &device,
+        64,
+        64,
+        TextureFormat::Rgba8Unorm,
+        Some(DepthFormat::Depth32Float),
+    )
+    .expect("Failed to create render target with depth");
+
+    let shader_source = include_str!("../shaders/depth_test.slang");
+    let shader =
+        ShaderModule::from_slang(&device, shader_source).expect("Failed to compile shader");
+
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: depth_vertex_layout(),
+            target_format: TextureFormat::Rgba8Unorm,
+            depth_stencil: Some(DepthStencilState {
+                format: DepthFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+            }),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create depth pipeline");
+
+    // Large-triangle trick: a single triangle that covers all of NDC [-1,1]².
+    let make_tri = |z: f32, color: [f32; 4]| -> [Depth3DVertex; 3] {
+        [
+            Depth3DVertex {
+                position: [-1.0, -1.0, z],
+                color,
+            },
+            Depth3DVertex {
+                position: [3.0, -1.0, z],
+                color,
+            },
+            Depth3DVertex {
+                position: [-1.0, 3.0, z],
+                color,
+            },
+        ]
+    };
+
+    // Red (z=0.2, near) drawn first; green (z=0.6, far) drawn second.
+    // Without depth testing green would overwrite red — this is the regression
+    // we are guarding against.
+    let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
+    let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
+
+    let red_vb = Buffer::with_data(&device, &red_verts, DataAccess::Scattered)
+        .expect("Failed to create red VB");
+    let green_vb = Buffer::with_data(&device, &green_verts, DataAccess::Scattered)
+        .expect("Failed to create green VB");
+
+    let mut encoder = CommandEncoder::new();
+    {
+        let mut pass = encoder.begin_render_pass();
+        pass.clear(Color::BLACK);
+        pass.clear_depth(1.0);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &red_vb);
+        pass.draw(0..3, 0..1);
+        pass.set_vertex_buffer(0, &green_vb);
+        pass.draw(0..3, 0..1);
+    }
+
+    target.render(encoder).expect("Failed to render");
+    let pixels = target.read_to_cpu().expect("Failed to read pixels");
+
+    let total = pixels.len() / 4;
+    let red_count = pixels
+        .chunks(4)
+        .filter(|p| p[0] > 200 && p[1] < 50 && p[2] < 50)
+        .count();
+    let green_count = pixels
+        .chunks(4)
+        .filter(|p| p[1] > 200 && p[0] < 50 && p[2] < 50)
+        .count();
+
+    assert!(
+        red_count == total,
+        "Depth occlusion failed: expected all {} pixels red, got {} red / {} green.\n\
+         This means depth testing is not working — green (drawn second, z=0.6) \
+         overwrote red (z=0.2) instead of being occluded.",
+        total,
+        red_count,
+        green_count
+    );
+}
+
+/// Depth occlusion (reversed): far geometry (red, z=0.8) must lose to near
+/// geometry (green, z=0.2) even when the red quad is submitted first.
+///
+/// Expected output: every pixel is green.
+/// This is the complement of the test above and verifies that a late-drawn
+/// near fragment correctly overwrites an early-drawn far fragment.
+#[test]
+fn test_depth_occlusion_green_beats_red() {
+    let Some(device) = create_device() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+
+    let target = RenderTarget::new_with_depth(
+        &device,
+        64,
+        64,
+        TextureFormat::Rgba8Unorm,
+        Some(DepthFormat::Depth32Float),
+    )
+    .expect("Failed to create render target with depth");
+
+    let shader_source = include_str!("../shaders/depth_test.slang");
+    let shader =
+        ShaderModule::from_slang(&device, shader_source).expect("Failed to compile shader");
+
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: depth_vertex_layout(),
+            target_format: TextureFormat::Rgba8Unorm,
+            depth_stencil: Some(DepthStencilState {
+                format: DepthFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+            }),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create depth pipeline");
+
+    let make_tri = |z: f32, color: [f32; 4]| -> [Depth3DVertex; 3] {
+        [
+            Depth3DVertex {
+                position: [-1.0, -1.0, z],
+                color,
+            },
+            Depth3DVertex {
+                position: [3.0, -1.0, z],
+                color,
+            },
+            Depth3DVertex {
+                position: [-1.0, 3.0, z],
+                color,
+            },
+        ]
+    };
+
+    // Red (z=0.8, far) drawn first; green (z=0.2, near) drawn second.
+    // Green must win because it is closer, not because it is drawn last.
+    let red_verts = make_tri(0.8, [1.0, 0.0, 0.0, 1.0]);
+    let green_verts = make_tri(0.2, [0.0, 1.0, 0.0, 1.0]);
+
+    let red_vb = Buffer::with_data(&device, &red_verts, DataAccess::Scattered)
+        .expect("Failed to create red VB");
+    let green_vb = Buffer::with_data(&device, &green_verts, DataAccess::Scattered)
+        .expect("Failed to create green VB");
+
+    let mut encoder = CommandEncoder::new();
+    {
+        let mut pass = encoder.begin_render_pass();
+        pass.clear(Color::BLACK);
+        pass.clear_depth(1.0);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &red_vb);
+        pass.draw(0..3, 0..1);
+        pass.set_vertex_buffer(0, &green_vb);
+        pass.draw(0..3, 0..1);
+    }
+
+    target.render(encoder).expect("Failed to render");
+    let pixels = target.read_to_cpu().expect("Failed to read pixels");
+
+    let total = pixels.len() / 4;
+    let green_count = pixels
+        .chunks(4)
+        .filter(|p| p[1] > 200 && p[0] < 50 && p[2] < 50)
+        .count();
+    let red_count = pixels
+        .chunks(4)
+        .filter(|p| p[0] > 200 && p[1] < 50 && p[2] < 50)
+        .count();
+
+    assert!(
+        green_count == total,
+        "Depth occlusion failed: expected all {} pixels green, got {} green / {} red.\n\
+         This means depth testing is not working — the near green fragment (z=0.2) \
+         did not overwrite the far red fragment (z=0.8).",
+        total,
+        green_count,
+        red_count
     );
 }

@@ -82,9 +82,13 @@ impl Color {
     }
 }
 
-/// Texture format for render targets.
+/// Texture format for render targets and textures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextureFormat {
+    /// Single-channel 8-bit unsigned normalized (red only)
+    R8Unorm,
+    /// Two-channel 8-bit unsigned normalized (red + green)
+    Rg8Unorm,
     /// 8-bit RGBA, sRGB color space
     Rgba8UnormSrgb,
     /// 8-bit RGBA, linear color space
@@ -104,6 +108,8 @@ impl TextureFormat {
     /// Get the number of bytes per pixel.
     pub fn bytes_per_pixel(&self) -> u32 {
         match self {
+            TextureFormat::R8Unorm => 1,
+            TextureFormat::Rg8Unorm => 2,
             TextureFormat::Rgba8UnormSrgb => 4,
             TextureFormat::Rgba8Unorm => 4,
             TextureFormat::Bgra8UnormSrgb => 4,
@@ -545,6 +551,8 @@ mod tests {
 
     #[test]
     fn test_texture_format_bytes_per_pixel() {
+        assert_eq!(TextureFormat::R8Unorm.bytes_per_pixel(), 1);
+        assert_eq!(TextureFormat::Rg8Unorm.bytes_per_pixel(), 2);
         assert_eq!(TextureFormat::Rgba8Unorm.bytes_per_pixel(), 4);
         assert_eq!(TextureFormat::Rgba16Float.bytes_per_pixel(), 8);
         assert_eq!(TextureFormat::Rgba32Float.bytes_per_pixel(), 16);

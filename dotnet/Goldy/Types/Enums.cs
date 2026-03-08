@@ -43,6 +43,10 @@ public enum TextureFormat
     Rgba16Float = 4,
     /// <summary>32-bit RGBA float.</summary>
     Rgba32Float = 5,
+    /// <summary>Single-channel 8-bit unsigned normalized.</summary>
+    R8Unorm = 6,
+    /// <summary>Two-channel 8-bit unsigned normalized.</summary>
+    Rg8Unorm = 7,
 }
 
 /// <summary>

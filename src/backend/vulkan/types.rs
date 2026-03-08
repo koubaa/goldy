@@ -86,7 +86,8 @@ unsafe impl bytemuck::Zeroable for BindlessIndices {}
 pub(crate) struct ResourceRegistry {
     next_storage_buffer_index: u32,
     next_uniform_buffer_index: u32,
-    next_texture_index: u32,
+    next_sampled_texture_index: u32,
+    next_storage_image_index: u32,
     next_sampler_index: u32,
     pub buffer_indices: HashMap<BufferHandle, u32>,
     pub texture_indices: HashMap<TextureHandle, u32>,
@@ -98,7 +99,8 @@ impl ResourceRegistry {
         Self {
             next_storage_buffer_index: 0,
             next_uniform_buffer_index: 0,
-            next_texture_index: 0,
+            next_sampled_texture_index: 0,
+            next_storage_image_index: 0,
             next_sampler_index: 0,
             buffer_indices: HashMap::new(),
             texture_indices: HashMap::new(),
@@ -120,9 +122,16 @@ impl ResourceRegistry {
         index
     }
 
-    pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
-        let index = self.next_texture_index;
-        self.next_texture_index += 1;
+    pub fn register_texture(&mut self, handle: TextureHandle, is_storage_image: bool) -> u32 {
+        let index = if is_storage_image {
+            let idx = self.next_storage_image_index;
+            self.next_storage_image_index += 1;
+            idx
+        } else {
+            let idx = self.next_sampled_texture_index;
+            self.next_sampled_texture_index += 1;
+            idx
+        };
         self.texture_indices.insert(handle, index);
         index
     }
@@ -277,6 +286,8 @@ pub(crate) struct TextureState {
     pub staging_memory: Option<vk::DeviceMemory>,
     /// Index in the global bindless descriptor set (if bindless enabled)
     pub bindless_index: Option<u32>,
+    /// Current image layout (for subregion writes / transitions)
+    pub current_layout: vk::ImageLayout,
 }
 
 /// GPU sampler state.
@@ -308,6 +319,11 @@ pub(crate) struct SurfaceState {
     pub width: u32,
     pub height: u32,
     pub format: vk::Format,
+    /// Depth buffer (when depth_format is Some)
+    pub depth_format: Option<DepthFormat>,
+    pub depth_image: Option<vk::Image>,
+    pub depth_memory: Option<vk::DeviceMemory>,
+    pub depth_view: Option<vk::ImageView>,
     /// Current frame index (0..MAX_FRAMES_IN_FLIGHT)
     pub current_frame: usize,
     /// Currently acquired swapchain image index

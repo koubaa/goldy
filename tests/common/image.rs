@@ -7,6 +7,7 @@ use std::path::Path;
 
 /// Comparison type for FLIP statistics.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum ComparisonType {
     /// Pass if the mean error is less than or equal to the threshold.
     Mean(f32),
@@ -16,6 +17,7 @@ pub enum ComparisonType {
 }
 
 impl ComparisonType {
+    #[allow(dead_code)]
     fn check(&self, pool: &mut nv_flip::FlipPool) -> bool {
         match *self {
             ComparisonType::Mean(threshold) => {
@@ -50,6 +52,7 @@ impl ComparisonType {
 
 /// Error type for image comparison failures.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ImageComparisonError {
     /// Reference image not found at the specified path.
     ReferenceNotFound(String),
@@ -118,6 +121,7 @@ impl From<std::io::Error> for ImageComparisonError {
 }
 
 /// Read a PNG file and return its RGBA pixel data.
+#[allow(dead_code)]
 fn read_png(
     path: &Path,
     expected_width: u32,
@@ -166,6 +170,7 @@ fn read_png(
 }
 
 /// Write RGBA pixel data to a PNG file.
+#[allow(dead_code)]
 fn write_png(
     path: &Path,
     width: u32,
@@ -215,6 +220,7 @@ fn add_alpha(input: &[u8]) -> Vec<u8> {
 }
 
 /// Print FLIP statistics for debugging.
+#[allow(dead_code)]
 fn print_flip_stats(pool: &mut nv_flip::FlipPool) {
     println!("  FLIP Statistics:");
     println!("    Min: {:.6}", pool.min_value());
@@ -241,6 +247,7 @@ fn print_flip_stats(pool: &mut nv_flip::FlipPool) {
 /// # Returns
 /// * `Ok(())` if all checks pass
 /// * `Err(ImageComparisonError::ComparisonFailed)` if any check fails, with paths to debug images
+#[allow(dead_code)]
 pub fn compare_images(
     reference_path: &Path,
     width: u32,

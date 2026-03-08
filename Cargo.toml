@@ -159,3 +159,7 @@ path = "examples/compute_particles.rs"
 name = "game_of_life"
 path = "examples/game_of_life.rs"
 
+[[example]]
+name = "depth_quads"
+path = "examples/depth_quads.rs"
+

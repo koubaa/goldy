@@ -254,6 +254,8 @@ pub(crate) struct TextureState {
     pub srv_offset: u32,
     /// Bindless descriptor heap offset (same as srv_offset when bindless is enabled)
     pub bindless_offset: Option<u32>,
+    /// Current resource state (for subregion writes)
+    pub current_state: Direct3D12::D3D12_RESOURCE_STATES,
 }
 
 /// GPU sampler state.
@@ -287,6 +289,11 @@ pub(crate) struct SurfaceState {
     pub width: u32,
     pub height: u32,
     pub format: Dxgi::Common::DXGI_FORMAT,
+    /// Depth buffer (optional)
+    pub depth_format: Option<DepthFormat>,
+    #[allow(dead_code)] // Held for ownership; dropped when surface is destroyed
+    pub depth_texture: Option<Direct3D12::ID3D12Resource>,
+    pub dsv_offset: Option<u32>,
     /// Current frame index (0..MAX_FRAMES_IN_FLIGHT)
     pub current_frame: usize,
     /// Currently acquired swapchain image index

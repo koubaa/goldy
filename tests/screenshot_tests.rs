@@ -20,9 +20,10 @@ use std::path::Path;
 
 use common::image::{compare_images, ComparisonType, ImageComparisonError};
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceType,
-    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule,
-    TextureFormat, Vertex2D, VertexBufferLayout,
+    Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DataAccess,
+    DepthFormat, DepthStencilState, Device, DeviceType, Instance, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule, TextureFormat, Vertex2D,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 fn create_device() -> Option<Device> {
@@ -427,6 +428,144 @@ fn test_game_of_life_update_100() {
         512,
         512,
         &[ComparisonType::Mean(0.01)],
+        pixels,
+    );
+}
+
+// ============================================================================
+// Depth Occlusion Tests
+// ============================================================================
+
+/// Vertex type carrying (x, y, z) position and RGBA color for depth tests.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct Depth3DVertex {
+    position: [f32; 3],
+    color: [f32; 4],
+}
+
+fn depth_vertex_layout() -> VertexBufferLayout {
+    VertexBufferLayout {
+        stride: std::mem::size_of::<Depth3DVertex>() as u32,
+        attributes: vec![
+            VertexAttribute {
+                location: 0,
+                format: VertexFormat::Float32x3,
+                offset: 0,
+            },
+            VertexAttribute {
+                location: 1,
+                format: VertexFormat::Float32x4,
+                offset: 12,
+            },
+        ],
+    }
+}
+
+/// Render two overlapping fullscreen triangles at different depths.
+///
+/// Red triangle is drawn first at z=0.2 (near).
+/// Green triangle is drawn second at z=0.6 (far).
+///
+/// With depth testing (`Less`): the green triangle is occluded by red.
+/// Without depth testing: green would overwrite red (since it's drawn second).
+///
+/// Expected output: solid red.
+fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
+    let target = RenderTarget::new_with_depth(
+        device,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        Some(DepthFormat::Depth32Float),
+    )
+    .expect("Failed to create render target with depth");
+
+    let shader_source = include_str!("../shaders/depth_test.slang");
+    let shader = ShaderModule::from_slang(device, shader_source).expect("Failed to create shader");
+
+    let pipeline = RenderPipeline::new(
+        device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: depth_vertex_layout(),
+            target_format: TextureFormat::Rgba8Unorm,
+            depth_stencil: Some(DepthStencilState {
+                format: DepthFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+            }),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create depth pipeline");
+
+    // Fullscreen triangle (covers entire NDC [-1,1]²) using the large-triangle trick.
+    let make_tri = |z: f32, color: [f32; 4]| -> [Depth3DVertex; 3] {
+        [
+            Depth3DVertex {
+                position: [-1.0, -1.0, z],
+                color,
+            },
+            Depth3DVertex {
+                position: [3.0, -1.0, z],
+                color,
+            },
+            Depth3DVertex {
+                position: [-1.0, 3.0, z],
+                color,
+            },
+        ]
+    };
+
+    // Red at z=0.2 (front), green at z=0.6 (back)
+    let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
+    let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
+
+    let red_vb =
+        Buffer::with_data(device, &red_verts, DataAccess::Scattered).expect("Failed to create VB");
+    let green_vb = Buffer::with_data(device, &green_verts, DataAccess::Scattered)
+        .expect("Failed to create VB");
+
+    let mut encoder = CommandEncoder::new();
+    {
+        let mut pass = encoder.begin_render_pass();
+        pass.clear(Color::BLACK);
+        pass.clear_depth(1.0);
+        pass.set_pipeline(&pipeline);
+
+        // Draw red first (z=0.2, writes depth)
+        pass.set_vertex_buffer(0, &red_vb);
+        pass.draw(0..3, 0..1);
+
+        // Draw green second (z=0.6, fails depth test: 0.6 is NOT Less than 0.2)
+        pass.set_vertex_buffer(0, &green_vb);
+        pass.draw(0..3, 0..1);
+    }
+
+    target.render(encoder).expect("Failed to render");
+    target.read_to_cpu().expect("Failed to read pixels")
+}
+
+/// Depth occlusion test: a near (red) geometry blocks a far (green) geometry.
+///
+/// Verifies that the depth buffer correctly occludes back-facing geometry
+/// even when it is submitted to the GPU after the front geometry.
+#[test]
+fn test_depth_occlusion() {
+    let Some(device) = create_device() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+
+    let pixels = render_depth_occlusion(&device, 64, 64);
+    run_screenshot_test(
+        "depth_occlusion",
+        "tests/screenshots/depth_occlusion.png",
+        64,
+        64,
+        &[ComparisonType::Mean(0.001)],
         pixels,
     );
 }

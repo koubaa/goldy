@@ -455,6 +455,15 @@ pub(super) fn bindless_index(state: &Dx12State, buffer_handle: BufferHandle) -> 
         .and_then(|b| b.bindless_offset)
 }
 
+/// Get the SRV (read-only / StructuredBuffer) bindless index for a storage buffer.
+/// Scattered buffers have both a UAV (at bindless_offset) and an SRV (at bindless_srv_offset).
+pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
+    state
+        .buffers
+        .get(&buffer_handle)
+        .and_then(|b| b.bindless_srv_offset.or(b.bindless_offset))
+}
+
 /// Read buffer contents back to CPU memory.
 ///
 /// For DEFAULT heap buffers (storage), creates a readback buffer and copies.

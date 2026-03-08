@@ -90,11 +90,17 @@ pub enum PyTextureFormat {
     RGBA16_FLOAT = 4,
     /// 32-bit RGBA float.
     RGBA32_FLOAT = 5,
+    /// Single-channel 8-bit unsigned normalized.
+    R8_UNORM = 6,
+    /// Two-channel 8-bit unsigned normalized.
+    RG8_UNORM = 7,
 }
 
 impl From<PyTextureFormat> for goldy::TextureFormat {
     fn from(tf: PyTextureFormat) -> Self {
         match tf {
+            PyTextureFormat::R8_UNORM => goldy::TextureFormat::R8Unorm,
+            PyTextureFormat::RG8_UNORM => goldy::TextureFormat::Rg8Unorm,
             PyTextureFormat::RGBA8_UNORM_SRGB => goldy::TextureFormat::Rgba8UnormSrgb,
             PyTextureFormat::RGBA8_UNORM => goldy::TextureFormat::Rgba8Unorm,
             PyTextureFormat::BGRA8_UNORM_SRGB => goldy::TextureFormat::Bgra8UnormSrgb,
@@ -108,6 +114,8 @@ impl From<PyTextureFormat> for goldy::TextureFormat {
 impl From<goldy::TextureFormat> for PyTextureFormat {
     fn from(tf: goldy::TextureFormat) -> Self {
         match tf {
+            goldy::TextureFormat::R8Unorm => PyTextureFormat::R8_UNORM,
+            goldy::TextureFormat::Rg8Unorm => PyTextureFormat::RG8_UNORM,
             goldy::TextureFormat::Rgba8UnormSrgb => PyTextureFormat::RGBA8_UNORM_SRGB,
             goldy::TextureFormat::Rgba8Unorm => PyTextureFormat::RGBA8_UNORM,
             goldy::TextureFormat::Bgra8UnormSrgb => PyTextureFormat::BGRA8_UNORM_SRGB,

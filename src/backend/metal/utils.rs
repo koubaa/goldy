@@ -18,6 +18,8 @@ use mtl::{
 /// Convert goldy TextureFormat to Metal MTLPixelFormat.
 pub fn format_to_mtl(format: TextureFormat) -> MTLPixelFormat {
     match format {
+        TextureFormat::R8Unorm => MTLPixelFormat::R8Unorm,
+        TextureFormat::Rg8Unorm => MTLPixelFormat::RG8Unorm,
         TextureFormat::Rgba8UnormSrgb => MTLPixelFormat::RGBA8Unorm_sRGB,
         TextureFormat::Rgba8Unorm => MTLPixelFormat::RGBA8Unorm,
         TextureFormat::Bgra8UnormSrgb => MTLPixelFormat::BGRA8Unorm_sRGB,
@@ -30,13 +32,15 @@ pub fn format_to_mtl(format: TextureFormat) -> MTLPixelFormat {
 /// Convert Metal MTLPixelFormat to goldy TextureFormat.
 pub fn mtl_to_format(format: MTLPixelFormat) -> TextureFormat {
     match format {
+        MTLPixelFormat::R8Unorm => TextureFormat::R8Unorm,
+        MTLPixelFormat::RG8Unorm => TextureFormat::Rg8Unorm,
         MTLPixelFormat::RGBA8Unorm_sRGB => TextureFormat::Rgba8UnormSrgb,
         MTLPixelFormat::RGBA8Unorm => TextureFormat::Rgba8Unorm,
         MTLPixelFormat::BGRA8Unorm_sRGB => TextureFormat::Bgra8UnormSrgb,
         MTLPixelFormat::BGRA8Unorm => TextureFormat::Bgra8Unorm,
         MTLPixelFormat::RGBA16Float => TextureFormat::Rgba16Float,
         MTLPixelFormat::RGBA32Float => TextureFormat::Rgba32Float,
-        _ => TextureFormat::Bgra8Unorm, // Default for unknown formats
+        _ => TextureFormat::Bgra8Unorm,
     }
 }
 

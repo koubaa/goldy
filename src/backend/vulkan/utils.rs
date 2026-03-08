@@ -14,6 +14,8 @@ use ash::vk;
 /// Convert Goldy TextureFormat to Vulkan format.
 pub fn format_to_vk(format: TextureFormat) -> vk::Format {
     match format {
+        TextureFormat::R8Unorm => vk::Format::R8_UNORM,
+        TextureFormat::Rg8Unorm => vk::Format::R8G8_UNORM,
         TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
         TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
         TextureFormat::Bgra8UnormSrgb => vk::Format::B8G8R8A8_SRGB,
@@ -60,6 +62,8 @@ pub fn index_format_to_vk(format: IndexFormat) -> vk::IndexType {
 /// Returns None for unsupported formats.
 pub fn vk_to_format(format: vk::Format) -> Option<TextureFormat> {
     match format {
+        vk::Format::R8_UNORM => Some(TextureFormat::R8Unorm),
+        vk::Format::R8G8_UNORM => Some(TextureFormat::Rg8Unorm),
         vk::Format::R8G8B8A8_SRGB => Some(TextureFormat::Rgba8UnormSrgb),
         vk::Format::R8G8B8A8_UNORM => Some(TextureFormat::Rgba8Unorm),
         vk::Format::B8G8R8A8_SRGB => Some(TextureFormat::Bgra8UnormSrgb),

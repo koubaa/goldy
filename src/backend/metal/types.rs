@@ -247,6 +247,9 @@ pub(crate) struct SurfaceState {
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
+    /// Depth buffer (optional)
+    pub depth_format: Option<DepthFormat>,
+    pub depth_texture: Option<MTLTexture>,
     /// Current frame index (0..MAX_FRAMES_IN_FLIGHT)
     pub current_frame: usize,
     /// The CAMetalLayer (stored as raw pointer for objc interop)

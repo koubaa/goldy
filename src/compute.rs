@@ -156,6 +156,24 @@ impl<'a> ComputePass<'a> {
             });
     }
 
+    /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
+    ///
+    /// Use this when you need to pass texture/sampler bindless indices or a mix of
+    /// buffer and texture indices. The shader receives these indices directly.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let tex_idx = texture.bindless_index().unwrap();
+    /// pass.set_push_constants_raw(&[buf_idx_0, buf_idx_1, tex_idx]);
+    /// ```
+    pub fn set_push_constants_raw(&mut self, indices: &[u32]) {
+        self.encoder
+            .commands
+            .push(ComputeCommand::SetPushConstantsRaw {
+                indices: indices.to_vec(),
+            });
+    }
+
     /// Dispatch compute workgroups.
     ///
     /// This records a dispatch command with the specified number of workgroups

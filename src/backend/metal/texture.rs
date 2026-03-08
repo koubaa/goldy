@@ -135,6 +135,120 @@ pub(super) fn write(
     Ok(())
 }
 
+/// Write data to a subregion of a texture.
+pub(super) fn write_region(
+    state: &MetalState,
+    texture_handle: TextureHandle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Result<()> {
+    let texture = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
+
+    let bytes_per_pixel = texture.format.bytes_per_pixel();
+    let bytes_per_row = width * bytes_per_pixel;
+
+    let region = MTLRegion {
+        origin: MTLOrigin {
+            x: x as u64,
+            y: y as u64,
+            z: 0,
+        },
+        size: MTLSize {
+            width: width as u64,
+            height: height as u64,
+            depth: 1,
+        },
+    };
+
+    texture
+        .texture
+        .replace_region(region, 0, data.as_ptr() as *const _, bytes_per_row as u64);
+
+    tracing::debug!(
+        "Wrote {}x{} region at ({},{}) ({} bytes)",
+        width,
+        height,
+        x,
+        y,
+        data.len()
+    );
+    Ok(())
+}
+
+/// Read texture contents to CPU memory.
+/// The texture must have been created with TextureFlags::COPY_SRC.
+pub(super) fn read_to_cpu(
+    state: &MetalState,
+    texture_handle: TextureHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let texture = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
+
+    let logical_device = state
+        .devices
+        .get(&texture.device_handle)
+        .context("Device no longer valid")?;
+
+    let width = texture.width;
+    let height = texture.height;
+    let bytes_per_pixel = texture.format.bytes_per_pixel();
+    let bytes_per_row = width * bytes_per_pixel;
+    let expected_size = (bytes_per_row * height) as usize;
+
+    if output.len() < expected_size {
+        anyhow::bail!(
+            "Output buffer too small: need {} bytes, got {}",
+            expected_size,
+            output.len()
+        );
+    }
+
+    let staging_buffer = logical_device.device.new_buffer(
+        expected_size as u64,
+        mtl::MTLResourceOptions::StorageModeShared,
+    );
+
+    let command_buffer = logical_device.command_queue.new_command_buffer();
+    let blit_encoder = command_buffer.new_blit_command_encoder();
+
+    blit_encoder.copy_from_texture_to_buffer(
+        &texture.texture,
+        0,
+        0,
+        MTLOrigin { x: 0, y: 0, z: 0 },
+        MTLSize {
+            width: width as u64,
+            height: height as u64,
+            depth: 1,
+        },
+        &staging_buffer,
+        0,
+        bytes_per_row as u64,
+        (bytes_per_row * height) as u64,
+        mtl::MTLBlitOption::empty(),
+    );
+
+    blit_encoder.end_encoding();
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+
+    unsafe {
+        let ptr = staging_buffer.contents();
+        std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), expected_size);
+    }
+
+    Ok(())
+}
+
 /// Destroy a texture.
 pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
     if let Some(texture) = state.textures.remove(&texture_handle) {

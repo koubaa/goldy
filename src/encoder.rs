@@ -393,6 +393,66 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_depth_default() {
+        let mut encoder = CommandEncoder::new();
+        {
+            let mut pass = encoder.begin_render_pass();
+            pass.clear_depth(1.0);
+        }
+        let commands = encoder.finish();
+
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            RenderCommand::ClearDepth(depth) => {
+                assert!(
+                    (*depth - 1.0).abs() < f32::EPSILON,
+                    "Expected depth 1.0 (far plane), got {}",
+                    depth
+                );
+            }
+            _ => panic!("Expected ClearDepth command"),
+        }
+    }
+
+    #[test]
+    fn test_clear_depth_reverse_z() {
+        let mut encoder = CommandEncoder::new();
+        {
+            let mut pass = encoder.begin_render_pass();
+            // Reverse-Z: clear to 0.0 (far becomes 0 in reverse-Z projection)
+            pass.clear_depth(0.0);
+        }
+        let commands = encoder.finish();
+
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            RenderCommand::ClearDepth(depth) => {
+                assert!(
+                    (*depth - 0.0).abs() < f32::EPSILON,
+                    "Expected depth 0.0 (reverse-Z), got {}",
+                    depth
+                );
+            }
+            _ => panic!("Expected ClearDepth command"),
+        }
+    }
+
+    #[test]
+    fn test_clear_color_and_depth_together() {
+        let mut encoder = CommandEncoder::new();
+        {
+            let mut pass = encoder.begin_render_pass();
+            pass.clear(Color::BLACK);
+            pass.clear_depth(1.0);
+        }
+        let commands = encoder.finish();
+
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(&commands[0], RenderCommand::Clear(_)));
+        assert!(matches!(&commands[1], RenderCommand::ClearDepth(_)));
+    }
+
+    #[test]
     fn test_multiple_commands() {
         let mut encoder = CommandEncoder::new();
         {

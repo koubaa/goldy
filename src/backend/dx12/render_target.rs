@@ -255,7 +255,7 @@ pub(super) fn render(
         handle
     };
 
-    // Find clear color
+    // Find clear color and depth
     let clear_color = commands
         .iter()
         .find_map(|c| match c {
@@ -263,15 +263,37 @@ pub(super) fn render(
             _ => None,
         })
         .unwrap_or(Color::BLACK);
+    let clear_depth = commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::ClearDepth(d) => Some(*d),
+            _ => None,
+        })
+        .unwrap_or(1.0);
 
-    // Clear and set render target
+    // Clear color and set render target (with optional depth/stencil)
     unsafe {
         cmd.ClearRenderTargetView(
             rtv_handle,
             &[clear_color.r, clear_color.g, clear_color.b, clear_color.a],
             None,
         );
-        cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
+    }
+
+    if let Some(dsv_off) = render_target.dsv_offset {
+        let dsv_handle = unsafe {
+            let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (dsv_off * logical_device.dsv_descriptor_size) as usize;
+            handle
+        };
+        unsafe {
+            cmd.ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
+            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, Some(&dsv_handle));
+        }
+    } else {
+        unsafe {
+            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
+        }
     }
 
     // Set viewport and scissor

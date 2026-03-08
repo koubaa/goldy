@@ -1,10 +1,10 @@
 //! Surface and swapchain management for window presentation.
 
 use super::types::{self, FrameSync, LogicalDevice, SurfaceState, MAX_FRAMES_IN_FLIGHT};
-use super::utils;
+use super::utils::{depth_aspect_mask, depth_format_to_vk, find_memory_type};
 use super::{DeviceHandle, PipelineHandle, SurfaceHandle, SwapchainImageHandle};
 use crate::backend::RenderCommand;
-use crate::types::{Color, TextureFormat};
+use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
 use ash::{khr, vk, Entry, Instance};
 use std::collections::HashMap;
@@ -93,6 +93,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     window: &dyn raw_window_handle::HasWindowHandle,
     display: &dyn raw_window_handle::HasDisplayHandle,
+    depth_format: Option<DepthFormat>,
 ) -> Result<SurfaceHandle> {
     let logical_device = devices
         .get(&device_handle)
@@ -240,6 +241,71 @@ pub(super) fn create(
         });
     }
 
+    // Create depth buffer if requested
+    let (depth_image, depth_memory, depth_view) = if let Some(df) = depth_format {
+        let vk_depth_format = depth_format_to_vk(df);
+        let depth_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk_depth_format)
+            .extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let d_image = unsafe { logical_device.device.create_image(&depth_info, None) }
+            .context("Failed to create surface depth image")?;
+
+        let d_mem_reqs = unsafe { logical_device.device.get_image_memory_requirements(d_image) };
+        let d_memory_type = find_memory_type(
+            instance,
+            physical_device,
+            d_mem_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+        .context("Failed to find memory type for surface depth buffer")?;
+
+        let d_alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(d_mem_reqs.size)
+            .memory_type_index(d_memory_type);
+
+        let d_memory = unsafe { logical_device.device.allocate_memory(&d_alloc_info, None) }
+            .context("Failed to allocate surface depth memory")?;
+
+        unsafe {
+            logical_device
+                .device
+                .bind_image_memory(d_image, d_memory, 0)
+        }
+        .context("Failed to bind surface depth memory")?;
+
+        let d_view_info = vk::ImageViewCreateInfo::default()
+            .image(d_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk_depth_format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: depth_aspect_mask(df),
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let d_view = unsafe { logical_device.device.create_image_view(&d_view_info, None) }
+            .context("Failed to create surface depth view")?;
+
+        (Some(d_image), Some(d_memory), Some(d_view))
+    } else {
+        (None, None, None)
+    };
+
     let handle = *next_surface_handle;
     *next_surface_handle += 1;
 
@@ -257,6 +323,10 @@ pub(super) fn create(
             current_frame: 0,
             current_image_index: None,
             frame_sync,
+            depth_format,
+            depth_image,
+            depth_memory,
+            depth_view,
         },
     );
 
@@ -297,6 +367,16 @@ pub(super) fn destroy(
 
                 for view in surface_state.swapchain_image_views {
                     logical_device.device.destroy_image_view(view, None);
+                }
+
+                if let Some(depth_view) = surface_state.depth_view {
+                    logical_device.device.destroy_image_view(depth_view, None);
+                }
+                if let Some(depth_image) = surface_state.depth_image {
+                    logical_device.device.destroy_image(depth_image, None);
+                }
+                if let Some(depth_memory) = surface_state.depth_memory {
+                    logical_device.device.free_memory(depth_memory, None);
                 }
 
                 let swapchain_loader =
@@ -437,7 +517,7 @@ where
     let image = surface_state.swapchain_images[image_index as usize];
     let image_view = surface_state.swapchain_image_views[image_index as usize];
 
-    // Find clear color
+    // Find clear color and clear depth
     let clear_color = commands
         .iter()
         .find_map(|c| match c {
@@ -445,6 +525,13 @@ where
             _ => None,
         })
         .unwrap_or(Color::BLACK);
+    let clear_depth = commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::ClearDepth(d) => Some(*d),
+            _ => None,
+        })
+        .unwrap_or(1.0);
 
     // Begin command buffer
     let begin_info =
@@ -454,7 +541,7 @@ where
         .context("Failed to begin command buffer")?;
 
     // Transition image to color attachment
-    let barrier = vk::ImageMemoryBarrier2::default()
+    let color_barrier = vk::ImageMemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
         .src_access_mask(vk::AccessFlags2::NONE)
         .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
@@ -470,8 +557,36 @@ where
             layer_count: 1,
         });
 
-    let dep_info =
-        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+    // Prepare image barriers - color always, depth if present
+    let mut barriers = vec![color_barrier];
+
+    // Add depth barrier if depth buffer exists
+    if let (Some(depth_img), Some(df)) = (surface_state.depth_image, surface_state.depth_format) {
+        let depth_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+            .src_access_mask(vk::AccessFlags2::NONE)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .image(depth_img)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: depth_aspect_mask(df),
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        barriers.push(depth_barrier);
+    }
+
+    let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
 
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
@@ -487,13 +602,33 @@ where
             },
         });
 
-    let rendering_info = vk::RenderingInfo::default()
+    // Create depth attachment if present
+    let depth_attachment = surface_state.depth_view.map(|dv| {
+        vk::RenderingAttachmentInfo::default()
+            .image_view(dv)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: clear_depth,
+                    stencil: 0,
+                },
+            })
+    });
+
+    let mut rendering_info = vk::RenderingInfo::default()
         .render_area(vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: vk::Extent2D { width, height },
         })
         .layer_count(1)
         .color_attachments(std::slice::from_ref(&color_attachment));
+
+    // Add depth attachment if present
+    if let Some(ref depth_att) = depth_attachment {
+        rendering_info = rendering_info.depth_attachment(depth_att);
+    }
 
     unsafe {
         logical_device
@@ -658,7 +793,7 @@ pub(super) fn resize(
     height: u32,
 ) -> Result<()> {
     // Get surface info we need
-    let (device_handle, surface, old_swapchain, format) = {
+    let (device_handle, surface, old_swapchain, format, depth_fmt) = {
         let surface_state = surfaces
             .get(&surface_handle)
             .context("Invalid surface handle")?;
@@ -667,6 +802,7 @@ pub(super) fn resize(
             surface_state.surface,
             surface_state.swapchain,
             surface_state.format,
+            surface_state.depth_format,
         )
     };
 
@@ -677,6 +813,19 @@ pub(super) fn resize(
 
     // Wait for all in-flight frames to complete before resizing
     unsafe { logical_device.device.device_wait_idle() }?;
+
+    // Destroy old depth buffer (must be before swapchain recreation)
+    if let Some(surface_state) = surfaces.get(&surface_handle) {
+        if let Some(depth_view) = surface_state.depth_view {
+            unsafe { logical_device.device.destroy_image_view(depth_view, None) };
+        }
+        if let Some(depth_image) = surface_state.depth_image {
+            unsafe { logical_device.device.destroy_image(depth_image, None) };
+        }
+        if let Some(depth_memory) = surface_state.depth_memory {
+            unsafe { logical_device.device.free_memory(depth_memory, None) };
+        }
+    }
 
     // Destroy old image views
     if let Some(surface_state) = surfaces.get(&surface_handle) {
@@ -755,6 +904,71 @@ pub(super) fn resize(
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("Failed to create swapchain image views")?;
 
+    // Recreate depth buffer if the surface had one
+    let (new_depth_image, new_depth_memory, new_depth_view) = if let Some(df) = depth_fmt {
+        let vk_depth_format = depth_format_to_vk(df);
+        let depth_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk_depth_format)
+            .extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let d_image = unsafe { logical_device.device.create_image(&depth_info, None) }
+            .context("Failed to create surface depth image on resize")?;
+
+        let d_mem_reqs = unsafe { logical_device.device.get_image_memory_requirements(d_image) };
+        let d_memory_type = find_memory_type(
+            instance,
+            physical_device,
+            d_mem_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+        .context("Failed to find memory type for surface depth on resize")?;
+
+        let d_alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(d_mem_reqs.size)
+            .memory_type_index(d_memory_type);
+
+        let d_memory = unsafe { logical_device.device.allocate_memory(&d_alloc_info, None) }
+            .context("Failed to allocate surface depth memory on resize")?;
+
+        unsafe {
+            logical_device
+                .device
+                .bind_image_memory(d_image, d_memory, 0)
+        }
+        .context("Failed to bind surface depth memory on resize")?;
+
+        let d_view_info = vk::ImageViewCreateInfo::default()
+            .image(d_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk_depth_format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: depth_aspect_mask(df),
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let d_view = unsafe { logical_device.device.create_image_view(&d_view_info, None) }
+            .context("Failed to create surface depth view on resize")?;
+
+        (Some(d_image), Some(d_memory), Some(d_view))
+    } else {
+        (None, None, None)
+    };
+
     // Update surface state - reset frame counter since we waited for idle
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         surface_state.swapchain = new_swapchain;
@@ -764,6 +978,9 @@ pub(super) fn resize(
         surface_state.height = extent.height;
         surface_state.current_frame = 0;
         surface_state.current_image_index = None;
+        surface_state.depth_image = new_depth_image;
+        surface_state.depth_memory = new_depth_memory;
+        surface_state.depth_view = new_depth_view;
     }
 
     tracing::debug!("Resized surface to {}x{}", extent.width, extent.height);
@@ -788,6 +1005,6 @@ pub(super) fn format(
 ) -> TextureFormat {
     surfaces
         .get(&surface_handle)
-        .and_then(|s| utils::vk_to_format(s.format))
+        .and_then(|s| super::utils::vk_to_format(s.format))
         .unwrap_or(TextureFormat::Bgra8UnormSrgb) // Safe fallback
 }

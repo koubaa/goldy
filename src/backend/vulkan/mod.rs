@@ -275,6 +275,11 @@ impl GpuBackend for VulkanBackend {
         buffer::bindless_index(&self.state.buffers, buffer_handle)
     }
 
+    fn buffer_bindless_srv_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
+        // Vulkan uses the same storage buffer descriptor for both StructuredBuffer and RWStructuredBuffer
+        buffer::bindless_index(&self.state.buffers, buffer_handle)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device_handle: DeviceHandle,
@@ -441,6 +446,7 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         window: &dyn raw_window_handle::HasWindowHandle,
         display: &dyn raw_window_handle::HasDisplayHandle,
+        depth_format: Option<crate::types::DepthFormat>,
     ) -> Result<SurfaceHandle> {
         surface::create(
             &self.state.entry,
@@ -451,6 +457,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             window,
             display,
+            depth_format,
         )
     }
 
@@ -621,11 +628,33 @@ impl GpuBackend for VulkanBackend {
         texture::write(
             &self.state.instance,
             &self.state.devices,
-            &self.state.textures,
+            &mut self.state.textures,
             texture_handle,
             data,
             width,
             height,
+        )
+    }
+
+    fn write_texture_region(
+        &mut self,
+        texture_handle: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        texture::write_region(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.textures,
+            texture_handle,
+            x,
+            y,
+            width,
+            height,
+            data,
         )
     }
 
@@ -635,6 +664,20 @@ impl GpuBackend for VulkanBackend {
             &mut self.state.textures,
             texture_handle,
         );
+    }
+
+    fn read_texture_to_cpu(
+        &mut self,
+        texture_handle: TextureHandle,
+        output: &mut [u8],
+    ) -> Result<()> {
+        texture::read_to_cpu(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.textures,
+            texture_handle,
+            output,
+        )
     }
 
     fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {

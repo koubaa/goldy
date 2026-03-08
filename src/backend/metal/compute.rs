@@ -165,6 +165,29 @@ pub(super) fn dispatch(
                     indices_bytes.as_ptr() as *const _,
                 );
             }
+            ComputeCommand::SetPushConstantsRaw {
+                indices: raw_indices,
+            } => {
+                ensure_compute!();
+                let mut indices = BindlessIndices::default();
+                for (i, &idx) in raw_indices.iter().enumerate() {
+                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                        break;
+                    }
+                    indices.indices[i] = idx;
+                }
+                let indices_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        &indices as *const _ as *const u8,
+                        std::mem::size_of::<BindlessIndices>(),
+                    )
+                };
+                encoder.unwrap().set_bytes(
+                    PUSH_CONSTANTS_SLOT,
+                    indices_bytes.len() as u64,
+                    indices_bytes.as_ptr() as *const _,
+                );
+            }
             ComputeCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,

@@ -3,22 +3,25 @@
 use super::super::{DeviceHandle, RenderCommand, SurfaceHandle, SwapchainImageHandle};
 use super::render_commands::{create_render_pass, record};
 use super::types::{MetalState, SurfaceState, MAX_FRAMES_IN_FLIGHT};
-use crate::types::TextureFormat;
+use super::utils::depth_format_to_mtl;
+use crate::types::{DepthFormat, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use cocoa::base::{id, nil, YES};
 use core_graphics_types::geometry::CGSize;
 use foreign_types::{ForeignType, ForeignTypeRef};
-use mtl::MTLPixelFormat;
+use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 
 /// Create a surface for window presentation.
+/// When `depth_format` is `Some`, a depth buffer is created for 3D rendering.
 pub(super) fn create(
     state: &mut MetalState,
     device_handle: DeviceHandle,
     window: &dyn HasWindowHandle,
     _display: &dyn HasDisplayHandle,
+    depth_format: Option<DepthFormat>,
 ) -> Result<SurfaceHandle> {
     let logical_device = state
         .devices
@@ -34,7 +37,7 @@ pub(super) fn create(
         _ => anyhow::bail!("Expected AppKit window handle on macOS"),
     };
 
-    let layer: id = unsafe {
+    let (layer, width, height) = unsafe {
         let layer: id = msg_send![class!(CAMetalLayer), layer];
         let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
         let () = msg_send![layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
@@ -47,8 +50,21 @@ pub(super) fn create(
         let size = CGSize::new(frame.size.width, frame.size.height);
         let () = msg_send![layer, setDrawableSize: size];
 
-        layer
+        let w = (frame.size.width as u32).max(1);
+        let h = (frame.size.height as u32).max(1);
+
+        (layer, w, h)
     };
+
+    let depth_texture = depth_format.map(|df| {
+        let depth_desc = TextureDescriptor::new();
+        depth_desc.set_width(width as u64);
+        depth_desc.set_height(height as u64);
+        depth_desc.set_pixel_format(depth_format_to_mtl(df));
+        depth_desc.set_usage(MTLTextureUsage::RenderTarget);
+        depth_desc.set_storage_mode(MTLStorageMode::Private);
+        logical_device.device.new_texture(&depth_desc)
+    });
 
     let handle = state.next_surface_handle;
     state.next_surface_handle += 1;
@@ -57,9 +73,11 @@ pub(super) fn create(
         handle,
         SurfaceState {
             device_handle,
-            width: 800,
-            height: 600,
+            width,
+            height,
             format: TextureFormat::Bgra8Unorm,
+            depth_format,
+            depth_texture,
             current_frame: 0,
             layer: layer as *mut std::ffi::c_void,
         },
@@ -122,14 +140,21 @@ pub(super) fn render(
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
     let mut clear_color = None;
+    let mut clear_depth = None;
     for cmd in commands {
-        if let RenderCommand::Clear(color) = cmd {
-            clear_color = Some(*color);
-            break;
+        match cmd {
+            RenderCommand::Clear(color) => clear_color = Some(*color),
+            RenderCommand::ClearDepth(depth) => clear_depth = Some(*depth),
+            _ => {}
         }
     }
 
-    let render_pass = create_render_pass(texture, None, clear_color, None);
+    let render_pass = create_render_pass(
+        texture,
+        surface_state.depth_texture.as_deref(),
+        clear_color,
+        clear_depth,
+    );
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let encoder = command_buffer.new_render_command_encoder(render_pass);
@@ -194,6 +219,24 @@ pub(super) fn resize(
 
     surface_state.width = width;
     surface_state.height = height;
+
+    // Recreate depth texture if present
+    if let Some(df) = surface_state.depth_format {
+        let logical_device = state
+            .devices
+            .get(&surface_state.device_handle)
+            .context("Device no longer valid")?;
+
+        let w = width.max(1);
+        let h = height.max(1);
+        let depth_desc = TextureDescriptor::new();
+        depth_desc.set_width(w as u64);
+        depth_desc.set_height(h as u64);
+        depth_desc.set_pixel_format(depth_format_to_mtl(df));
+        depth_desc.set_usage(MTLTextureUsage::RenderTarget);
+        depth_desc.set_storage_mode(MTLStorageMode::Private);
+        surface_state.depth_texture = Some(logical_device.device.new_texture(&depth_desc));
+    }
 
     let layer = surface_state.layer as id;
     let size = CGSize::new(width as f64, height as f64);
