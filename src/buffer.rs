@@ -25,8 +25,17 @@ impl Buffer {
     /// - `DataAccess::Broadcast`: All threads read the same address.
     ///   Hardware optimizes for wave-wide broadcast (ConstantBuffer).
     pub fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self> {
+        Self::new_with_stride(device, size, access, None)
+    }
+
+    pub fn new_with_stride(
+        device: &Device,
+        size: u64,
+        access: DataAccess,
+        element_stride: Option<u32>,
+    ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_buffer(device.handle, size, access, None)?;
+        let handle = backend.create_buffer(device.handle, size, access, element_stride)?;
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
