@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// Textures hold image data on the GPU and can be bound to shaders
 /// for sampling operations (e.g., applying textures to 3D models).
+#[derive(Clone)]
 pub struct Texture {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: TextureHandle,
@@ -115,6 +116,51 @@ impl Texture {
         Ok(texture)
     }
 
+    /// Write pixel data to a subregion of the texture.
+    ///
+    /// The data must match the specified width and height for the texture's format.
+    /// The region must fit within the texture bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Left offset in pixels
+    /// * `y` - Top offset in pixels
+    /// * `width` - Width of the region in pixels
+    /// * `height` - Height of the region in pixels
+    /// * `data` - Raw pixel data (must match width * height * bytes_per_pixel)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Region is out of bounds
+    /// - Data size doesn't match expected size
+    /// - GPU upload fails
+    pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> Result<()> {
+        if x + width > self.width || y + height > self.height {
+            anyhow::bail!(
+                "Region out of bounds: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                self.width,
+                self.height
+            );
+        }
+        let expected_size = (width * height * self.format.bytes_per_pixel()) as usize;
+        if data.len() != expected_size {
+            anyhow::bail!(
+                "Data size mismatch: expected {} bytes for {}x{} region, got {}",
+                expected_size,
+                width,
+                height,
+                data.len()
+            );
+        }
+        let mut backend = self.backend.lock().unwrap();
+        backend.write_texture_region(self.handle, x, y, width, height, data)
+    }
+
     /// Write pixel data to the texture.
     ///
     /// The data must match the texture's dimensions and format.
@@ -160,6 +206,30 @@ impl Texture {
     /// Get the size of the texture data in bytes.
     pub fn byte_size(&self) -> usize {
         (self.width * self.height * self.format.bytes_per_pixel()) as usize
+    }
+
+    /// Read texture contents to CPU memory.
+    ///
+    /// The texture must have been created with [`TextureFlags::COPY_SRC`].
+    /// The output slice must be at least [`byte_size()`](Self::byte_size) bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Output buffer is too small
+    /// - Texture was not created with COPY_SRC
+    /// - GPU readback fails
+    pub fn read_to_cpu(&self, output: &mut [u8]) -> Result<()> {
+        let expected_size = self.byte_size();
+        if output.len() < expected_size {
+            anyhow::bail!(
+                "Output buffer too small: {} < {}",
+                output.len(),
+                expected_size
+            );
+        }
+        let mut backend = self.backend.lock().unwrap();
+        backend.read_texture_to_cpu(self.handle, output)
     }
 
     /// Get the backend handle for this texture.
@@ -293,6 +363,64 @@ mod tests {
         let data = vec![0u8; 4]; // Too small
         let result = texture.write(&data);
 
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_texture_r8_unorm() {
+        let device = create_test_device();
+        let data = vec![128u8; 64 * 64]; // 1 byte per pixel
+        let texture = Texture::with_data(
+            &device,
+            &data,
+            64,
+            64,
+            TextureFormat::R8Unorm,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
+        )
+        .unwrap();
+
+        assert_eq!(texture.width(), 64);
+        assert_eq!(texture.height(), 64);
+        assert_eq!(texture.format(), TextureFormat::R8Unorm);
+        assert_eq!(texture.byte_size(), 64 * 64 * 1);
+    }
+
+    #[test]
+    fn test_texture_rg8_unorm() {
+        let device = create_test_device();
+        let data = vec![0u8; 32 * 32 * 2]; // 2 bytes per pixel
+        let texture = Texture::with_data(
+            &device,
+            &data,
+            32,
+            32,
+            TextureFormat::Rg8Unorm,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
+        )
+        .unwrap();
+
+        assert_eq!(texture.width(), 32);
+        assert_eq!(texture.height(), 32);
+        assert_eq!(texture.format(), TextureFormat::Rg8Unorm);
+        assert_eq!(texture.byte_size(), 32 * 32 * 2);
+    }
+
+    #[test]
+    fn test_texture_r8_data_size_validation() {
+        let device = create_test_device();
+        let data = vec![0u8; 100]; // Wrong size for 64x64 R8
+        let result = Texture::with_data(
+            &device,
+            &data,
+            64,
+            64,
+            TextureFormat::R8Unorm,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
+        );
         assert!(result.is_err());
     }
 }

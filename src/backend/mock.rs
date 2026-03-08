@@ -292,6 +292,11 @@ impl GpuBackend for MockBackend {
         self.buffers.get(&buffer).map(|b| b.bindless_index)
     }
 
+    fn buffer_bindless_srv_index(&self, buffer: BufferHandle) -> Option<u32> {
+        // Mock backend uses a unified bindless index
+        self.buffers.get(&buffer).map(|b| b.bindless_index)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         _device: DeviceHandle,
@@ -547,6 +552,7 @@ impl GpuBackend for MockBackend {
         device: DeviceHandle,
         _window: &dyn raw_window_handle::HasWindowHandle,
         _display: &dyn raw_window_handle::HasDisplayHandle,
+        _depth_format: Option<DepthFormat>,
     ) -> Result<SurfaceHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -708,8 +714,73 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
+    fn write_texture_region(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        let tex = self
+            .textures
+            .get_mut(&texture)
+            .ok_or_else(|| anyhow::anyhow!("Invalid texture handle"))?;
+
+        if x + width > tex.width || y + height > tex.height {
+            anyhow::bail!(
+                "Region out of bounds: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                tex.width,
+                tex.height
+            );
+        }
+
+        let bpp = tex.format.bytes_per_pixel() as usize;
+        let expected_size = (width * height) as usize * bpp;
+        if data.len() != expected_size {
+            anyhow::bail!(
+                "Data size mismatch: expected {}, got {}",
+                expected_size,
+                data.len()
+            );
+        }
+
+        let tex_row_bytes = (tex.width * tex.format.bytes_per_pixel()) as usize;
+        for row in 0..(height as usize) {
+            let src_offset = row * (width as usize) * bpp;
+            let dst_offset = ((y as usize + row) * tex_row_bytes) + (x as usize * bpp);
+            let row_bytes = (width as usize) * bpp;
+            tex.data[dst_offset..dst_offset + row_bytes]
+                .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
+        }
+        Ok(())
+    }
+
     fn destroy_texture(&mut self, texture: TextureHandle) {
         self.textures.remove(&texture);
+    }
+
+    fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()> {
+        let tex = self
+            .textures
+            .get(&texture)
+            .ok_or_else(|| anyhow::anyhow!("Invalid texture handle"))?;
+
+        let expected_size = tex.data.len();
+        if output.len() < expected_size {
+            anyhow::bail!(
+                "Output buffer too small: {} < {}",
+                output.len(),
+                expected_size
+            );
+        }
+        output[..expected_size].copy_from_slice(&tex.data);
+        Ok(())
     }
 
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32> {
@@ -1088,7 +1159,7 @@ mod tests {
         }
 
         let surface = backend
-            .create_surface(device, &MockWindow, &MockWindow)
+            .create_surface(device, &MockWindow, &MockWindow, None)
             .unwrap();
 
         // Default format should be Bgra8UnormSrgb
@@ -1138,7 +1209,7 @@ mod tests {
         }
 
         let surface = backend
-            .create_surface(device, &MockWindow, &MockWindow)
+            .create_surface(device, &MockWindow, &MockWindow, None)
             .unwrap();
 
         // Should return the configured format, not the default
@@ -1184,7 +1255,7 @@ mod tests {
 
         // Create first surface with default format
         let surface1 = backend
-            .create_surface(device, &MockWindow, &MockWindow)
+            .create_surface(device, &MockWindow, &MockWindow, None)
             .unwrap();
         assert_eq!(
             backend.surface_format(surface1),
@@ -1194,7 +1265,7 @@ mod tests {
         // Change default and create second surface
         backend.set_default_surface_format(TextureFormat::Rgba8UnormSrgb);
         let surface2 = backend
-            .create_surface(device, &MockWindow, &MockWindow)
+            .create_surface(device, &MockWindow, &MockWindow, None)
             .unwrap();
 
         // First surface should retain its original format

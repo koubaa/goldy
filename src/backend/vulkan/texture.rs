@@ -131,19 +131,36 @@ pub(super) fn create(
     // Register texture in bindless descriptor set if enabled
     let bindless_index = if bindless_enabled {
         let logical_device = devices.get_mut(&device_handle).unwrap();
-        let index = logical_device.resource_registry.register_texture(handle);
+        let is_storage_image = matches!(access, SpatialAccess::Direct);
+        let index = logical_device
+            .resource_registry
+            .register_texture(handle, is_storage_image);
 
         // Update the global descriptor set with this texture
         if let Some(descriptor_set) = bindless_descriptor_set {
+            let (binding, descriptor_type, image_layout) = if is_storage_image {
+                (
+                    types::bindless_bindings::STORAGE_IMAGES,
+                    vk::DescriptorType::STORAGE_IMAGE,
+                    vk::ImageLayout::GENERAL,
+                )
+            } else {
+                (
+                    types::bindless_bindings::SAMPLED_IMAGES,
+                    vk::DescriptorType::SAMPLED_IMAGE,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )
+            };
+
             let image_info = vk::DescriptorImageInfo::default()
                 .image_view(view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                .image_layout(image_layout);
 
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
-                .dst_binding(types::bindless_bindings::SAMPLED_IMAGES)
+                .dst_binding(binding)
                 .dst_array_element(index)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_type(descriptor_type)
                 .image_info(std::slice::from_ref(&image_info));
 
             unsafe {
@@ -152,7 +169,16 @@ pub(super) fn create(
                     .update_descriptor_sets(std::slice::from_ref(&write), &[]);
             }
 
-            tracing::trace!("Registered texture {} at bindless index {}", handle, index);
+            tracing::trace!(
+                "Registered texture {} at bindless index {} ({})",
+                handle,
+                index,
+                if is_storage_image {
+                    "storage_image"
+                } else {
+                    "sampled_image"
+                }
+            );
         }
 
         Some(index)
@@ -173,6 +199,7 @@ pub(super) fn create(
             staging_buffer: None,
             staging_memory: None,
             bindless_index,
+            current_layout: vk::ImageLayout::UNDEFINED,
         },
     );
 
@@ -186,7 +213,7 @@ pub(super) fn create(
 pub(super) fn write(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,
-    textures: &HashMap<TextureHandle, TextureState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
     data: &[u8],
     width: u32,
@@ -197,6 +224,7 @@ pub(super) fn write(
         .context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
+    let old_layout = texture.current_layout;
     let image = texture.image;
     let tex_width = texture.width;
     let tex_height = texture.height;
@@ -311,12 +339,30 @@ pub(super) fn write(
             .context("Failed to begin command buffer")?;
 
         // Transition image to transfer dst
+        let (src_stage, src_access) = match old_layout {
+            vk::ImageLayout::UNDEFINED => (
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_READ,
+            ),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            ),
+            _ => (
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+        };
         let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-            .src_access_mask(vk::AccessFlags2::empty())
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
             .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
+            .old_layout(old_layout)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .image(image)
             .subresource_range(vk::ImageSubresourceRange {
@@ -408,12 +454,496 @@ pub(super) fn write(
         logical_device.device.free_memory(staging_memory, None);
     }
 
+    if let Some(tex) = textures.get_mut(&texture_handle) {
+        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    }
+
     tracing::debug!(
         "Wrote {}x{} texture data ({} bytes)",
         width,
         height,
         data.len()
     );
+    Ok(())
+}
+
+/// Write data to a subregion of a texture.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn write_region(
+    instance: &ash::Instance,
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    texture_handle: TextureHandle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Result<()> {
+    let texture = textures
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
+
+    let device_handle = texture.device_handle;
+    let image = texture.image;
+    let tex_width = texture.width;
+    let tex_height = texture.height;
+    let old_layout = texture.current_layout;
+
+    if x + width > tex_width || y + height > tex_height {
+        anyhow::bail!(
+            "Region out of bounds: {}x{} at ({},{}) exceeds {}x{} texture",
+            width,
+            height,
+            x,
+            y,
+            tex_width,
+            tex_height
+        );
+    }
+
+    let bytes_per_pixel = texture.format.bytes_per_pixel();
+    let expected_size = (width * height * bytes_per_pixel) as usize;
+    if data.len() != expected_size {
+        anyhow::bail!(
+            "Data size mismatch: expected {} bytes, got {}",
+            expected_size,
+            data.len()
+        );
+    }
+
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let physical_device = logical_device.physical_device;
+    let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    let find_mem_type = |type_filter: u32, properties: vk::MemoryPropertyFlags| -> Option<u32> {
+        (0..mem_props.memory_type_count).find(|&i| {
+            (type_filter & (1 << i)) != 0
+                && (mem_props.memory_types[i as usize].property_flags & properties) == properties
+        })
+    };
+
+    let buffer_size = data.len() as u64;
+    let staging_buffer_info = vk::BufferCreateInfo::default()
+        .size(buffer_size)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let staging_buffer = unsafe {
+        logical_device
+            .device
+            .create_buffer(&staging_buffer_info, None)
+    }
+    .context("Failed to create staging buffer")?;
+
+    let staging_mem_reqs = unsafe {
+        logical_device
+            .device
+            .get_buffer_memory_requirements(staging_buffer)
+    };
+    let staging_memory_type = find_mem_type(
+        staging_mem_reqs.memory_type_bits,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )
+    .context("Failed to find memory type for staging buffer")?;
+
+    let staging_alloc_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(staging_mem_reqs.size)
+        .memory_type_index(staging_memory_type);
+
+    let staging_memory = unsafe {
+        logical_device
+            .device
+            .allocate_memory(&staging_alloc_info, None)
+    }
+    .context("Failed to allocate staging memory")?;
+
+    unsafe {
+        logical_device
+            .device
+            .bind_buffer_memory(staging_buffer, staging_memory, 0)
+    }
+    .context("Failed to bind staging memory")?;
+
+    unsafe {
+        let ptr = logical_device
+            .device
+            .map_memory(staging_memory, 0, buffer_size, vk::MemoryMapFlags::empty())
+            .context("Failed to map staging memory")?;
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+        logical_device.device.unmap_memory(staging_memory);
+    }
+
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(logical_device.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+
+    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+        .context("Failed to allocate command buffer")?;
+    let cmd_buffer = cmd_buffers[0];
+
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    unsafe {
+        logical_device
+            .device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .context("Failed to begin command buffer")?;
+
+        let (src_stage, src_access) = match old_layout {
+            vk::ImageLayout::UNDEFINED => (
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_READ,
+            ),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            ),
+            _ => (
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+        };
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .old_layout(old_layout)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device
+            .device
+            .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D {
+                x: x as i32,
+                y: y as i32,
+                z: 0,
+            })
+            .image_extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            });
+        logical_device.device.cmd_copy_buffer_to_image(
+            cmd_buffer,
+            staging_buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region],
+        );
+
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+            )
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device
+            .device
+            .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+
+        logical_device
+            .device
+            .end_command_buffer(cmd_buffer)
+            .context("Failed to end command buffer")?;
+
+        // Submit and wait
+        let cmd_buffers = [cmd_buffer];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+
+        logical_device
+            .device
+            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+            .context("Failed to submit command buffer")?;
+        logical_device
+            .device
+            .queue_wait_idle(logical_device.queue)
+            .context("Failed to wait for queue")?;
+
+        // Cleanup
+        logical_device
+            .device
+            .free_command_buffers(logical_device.command_pool, &[cmd_buffer]);
+        logical_device.device.destroy_buffer(staging_buffer, None);
+        logical_device.device.free_memory(staging_memory, None);
+    }
+
+    if let Some(tex) = textures.get_mut(&texture_handle) {
+        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    tracing::debug!(
+        "Wrote {}x{} region at ({},{}) to texture ({} bytes)",
+        width,
+        height,
+        x,
+        y,
+        data.len()
+    );
+    Ok(())
+}
+
+/// Read texture contents to CPU memory.
+/// The texture must have been created with TextureFlags::COPY_SRC.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn read_to_cpu(
+    instance: &ash::Instance,
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    texture_handle: TextureHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let (device_handle, width, height, format, image, old_layout, existing_sb, existing_sm) = {
+        let texture = textures
+            .get(&texture_handle)
+            .context("Invalid texture handle")?;
+        (
+            texture.device_handle,
+            texture.width,
+            texture.height,
+            texture.format,
+            texture.image,
+            texture.current_layout,
+            texture.staging_buffer,
+            texture.staging_memory,
+        )
+    };
+
+    let expected_size = (width * height * format.bytes_per_pixel()) as usize;
+    if output.len() < expected_size {
+        anyhow::bail!(
+            "Output buffer too small: {} < {}",
+            output.len(),
+            expected_size
+        );
+    }
+
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let physical_device = logical_device.physical_device;
+    let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    let find_mem_type = |type_filter: u32, properties: vk::MemoryPropertyFlags| -> Option<u32> {
+        (0..mem_props.memory_type_count).find(|&i| {
+            (type_filter & (1 << i)) != 0
+                && (mem_props.memory_types[i as usize].property_flags & properties) == properties
+        })
+    };
+
+    // Lazy-create staging buffer
+    let (staging_buffer, staging_memory) = match (existing_sb, existing_sm) {
+        (Some(buf), Some(mem)) => (buf, mem),
+        (None, _) | (_, None) => {
+            let buffer_size = expected_size as u64;
+            let staging_info = vk::BufferCreateInfo::default()
+                .size(buffer_size)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+            let sb = unsafe { logical_device.device.create_buffer(&staging_info, None) }
+                .context("Failed to create staging buffer")?;
+
+            let staging_reqs = unsafe { logical_device.device.get_buffer_memory_requirements(sb) };
+            let staging_memory_type = find_mem_type(
+                staging_reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .context("Failed to find memory type for staging buffer")?;
+
+            let staging_alloc = vk::MemoryAllocateInfo::default()
+                .allocation_size(staging_reqs.size)
+                .memory_type_index(staging_memory_type);
+
+            let sm = unsafe { logical_device.device.allocate_memory(&staging_alloc, None) }
+                .context("Failed to allocate staging buffer memory")?;
+
+            unsafe { logical_device.device.bind_buffer_memory(sb, sm, 0) }
+                .context("Failed to bind staging buffer memory")?;
+
+            let tex = textures.get_mut(&texture_handle).unwrap();
+            tex.staging_buffer = Some(sb);
+            tex.staging_memory = Some(sm);
+
+            (sb, sm)
+        }
+    };
+
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(logical_device.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+
+    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+        .context("Failed to allocate command buffer")?;
+    let cmd = cmd_buffers[0];
+
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    unsafe {
+        logical_device
+            .device
+            .begin_command_buffer(cmd, &begin_info)
+            .context("Failed to begin command buffer")?;
+
+        // Transition image to transfer src
+        let (src_stage, src_access) = match old_layout {
+            vk::ImageLayout::UNDEFINED => (
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_READ,
+            ),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            ),
+            vk::ImageLayout::GENERAL => (
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+            ),
+            _ => (
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+        };
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .old_layout(old_layout)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
+        // Copy image to staging buffer
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            });
+
+        logical_device.device.cmd_copy_image_to_buffer(
+            cmd,
+            image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            staging_buffer,
+            std::slice::from_ref(&region),
+        );
+
+        logical_device
+            .device
+            .end_command_buffer(cmd)
+            .context("Failed to end command buffer")?;
+    }
+
+    let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+    unsafe {
+        logical_device.device.queue_submit(
+            logical_device.queue,
+            std::slice::from_ref(&submit_info),
+            vk::Fence::null(),
+        )
+    }
+    .context("Failed to submit command buffer")?;
+
+    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }
+        .context("Failed to wait for queue")?;
+
+    unsafe {
+        logical_device
+            .device
+            .free_command_buffers(logical_device.command_pool, &[cmd]);
+    }
+
+    // Read from staging buffer
+    unsafe {
+        let ptr = logical_device
+            .device
+            .map_memory(
+                staging_memory,
+                0,
+                expected_size as u64,
+                vk::MemoryMapFlags::empty(),
+            )
+            .context("Failed to map staging buffer")?;
+
+        std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), expected_size);
+
+        logical_device.device.unmap_memory(staging_memory);
+    }
+
+    if let Some(tex) = textures.get_mut(&texture_handle) {
+        tex.current_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+    }
+
     Ok(())
 }
 

@@ -97,11 +97,15 @@ pub enum GoldyTextureFormat {
     Bgra8Unorm = 3,
     Rgba16Float = 4,
     Rgba32Float = 5,
+    R8Unorm = 6,
+    Rg8Unorm = 7,
 }
 
 impl From<GoldyTextureFormat> for goldy::TextureFormat {
     fn from(f: GoldyTextureFormat) -> Self {
         match f {
+            GoldyTextureFormat::R8Unorm => goldy::TextureFormat::R8Unorm,
+            GoldyTextureFormat::Rg8Unorm => goldy::TextureFormat::Rg8Unorm,
             GoldyTextureFormat::Rgba8UnormSrgb => goldy::TextureFormat::Rgba8UnormSrgb,
             GoldyTextureFormat::Rgba8Unorm => goldy::TextureFormat::Rgba8Unorm,
             GoldyTextureFormat::Bgra8UnormSrgb => goldy::TextureFormat::Bgra8UnormSrgb,
@@ -115,6 +119,8 @@ impl From<GoldyTextureFormat> for goldy::TextureFormat {
 impl From<goldy::TextureFormat> for GoldyTextureFormat {
     fn from(f: goldy::TextureFormat) -> Self {
         match f {
+            goldy::TextureFormat::R8Unorm => GoldyTextureFormat::R8Unorm,
+            goldy::TextureFormat::Rg8Unorm => GoldyTextureFormat::Rg8Unorm,
             goldy::TextureFormat::Rgba8UnormSrgb => GoldyTextureFormat::Rgba8UnormSrgb,
             goldy::TextureFormat::Rgba8Unorm => GoldyTextureFormat::Rgba8Unorm,
             goldy::TextureFormat::Bgra8UnormSrgb => GoldyTextureFormat::Bgra8UnormSrgb,

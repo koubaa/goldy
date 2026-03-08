@@ -180,6 +180,29 @@ pub(super) fn dispatch(
                     }
                 }
             }
+            ComputeCommand::SetPushConstantsRaw {
+                indices: raw_indices,
+            } => {
+                // Fully bindless mode: push raw indices directly (for textures/samplers)
+                if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                    let mut indices = BindlessIndices::default();
+                    for (i, &idx) in raw_indices.iter().enumerate() {
+                        if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                            break;
+                        }
+                        indices.indices[i] = idx;
+                    }
+                    unsafe {
+                        logical_device.device.cmd_push_constants(
+                            cmd,
+                            pipeline.layout,
+                            vk::ShaderStageFlags::COMPUTE,
+                            0,
+                            bytemuck::bytes_of(&indices),
+                        );
+                    }
+                }
+            }
             ComputeCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,

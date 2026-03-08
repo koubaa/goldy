@@ -148,6 +148,14 @@ public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
     return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWStructuredBuffer<T>>();
 }
 
+/// Dynamic read-only scattered access - reads slot index from gGoldyDynamic.slots[n].
+/// Use when binding a buffer as StructuredBuffer<T> (read-only / SRV).
+/// On SPIRV, identical to goldy_dyn_scattered (storage buffer, same descriptor).
+public StructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+{
+    return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<StructuredBuffer<T>>();
+}
+
 /// Dynamic broadcast access - reads slot index from gGoldyDynamic.slots[n].
 /// Requires GOLDY_DECLARE_DYNAMIC in shader.
 public T goldy_dyn_broadcast<T>(uint n)
@@ -186,6 +194,24 @@ public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
     return g_GoldyStorageImageHeap[slot].asOpaqueDescriptor<RWTexture2D<T>>();
 }
 
+/// Dynamic direct spatial access - reads slot index from gGoldyDynamic.slots[n].
+public RWTexture2D<T> goldy_dyn_direct_spatial<T : ITexelElement>(uint n)
+{
+    return g_GoldyStorageImageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWTexture2D<T>>();
+}
+
+/// Dynamic interpolated access - reads slot index from gGoldyDynamic.slots[n].
+public Texture2D<T> goldy_dyn_interpolated<T : ITexelElement>(uint n)
+{
+    return g_GoldyTextureHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<Texture2D<T>>();
+}
+
+/// Dynamic sampler access - reads slot index from gGoldyDynamic.slots[n].
+public SamplerState goldy_dyn_filter(uint n)
+{
+    return g_GoldySamplerHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<SamplerState>();
+}
+
 /// Access a sampler state by slot index (SPIRV).
 public SamplerState goldy_filter(uint slot)
 {
@@ -201,6 +227,19 @@ public SamplerState goldy_filter(uint slot)
 /// Dynamic scattered access - reads slot index from push constants.
 /// Uses __goldy_get_slot for proper cbuffer component access.
 public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
+{
+    uint slot = __goldy_get_slot(n);
+    DescriptorHandle<RWStructuredBuffer<T>> handle;
+    handle = DescriptorHandle<RWStructuredBuffer<T>>(uint2(slot, 0));
+    return *handle;
+}
+
+/// Dynamic read-only scattered access - reads slot index from push constants.
+/// On DX12, uses RWStructuredBuffer<T> (UAV) to avoid resource state transitions.
+/// Buffers start in D3D12_RESOURCE_STATE_UNORDERED_ACCESS; SRV would need a barrier.
+/// Declare the result as RWStructuredBuffer<T> and only read from it.
+/// TODO: revisit with enhanced buffers
+public RWStructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
     uint slot = __goldy_get_slot(n);
     DescriptorHandle<RWStructuredBuffer<T>> handle;
@@ -259,6 +298,33 @@ public SamplerState goldy_filter(uint slot)
     return *handle;
 }
 
+/// Dynamic direct spatial access - reads slot index from push constants.
+public RWTexture2D<T> goldy_dyn_direct_spatial<T : ITexelElement>(uint n)
+{
+    uint slot = __goldy_get_slot(n);
+    DescriptorHandle<RWTexture2D<T>> handle;
+    handle = DescriptorHandle<RWTexture2D<T>>(uint2(slot, 0));
+    return *handle;
+}
+
+/// Dynamic interpolated access - reads slot index from push constants.
+public Texture2D<T> goldy_dyn_interpolated<T : ITexelElement>(uint n)
+{
+    uint slot = __goldy_get_slot(n);
+    DescriptorHandle<Texture2D<T>> handle;
+    handle = DescriptorHandle<Texture2D<T>>(uint2(slot, 0));
+    return *handle;
+}
+
+/// Dynamic sampler access - reads slot index from push constants.
+public SamplerState goldy_dyn_filter(uint n)
+{
+    uint slot = __goldy_get_slot(n);
+    DescriptorHandle<SamplerState> handle;
+    handle = DescriptorHandle<SamplerState>(uint2(slot, 0));
+    return *handle;
+}
+
 /// Dynamic byte-address buffer access for InterlockedMin/Max (e.g. path_bboxes).
 public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
 {
@@ -286,6 +352,16 @@ public Ptr<T, Access.ReadWrite, AddressSpace.Device> goldy_dyn_scattered<T>(uint
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.storageBuffers[slot];
     return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
+}
+
+/// Dynamic read-only scattered access - returns typed read-only pointer.
+/// Usage: goldy_dyn_buf_ro<Particle>(0)[idx]
+/// On Metal, read-only device pointers use the same argument buffer slot as RW.
+public Ptr<T, Access.Read, AddressSpace.Device> goldy_dyn_buf_ro<T>(uint n)
+{
+    uint slot = gGoldyDynamic.slots[n];
+    uint* basePtr = gGoldy.storageBuffers[slot];
+    return (Ptr<T, Access.Read, AddressSpace.Device>)basePtr;
 }
 
 /// Static scattered access - returns typed pointer for read/write access.
@@ -329,6 +405,27 @@ public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 /// Access a sampler state by slot index (Metal).
 public SamplerState goldy_filter(uint slot)
 {
+    return gGoldy.samplers[slot];
+}
+
+/// Dynamic direct spatial access - reads slot index from gGoldyDynamic.slots[n].
+public RWTexture2D<T> goldy_dyn_direct_spatial<T : ITexelElement>(uint n)
+{
+    uint slot = gGoldyDynamic.slots[n];
+    return reinterpret<RWTexture2D<T>>(gGoldy.storageImages[slot]);
+}
+
+/// Dynamic interpolated access - reads slot index from gGoldyDynamic.slots[n].
+public Texture2D<T> goldy_dyn_interpolated<T : ITexelElement>(uint n)
+{
+    uint slot = gGoldyDynamic.slots[n];
+    return reinterpret<Texture2D<T>>(gGoldy.textures[slot]);
+}
+
+/// Dynamic sampler access - reads slot index from gGoldyDynamic.slots[n].
+public SamplerState goldy_dyn_filter(uint n)
+{
+    uint slot = gGoldyDynamic.slots[n];
     return gGoldy.samplers[slot];
 }
 

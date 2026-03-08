@@ -40,6 +40,10 @@ pub const PARTICLES: &str = include_str!("../shaders/particles.slang");
 /// Spinning cube wireframe shader
 pub const SPINNING_CUBE: &str = include_str!("../shaders/spinning_cube.slang");
 
+/// Depth-testing shader: vertex carries (x, y, z) position + RGBA color.
+/// Used by depth occlusion tests and the depth_quads example.
+pub const DEPTH_TEST: &str = include_str!("../shaders/depth_test.slang");
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -131,6 +131,11 @@ impl GpuBackend for MetalBackend {
         buffer::bindless_index(&self.state, buffer)
     }
 
+    fn buffer_bindless_srv_index(&self, buffer: BufferHandle) -> Option<u32> {
+        // Metal uses the same argument buffer slot for both StructuredBuffer and RWStructuredBuffer
+        buffer::bindless_index(&self.state, buffer)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device: DeviceHandle,
@@ -303,8 +308,24 @@ impl GpuBackend for MetalBackend {
         texture::write(&self.state, texture, data, width, height)
     }
 
+    fn write_texture_region(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        texture::write_region(&self.state, texture, x, y, width, height, data)
+    }
+
     fn destroy_texture(&mut self, texture: TextureHandle) {
         texture::destroy(&mut self.state, texture);
+    }
+
+    fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()> {
+        texture::read_to_cpu(&self.state, texture, output)
     }
 
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32> {
@@ -332,8 +353,9 @@ impl GpuBackend for MetalBackend {
         device: DeviceHandle,
         window: &dyn raw_window_handle::HasWindowHandle,
         display: &dyn raw_window_handle::HasDisplayHandle,
+        depth_format: Option<DepthFormat>,
     ) -> Result<SurfaceHandle> {
-        surface::create(&mut self.state, device, window, display)
+        surface::create(&mut self.state, device, window, display, depth_format)
     }
 
     fn destroy_surface(&mut self, surface: SurfaceHandle) {

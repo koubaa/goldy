@@ -18,6 +18,8 @@ use windows::Win32::Graphics::{Direct3D, Direct3D12, Dxgi};
 /// Convert Goldy TextureFormat to DXGI format.
 pub fn format_to_dxgi(format: TextureFormat) -> Dxgi::Common::DXGI_FORMAT {
     match format {
+        TextureFormat::R8Unorm => Dxgi::Common::DXGI_FORMAT_R8_UNORM,
+        TextureFormat::Rg8Unorm => Dxgi::Common::DXGI_FORMAT_R8G8_UNORM,
         TextureFormat::Rgba8UnormSrgb => Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
         TextureFormat::Rgba8Unorm => Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
         TextureFormat::Bgra8UnormSrgb => Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
@@ -30,6 +32,8 @@ pub fn format_to_dxgi(format: TextureFormat) -> Dxgi::Common::DXGI_FORMAT {
 /// Convert DXGI format to Goldy TextureFormat.
 pub fn dxgi_to_format(format: Dxgi::Common::DXGI_FORMAT) -> Option<TextureFormat> {
     match format {
+        Dxgi::Common::DXGI_FORMAT_R8_UNORM => Some(TextureFormat::R8Unorm),
+        Dxgi::Common::DXGI_FORMAT_R8G8_UNORM => Some(TextureFormat::Rg8Unorm),
         Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB => Some(TextureFormat::Rgba8UnormSrgb),
         Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM => Some(TextureFormat::Rgba8Unorm),
         Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB => Some(TextureFormat::Bgra8UnormSrgb),

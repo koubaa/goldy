@@ -110,6 +110,7 @@ pub(super) fn create(
             resource,
             srv_offset,
             bindless_offset: Some(srv_offset), // SRV offset is the bindless offset
+            current_state: D3D12_RESOURCE_STATE_COPY_DEST,
         },
     );
 
@@ -271,6 +272,10 @@ pub(super) fn write(
     }
     .context("Failed to close command list")?;
 
+    if let Some(tex) = state.textures.get_mut(&texture_handle) {
+        tex.current_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = state.devices.get(&device_handle).unwrap();
@@ -291,6 +296,419 @@ pub(super) fn write(
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     tracing::debug!("Wrote {}x{} texture data", width, height);
+    Ok(())
+}
+
+/// Write data to a subregion of a texture.
+pub(super) fn write_region(
+    state: &mut Dx12State,
+    texture_handle: TextureHandle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Result<()> {
+    let texture = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
+
+    if x + width > texture.width || y + height > texture.height {
+        anyhow::bail!(
+            "Region out of bounds: {}x{} at ({},{}) exceeds {}x{} texture",
+            width,
+            height,
+            x,
+            y,
+            texture.width,
+            texture.height
+        );
+    }
+
+    let expected_size = (width * height * texture.format.bytes_per_pixel()) as usize;
+    if data.len() != expected_size {
+        anyhow::bail!(
+            "Data size mismatch: expected {}, got {}",
+            expected_size,
+            data.len()
+        );
+    }
+
+    let device_handle = texture.device_handle;
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let row_pitch = ((width * texture.format.bytes_per_pixel() + 255) & !255) as u64;
+    let staging_size = row_pitch * height as u64;
+
+    let upload_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_UPLOAD,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+
+    let buffer_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: staging_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+
+    let mut staging: Option<ID3D12Resource> = None;
+    unsafe {
+        logical_device.device.CreateCommittedResource(
+            &upload_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &buffer_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            None,
+            &mut staging,
+        )
+    }
+    .context("Failed to create staging buffer")?;
+    let staging = staging.context("CreateCommittedResource returned null")?;
+
+    let texture_format = texture.format;
+    let bytes_per_row = (width * texture_format.bytes_per_pixel()) as usize;
+    let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let read_range = D3D12_RANGE { Begin: 0, End: 0 };
+    unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
+        .context("Failed to map staging buffer")?;
+
+    for row in 0..height {
+        let src_offset = (row as usize) * bytes_per_row;
+        let dst_offset = (row as u64 * row_pitch) as usize;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr().add(src_offset),
+                (mapped_ptr as *mut u8).add(dst_offset),
+                bytes_per_row,
+            );
+        }
+    }
+
+    let written_range = D3D12_RANGE {
+        Begin: 0,
+        End: staging_size as usize,
+    };
+    unsafe { staging.Unmap(0, Some(&written_range)) };
+
+    unsafe { logical_device.command_allocator.Reset() }
+        .context("Failed to reset command allocator")?;
+
+    let command_list: ID3D12GraphicsCommandList = unsafe {
+        logical_device.device.CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            &logical_device.command_allocator,
+            None,
+        )
+    }
+    .context("Failed to create command list")?;
+
+    let texture = state.textures.get(&texture_handle).unwrap();
+    let state_before = texture.current_state;
+
+    // Transition to copy dest
+    let barrier_to_copy = D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                StateBefore: state_before,
+                StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
+            }),
+        },
+    };
+    unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
+
+    let src_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&staging) },
+        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                Offset: 0,
+                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                    Format: format_to_dxgi(texture.format),
+                    Width: width,
+                    Height: height,
+                    Depth: 1,
+                    RowPitch: row_pitch as u32,
+                },
+            },
+        },
+    };
+
+    let dst_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            SubresourceIndex: 0,
+        },
+    };
+
+    unsafe {
+        command_list.CopyTextureRegion(&dst_location, x, y, 0, &src_location, None);
+    }
+
+    // Transition to shader resource
+    let barrier_to_shader = D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
+                StateAfter: D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            }),
+        },
+    };
+    unsafe {
+        command_list.ResourceBarrier(&[barrier_to_shader]);
+        command_list.Close()
+    }
+    .context("Failed to close command list")?;
+
+    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
+
+    let logical_device = state.devices.get(&device_handle).unwrap();
+    unsafe {
+        logical_device
+            .command_queue
+            .ExecuteCommandLists(&[Some(cmd_list)]);
+    }
+
+    let fence_value = logical_device.fence_value;
+    unsafe {
+        logical_device
+            .command_queue
+            .Signal(&logical_device.fence, fence_value)
+    }
+    .context("Failed to signal fence")?;
+    wait_for_fence(&logical_device.fence, fence_value)?;
+
+    if let Some(tex) = state.textures.get_mut(&texture_handle) {
+        tex.current_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
+    tracing::debug!("Wrote {}x{} region at ({},{})", width, height, x, y);
+    Ok(())
+}
+
+/// Read texture contents to CPU memory.
+/// The texture must have been created with TextureFlags::COPY_SRC.
+pub(super) fn read_to_cpu(
+    state: &mut Dx12State,
+    texture_handle: TextureHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    use windows::Win32::Graphics::Direct3D12::*;
+
+    let texture = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
+
+    let device_handle = texture.device_handle;
+    let width = texture.width;
+    let height = texture.height;
+    let format = texture.format;
+    let expected_size = (width * height * format.bytes_per_pixel()) as usize;
+
+    if output.len() < expected_size {
+        anyhow::bail!(
+            "Output buffer too small: {} < {}",
+            output.len(),
+            expected_size
+        );
+    }
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let row_pitch = ((width * format.bytes_per_pixel() + 255) & !255) as u64;
+    let staging_size = row_pitch * height as u64;
+
+    let heap_properties = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_READBACK,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+
+    let resource_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: staging_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+
+    let mut staging_buffer: Option<ID3D12Resource> = None;
+    unsafe {
+        logical_device.device.CreateCommittedResource(
+            &heap_properties,
+            D3D12_HEAP_FLAG_NONE,
+            &resource_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut staging_buffer,
+        )
+    }
+    .context("Failed to create staging buffer")?;
+    let staging_buffer = staging_buffer.context("CreateCommittedResource returned null")?;
+
+    let command_list: ID3D12GraphicsCommandList = unsafe {
+        logical_device.device.CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            &logical_device.command_allocator,
+            None,
+        )
+    }
+    .context("Failed to create command list")?;
+
+    unsafe { command_list.Reset(&logical_device.command_allocator, None) }
+        .context("Failed to reset command list")?;
+
+    let state_before = texture.current_state;
+
+    let barrier = D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                StateBefore: state_before,
+                StateAfter: D3D12_RESOURCE_STATE_COPY_SOURCE,
+            }),
+        },
+    };
+    unsafe { command_list.ResourceBarrier(&[barrier]) };
+
+    let src_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            SubresourceIndex: 0,
+        },
+    };
+
+    let dst_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&staging_buffer) },
+        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                Offset: 0,
+                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                    Format: format_to_dxgi(format),
+                    Width: width,
+                    Height: height,
+                    Depth: 1,
+                    RowPitch: row_pitch as u32,
+                },
+            },
+        },
+    };
+
+    unsafe { command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
+
+    let barrier_back = D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                StateBefore: D3D12_RESOURCE_STATE_COPY_SOURCE,
+                StateAfter: state_before,
+            }),
+        },
+    };
+    unsafe { command_list.ResourceBarrier(&[barrier_back]) };
+
+    unsafe { command_list.Close() }.context("Failed to close command list")?;
+
+    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
+    unsafe {
+        logical_device
+            .command_queue
+            .ExecuteCommandLists(&[Some(cmd_list)]);
+    }
+
+    let fence_value = logical_device.fence_value;
+    unsafe {
+        logical_device
+            .command_queue
+            .Signal(&logical_device.fence, fence_value)
+    }
+    .context("Failed to signal fence")?;
+    wait_for_fence(&logical_device.fence, fence_value)?;
+
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        dev.fence_value += 1;
+    }
+
+    let mut mapped_data: *mut u8 = std::ptr::null_mut();
+    unsafe {
+        staging_buffer.Map(
+            0,
+            None,
+            Some(&mut mapped_data as *mut *mut u8 as *mut *mut _),
+        )
+    }
+    .context("Failed to map staging buffer")?;
+
+    let bytes_per_row = width * format.bytes_per_pixel();
+    if row_pitch == bytes_per_row as u64 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(mapped_data, output.as_mut_ptr(), expected_size);
+        }
+    } else {
+        for row in 0..height as usize {
+            let src_offset = row * row_pitch as usize;
+            let dst_offset = row * bytes_per_row as usize;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    mapped_data.add(src_offset),
+                    output.as_mut_ptr().add(dst_offset),
+                    bytes_per_row as usize,
+                );
+            }
+        }
+    }
+
+    unsafe { staging_buffer.Unmap(0, None) };
+
     Ok(())
 }
 

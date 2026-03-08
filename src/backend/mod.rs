@@ -121,6 +121,8 @@ pub enum ComputeCommand {
     SetPipeline(ComputePipelineHandle),
     /// Set push constants (fully bindless mode - buffer indices passed directly).
     SetPushConstants { buffers: Vec<BufferHandle> },
+    /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
+    SetPushConstantsRaw { indices: Vec<u32> },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,
@@ -179,6 +181,11 @@ pub trait GpuBackend: Send + Sync {
     /// Get the buffer's index in the global bindless descriptor set.
     /// Returns None if bindless is not enabled or the buffer is not registered.
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32>;
+    /// Get the buffer's SRV (read-only) bindless index.
+    /// For DX12, scattered buffers have both a UAV (write) and SRV (read-only) descriptor.
+    /// Returns the SRV index for use with `StructuredBuffer<T>` / goldy_dyn_buf_ro.
+    /// Falls back to the primary bindless index on backends with unified descriptors.
+    fn buffer_bindless_srv_index(&self, buffer: BufferHandle) -> Option<u32>;
 
     // Shader management
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
@@ -258,7 +265,21 @@ pub trait GpuBackend: Send + Sync {
         width: u32,
         height: u32,
     ) -> Result<()>;
+    /// Write pixel data to a subregion of the texture.
+    /// The data must match width*height*bpp for the texture's format.
+    fn write_texture_region(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<()>;
     fn destroy_texture(&mut self, texture: TextureHandle);
+    /// Read texture contents to CPU memory.
+    /// The texture must have been created with TextureFlags::COPY_SRC.
+    fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()>;
     /// Get the texture's index in the global bindless descriptor set.
     /// Returns None if bindless is not enabled or the texture is not registered.
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
@@ -274,11 +295,13 @@ pub trait GpuBackend: Send + Sync {
     // Surface API - zero-copy presentation to window
     /// Create a surface for presenting to a window.
     /// The window handle is platform-specific (HWND on Windows, wl_surface on Wayland, NSView on macOS).
+    /// When `depth_format` is `Some`, a depth buffer is created for depth testing (e.g. 3D rendering).
     fn create_surface(
         &mut self,
         device: DeviceHandle,
         window: &dyn raw_window_handle::HasWindowHandle,
         display: &dyn raw_window_handle::HasDisplayHandle,
+        depth_format: Option<DepthFormat>,
     ) -> Result<SurfaceHandle>;
 
     /// Destroy a surface.

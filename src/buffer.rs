@@ -135,6 +135,16 @@ impl Buffer {
         backend.buffer_bindless_index(self.handle)
     }
 
+    /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_dyn_buf_ro` access.
+    ///
+    /// On DX12, scattered buffers have separate UAV (write) and SRV (read-only) descriptors at
+    /// different heap indices. Use this index when the shader declares `StructuredBuffer<T>`.
+    /// On Vulkan and Metal, returns the same value as `bindless_index()`.
+    pub fn bindless_srv_index(&self) -> Option<u32> {
+        let backend = self.backend.lock().unwrap();
+        backend.buffer_bindless_srv_index(self.handle)
+    }
+
     /// Read buffer contents back to CPU memory.
     ///
     /// The `output` slice must be at least `size` bytes. Reads from offset 0.

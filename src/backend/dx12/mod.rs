@@ -293,6 +293,10 @@ impl GpuBackend for Dx12Backend {
         buffer::bindless_index(&self.state, buffer_handle)
     }
 
+    fn buffer_bindless_srv_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
+        buffer::bindless_srv_index(&self.state, buffer_handle)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device: DeviceHandle,
@@ -385,8 +389,15 @@ impl GpuBackend for Dx12Backend {
         device_handle: DeviceHandle,
         window: &dyn raw_window_handle::HasWindowHandle,
         display: &dyn raw_window_handle::HasDisplayHandle,
+        depth_format: Option<crate::types::DepthFormat>,
     ) -> Result<SurfaceHandle> {
-        surface::create(&mut self.state, device_handle, window, display)
+        surface::create(
+            &mut self.state,
+            device_handle,
+            window,
+            display,
+            depth_format,
+        )
     }
     fn destroy_surface(&mut self, surface_handle: SurfaceHandle) {
         surface::destroy(&mut self.state, surface_handle);
@@ -497,8 +508,28 @@ impl GpuBackend for Dx12Backend {
         texture::write(&mut self.state, texture_handle, data, width, height)
     }
 
+    fn write_texture_region(
+        &mut self,
+        texture_handle: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        texture::write_region(&mut self.state, texture_handle, x, y, width, height, data)
+    }
+
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
         texture::destroy(&mut self.state, texture_handle);
+    }
+
+    fn read_texture_to_cpu(
+        &mut self,
+        texture_handle: TextureHandle,
+        output: &mut [u8],
+    ) -> Result<()> {
+        texture::read_to_cpu(&mut self.state, texture_handle, output)
     }
 
     fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {

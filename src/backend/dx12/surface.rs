@@ -4,10 +4,10 @@
 
 use super::render_commands;
 use super::types::{FrameSync, LogicalDevice, SurfaceState, MAX_FRAMES_IN_FLIGHT};
-use super::utils::dxgi_to_format;
+use super::utils::{depth_format_to_dxgi, dxgi_to_format};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle};
 use crate::backend::RenderCommand;
-use crate::types::{Color, TextureFormat};
+use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
 use raw_window_handle::RawWindowHandle;
 use windows::{
@@ -24,12 +24,14 @@ use windows::{
 };
 
 /// Create a surface from a window handle.
+/// When `depth_format` is `Some`, a depth buffer is created for 3D rendering.
 #[allow(clippy::too_many_lines)]
 pub(super) fn create(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     window: &dyn raw_window_handle::HasWindowHandle,
     _display: &dyn raw_window_handle::HasDisplayHandle,
+    depth_format: Option<DepthFormat>,
 ) -> Result<SurfaceHandle> {
     let logical_device = state
         .devices
@@ -112,6 +114,75 @@ pub(super) fn create(
         rtv_offsets.push(rtv_offset);
     }
 
+    // Create depth buffer if requested
+    let (depth_texture, dsv_offset) = if let Some(df) = depth_format {
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+
+        let depth_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: width.max(1) as u64,
+            Height: height.max(1),
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: depth_format_to_dxgi(df),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+        };
+
+        let depth_clear = D3D12_CLEAR_VALUE {
+            Format: depth_format_to_dxgi(df),
+            Anonymous: D3D12_CLEAR_VALUE_0 {
+                DepthStencil: D3D12_DEPTH_STENCIL_VALUE {
+                    Depth: 1.0,
+                    Stencil: 0,
+                },
+            },
+        };
+
+        let mut depth_tex: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &heap_properties,
+                D3D12_HEAP_FLAG_NONE,
+                &depth_desc,
+                D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                Some(&depth_clear),
+                &mut depth_tex,
+            )
+        }
+        .context("Failed to create surface depth buffer")?;
+        let depth_tex = depth_tex.context("CreateCommittedResource returned null for depth")?;
+
+        let dsv_off = state.next_dsv_offset;
+        state.next_dsv_offset += 1;
+
+        let dsv_handle = unsafe {
+            let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (dsv_off * logical_device.dsv_descriptor_size) as usize;
+            handle
+        };
+        unsafe {
+            logical_device
+                .device
+                .CreateDepthStencilView(&depth_tex, None, dsv_handle);
+        }
+
+        (Some(depth_tex), Some(dsv_off))
+    } else {
+        (None, None)
+    };
+
     // Create per-frame sync resources
     let mut frame_sync = Vec::new();
     for _ in 0..MAX_FRAMES_IN_FLIGHT {
@@ -154,6 +225,9 @@ pub(super) fn create(
             width,
             height,
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            depth_format,
+            depth_texture,
+            dsv_offset,
             current_frame: 0,
             current_image_index: None,
             frame_sync,
@@ -247,7 +321,7 @@ pub(super) fn render(
         handle
     };
 
-    // Find clear color
+    // Find clear color and clear depth
     let clear_color = commands
         .iter()
         .find_map(|c| match c {
@@ -255,6 +329,13 @@ pub(super) fn render(
             _ => None,
         })
         .unwrap_or(Color::BLACK);
+    let clear_depth = commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::ClearDepth(d) => Some(*d),
+            _ => None,
+        })
+        .unwrap_or(1.0);
 
     unsafe {
         cmd.ClearRenderTargetView(
@@ -262,7 +343,23 @@ pub(super) fn render(
             &[clear_color.r, clear_color.g, clear_color.b, clear_color.a],
             None,
         );
-        cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
+    }
+
+    // Set render target(s) and optionally depth/stencil
+    if let (Some(dsv_off), Some(_df)) = (surface.dsv_offset, surface.depth_format) {
+        let dsv_handle = unsafe {
+            let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (dsv_off * logical_device.dsv_descriptor_size) as usize;
+            handle
+        };
+        unsafe {
+            cmd.ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
+            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, Some(&dsv_handle));
+        }
+    } else {
+        unsafe {
+            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
+        }
     }
 
     // Set viewport and scissor
@@ -409,11 +506,14 @@ pub(super) fn resize(
         let _ = wait_for_gpu(logical_device);
     }
 
-    // Release old render targets and resize swapchain
-    {
+    // Release old render targets, depth buffer, and resize swapchain
+    let depth_format = {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
         surface.render_targets.clear();
         surface.rtv_offsets.clear();
+        surface.depth_texture = None;
+        surface.dsv_offset = None;
+        let df = surface.depth_format;
 
         // Resize swapchain
         unsafe {
@@ -429,7 +529,8 @@ pub(super) fn resize(
 
         surface.width = width;
         surface.height = height;
-    }
+        df
+    };
 
     // Get device info for creating RTVs
     let (rtv_heap, rtv_descriptor_size, device) = {
@@ -466,6 +567,82 @@ pub(super) fn resize(
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
         surface.render_targets.push(buffer);
         surface.rtv_offsets.push(rtv_offset);
+    }
+
+    // Recreate depth buffer if the surface had one
+    if let Some(df) = depth_format {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Surface's device is invalid")?;
+
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+
+        let w = width.max(1);
+        let h = height.max(1);
+        let depth_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: w as u64,
+            Height: h,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: depth_format_to_dxgi(df),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+        };
+
+        let depth_clear = D3D12_CLEAR_VALUE {
+            Format: depth_format_to_dxgi(df),
+            Anonymous: D3D12_CLEAR_VALUE_0 {
+                DepthStencil: D3D12_DEPTH_STENCIL_VALUE {
+                    Depth: 1.0,
+                    Stencil: 0,
+                },
+            },
+        };
+
+        let mut depth_tex: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &heap_properties,
+                D3D12_HEAP_FLAG_NONE,
+                &depth_desc,
+                D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                Some(&depth_clear),
+                &mut depth_tex,
+            )
+        }
+        .context("Failed to create surface depth buffer on resize")?;
+        let depth_tex = depth_tex.context("CreateCommittedResource returned null for depth")?;
+
+        let dsv_off = state.next_dsv_offset;
+        state.next_dsv_offset += 1;
+
+        let dsv_handle = unsafe {
+            let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (dsv_off * logical_device.dsv_descriptor_size) as usize;
+            handle
+        };
+        unsafe {
+            logical_device
+                .device
+                .CreateDepthStencilView(&depth_tex, None, dsv_handle);
+        }
+
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+        surface.depth_texture = Some(depth_tex);
+        surface.dsv_offset = Some(dsv_off);
     }
 
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();

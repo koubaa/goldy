@@ -79,9 +79,25 @@ impl Surface {
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
+        Self::new_with_depth(device, window, None)
+    }
+
+    /// Create a new surface with an optional depth buffer for 3D rendering.
+    ///
+    /// When `depth_format` is `Some`, a depth buffer is created and depth testing
+    /// is enabled for pipelines that specify `depth_stencil`. Use this for 3D games
+    /// (e.g. DOOM) that require correct occlusion.
+    pub fn new_with_depth<W>(
+        device: &Device,
+        window: &W,
+        depth_format: Option<crate::types::DepthFormat>,
+    ) -> Result<Self>
+    where
+        W: HasWindowHandle + HasDisplayHandle,
+    {
         let handle = {
             let mut backend = device.backend.lock().unwrap();
-            backend.create_surface(device.handle, window, window)?
+            backend.create_surface(device.handle, window, window, depth_format)?
         };
 
         let (width, height) = {
@@ -254,6 +270,10 @@ mod tests {
         fn new(width: u32, height: u32) -> Self {
             Self { width, height }
         }
+
+        fn size(&self) -> (u32, u32) {
+            (self.width, self.height)
+        }
     }
 
     impl raw_window_handle::HasWindowHandle for MockWindow {
@@ -298,6 +318,7 @@ mod tests {
     fn test_surface_size() {
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
+        assert_eq!(window.size(), (800, 600));
         let surface = Surface::new(&device, &window).unwrap();
 
         assert_eq!(surface.width(), 800);
@@ -313,6 +334,20 @@ mod tests {
 
         // Default mock format is Bgra8UnormSrgb
         assert_eq!(surface.format(), TextureFormat::Bgra8UnormSrgb);
+    }
+
+    #[test]
+    fn test_surface_with_depth() {
+        use crate::types::DepthFormat;
+
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        // Surface with depth buffer for 3D rendering (e.g. DOOM)
+        let surface =
+            Surface::new_with_depth(&device, &window, Some(DepthFormat::Depth24Plus)).unwrap();
+
+        assert_eq!(surface.width(), 800);
+        assert_eq!(surface.height(), 600);
     }
 
     #[test]
@@ -376,6 +411,29 @@ mod tests {
         // Dimensions should remain unchanged
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
+    }
+
+    #[test]
+    fn test_surface_depth_frame_render() {
+        use crate::types::DepthFormat;
+
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        let surface =
+            Surface::new_with_depth(&device, &window, Some(DepthFormat::Depth32Float)).unwrap();
+
+        let frame = surface.acquire().unwrap();
+
+        // Render with both a color clear and a depth clear
+        let mut encoder = crate::encoder::CommandEncoder::new();
+        {
+            let mut pass = encoder.begin_render_pass();
+            pass.clear(crate::types::Color::CORNFLOWER_BLUE);
+            pass.clear_depth(1.0);
+        }
+
+        frame.render(encoder).unwrap();
+        surface.present(frame).unwrap();
     }
 
     #[test]
