@@ -26,7 +26,6 @@ use types::{Dx12State, DxgiAdapterInfo, LogicalDevice};
 use super::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-#[cfg(debug_assertions)]
 use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug};
 use windows::Win32::Graphics::Dxgi::*;
 
@@ -40,14 +39,17 @@ impl Dx12Backend {
     pub fn new() -> Result<Self> {
         tracing::info!("Initializing DX12 backend");
 
-        // Enable debug layer in debug builds
-        #[cfg(debug_assertions)]
+        // Enable debug layer in debug builds or when GOLDY_DX12_DEBUG=1
         {
-            let mut debug: Option<ID3D12Debug> = None;
-            if unsafe { D3D12GetDebugInterface(&mut debug) }.is_ok() {
-                if let Some(debug) = debug {
-                    unsafe { debug.EnableDebugLayer() };
-                    tracing::info!("D3D12 debug layer enabled");
+            let enable = cfg!(debug_assertions)
+                || std::env::var("GOLDY_DX12_DEBUG").map_or(false, |v| v == "1" || v == "true");
+            if enable {
+                let mut debug_interface: Option<ID3D12Debug> = None;
+                if unsafe { D3D12GetDebugInterface(&mut debug_interface) }.is_ok() {
+                    if let Some(d) = debug_interface {
+                        unsafe { d.EnableDebugLayer() };
+                        tracing::info!("D3D12 debug layer enabled (set GOLDY_DX12_DEBUG=1 for validation details)");
+                    }
                 }
             }
         }
