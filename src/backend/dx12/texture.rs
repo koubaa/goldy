@@ -186,9 +186,25 @@ pub(super) fn write(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    // Calculate row pitch (must be 256-byte aligned for D3D12)
-    let row_pitch = ((width * texture.format.bytes_per_pixel() + 255) & !255) as u64;
-    let staging_size = row_pitch * height as u64;
+    // Use GetCopyableFootprints with the actual texture's resource desc
+    let resource_desc = unsafe { texture.resource.GetDesc() };
+    let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+    let mut num_rows: u32 = 0;
+    let mut row_size: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    unsafe {
+        logical_device.device.GetCopyableFootprints(
+            &resource_desc,
+            0,
+            1,
+            0,
+            Some(&mut footprint),
+            Some(&mut num_rows),
+            Some(&mut row_size),
+            Some(&mut total_bytes),
+        );
+    }
+    let staging_size = total_bytes;
 
     // Create staging buffer
     let upload_heap = D3D12_HEAP_PROPERTIES {
@@ -237,9 +253,10 @@ pub(super) fn write(
 
     let texture_format = texture.format;
     let bytes_per_row = (width * texture_format.bytes_per_pixel()) as usize;
+    let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
     for row in 0..height {
         let src_offset = (row as usize) * bytes_per_row;
-        let dst_offset = (row as u64 * row_pitch) as usize;
+        let dst_offset = (footprint.Offset + row as u64 * row_pitch_bytes as u64) as usize;
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr().add(src_offset),
@@ -272,34 +289,31 @@ pub(super) fn write(
     let texture = state.textures.get(&texture_handle).unwrap();
     let state_before = texture.current_state;
 
-    // Transition to COPY_DEST (required for CopyTextureRegion; storage textures start as UNORDERED_ACCESS)
-    let barrier_to_copy = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: state_before,
-                StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
-            }),
-        },
-    };
-    unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
+    // Transition to COPY_DEST only if not already in that state
+    // (non-storage textures are created in COPY_DEST; redundant transitions are invalid)
+    if state_before != D3D12_RESOURCE_STATE_COPY_DEST {
+        let barrier_to_copy = D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                    pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    StateBefore: state_before,
+                    StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
+                }),
+            },
+        };
+        unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
+    }
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&staging) },
         Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
             PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: 0,
-                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                    Format: format_to_dxgi(texture.format),
-                    Width: width,
-                    Height: height,
-                    Depth: 1,
-                    RowPitch: row_pitch as u32,
-                },
+                Offset: footprint.Offset,
+                Footprint: footprint.Footprint,
             },
         },
     };
@@ -315,7 +329,7 @@ pub(super) fn write(
     unsafe {
         command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None);
 
-        // Transition to shader resource
+        // Transition to shader resource state for sampling
         let barrier = D3D12_RESOURCE_BARRIER {
             Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
             Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -355,6 +369,10 @@ pub(super) fn write(
     }
     .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
+
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        dev.fence_value += 1;
+    }
 
     tracing::debug!("Wrote {}x{} texture data", width, height);
     Ok(())
@@ -402,8 +420,37 @@ pub(super) fn write_region(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    let row_pitch = ((width * texture.format.bytes_per_pixel() + 255) & !255) as u64;
-    let staging_size = row_pitch * height as u64;
+    // Use footprint for the UPLOAD REGION (width x height), not the full texture.
+    // The buffer layout must match GetCopyableFootprints for the region we're uploading.
+    let region_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        Alignment: 0,
+        Width: width as u64,
+        Height: height,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: format_to_dxgi(texture.format),
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+    let mut _num_rows: u32 = 0;
+    let mut _row_size: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    unsafe {
+        logical_device.device.GetCopyableFootprints(
+            &region_desc,
+            0,
+            1,
+            0,
+            Some(&mut footprint),
+            Some(&mut _num_rows),
+            Some(&mut _row_size),
+            Some(&mut total_bytes),
+        );
+    }
+    let staging_size = total_bytes;
 
     let upload_heap = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_UPLOAD,
@@ -421,10 +468,7 @@ pub(super) fn write_region(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -450,9 +494,10 @@ pub(super) fn write_region(
     unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
         .context("Failed to map staging buffer")?;
 
+    let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
     for row in 0..height {
         let src_offset = (row as usize) * bytes_per_row;
-        let dst_offset = (row as u64 * row_pitch) as usize;
+        let dst_offset = (footprint.Offset + row as u64 * row_pitch_bytes as u64) as usize;
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr().add(src_offset),
@@ -484,34 +529,29 @@ pub(super) fn write_region(
     let texture = state.textures.get(&texture_handle).unwrap();
     let state_before = texture.current_state;
 
-    // Transition to copy dest
-    let barrier_to_copy = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: state_before,
-                StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
-            }),
-        },
-    };
-    unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
+    if state_before != D3D12_RESOURCE_STATE_COPY_DEST {
+        let barrier_to_copy = D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                    pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    StateBefore: state_before,
+                    StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
+                }),
+            },
+        };
+        unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
+    }
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&staging) },
         Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
             PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: 0,
-                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                    Format: format_to_dxgi(texture.format),
-                    Width: width,
-                    Height: height,
-                    Depth: 1,
-                    RowPitch: row_pitch as u32,
-                },
+                Offset: footprint.Offset,
+                Footprint: footprint.Footprint,
             },
         },
     };
@@ -528,7 +568,6 @@ pub(super) fn write_region(
         command_list.CopyTextureRegion(&dst_location, x, y, 0, &src_location, None);
     }
 
-    // Transition to shader resource
     let barrier_to_shader = D3D12_RESOURCE_BARRIER {
         Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
         Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -564,6 +603,10 @@ pub(super) fn write_region(
     }
     .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
+
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        dev.fence_value += 1;
+    }
 
     if let Some(tex) = state.textures.get_mut(&texture_handle) {
         tex.current_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -606,8 +649,25 @@ pub(super) fn read_to_cpu(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    let row_pitch = ((width * format.bytes_per_pixel() + 255) & !255) as u64;
-    let staging_size = row_pitch * height as u64;
+    // Use the texture's actual resource desc for correct layout
+    let res_desc = unsafe { texture.resource.GetDesc() };
+    let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+    let mut _num_rows: u32 = 0;
+    let mut _row_size: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    unsafe {
+        logical_device.device.GetCopyableFootprints(
+            &res_desc,
+            0,
+            1,
+            0,
+            Some(&mut footprint),
+            Some(&mut _num_rows),
+            Some(&mut _row_size),
+            Some(&mut total_bytes),
+        );
+    }
+    let staging_size = total_bytes;
 
     let heap_properties = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_READBACK,
@@ -692,14 +752,8 @@ pub(super) fn read_to_cpu(
         Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
             PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: 0,
-                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                    Format: format_to_dxgi(format),
-                    Width: width,
-                    Height: height,
-                    Depth: 1,
-                    RowPitch: row_pitch as u32,
-                },
+                Offset: footprint.Offset,
+                Footprint: footprint.Footprint,
             },
         },
     };
@@ -752,22 +806,17 @@ pub(super) fn read_to_cpu(
     }
     .context("Failed to map staging buffer")?;
 
-    let bytes_per_row = width * format.bytes_per_pixel();
-    if row_pitch == bytes_per_row as u64 {
+    let bytes_per_row = (width * format.bytes_per_pixel()) as usize;
+    let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
+    for row in 0..height as usize {
+        let src_offset = (footprint.Offset + row as u64 * row_pitch_bytes as u64) as usize;
+        let dst_offset = row * bytes_per_row;
         unsafe {
-            std::ptr::copy_nonoverlapping(mapped_data, output.as_mut_ptr(), expected_size);
-        }
-    } else {
-        for row in 0..height as usize {
-            let src_offset = row * row_pitch as usize;
-            let dst_offset = row * bytes_per_row as usize;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    mapped_data.add(src_offset),
-                    output.as_mut_ptr().add(dst_offset),
-                    bytes_per_row as usize,
-                );
-            }
+            std::ptr::copy_nonoverlapping(
+                mapped_data.add(src_offset),
+                output.as_mut_ptr().add(dst_offset),
+                bytes_per_row,
+            );
         }
     }
 
@@ -778,6 +827,12 @@ pub(super) fn read_to_cpu(
 
 /// Destroy a texture.
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
+    if let Some(tex) = state.textures.get(&texture_handle) {
+        let device_handle = tex.device_handle;
+        if let Some(dev) = state.devices.get_mut(&device_handle) {
+            dev.resource_registry.unregister_texture(texture_handle);
+        }
+    }
     state.textures.remove(&texture_handle);
 }
 
