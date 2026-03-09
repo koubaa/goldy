@@ -329,8 +329,15 @@ impl GpuBackend for Dx12Backend {
         device_handle: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderHandle> {
-        shader::create_with_paths(&mut self.state, device_handle, slang_source, search_paths)
+        shader::create_with_paths(
+            &mut self.state,
+            device_handle,
+            slang_source,
+            search_paths,
+            defines,
+        )
     }
 
     fn destroy_shader(&mut self, shader_handle: ShaderHandle) {

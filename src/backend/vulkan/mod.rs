@@ -324,6 +324,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             slang_source,
             &[],
+            &[],
         )
     }
 
@@ -332,6 +333,7 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
@@ -340,6 +342,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             slang_source,
             search_paths,
+            defines,
         )
     }
 

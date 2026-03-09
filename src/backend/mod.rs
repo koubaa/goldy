@@ -194,6 +194,7 @@ pub trait GpuBackend: Send + Sync {
         device: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 

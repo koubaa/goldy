@@ -163,6 +163,7 @@ impl GpuBackend for MetalBackend {
             device,
             slang_source,
             &[],
+            &[],
         )
     }
 
@@ -171,6 +172,7 @@ impl GpuBackend for MetalBackend {
         device: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
@@ -179,6 +181,7 @@ impl GpuBackend for MetalBackend {
             device,
             slang_source,
             search_paths,
+            defines,
         )
     }
 

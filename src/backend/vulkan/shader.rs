@@ -14,6 +14,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     slang_source: &str,
     search_paths: &[&str],
+    defines: &[(&str, &str)],
 ) -> Result<ShaderHandle> {
     // Just validate the device exists - actual compilation happens at pipeline creation
     let _ = devices
@@ -29,6 +30,10 @@ pub(super) fn create(
             device_handle,
             slang_source: slang_source.to_string(),
             search_paths: search_paths.iter().map(|s| s.to_string()).collect(),
+            defines: defines
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             vertex_module: None,
             fragment_module: None,
             compute_module: None,
@@ -96,18 +101,24 @@ pub(super) fn ensure_stage_compiled(
         _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
     };
 
-    // Clone source and search paths to avoid borrow issues
+    // Clone source, search paths, and defines to avoid borrow issues
     let slang_source = shader.slang_source.clone();
     let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
+    let extra_defines: Vec<(&str, &str)> = shader
+        .defines
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let device_handle = shader.device_handle;
 
     // Compile shader with reflection data for resource binding
     let result = slang_compiler
-        .compile_bindless_with_reflection(
+        .compile_bindless_with_reflection_and_defines(
             &slang_source,
             crate::slang::ShaderTarget::Spirv,
             &[(entry_point_name, stage)],
             &search_paths,
+            &extra_defines,
         )
         .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
 

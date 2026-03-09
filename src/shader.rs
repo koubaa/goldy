@@ -106,6 +106,18 @@ impl ShaderModule {
         source: &str,
         extra_paths: &[&str],
     ) -> Result<Self> {
+        Self::from_slang_with_paths_and_defines(device, source, extra_paths, &[])
+    }
+
+    /// Create a shader module with search paths and preprocessor defines.
+    ///
+    /// Use for shader variants like MSAA (`msaa`, `msaa8`, `msaa16`).
+    pub fn from_slang_with_paths_and_defines(
+        device: &Device,
+        source: &str,
+        extra_paths: &[&str],
+        defines: &[(&str, &str)],
+    ) -> Result<Self> {
         // Get search paths from registered libraries
         let library_paths = device
             .get_shader_search_paths()
@@ -121,7 +133,8 @@ impl ShaderModule {
         let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
 
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_shader_with_paths(device.handle, source, &path_refs)?;
+        let handle =
+            backend.create_shader_with_paths(device.handle, source, &path_refs, defines)?;
 
         Ok(Self {
             backend: Arc::clone(&device.backend),

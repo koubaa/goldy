@@ -338,7 +338,7 @@ impl GpuBackend for MockBackend {
     }
 
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
-        self.create_shader_with_paths(device, slang_source, &[])
+        self.create_shader_with_paths(device, slang_source, &[], &[])
     }
 
     fn create_shader_with_paths(
@@ -346,6 +346,7 @@ impl GpuBackend for MockBackend {
         device: DeviceHandle,
         slang_source: &str,
         _search_paths: &[&str],
+        _defines: &[(&str, &str)],
     ) -> Result<ShaderHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");

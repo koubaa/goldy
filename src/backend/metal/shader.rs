@@ -34,15 +34,17 @@ fn compile_stage_with_reflection(
     search_paths: &[String],
     entry_point: &str,
     stage: SlangStage,
+    extra_defines: &[(&str, &str)],
 ) -> Result<(Library, Option<crate::slang::ShaderReflection>)> {
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
     let result = slang_compiler
-        .compile_bindless_with_reflection(
+        .compile_bindless_with_reflection_and_defines(
             slang_source,
             ShaderTarget::Metal,
             &[(entry_point, stage)],
             &search_path_refs,
+            extra_defines,
         )
         .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
 
@@ -134,6 +136,11 @@ pub(super) fn ensure_stage_compiled(
     let device_handle = shader.device_handle;
     let slang_source = shader.slang_source.clone();
     let search_paths = shader.search_paths.clone();
+    let extra_defines: Vec<(&str, &str)> = shader
+        .defines
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     let logical_device = devices
         .get(&device_handle)
@@ -146,6 +153,7 @@ pub(super) fn ensure_stage_compiled(
         &search_paths,
         entry_point,
         stage,
+        &extra_defines,
     )?;
 
     let shader = shaders.get_mut(&shader_handle).unwrap();
@@ -170,6 +178,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     slang_source: &str,
     search_paths: &[&str],
+    defines: &[(&str, &str)],
 ) -> Result<ShaderHandle> {
     devices
         .get(&device_handle)
@@ -184,6 +193,10 @@ pub(super) fn create(
             device_handle,
             slang_source: slang_source.to_string(),
             search_paths: search_paths.iter().map(|s| s.to_string()).collect(),
+            defines: defines
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             vertex_library: None,
             fragment_library: None,
             compute_library: None,

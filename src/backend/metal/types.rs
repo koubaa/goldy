@@ -178,6 +178,8 @@ pub(crate) struct ShaderState {
     pub slang_source: String,
     /// Search paths for Slang module resolution
     pub search_paths: Vec<String>,
+    /// Extra preprocessor defines (e.g. msaa, msaa8)
+    pub defines: Vec<(String, String)>,
     /// Compiled vertex shader library
     pub vertex_library: Option<Library>,
     /// Compiled fragment shader library
