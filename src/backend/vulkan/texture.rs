@@ -189,7 +189,12 @@ pub(super) fn create(
 
     let initial_layout = if is_storage_image {
         let logical_device = devices.get(&device_handle).unwrap();
-        transition_image_layout(logical_device, image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL)?;
+        transition_image_layout(
+            logical_device,
+            image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::GENERAL,
+        )?;
         vk::ImageLayout::GENERAL
     } else {
         vk::ImageLayout::UNDEFINED
@@ -1005,7 +1010,9 @@ fn transition_image_layout(
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
-        logical_device.device.begin_command_buffer(cmd, &begin_info)
+        logical_device
+            .device
+            .begin_command_buffer(cmd, &begin_info)
             .context("Failed to begin command buffer")?;
 
         let (src_stage, src_access) = match old_layout {
@@ -1062,18 +1069,25 @@ fn transition_image_layout(
             vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
-        logical_device.device.end_command_buffer(cmd)
+        logical_device
+            .device
+            .end_command_buffer(cmd)
             .context("Failed to end command buffer")?;
 
         let cmd_buffers_arr = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
-        logical_device.device
+        logical_device
+            .device
             .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
             .context("Failed to submit layout transition")?;
-        logical_device.device.queue_wait_idle(logical_device.queue)
+        logical_device
+            .device
+            .queue_wait_idle(logical_device.queue)
             .context("Failed to wait for layout transition")?;
 
-        logical_device.device.free_command_buffers(logical_device.command_pool, &cmd_buffers_arr);
+        logical_device
+            .device
+            .free_command_buffers(logical_device.command_pool, &cmd_buffers_arr);
     }
 
     Ok(())

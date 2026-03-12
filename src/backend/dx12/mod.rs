@@ -42,7 +42,7 @@ impl Dx12Backend {
         // Enable debug layer in debug builds or when GOLDY_DX12_DEBUG=1
         {
             let enable = cfg!(debug_assertions)
-                || std::env::var("GOLDY_DX12_DEBUG").map_or(false, |v| v == "1" || v == "true");
+                || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true");
             if enable {
                 let mut debug_interface: Option<ID3D12Debug> = None;
                 if unsafe { D3D12GetDebugInterface(&mut debug_interface) }.is_ok() {

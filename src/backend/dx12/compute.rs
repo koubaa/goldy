@@ -237,9 +237,7 @@ pub(super) fn dispatch(
                     Anonymous: D3D12_RESOURCE_BARRIER_0 {
                         Transition: std::mem::ManuallyDrop::new(
                             D3D12_RESOURCE_TRANSITION_BARRIER {
-                                pResource: unsafe {
-                                    std::mem::transmute_copy(&buf_state.resource)
-                                },
+                                pResource: unsafe { std::mem::transmute_copy(&buf_state.resource) },
                                 Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                 StateBefore: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                 StateAfter: D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
@@ -267,9 +265,7 @@ pub(super) fn dispatch(
                     Anonymous: D3D12_RESOURCE_BARRIER_0 {
                         Transition: std::mem::ManuallyDrop::new(
                             D3D12_RESOURCE_TRANSITION_BARRIER {
-                                pResource: unsafe {
-                                    std::mem::transmute_copy(&buf_state.resource)
-                                },
+                                pResource: unsafe { std::mem::transmute_copy(&buf_state.resource) },
                                 Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                 StateBefore: D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
                                 StateAfter: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,

@@ -325,7 +325,7 @@ pub(super) fn create_view(
     }
 
     let stride = element_stride.unwrap_or(4);
-    if offset % stride as u64 != 0 {
+    if !offset.is_multiple_of(stride as u64) {
         anyhow::bail!(
             "View offset {} is not aligned to element stride {}",
             offset,

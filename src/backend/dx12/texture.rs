@@ -116,7 +116,9 @@ pub(super) fn create(
     // For storage images (Direct access): create UAV so compute shaders can write via RWTexture2D.
     // bindless_offset must point to UAV for goldy_dyn_direct_spatial.
     let bindless_offset = if is_storage {
-        let uav_offset = logical_device.resource_registry.register_texture_uav(handle);
+        let uav_offset = logical_device
+            .resource_registry
+            .register_texture_uav(handle);
         let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
             Format: format_to_dxgi(format),
             ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
@@ -135,9 +137,12 @@ pub(super) fn create(
             cpu_handle
         };
         unsafe {
-            logical_device
-                .device
-                .CreateUnorderedAccessView(Some(&resource), None, Some(&uav_desc), uav_cpu_handle);
+            logical_device.device.CreateUnorderedAccessView(
+                Some(&resource),
+                None,
+                Some(&uav_desc),
+                uav_cpu_handle,
+            );
         }
         Some(uav_offset)
     } else {
@@ -159,7 +164,13 @@ pub(super) fn create(
     );
 
     let _ = flags; // reserved for future use
-    tracing::debug!("Created texture {}x{} (handle={}, storage={})", width, height, handle, is_storage);
+    tracing::debug!(
+        "Created texture {}x{} (handle={}, storage={})",
+        width,
+        height,
+        handle,
+        is_storage
+    );
     Ok(handle)
 }
 
@@ -430,7 +441,10 @@ pub(super) fn write_region(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: format_to_dxgi(texture.format),
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -468,7 +482,10 @@ pub(super) fn write_region(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };

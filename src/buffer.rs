@@ -176,7 +176,12 @@ impl Buffer {
     ///
     /// `element_stride` sets the structured buffer stride for the view's descriptor.
     /// If `None`, defaults to 4 bytes (u32).
-    pub fn create_view(&self, offset: u64, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
+    pub fn create_view(
+        &self,
+        offset: u64,
+        size: u64,
+        element_stride: Option<u32>,
+    ) -> Result<BufferView> {
         let mut backend = self.backend.lock().unwrap();
         let handle = backend.create_buffer_view(self.handle, offset, size, element_stride)?;
         Ok(BufferView {
@@ -192,7 +197,11 @@ impl Buffer {
     ///
     /// Convenience wrapper that computes the byte offset, byte size, and element stride
     /// from the type `T` and element count.
-    pub fn create_typed_view<T: bytemuck::Pod>(&self, first_element: u64, count: u64) -> Result<BufferView> {
+    pub fn create_typed_view<T: bytemuck::Pod>(
+        &self,
+        first_element: u64,
+        count: u64,
+    ) -> Result<BufferView> {
         let stride = std::mem::size_of::<T>() as u64;
         let offset = first_element * stride;
         let size = count * stride;
@@ -335,7 +344,10 @@ impl BufferPool {
 
     /// Create a pool with a custom sub-allocation alignment.
     pub fn with_alignment(device: &Device, total_size: u64, alignment: u64) -> Result<Self> {
-        assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+        assert!(
+            alignment.is_power_of_two(),
+            "alignment must be a power of two"
+        );
         let backing = Buffer::new(device, total_size, DataAccess::Scattered)?;
         Ok(Self {
             backing,
@@ -364,7 +376,7 @@ impl BufferPool {
     pub fn alloc_bytes(&mut self, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
         let stride = element_stride.unwrap_or(4) as u64;
         let alloc_align = lcm(self.alignment, stride);
-        let aligned_offset = ((self.offset + alloc_align - 1) / alloc_align) * alloc_align;
+        let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
 
         if aligned_offset + size > self.backing.size() {
             anyhow::bail!(
@@ -375,7 +387,9 @@ impl BufferPool {
             );
         }
 
-        let view = self.backing.create_view(aligned_offset, size, element_stride)?;
+        let view = self
+            .backing
+            .create_view(aligned_offset, size, element_stride)?;
         self.offset = aligned_offset + size;
         Ok(view)
     }

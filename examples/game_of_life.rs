@@ -162,7 +162,6 @@ impl RenderState {
         pool.backing_buffer()
             .write_data((cell_bytes as u64 + 255) & !255, &initial_state)?;
 
-
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
