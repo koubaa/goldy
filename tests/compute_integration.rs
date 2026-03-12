@@ -5,7 +5,8 @@
 mod common;
 
 use goldy::{
-    Buffer, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance, ShaderModule,
+    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
+    ShaderModule,
 };
 
 /// Simple compute shader that doubles each value in a buffer.
@@ -638,4 +639,189 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         "Failed to dispatch with struct buffer: {:?}",
         result.err()
     );
+}
+
+// ─── Buffer views: sub-buffer descriptor binding ──────────────────────────────
+
+/// Two views into one buffer. Shader copies from view A to view B.
+/// Proves that sub-buffer descriptors with offset/range work end-to-end.
+#[test]
+fn test_buffer_view_copy_between_sub_regions() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let mut data = vec![0u32; N * 2];
+    // First half: source values 1..=64
+    for i in 0..N {
+        data[i] = (i + 1) as u32;
+    }
+    // Second half: zeros (destination)
+
+    let pool_buf =
+        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool buffer");
+
+    let view_a = pool_buf
+        .create_view(0, (N * 4) as u64, Some(4))
+        .expect("create view A");
+    let view_b = pool_buf
+        .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
+        .expect("create view B");
+
+    let idx_a = view_a.bindless_index().expect("view A bindless index");
+    let idx_b = view_b.bindless_index().expect("view B bindless index");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[idx_a, idx_b]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    // Read back the entire pool buffer and check the second half
+    let mut output = vec![0u8; N * 2 * 4];
+    pool_buf
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for i in 0..N {
+        assert_eq!(
+            result[N + i],
+            (i + 1) as u32,
+            "dest[{}]: expected {} (copied from source view), got {}",
+            i,
+            i + 1,
+            result[N + i]
+        );
+    }
+}
+
+/// Shader doubles values in a view — the other half of the buffer must be untouched.
+#[test]
+fn test_buffer_view_isolation() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let mut data = vec![0u32; N * 2];
+    for i in 0..N {
+        data[i] = 100; // first half: sentinel
+    }
+    for i in 0..N {
+        data[N + i] = (i + 1) as u32; // second half: values to double
+    }
+
+    let pool_buf =
+        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool buffer");
+
+    // View only the second half
+    let view = pool_buf
+        .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
+        .expect("create view");
+
+    let idx = view.bindless_index().expect("view bindless index");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[idx]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; N * 2 * 4];
+    pool_buf
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+
+    // First half must be untouched
+    for i in 0..N {
+        assert_eq!(
+            result[i], 100,
+            "sentinel[{}] was modified (expected 100, got {})",
+            i, result[i]
+        );
+    }
+
+    // Second half must be doubled
+    for i in 0..N {
+        let expected = ((i + 1) as u32) * 2;
+        assert_eq!(
+            result[N + i],
+            expected,
+            "view[{}]: expected {} (doubled), got {}",
+            i,
+            expected,
+            result[N + i]
+        );
+    }
+}
+
+// ─── BufferPool convenience wrapper ───────────────────────────────────────────
+
+/// Allocate typed regions from a pool, write via the backing buffer, dispatch.
+#[test]
+fn test_buffer_pool_alloc_and_dispatch() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let pool_size = 256 * 3; // 3 x 256-byte aligned regions
+    let mut pool = BufferPool::new(&device, pool_size as u64).expect("create pool");
+
+    let src_view = pool.alloc::<u32>(N as u64).expect("alloc src");
+    let dst_view = pool.alloc::<u32>(N as u64).expect("alloc dst");
+
+    // Write source data into the backing buffer at the correct offset
+    let src_data: Vec<u32> = (1..=N as u32).collect();
+    pool.backing_buffer()
+        .write_data(0, &src_data)
+        .expect("write src data");
+
+    let src_idx = src_view.bindless_index().expect("src bindless index");
+    let dst_idx = dst_view.bindless_index().expect("dst bindless index");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[src_idx, dst_idx]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    // Read back entire pool and verify the destination region
+    let mut output = vec![0u8; pool_size];
+    pool.backing_buffer()
+        .read_to_cpu(&device, &mut output)
+        .expect("readback");
+
+    // Destination starts at 256 bytes (first aligned offset after 64*4=256)
+    let dst_offset = 256usize;
+    let dst_slice: &[u32] = bytemuck::cast_slice(&output[dst_offset..dst_offset + N * 4]);
+    for i in 0..N {
+        assert_eq!(
+            dst_slice[i],
+            (i + 1) as u32,
+            "pool dst[{}]: expected {}, got {}",
+            i,
+            i + 1,
+            dst_slice[i]
+        );
+    }
+
+    assert!(pool.used() > 0);
+    assert!(pool.remaining() < pool.capacity());
 }

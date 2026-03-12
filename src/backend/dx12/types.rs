@@ -189,6 +189,8 @@ pub(crate) struct BufferState {
     pub is_storage: bool,
     /// Upload buffer for DEFAULT heap resources (needed for CPU writes)
     pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
+    /// If true, this is a view into another buffer — don't free the resource on destroy.
+    pub is_view: bool,
 }
 
 /// Shader module state with cached compiled bytecode.

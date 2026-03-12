@@ -205,6 +205,8 @@ pub(crate) struct BufferState {
     /// HOST_VISIBLE staging buffer for DEVICE_LOCAL storage buffers (CPU upload/readback)
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
+    /// If true, this is a view into another buffer — don't free the VkBuffer/memory on destroy.
+    pub is_view: bool,
 }
 
 /// Shader module state with cached compiled stages.

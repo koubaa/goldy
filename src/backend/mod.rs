@@ -187,6 +187,22 @@ pub trait GpuBackend: Send + Sync {
     /// Falls back to the primary bindless index on backends with unified descriptors.
     fn buffer_bindless_srv_index(&self, buffer: BufferHandle) -> Option<u32>;
 
+    /// Create a view into a sub-region of an existing buffer.
+    ///
+    /// The view gets its own bindless descriptor pointing at `[offset, offset+size)` of the
+    /// parent buffer. The shader sees the sub-region as a zero-based buffer. The view does not
+    /// own the underlying memory — dropping it unregisters its descriptor but does not free
+    /// the parent's allocation.
+    ///
+    /// `element_stride` determines the structured buffer stride for the view's descriptor.
+    fn create_buffer_view(
+        &mut self,
+        parent: BufferHandle,
+        offset: u64,
+        size: u64,
+        element_stride: Option<u32>,
+    ) -> Result<BufferHandle>;
+
     // Shader management
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
     fn create_shader_with_paths(

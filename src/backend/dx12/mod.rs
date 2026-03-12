@@ -299,6 +299,16 @@ impl GpuBackend for Dx12Backend {
         buffer::bindless_srv_index(&self.state, buffer_handle)
     }
 
+    fn create_buffer_view(
+        &mut self,
+        parent: BufferHandle,
+        offset: u64,
+        size: u64,
+        element_stride: Option<u32>,
+    ) -> Result<BufferHandle> {
+        buffer::create_view(&mut self.state, parent, offset, size, element_stride)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device: DeviceHandle,

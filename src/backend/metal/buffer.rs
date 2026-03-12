@@ -86,6 +86,69 @@ pub(super) fn create(
     Ok(handle)
 }
 
+/// Create a view into a sub-region of an existing storage buffer.
+///
+/// On Metal, the view encodes the parent's MTLBuffer at the view's byte offset
+/// into a new argument buffer slot. The shader sees element [0] as the data at `offset`.
+pub(super) fn create_view(
+    state: &mut MetalState,
+    parent_handle: BufferHandle,
+    offset: u64,
+    size: u64,
+) -> Result<BufferHandle> {
+    let parent = state
+        .buffers
+        .get(&parent_handle)
+        .context("Invalid parent buffer handle")?;
+
+    if offset + size > parent.size {
+        anyhow::bail!(
+            "View [{}, {}) exceeds parent buffer size {}",
+            offset,
+            offset + size,
+            parent.size
+        );
+    }
+
+    let device_handle = parent.device_handle;
+    let parent_mtl_buffer = parent.buffer.clone();
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+
+    let logical_device = state
+        .devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
+
+    let arg_buffer_index = logical_device
+        .resource_registry
+        .register_storage_buffer(handle);
+
+    let encoded_length = logical_device.argument_encoder.encoded_length();
+    let ab_offset = (arg_buffer_index as u64) * encoded_length;
+    if ab_offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
+        logical_device
+            .argument_encoder
+            .set_argument_buffer(&logical_device.argument_buffer, ab_offset);
+        logical_device
+            .argument_encoder
+            .set_buffer(0, &parent_mtl_buffer, offset);
+    }
+
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            buffer: parent_mtl_buffer,
+            size,
+            arg_buffer_index,
+        },
+    );
+
+    Ok(handle)
+}
+
 /// Destroy a buffer, unregistering it from the bindless registry.
 pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {

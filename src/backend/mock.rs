@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::types::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 
 /// Mock GPU backend for testing.
@@ -295,6 +295,40 @@ impl GpuBackend for MockBackend {
     fn buffer_bindless_srv_index(&self, buffer: BufferHandle) -> Option<u32> {
         // Mock backend uses a unified bindless index
         self.buffers.get(&buffer).map(|b| b.bindless_index)
+    }
+
+    fn create_buffer_view(
+        &mut self,
+        parent: BufferHandle,
+        offset: u64,
+        size: u64,
+        _element_stride: Option<u32>,
+    ) -> Result<BufferHandle> {
+        let parent_buf = self
+            .buffers
+            .get(&parent)
+            .context("Invalid parent buffer handle")?;
+        if offset + size > parent_buf.size {
+            anyhow::bail!("View exceeds parent buffer size");
+        }
+        let device_handle = parent_buf.device_handle;
+
+        let handle = self.next_buffer_handle;
+        self.next_buffer_handle += 1;
+        let index = self.next_bindless_index;
+        self.next_bindless_index += 1;
+
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle,
+                size,
+                data: vec![0; size as usize],
+                bindless_index: index,
+            },
+        );
+
+        Ok(handle)
     }
 
     fn read_buffer_to_cpu(
