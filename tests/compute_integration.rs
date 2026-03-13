@@ -773,7 +773,6 @@ fn test_buffer_view_isolation() {
 #[test]
 fn test_buffer_pool_alloc_and_dispatch() {
     let device = make_device();
-
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -824,4 +823,34 @@ fn test_buffer_pool_alloc_and_dispatch() {
 
     assert!(pool.used() > 0);
     assert!(pool.remaining() < pool.capacity());
+}
+
+/// alloc_with_data allocates and uploads in one call; verify via readback.
+#[test]
+fn test_buffer_pool_alloc_with_data() {
+    let device = make_device();
+    const N: usize = 64;
+    let total = BufferPool::padded_size(&[(N, std::mem::size_of::<u32>())]);
+    let mut pool = BufferPool::new(&device, total).expect("create pool");
+    let data: Vec<u32> = (1..=N as u32).collect();
+    let view = pool.alloc_with_data(&data).expect("alloc_with_data");
+    assert_eq!(view.size(), (N * std::mem::size_of::<u32>()) as u64);
+
+    let mut output = vec![0u8; total as usize];
+    pool.backing_buffer()
+        .read_to_cpu(&device, &mut output)
+        .expect("readback");
+    let roundtripped: &[u32] = bytemuck::cast_slice(&output[..N * 4]);
+    for i in 0..N {
+        assert_eq!(roundtripped[i], (i + 1) as u32, "mismatch at index {}", i);
+    }
+}
+
+/// alloc_with_data with empty slice allocates zero-length view.
+#[test]
+fn test_buffer_pool_alloc_with_data_empty() {
+    let device = make_device();
+    let mut pool = BufferPool::new(&device, 1024).expect("create pool");
+    let view = pool.alloc_with_data::<u32>(&[]).expect("alloc_with_data empty");
+    assert_eq!(view.size(), 0);
 }

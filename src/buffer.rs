@@ -216,6 +216,27 @@ impl Drop for Buffer {
     }
 }
 
+/// Trait for types that can be bound as vertex or index buffers.
+///
+/// Both [`Buffer`] and [`BufferView`] implement this trait, allowing either to be passed
+/// to `set_vertex_buffer` and `set_index_buffer`. For `BufferView`, the encoder binds
+/// the parent buffer at the view's offset internally.
+pub trait BufferSource {
+    #[doc(hidden)]
+    fn source_handle(&self) -> BufferHandle;
+    #[doc(hidden)]
+    fn source_offset(&self) -> u64;
+}
+
+impl BufferSource for Buffer {
+    fn source_handle(&self) -> BufferHandle {
+        self.handle
+    }
+    fn source_offset(&self) -> u64 {
+        0
+    }
+}
+
 /// A view into a sub-region of a [`Buffer`].
 ///
 /// A `BufferView` shares the parent buffer's GPU memory but gets its own bindless
@@ -229,9 +250,7 @@ impl Drop for Buffer {
 pub struct BufferView {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
-    #[allow(dead_code)]
     parent_handle: BufferHandle,
-    #[allow(dead_code)]
     offset: u64,
     size: u64,
 }
@@ -273,6 +292,15 @@ impl BufferView {
         }
         let mut backend = self.backend.lock().unwrap();
         backend.write_buffer(self.parent_handle, self.offset, bytes)
+    }
+}
+
+impl BufferSource for BufferView {
+    fn source_handle(&self) -> BufferHandle {
+        self.parent_handle
+    }
+    fn source_offset(&self) -> u64 {
+        self.offset
     }
 }
 
@@ -331,6 +359,24 @@ pub struct BufferPool {
 }
 
 impl BufferPool {
+    /// Compute the total pool size needed for a set of allocations.
+    ///
+    /// Takes `(element_count, element_size)` pairs and returns the exact byte size
+    /// required, including alignment padding. Use with [`BufferPool::new`] to avoid
+    /// magic padding constants.
+    pub fn padded_size(allocs: &[(usize, usize)]) -> u64 {
+        const ALIGNMENT: u64 = 256;
+        let mut offset = 0u64;
+        for &(count, stride) in allocs {
+            let stride = stride as u64;
+            let alloc_align = lcm(ALIGNMENT, stride);
+            let aligned_offset = offset.div_ceil(alloc_align) * alloc_align;
+            let size = (count as u64) * stride;
+            offset = aligned_offset + size;
+        }
+        offset
+    }
+
     /// Create a new buffer pool with the given total size.
     ///
     /// The backing buffer is allocated as `DataAccess::Scattered` (storage buffer)
@@ -364,6 +410,16 @@ impl BufferPool {
         let stride = std::mem::size_of::<T>() as u64;
         let size = count * stride;
         self.alloc_bytes(size, Some(stride as u32))
+    }
+
+    /// Allocate and fill a typed region in one call.
+    ///
+    /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
+    /// Matches the ergonomics of [`Buffer::with_data`].
+    pub fn alloc_with_data<T: bytemuck::Pod>(&mut self, data: &[T]) -> Result<BufferView> {
+        let view = self.alloc::<T>(data.len() as u64)?;
+        view.write_data(data)?;
+        Ok(view)
     }
 
     /// Allocate a raw byte region from the pool.
@@ -422,4 +478,40 @@ impl BufferPool {
     pub fn backing_buffer(&self) -> &Buffer {
         &self.backing
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    #[test]
+    fn test_padded_size_empty() {
+        assert_eq!(BufferPool::padded_size(&[]), 0);
+    }
+
+    #[test]
+    fn test_padded_size_single_allocation() {
+        // 64 u32s = 256 bytes, aligned to 256, no padding
+        assert_eq!(
+            BufferPool::padded_size(&[(64, size_of::<u32>())]),
+            256
+        );
+    }
+
+    #[test]
+    fn test_padded_size_multiple_allocations() {
+        // Simulates goldy-doom: static_vb, static_ib, sky_vb, sky_ib, decor_vb, decor_ib
+        // With varying strides, alignment padding is inserted between allocs
+        let size = BufferPool::padded_size(&[
+            (100, size_of::<u32>()),      // 400 bytes
+            (200, size_of::<u32>()),      // 800 bytes
+            (50, 52),                     // SpriteVertex-like stride
+            (75, 52),
+        ]);
+        assert!(size > 400 + 800 + 50 * 52 + 75 * 52, "padded_size should exceed raw sum");
+        assert!(size < 400 + 800 + 50 * 52 + 75 * 52 + 4 * 8192,
+            "padded_size should be tighter than naive + magic constant");
+    }
+
 }

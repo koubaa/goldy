@@ -347,7 +347,7 @@ pub(super) fn create_view(
             .get_mut(&device_handle)
             .context("Invalid device handle")?;
 
-        if !logical_device.bindless_enabled {
+        if !logical_device.bindless_enabled || num_elements == 0 {
             (None, None)
         } else {
             // UAV descriptor
