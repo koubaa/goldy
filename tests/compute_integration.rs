@@ -854,3 +854,163 @@ fn test_buffer_pool_alloc_with_data_empty() {
     let view = pool.alloc_with_data::<u32>(&[]).expect("alloc_with_data empty");
     assert_eq!(view.size(), 0);
 }
+
+// ─── goldy_exp utility correctness ────────────────────────────────────────────
+
+/// `positive_mod(x, m)` must always return a value in `[0, m)`.
+///
+/// HLSL `fmod` returns negative values when `x < 0`, which breaks UV wrapping.
+/// This test verifies the double-fmod formula on the actual GPU path.
+#[test]
+fn test_positive_mod_correctness() {
+    const SHADER: &str = r#"
+import goldy_exp;
+
+#define OUT goldy_dyn_scattered<float>(0)
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    // scalar: negative dividend
+    OUT[0] = positive_mod(-1.0, 3.0);    // 2.0
+    OUT[1] = positive_mod(-3.0, 3.0);    // 0.0
+    OUT[2] = positive_mod(-0.5, 1.0);    // 0.5
+
+    // scalar: positive / zero inputs (must be unchanged)
+    OUT[3] = positive_mod(2.5, 3.0);     // 2.5
+    OUT[4] = positive_mod(0.0, 1.0);     // 0.0
+
+    // float2 overload
+    float2 r = positive_mod(float2(-1.0, -0.5), float2(3.0, 1.0));
+    OUT[5] = r.x;   // 2.0
+    OUT[6] = r.y;   // 0.5
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile positive_mod shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let buf = Buffer::with_data(&device, &vec![0.0f32; 7], DataAccess::Scattered)
+        .expect("create output buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 7 * 4];
+    buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
+    let result: &[f32] = bytemuck::cast_slice(&raw);
+
+    let eps = 1e-5f32;
+    let cases: &[(usize, f32, &str)] = &[
+        (0, 2.0, "positive_mod(-1, 3)"),
+        (1, 0.0, "positive_mod(-3, 3)"),
+        (2, 0.5, "positive_mod(-0.5, 1)"),
+        (3, 2.5, "positive_mod(2.5, 3)"),
+        (4, 0.0, "positive_mod(0, 1)"),
+        (5, 2.0, "float2 positive_mod x"),
+        (6, 0.5, "float2 positive_mod y"),
+    ];
+    for &(i, expected, label) in cases {
+        assert!(
+            (result[i] - expected).abs() < eps,
+            "{}: expected {}, got {}",
+            label, expected, result[i]
+        );
+    }
+}
+
+/// `modelview_right` extracts column 0 from a 4×4 matrix, and
+/// `billboard_cylindrical_offset` offsets a point along that vector.
+#[test]
+fn test_billboard_math() {
+    const SHADER: &str = r#"
+import goldy_exp;
+
+#define OUT goldy_dyn_scattered<float>(0)
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    // Row-major construction. Column 0 = (m[0][0], m[1][0], m[2][0]) = (1, 5, 9).
+    float4x4 m = float4x4(
+        1, 0, 0, 0,
+        5, 1, 0, 0,
+        9, 0, 1, 0,
+        0, 0, 0, 1
+    );
+    float3 r = modelview_right(m);
+    OUT[0] = r.x;   // 1.0
+    OUT[1] = r.y;   // 5.0
+    OUT[2] = r.z;   // 9.0
+
+    // center=(1,2,3), cam_right=(1,0,0), offset=5 → (6, 2, 3)
+    float3 off = billboard_cylindrical_offset(
+        float3(1.0, 2.0, 3.0),
+        float3(1.0, 0.0, 0.0),
+        5.0
+    );
+    OUT[3] = off.x;  // 6.0
+    OUT[4] = off.y;  // 2.0
+    OUT[5] = off.z;  // 3.0
+
+    // Identity matrix: right = (1, 0, 0)
+    float4x4 ident = float4x4(
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    );
+    float3 ident_right = modelview_right(ident);
+    OUT[6] = ident_right.x;  // 1.0
+    OUT[7] = ident_right.y;  // 0.0
+    OUT[8] = ident_right.z;  // 0.0
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile billboard shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let buf = Buffer::with_data(&device, &vec![0.0f32; 9], DataAccess::Scattered)
+        .expect("create output buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 9 * 4];
+    buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
+    let result: &[f32] = bytemuck::cast_slice(&raw);
+
+    let eps = 1e-5f32;
+    let cases: &[(usize, f32, &str)] = &[
+        (0, 1.0, "modelview_right col0.x"),
+        (1, 5.0, "modelview_right col0.y"),
+        (2, 9.0, "modelview_right col0.z"),
+        (3, 6.0, "cylindrical offset x"),
+        (4, 2.0, "cylindrical offset y (unchanged)"),
+        (5, 3.0, "cylindrical offset z (unchanged)"),
+        (6, 1.0, "identity right.x"),
+        (7, 0.0, "identity right.y"),
+        (8, 0.0, "identity right.z"),
+    ];
+    for &(i, expected, label) in cases {
+        assert!(
+            (result[i] - expected).abs() < eps,
+            "{}: expected {}, got {}",
+            label, expected, result[i]
+        );
+    }
+}

@@ -32,9 +32,20 @@ public float2 to_polar(float2 uv) {
     return float2(dist, angle);
 }
 
+// Positive modulo — HLSL fmod returns negative for negative inputs
+public float positive_mod(float x, float m) {
+    return fmod(fmod(x, m) + m, m);
+}
+
+public float2 positive_mod(float2 x, float2 m) {
+    return float2(
+        fmod(fmod(x.x, m.x) + m.x, m.x),
+        fmod(fmod(x.y, m.y) + m.y, m.y)
+    );
+}
+
 // Smoothstep helper
 public float smootherstep(float edge0, float edge1, float x) {
     x = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
 }
-
