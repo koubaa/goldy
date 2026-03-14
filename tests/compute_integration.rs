@@ -851,7 +851,9 @@ fn test_buffer_pool_alloc_with_data() {
 fn test_buffer_pool_alloc_with_data_empty() {
     let device = make_device();
     let mut pool = BufferPool::new(&device, 1024).expect("create pool");
-    let view = pool.alloc_with_data::<u32>(&[]).expect("alloc_with_data empty");
+    let view = pool
+        .alloc_with_data::<u32>(&[])
+        .expect("alloc_with_data empty");
     assert_eq!(view.size(), 0);
 }
 
@@ -921,7 +923,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         assert!(
             (result[i] - expected).abs() < eps,
             "{}: expected {}, got {}",
-            label, expected, result[i]
+            label,
+            expected,
+            result[i]
         );
     }
 }
@@ -1010,7 +1014,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         assert!(
             (result[i] - expected).abs() < eps,
             "{}: expected {}, got {}",
-            label, expected, result[i]
+            label,
+            expected,
+            result[i]
         );
     }
 }

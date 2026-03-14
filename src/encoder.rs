@@ -94,12 +94,7 @@ impl<'a> RenderPass<'a> {
     }
 
     /// Set a vertex buffer with an additional offset.
-    pub fn set_vertex_buffer_offset(
-        &mut self,
-        slot: u32,
-        buffer: &impl BufferSource,
-        offset: u64,
-    ) {
+    pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &impl BufferSource, offset: u64) {
         self.encoder.commands.push(RenderCommand::SetVertexBuffer {
             slot,
             buffer: buffer.source_handle(),

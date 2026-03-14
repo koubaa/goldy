@@ -493,10 +493,7 @@ mod tests {
     #[test]
     fn test_padded_size_single_allocation() {
         // 64 u32s = 256 bytes, aligned to 256, no padding
-        assert_eq!(
-            BufferPool::padded_size(&[(64, size_of::<u32>())]),
-            256
-        );
+        assert_eq!(BufferPool::padded_size(&[(64, size_of::<u32>())]), 256);
     }
 
     #[test]
@@ -504,14 +501,18 @@ mod tests {
         // Simulates goldy-doom: static_vb, static_ib, sky_vb, sky_ib, decor_vb, decor_ib
         // With varying strides, alignment padding is inserted between allocs
         let size = BufferPool::padded_size(&[
-            (100, size_of::<u32>()),      // 400 bytes
-            (200, size_of::<u32>()),      // 800 bytes
-            (50, 52),                     // SpriteVertex-like stride
+            (100, size_of::<u32>()), // 400 bytes
+            (200, size_of::<u32>()), // 800 bytes
+            (50, 52),                // SpriteVertex-like stride
             (75, 52),
         ]);
-        assert!(size > 400 + 800 + 50 * 52 + 75 * 52, "padded_size should exceed raw sum");
-        assert!(size < 400 + 800 + 50 * 52 + 75 * 52 + 4 * 8192,
-            "padded_size should be tighter than naive + magic constant");
+        assert!(
+            size > 400 + 800 + 50 * 52 + 75 * 52,
+            "padded_size should exceed raw sum"
+        );
+        assert!(
+            size < 400 + 800 + 50 * 52 + 75 * 52 + 4 * 8192,
+            "padded_size should be tighter than naive + magic constant"
+        );
     }
-
 }

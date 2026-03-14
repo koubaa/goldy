@@ -277,7 +277,8 @@ impl VertexBufferLayout {
             .collect();
         let expected_stride = std::mem::size_of::<T>() as u32;
         assert_eq!(
-            offset, expected_stride,
+            offset,
+            expected_stride,
             "VertexBufferLayout::from_formats: sum of format sizes ({offset}) != \
              size_of::<{}>() ({expected_stride}). Check field order and padding.",
             std::any::type_name::<T>(),

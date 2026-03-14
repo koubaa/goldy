@@ -352,9 +352,8 @@ mod tests {
         let shader_path = manifest_dir.join("shaders");
         let shader_path_str = shader_path.to_string_lossy();
 
-        let test_shader =
-            std::fs::read_to_string(shader_path.join("test_goldy_exp_math.slang"))
-                .expect("Failed to read test_goldy_exp_math.slang");
+        let test_shader = std::fs::read_to_string(shader_path.join("test_goldy_exp_math.slang"))
+            .expect("Failed to read test_goldy_exp_math.slang");
 
         let entry = &[("cs_main", SlangStage::Compute)];
 

@@ -43,12 +43,10 @@ static SHARED_DX12: OnceLock<Arc<Mutex<Box<dyn super::GpuBackend>>>> = OnceLock:
 /// True when the D3D12 debug layer will be enabled (debug build or GOLDY_DX12_DEBUG=1).
 /// Used to decide between singleton (debug) vs per-instance (release) backend.
 fn is_debug_mode() -> bool {
-    let no_debug = std::env::var("GOLDY_DX12_NO_DEBUG")
-        .is_ok_and(|v| v == "1" || v == "true");
+    let no_debug = std::env::var("GOLDY_DX12_NO_DEBUG").is_ok_and(|v| v == "1" || v == "true");
     !no_debug
         && (cfg!(debug_assertions)
-            || std::env::var("GOLDY_DX12_DEBUG")
-                .is_ok_and(|v| v == "1" || v == "true"))
+            || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true"))
 }
 
 /// Get or create the shared DX12 backend.
@@ -57,14 +55,14 @@ pub fn shared_backend() -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>
         Ok(SHARED_DX12
             .get_or_init(|| {
                 let backend = Dx12Backend::new().expect("Failed to create DX12 backend");
-                Arc::new(Mutex::new(
-                    Box::new(backend) as Box<dyn super::GpuBackend>,
-                ))
+                Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>))
             })
             .clone())
     } else {
         let backend = Dx12Backend::new()?;
-        Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))
+        Ok(Arc::new(Mutex::new(
+            Box::new(backend) as Box<dyn super::GpuBackend>
+        )))
     }
 }
 
@@ -186,33 +184,82 @@ impl Dx12Backend {
         if let Some(logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
 
-            let buffer_handles: Vec<_> = self.state.buffers.iter()
-                .filter(|(_, b)| b.device_handle == device_handle).map(|(h, _)| *h).collect();
-            for handle in buffer_handles { self.state.buffers.remove(&handle); }
+            let buffer_handles: Vec<_> = self
+                .state
+                .buffers
+                .iter()
+                .filter(|(_, b)| b.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in buffer_handles {
+                self.state.buffers.remove(&handle);
+            }
 
-            let shader_handles: Vec<_> = self.state.shaders.iter()
-                .filter(|(_, s)| s.device_handle == device_handle).map(|(h, _)| *h).collect();
-            for handle in shader_handles { self.state.shaders.remove(&handle); }
+            let shader_handles: Vec<_> = self
+                .state
+                .shaders
+                .iter()
+                .filter(|(_, s)| s.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in shader_handles {
+                self.state.shaders.remove(&handle);
+            }
 
-            let pipeline_handles: Vec<_> = self.state.pipelines.iter()
-                .filter(|(_, p)| p.device_handle == device_handle).map(|(h, _)| *h).collect();
-            for handle in pipeline_handles { self.state.pipelines.remove(&handle); }
+            let pipeline_handles: Vec<_> = self
+                .state
+                .pipelines
+                .iter()
+                .filter(|(_, p)| p.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in pipeline_handles {
+                self.state.pipelines.remove(&handle);
+            }
 
-            let target_handles: Vec<_> = self.state.render_targets.iter()
-                .filter(|(_, t)| t.device_handle == device_handle).map(|(h, _)| *h).collect();
-            for handle in target_handles { self.state.render_targets.remove(&handle); }
+            let target_handles: Vec<_> = self
+                .state
+                .render_targets
+                .iter()
+                .filter(|(_, t)| t.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in target_handles {
+                self.state.render_targets.remove(&handle);
+            }
 
-            let surface_handles: Vec<_> = self.state.surfaces.iter()
-                .filter(|(_, s)| s.device_handle == device_handle).map(|(h, _)| *h).collect();
-            for handle in surface_handles { self.state.surfaces.remove(&handle); }
+            let surface_handles: Vec<_> = self
+                .state
+                .surfaces
+                .iter()
+                .filter(|(_, s)| s.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in surface_handles {
+                self.state.surfaces.remove(&handle);
+            }
 
-            let texture_handles: Vec<_> = self.state.textures.iter()
-                .filter(|(_, t)| t.device_handle == device_handle).map(|(h, _)| *h).collect();
-            for handle in texture_handles { self.state.textures.remove(&handle); }
+            let texture_handles: Vec<_> = self
+                .state
+                .textures
+                .iter()
+                .filter(|(_, t)| t.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in texture_handles {
+                self.state.textures.remove(&handle);
+            }
 
-            let sampler_handles: Vec<_> = self.state.samplers.iter()
-                .filter(|(_, s)| s.device_handle == device_handle).map(|(h, _)| *h).collect();
-            for handle in sampler_handles { self.state.samplers.remove(&handle); }
+            let sampler_handles: Vec<_> = self
+                .state
+                .samplers
+                .iter()
+                .filter(|(_, s)| s.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in sampler_handles {
+                self.state.samplers.remove(&handle);
+            }
 
             tracing::info!("Destroyed DX12 device {}", device_handle);
         }
