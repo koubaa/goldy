@@ -26,11 +26,47 @@ use types::{Dx12State, DxgiAdapterInfo, LogicalDevice};
 use super::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug};
 use windows::Win32::Graphics::Dxgi::*;
 
 static DEBUG_LAYER_INIT: Once = Once::new();
+
+/// Shared DX12 backend singleton.
+///
+/// The D3D12 debug layer tracks all objects process-wide and is not thread-safe
+/// under concurrent operations from multiple backend instances. Sharing a single
+/// backend lets the existing `Arc<Mutex<...>>` in `Instance`/`Device` naturally
+/// serialize all D3D12 calls, preventing access violations in parallel tests.
+static SHARED_DX12: OnceLock<Arc<Mutex<Box<dyn super::GpuBackend>>>> = OnceLock::new();
+
+/// True when the D3D12 debug layer will be enabled (debug build or GOLDY_DX12_DEBUG=1).
+/// Used to decide between singleton (debug) vs per-instance (release) backend.
+fn is_debug_mode() -> bool {
+    let no_debug = std::env::var("GOLDY_DX12_NO_DEBUG")
+        .is_ok_and(|v| v == "1" || v == "true");
+    !no_debug
+        && (cfg!(debug_assertions)
+            || std::env::var("GOLDY_DX12_DEBUG")
+                .is_ok_and(|v| v == "1" || v == "true"))
+}
+
+/// Get or create the shared DX12 backend.
+pub fn shared_backend() -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>> {
+    if is_debug_mode() {
+        Ok(SHARED_DX12
+            .get_or_init(|| {
+                let backend = Dx12Backend::new().expect("Failed to create DX12 backend");
+                Arc::new(Mutex::new(
+                    Box::new(backend) as Box<dyn super::GpuBackend>,
+                ))
+            })
+            .clone())
+    } else {
+        let backend = Dx12Backend::new()?;
+        Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))
+    }
+}
 
 /// DirectX 12 backend.
 pub struct Dx12Backend {
@@ -43,11 +79,10 @@ impl Dx12Backend {
         tracing::info!("Initializing DX12 backend");
 
         // Enable debug layer in debug builds or when GOLDY_DX12_DEBUG=1.
-        // Must be called exactly once before any device creation (process-global).
+        // Set GOLDY_DX12_NO_DEBUG=1 to force-disable (avoids debug-layer crashes
+        // in parallel test threads where multiple D3D12 devices coexist).
         DEBUG_LAYER_INIT.call_once(|| {
-            let enable = cfg!(debug_assertions)
-                || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true");
-            if enable {
+            if is_debug_mode() {
                 let mut debug_interface: Option<ID3D12Debug> = None;
                 if unsafe { D3D12GetDebugInterface(&mut debug_interface) }.is_ok() {
                     if let Some(d) = debug_interface {
@@ -59,7 +94,7 @@ impl Dx12Backend {
         });
 
         // Create DXGI factory
-        let factory_flags = if cfg!(debug_assertions) {
+        let factory_flags = if is_debug_mode() {
             DXGI_CREATE_FACTORY_DEBUG
         } else {
             DXGI_CREATE_FACTORY_FLAGS(0)
@@ -146,14 +181,51 @@ impl Dx12Backend {
     }
 }
 
+impl Dx12Backend {
+    fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
+        if let Some(logical_device) = self.state.devices.remove(&device_handle) {
+            let _ = self.wait_for_gpu(&logical_device);
+
+            let buffer_handles: Vec<_> = self.state.buffers.iter()
+                .filter(|(_, b)| b.device_handle == device_handle).map(|(h, _)| *h).collect();
+            for handle in buffer_handles { self.state.buffers.remove(&handle); }
+
+            let shader_handles: Vec<_> = self.state.shaders.iter()
+                .filter(|(_, s)| s.device_handle == device_handle).map(|(h, _)| *h).collect();
+            for handle in shader_handles { self.state.shaders.remove(&handle); }
+
+            let pipeline_handles: Vec<_> = self.state.pipelines.iter()
+                .filter(|(_, p)| p.device_handle == device_handle).map(|(h, _)| *h).collect();
+            for handle in pipeline_handles { self.state.pipelines.remove(&handle); }
+
+            let target_handles: Vec<_> = self.state.render_targets.iter()
+                .filter(|(_, t)| t.device_handle == device_handle).map(|(h, _)| *h).collect();
+            for handle in target_handles { self.state.render_targets.remove(&handle); }
+
+            let surface_handles: Vec<_> = self.state.surfaces.iter()
+                .filter(|(_, s)| s.device_handle == device_handle).map(|(h, _)| *h).collect();
+            for handle in surface_handles { self.state.surfaces.remove(&handle); }
+
+            let texture_handles: Vec<_> = self.state.textures.iter()
+                .filter(|(_, t)| t.device_handle == device_handle).map(|(h, _)| *h).collect();
+            for handle in texture_handles { self.state.textures.remove(&handle); }
+
+            let sampler_handles: Vec<_> = self.state.samplers.iter()
+                .filter(|(_, s)| s.device_handle == device_handle).map(|(h, _)| *h).collect();
+            for handle in sampler_handles { self.state.samplers.remove(&handle); }
+
+            tracing::info!("Destroyed DX12 device {}", device_handle);
+        }
+    }
+}
+
 impl Drop for Dx12Backend {
     fn drop(&mut self) {
         tracing::info!("Shutting down DX12 backend");
 
-        // Wait for all devices to finish and destroy them
         let device_handles: Vec<_> = self.state.devices.keys().copied().collect();
         for handle in device_handles {
-            self.destroy_device(handle);
+            self.destroy_device_inner(handle);
         }
     }
 }
@@ -172,96 +244,7 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
-        if let Some(logical_device) = self.state.devices.remove(&device_handle) {
-            // Wait for GPU to finish
-            let _ = self.wait_for_gpu(&logical_device);
-
-            // Destroy buffers owned by this device
-            let buffer_handles: Vec<_> = self
-                .state
-                .buffers
-                .iter()
-                .filter(|(_, b)| b.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in buffer_handles {
-                self.state.buffers.remove(&handle);
-            }
-
-            // Destroy shaders owned by this device
-            let shader_handles: Vec<_> = self
-                .state
-                .shaders
-                .iter()
-                .filter(|(_, s)| s.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in shader_handles {
-                self.state.shaders.remove(&handle);
-            }
-
-            // Destroy pipelines owned by this device
-            let pipeline_handles: Vec<_> = self
-                .state
-                .pipelines
-                .iter()
-                .filter(|(_, p)| p.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in pipeline_handles {
-                self.state.pipelines.remove(&handle);
-            }
-
-            // Destroy render targets owned by this device
-            let target_handles: Vec<_> = self
-                .state
-                .render_targets
-                .iter()
-                .filter(|(_, t)| t.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in target_handles {
-                self.state.render_targets.remove(&handle);
-            }
-
-            // Destroy surfaces owned by this device
-            let surface_handles: Vec<_> = self
-                .state
-                .surfaces
-                .iter()
-                .filter(|(_, s)| s.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in surface_handles {
-                self.state.surfaces.remove(&handle);
-            }
-
-            // Destroy textures owned by this device
-            let texture_handles: Vec<_> = self
-                .state
-                .textures
-                .iter()
-                .filter(|(_, t)| t.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in texture_handles {
-                self.state.textures.remove(&handle);
-            }
-
-            // Destroy samplers owned by this device
-            let sampler_handles: Vec<_> = self
-                .state
-                .samplers
-                .iter()
-                .filter(|(_, s)| s.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in sampler_handles {
-                self.state.samplers.remove(&handle);
-            }
-
-            tracing::info!("Destroyed DX12 device {}", device_handle);
-        }
+        self.destroy_device_inner(device_handle);
     }
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {

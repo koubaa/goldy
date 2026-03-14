@@ -437,6 +437,32 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     }
 }
 
+/// Create the default backend wrapped in an `Arc<Mutex<...>>`.
+///
+/// For DX12, returns a process-wide singleton so that all `Instance` objects
+/// share one backend — the existing per-instance `Mutex` then naturally
+/// serializes all D3D12 calls, preventing debug-layer access violations
+/// when parallel test threads create independent instances.
+///
+/// For other backends, creates a fresh instance each time.
+pub fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    {
+        let wants_dx12 = match std::env::var("GOLDY_BACKEND") {
+            Ok(v) => matches!(v.to_lowercase().as_str(), "dx12" | "d3d12" | "directx"),
+            Err(_) => true, // DX12 is the Windows default
+        };
+        if wants_dx12 {
+            return dx12::shared_backend();
+        }
+    }
+
+    let backend = create_default_backend()?;
+    Ok(Arc::new(Mutex::new(backend)))
+}
+
 /// Create a specific backend by type.
 pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> {
     match backend_type {
