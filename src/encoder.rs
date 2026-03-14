@@ -83,7 +83,7 @@ impl<'a> RenderPass<'a> {
 
     /// Set a vertex buffer.
     ///
-    /// Accepts either a [`Buffer`] or [`BufferView`]; for pool-allocated views,
+    /// Accepts either a [`Buffer`] or [`crate::BufferView`]; for pool-allocated views,
     /// the parent buffer and offset are resolved automatically.
     pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl BufferSource) {
         self.encoder.commands.push(RenderCommand::SetVertexBuffer {
@@ -152,7 +152,7 @@ impl<'a> RenderPass<'a> {
     /// Set an index buffer for indexed drawing.
     ///
     /// The buffer should contain index data (u16 or u32 values).
-    /// Accepts either a [`Buffer`] or [`BufferView`].
+    /// Accepts either a [`Buffer`] or [`crate::BufferView`].
     pub fn set_index_buffer(&mut self, buffer: &impl BufferSource, format: IndexFormat) {
         self.encoder.commands.push(RenderCommand::SetIndexBuffer {
             buffer: buffer.source_handle(),
