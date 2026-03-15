@@ -1,9 +1,9 @@
 //! Compute pipeline and dispatch logic.
 
 use super::shader;
-use super::types::{self, ComputePipelineState, Dx12State};
+use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
 use super::{ComputePipelineHandle, DeviceHandle, ShaderHandle};
-use crate::backend::ComputeCommand;
+use crate::backend::{ComputeCommand, FenceToken};
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
@@ -70,34 +70,64 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
     state.compute_pipelines.remove(&pipeline_handle);
 }
 
-/// Dispatch compute commands.
-pub(super) fn dispatch(
+/// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+pub(super) fn submit(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     commands: &[ComputeCommand],
-) -> Result<()> {
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
+) -> Result<FenceToken> {
+    let (allocator, fence_value, slot_idx) = {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
 
-    // Reset command allocator
-    unsafe { logical_device.command_allocator.Reset() }
-        .context("Failed to reset command allocator")?;
+        // Find a free slot (allocator whose work has completed) or create a new one
+        let fence = &logical_device.fence;
+        let completed = unsafe { fence.GetCompletedValue() };
+        let pool = &mut logical_device.compute_allocator_pool;
+        let slot_idx = pool.iter().position(|s| completed >= s.fence_value);
+        let (allocator, slot_idx) = if let Some(idx) = slot_idx {
+            let slot = &mut pool[idx];
+            unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
+            (slot.allocator.clone(), idx)
+        } else {
+            let new_allocator: ID3D12CommandAllocator = unsafe {
+                logical_device
+                    .device
+                    .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+            }
+            .context("Failed to create command allocator")?;
+            pool.push(ComputeAllocatorSlot {
+                allocator: new_allocator.clone(),
+                fence_value: 0,
+            });
+            unsafe { new_allocator.Reset() }.context("Failed to reset new command allocator")?;
+            (new_allocator, pool.len() - 1)
+        };
+        let token = logical_device.fence_value;
+        logical_device.fence_value += 1;
+        (allocator, token, slot_idx)
+    };
 
-    // Create command list
-    let command_list: ID3D12GraphicsCommandList = unsafe {
-        logical_device.device.CreateCommandList(
-            0,
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            &logical_device.command_allocator,
-            None,
-        )
-    }
-    .context("Failed to create command list")?;
+    // Create command list (allocator is owned, no borrow of state)
+    let command_list: ID3D12GraphicsCommandList = {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        unsafe {
+            logical_device.device.CreateCommandList(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                &allocator,
+                None,
+            )
+        }
+        .context("Failed to create command list")?
+    };
 
-    // Bind descriptor heaps for bindless rendering (must be done before any dispatch calls)
-    // Re-borrow logical_device to get heaps
+    // Bind descriptor heaps for bindless rendering
     let logical_device = state
         .devices
         .get(&device_handle)
@@ -402,20 +432,60 @@ pub(super) fn dispatch(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    // Wait for completion
-    let fence_value = logical_device.fence_value;
+    // Signal fence with the token we reserved
     unsafe {
         logical_device
             .command_queue
             .Signal(&logical_device.fence, fence_value)
     }
     .context("Failed to signal fence")?;
-    super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
 
-    // Increment fence value for next operation
+    // Update the slot's fence_value so we know when it can be reused
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
+        if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
+            slot.fence_value = fence_value;
+        }
     }
 
-    Ok(())
+    Ok(fence_value)
+}
+
+/// Check if the fence for the given token has signaled.
+pub(super) fn is_fence_complete(
+    state: &Dx12State,
+    device_handle: DeviceHandle,
+    token: FenceToken,
+) -> bool {
+    let logical_device = match state.devices.get(&device_handle) {
+        Some(dev) => dev,
+        None => return false,
+    };
+    (unsafe { logical_device.fence.GetCompletedValue() }) >= token
+}
+
+/// Block until the fence signals.
+pub(super) fn wait_fence(
+    state: &Dx12State,
+    device_handle: DeviceHandle,
+    token: FenceToken,
+) -> Result<()> {
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+    super::utils::wait_for_fence(&logical_device.fence, token)
+}
+
+/// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed.
+pub(super) fn wait_fence_timeout(
+    state: &Dx12State,
+    device_handle: DeviceHandle,
+    token: FenceToken,
+    timeout_ms: u32,
+) -> Result<bool> {
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+    super::utils::wait_for_fence_timeout(&logical_device.fence, token, timeout_ms)
 }

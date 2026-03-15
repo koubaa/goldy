@@ -1,8 +1,8 @@
 //! Compute pipeline and dispatch logic.
 
-use super::types::{self, BindlessIndices, BufferState, ComputePipelineState, LogicalDevice};
-use super::{BufferHandle, ComputePipelineHandle, DeviceHandle};
-use crate::backend::ComputeCommand;
+use super::types::{self, BindlessIndices, ComputePipelineState, LogicalDevice};
+use super::{ComputePipelineHandle, DeviceHandle};
+use crate::backend::{ComputeCommand, FenceToken};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -90,17 +90,24 @@ pub(super) fn destroy(
     }
 }
 
-/// Dispatch compute commands.
-pub(super) fn dispatch(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
-    compute_pipelines: &HashMap<ComputePipelineHandle, ComputePipelineState>,
-    buffers: &HashMap<BufferHandle, BufferState>,
+/// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+pub(super) fn submit(
+    state: &mut super::types::VulkanState,
     device_handle: DeviceHandle,
     commands: &[ComputeCommand],
-) -> Result<()> {
+) -> Result<FenceToken> {
+    let devices = &state.devices;
+    let compute_pipelines = &state.compute_pipelines;
+    let buffers = &state.buffers;
+
     let logical_device = devices
         .get(&device_handle)
         .context("Invalid device handle")?;
+
+    // Create fence for this submission
+    let fence_create_info = vk::FenceCreateInfo::default();
+    let fence = unsafe { logical_device.device.create_fence(&fence_create_info, None) }
+        .context("Failed to create fence")?;
 
     // Allocate command buffer
     let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -122,7 +129,7 @@ pub(super) fn dispatch(
     // Track current pipeline for push constants
     let mut current_pipeline: Option<ComputePipelineHandle> = None;
 
-    // Process commands
+    // Process commands (same logic as dispatch)
     for command in commands {
         match command {
             ComputeCommand::SetPipeline(handle) => {
@@ -134,7 +141,6 @@ pub(super) fn dispatch(
                             pipeline_state.pipeline,
                         );
 
-                        // Bind the global bindless descriptor set if enabled
                         if logical_device.bindless_enabled {
                             if let (Some(bindless_set), Some(bindless_layout)) = (
                                 logical_device.bindless_descriptor_set,
@@ -157,7 +163,6 @@ pub(super) fn dispatch(
             ComputeCommand::SetPushConstants {
                 buffers: buffer_handles,
             } => {
-                // Fully bindless mode: push buffer indices directly
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                     let mut indices = BindlessIndices::default();
                     for (i, buffer_handle) in buffer_handles.iter().enumerate() {
@@ -183,7 +188,6 @@ pub(super) fn dispatch(
             ComputeCommand::SetPushConstantsRaw {
                 indices: raw_indices,
             } => {
-                // Fully bindless mode: push raw indices directly (for textures/samplers)
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                     let mut indices = BindlessIndices::default();
                     for (i, &idx) in raw_indices.iter().enumerate() {
@@ -295,27 +299,101 @@ pub(super) fn dispatch(
     unsafe { logical_device.device.end_command_buffer(cmd) }
         .context("Failed to end command buffer")?;
 
-    // Submit and wait
+    // Submit with fence (non-blocking)
     let cmd_buffers = [cmd];
     let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
     unsafe {
         logical_device
             .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+            .queue_submit(logical_device.queue, &[submit_info], fence)
             .context("Failed to submit command buffer")?;
-        logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
-            .context("Failed to wait for queue")?;
     }
 
-    // Cleanup
+    // Cleanup command buffer (fence tracks completion)
     unsafe {
         logical_device
             .device
             .free_command_buffers(logical_device.command_pool, &cmd_buffers);
     }
 
+    // Store fence and return token
+    let token = state.next_compute_fence_token;
+    state.next_compute_fence_token += 1;
+    state
+        .compute_fence_pool
+        .insert(token, (device_handle, fence));
+
+    Ok(token)
+}
+
+/// Check if the fence for the given token has signaled.
+pub(super) fn is_fence_complete(
+    state: &super::types::VulkanState,
+    _device_handle: DeviceHandle,
+    token: FenceToken,
+) -> bool {
+    let Some((device_handle, fence)) = state.compute_fence_pool.get(&token) else {
+        return true; // Unknown token, treat as complete
+    };
+    let Some(logical_device) = state.devices.get(device_handle) else {
+        return true;
+    };
+    unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or_default()
+}
+
+/// Block until the fence signals.
+pub(super) fn wait_fence(
+    state: &super::types::VulkanState,
+    _device_handle: DeviceHandle,
+    token: FenceToken,
+) -> Result<()> {
+    let (stored_device, fence) = state
+        .compute_fence_pool
+        .get(&token)
+        .context("Invalid fence token")?;
+    let logical_device = state
+        .devices
+        .get(stored_device)
+        .context("Device for fence no longer exists")?;
+
+    unsafe {
+        logical_device
+            .device
+            .wait_for_fences(&[*fence], true, u64::MAX)
+            .context("Failed to wait for fence")?;
+    }
     Ok(())
+}
+
+/// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed.
+pub(super) fn wait_fence_timeout(
+    state: &super::types::VulkanState,
+    _device: DeviceHandle,
+    token: FenceToken,
+    timeout_ms: u32,
+) -> Result<bool> {
+    let (stored_device, fence) = state
+        .compute_fence_pool
+        .get(&token)
+        .context("Invalid fence token")?;
+    let logical_device = state
+        .devices
+        .get(stored_device)
+        .context("Device for fence no longer exists")?;
+
+    // vkWaitForFences uses nanoseconds
+    let timeout_ns = u64::from(timeout_ms) * 1_000_000;
+
+    let result = unsafe {
+        logical_device
+            .device
+            .wait_for_fences(&[*fence], true, timeout_ns)
+    };
+
+    match result {
+        Ok(()) => Ok(true),
+        Err(vk::Result::TIMEOUT) => Ok(false),
+        Err(e) => Err(anyhow::anyhow!("Failed to wait for fence: {:?}", e)),
+    }
 }

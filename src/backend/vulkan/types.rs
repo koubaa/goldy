@@ -11,8 +11,8 @@
 //! - Update-after-bind allows descriptor updates without pipeline barriers
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle,
+    RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
@@ -521,4 +521,7 @@ pub(super) struct VulkanState {
     pub next_sampler_handle: SamplerHandle,
     /// Per-backend Slang compiler instance (avoids global state issues in tests)
     pub slang_compiler: crate::slang::SlangCompiler,
+    /// Per-submission fences for non-blocking compute; token -> (device, VkFence)
+    pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence)>,
+    pub next_compute_fence_token: u64,
 }

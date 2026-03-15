@@ -1,13 +1,14 @@
 //! Compute pipeline and dispatch logic.
 
-use super::super::{ComputeCommand, ComputePipelineHandle, DeviceHandle, ShaderHandle};
+use super::super::{ComputeCommand, ComputePipelineHandle, DeviceHandle, FenceToken, ShaderHandle};
 use super::shader::parse_numthreads;
 use super::types::PUSH_CONSTANTS_SLOT;
 use super::types::{BindlessIndices, ComputePipelineState, MetalState, MAX_PUSH_CONSTANT_INDICES};
 use crate::slang::SlangStage;
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::MTLSize;
+use mtl::{MTLCommandBufferStatus, MTLSize};
+use std::sync::atomic::Ordering;
 
 /// Create a compute pipeline.
 pub(super) fn create(
@@ -87,28 +88,16 @@ fn begin_compute_encoder<'a>(
     encoder
 }
 
-/// Dispatch compute commands.
-///
-/// ClearBuffer commands are executed via a blit encoder (`fill_buffer`) so they
-/// are ordered correctly with respect to surrounding compute dispatches.
-pub(super) fn dispatch(
-    state: &mut MetalState,
-    device_handle: DeviceHandle,
+/// Record compute commands to a command buffer (shared by submit and dispatch).
+fn record_commands_to_buffer(
+    state: &MetalState,
+    command_buffer: &mtl::CommandBufferRef,
+    logical_device: &super::types::LogicalDevice,
     commands: &[ComputeCommand],
 ) -> Result<()> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
-
-    let command_buffer = logical_device.command_queue.new_command_buffer();
-
-    // Defer creating the first compute encoder until the first non-ClearBuffer
-    // command so we never emit an empty encoder before a leading blit.
     let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
     let mut current_pipeline: Option<&ComputePipelineState> = None;
 
-    /// End the active compute encoder, if any.
     macro_rules! end_compute {
         () => {
             if let Some(enc) = encoder.take() {
@@ -117,8 +106,6 @@ pub(super) fn dispatch(
         };
     }
 
-    /// Ensure a compute encoder is active, (re-)creating one if needed and
-    /// rebinding the pipeline state that was set before the last blit.
     macro_rules! ensure_compute {
         () => {
             if encoder.is_none() {
@@ -255,8 +242,6 @@ pub(super) fn dispatch(
                     *size
                 };
                 if clear_size > 0 {
-                    // End compute encoder, issue GPU-ordered fill via blit encoder,
-                    // then lazily resume compute on the next non-clear command.
                     end_compute!();
                     let blit = command_buffer.new_blit_command_encoder();
                     let range = mtl::NSRange::new(*offset, clear_size);
@@ -268,8 +253,92 @@ pub(super) fn dispatch(
     }
 
     end_compute!();
-    command_buffer.commit();
-    command_buffer.wait_until_completed();
-
     Ok(())
+}
+
+/// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+pub(super) fn submit(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    commands: &[ComputeCommand],
+) -> Result<FenceToken> {
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let command_buffer_ref = logical_device.command_queue.new_command_buffer();
+    record_commands_to_buffer(state, command_buffer_ref, logical_device, commands)?;
+
+    let owned_buffer = command_buffer_ref.to_owned();
+    let token = state
+        .next_compute_fence_token
+        .fetch_add(1, Ordering::SeqCst);
+    state
+        .compute_fence_pool
+        .lock()
+        .unwrap()
+        .insert(token, owned_buffer);
+
+    command_buffer_ref.commit();
+
+    Ok(token)
+}
+
+/// Check if the fence for the given token has signaled (work complete).
+pub(super) fn is_fence_complete(
+    state: &MetalState,
+    _device: DeviceHandle,
+    token: FenceToken,
+) -> bool {
+    let pool = state.compute_fence_pool.lock().unwrap();
+    if let Some(buf) = pool.get(&token) {
+        buf.status() == MTLCommandBufferStatus::Completed
+    } else {
+        true // Already removed (waited on), consider complete
+    }
+}
+
+/// Block until the fence signals.
+pub(super) fn wait_fence(
+    state: &MetalState,
+    _device: DeviceHandle,
+    token: FenceToken,
+) -> Result<()> {
+    let mut pool = state.compute_fence_pool.lock().unwrap();
+    if let Some(buf) = pool.remove(&token) {
+        buf.wait_until_completed();
+    }
+    Ok(())
+}
+
+/// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed.
+pub(super) fn wait_fence_timeout(
+    state: &MetalState,
+    _device: DeviceHandle,
+    token: FenceToken,
+    timeout_ms: u32,
+) -> Result<bool> {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(timeout_ms as u64);
+
+    loop {
+        {
+            let pool = state.compute_fence_pool.lock().unwrap();
+            if let Some(buf) = pool.get(&token) {
+                if buf.status() == MTLCommandBufferStatus::Completed {
+                    drop(pool);
+                    let mut p = state.compute_fence_pool.lock().unwrap();
+                    p.remove(&token);
+                    return Ok(true);
+                }
+            } else {
+                return Ok(true); // Already removed
+            }
+        }
+        if start.elapsed() >= timeout {
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }

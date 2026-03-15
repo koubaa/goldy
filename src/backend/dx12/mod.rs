@@ -617,11 +617,28 @@ impl GpuBackend for Dx12Backend {
         compute::destroy(&mut self.state, pipeline_handle);
     }
 
-    fn dispatch_compute(
+    fn submit_compute(
         &mut self,
         device_handle: DeviceHandle,
         commands: &[ComputeCommand],
-    ) -> Result<()> {
-        compute::dispatch(&mut self.state, device_handle, commands)
+    ) -> Result<FenceToken> {
+        compute::submit(&mut self.state, device_handle, commands)
+    }
+
+    fn is_fence_complete(&self, device_handle: DeviceHandle, token: FenceToken) -> bool {
+        compute::is_fence_complete(&self.state, device_handle, token)
+    }
+
+    fn wait_fence(&self, device_handle: DeviceHandle, token: FenceToken) -> Result<()> {
+        compute::wait_fence(&self.state, device_handle, token)
+    }
+
+    fn wait_fence_timeout(
+        &self,
+        device_handle: DeviceHandle,
+        token: FenceToken,
+        timeout_ms: u32,
+    ) -> Result<bool> {
+        compute::wait_fence_timeout(&self.state, device_handle, token, timeout_ms)
     }
 }

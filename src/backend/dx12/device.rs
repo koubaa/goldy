@@ -221,6 +221,12 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
+    // Initialize compute allocator pool with the primary allocator
+    let compute_allocator_pool = vec![types::ComputeAllocatorSlot {
+        allocator: command_allocator.clone(),
+        fence_value: 0, // Not yet used; GetCompletedValue() >= 0 so slot is free
+    }];
+
     state.devices.insert(
         handle,
         LogicalDevice {
@@ -228,6 +234,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             adapter_id,
             command_queue,
             command_allocator,
+            compute_allocator_pool,
             rtv_heap,
             rtv_descriptor_size,
             dsv_heap,

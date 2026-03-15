@@ -14,8 +14,11 @@ use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
+use crate::backend::FenceToken;
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
@@ -265,6 +268,10 @@ unsafe impl Sync for SurfaceState {}
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
+    /// Pool of in-flight compute command buffers for non-blocking submit.
+    /// Key: FenceToken. Removed when wait completes.
+    pub compute_fence_pool: Mutex<HashMap<FenceToken, mtl::CommandBuffer>>,
+    pub next_compute_fence_token: AtomicU64,
     pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
     pub buffers: std::collections::HashMap<BufferHandle, BufferState>,

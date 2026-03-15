@@ -18,6 +18,7 @@ pub mod compute;
 pub mod device;
 pub mod encoder;
 pub mod examples;
+pub mod gpu_future;
 pub mod pipeline;
 pub mod render_target;
 pub mod sampler;
@@ -39,6 +40,7 @@ pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transf
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
+pub use gpu_future::GpuFuture;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use render_target::RenderTarget;
 pub use sampler::Sampler;

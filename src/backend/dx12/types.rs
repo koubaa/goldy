@@ -146,12 +146,22 @@ pub(crate) struct DxgiAdapterInfo {
     pub adapter_id: u32,
 }
 
+/// A slot in the compute command allocator pool.
+/// An allocator can only be reset after its associated GPU work has completed.
+#[allow(dead_code)]
+pub(crate) struct ComputeAllocatorSlot {
+    pub allocator: Direct3D12::ID3D12CommandAllocator,
+    /// Fence value when this slot was last used (for reuse detection)
+    pub fence_value: u64,
+}
+
 /// A logical D3D12 device with associated resources.
 #[allow(dead_code)]
 pub(crate) struct LogicalDevice {
     pub device: Direct3D12::ID3D12Device,
     pub adapter_id: u32,
     pub command_queue: Direct3D12::ID3D12CommandQueue,
+    /// Legacy single allocator for non-compute paths (e.g. render target). Compute uses the pool.
     pub command_allocator: Direct3D12::ID3D12CommandAllocator,
     pub rtv_heap: Direct3D12::ID3D12DescriptorHeap,
     pub rtv_descriptor_size: u32,
@@ -173,6 +183,9 @@ pub(crate) struct LogicalDevice {
     pub compute_dispatch_indirect_signature: Option<Direct3D12::ID3D12CommandSignature>,
     /// Registry tracking resource offsets in descriptor heaps
     pub resource_registry: ResourceRegistry,
+    /// Pool of command allocators for non-blocking compute submission.
+    /// Slots can be reused when fence signals completion.
+    pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
 }
 
 /// GPU buffer state.

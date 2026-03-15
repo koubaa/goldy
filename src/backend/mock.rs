@@ -886,20 +886,37 @@ impl GpuBackend for MockBackend {
         self.compute_pipelines.remove(&pipeline);
     }
 
-    fn dispatch_compute(
+    fn submit_compute(
         &mut self,
         device: DeviceHandle,
         commands: &[ComputeCommand],
-    ) -> Result<()> {
+    ) -> Result<FenceToken> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
 
-        // Record commands
         self.recorded_compute_commands.push(commands.to_vec());
         self.compute_dispatch_count += 1;
 
+        // Mock completes immediately; use token 0.
+        Ok(0)
+    }
+
+    fn is_fence_complete(&self, _device: DeviceHandle, _token: FenceToken) -> bool {
+        true
+    }
+
+    fn wait_fence(&self, _device: DeviceHandle, _token: FenceToken) -> Result<()> {
         Ok(())
+    }
+
+    fn wait_fence_timeout(
+        &self,
+        _device: DeviceHandle,
+        _token: FenceToken,
+        _timeout_ms: u32,
+    ) -> Result<bool> {
+        Ok(true)
     }
 }
 

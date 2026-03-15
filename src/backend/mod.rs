@@ -69,6 +69,10 @@ pub type SwapchainImageHandle = u64;
 pub type TextureHandle = u64;
 pub type SamplerHandle = u64;
 
+/// Fence token for non-blocking compute submission.
+/// Backends use this to identify a specific GPU submission for polling and waiting.
+pub type FenceToken = u64;
+
 /// Render command for command buffer recording.
 #[derive(Debug, Clone)]
 pub enum RenderCommand {
@@ -365,8 +369,35 @@ pub trait GpuBackend: Send + Sync {
 
     /// Execute compute commands.
     /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand])
-        -> Result<()>;
+    fn dispatch_compute(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[ComputeCommand],
+    ) -> Result<()> {
+        let token = self.submit_compute(device, commands)?;
+        self.wait_fence(device, token)
+    }
+
+    /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+    fn submit_compute(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[ComputeCommand],
+    ) -> Result<FenceToken>;
+
+    /// Check if the fence for the given token has signaled (work complete).
+    fn is_fence_complete(&self, device: DeviceHandle, token: FenceToken) -> bool;
+
+    /// Block until the fence signals. Returns an error if the device was lost.
+    fn wait_fence(&self, device: DeviceHandle, token: FenceToken) -> Result<()>;
+
+    /// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed, Err if device lost.
+    fn wait_fence_timeout(
+        &self,
+        device: DeviceHandle,
+        token: FenceToken,
+        timeout_ms: u32,
+    ) -> Result<bool>;
 }
 
 /// Create the default backend for the current platform.

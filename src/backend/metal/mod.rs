@@ -49,6 +49,8 @@ impl MetalBackend {
 
         Ok(Self {
             state: MetalState {
+                compute_fence_pool: std::sync::Mutex::new(std::collections::HashMap::new()),
+                next_compute_fence_token: std::sync::atomic::AtomicU64::new(1),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
                 buffers: std::collections::HashMap::new(),
@@ -420,12 +422,29 @@ impl GpuBackend for MetalBackend {
         compute::destroy(&mut self.state, pipeline);
     }
 
-    fn dispatch_compute(
+    fn submit_compute(
         &mut self,
         device: DeviceHandle,
         commands: &[ComputeCommand],
-    ) -> Result<()> {
-        compute::dispatch(&mut self.state, device, commands)
+    ) -> Result<super::FenceToken> {
+        compute::submit(&mut self.state, device, commands)
+    }
+
+    fn is_fence_complete(&self, device: DeviceHandle, token: super::FenceToken) -> bool {
+        compute::is_fence_complete(&self.state, device, token)
+    }
+
+    fn wait_fence(&self, device: DeviceHandle, token: super::FenceToken) -> Result<()> {
+        compute::wait_fence(&self.state, device, token)
+    }
+
+    fn wait_fence_timeout(
+        &self,
+        device: DeviceHandle,
+        token: super::FenceToken,
+        timeout_ms: u32,
+    ) -> Result<bool> {
+        compute::wait_fence_timeout(&self.state, device, token, timeout_ms)
     }
 }
 
