@@ -34,7 +34,7 @@ pub mod slang;
 pub mod instrumentation;
 
 // Re-export main types
-pub use buffer::Buffer;
+pub use buffer::{Buffer, BufferPool, BufferSource, BufferView};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};

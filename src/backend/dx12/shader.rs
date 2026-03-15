@@ -10,7 +10,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     slang_source: &str,
 ) -> Result<ShaderHandle> {
-    create_with_paths(state, device_handle, slang_source, &[])
+    create_with_paths(state, device_handle, slang_source, &[], &[])
 }
 
 /// Create a shader from Slang source code with custom search paths.
@@ -19,6 +19,7 @@ pub(super) fn create_with_paths(
     device_handle: DeviceHandle,
     slang_source: &str,
     search_paths: &[&str],
+    defines: &[(&str, &str)],
 ) -> Result<ShaderHandle> {
     let _ = state
         .devices
@@ -29,6 +30,10 @@ pub(super) fn create_with_paths(
     state.next_shader_handle += 1;
 
     let stored_paths: Vec<String> = search_paths.iter().map(|s| s.to_string()).collect();
+    let stored_defines: Vec<(String, String)> = defines
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
 
     state.shaders.insert(
         handle,
@@ -36,6 +41,7 @@ pub(super) fn create_with_paths(
             device_handle,
             slang_source: slang_source.to_string(),
             search_paths: stored_paths,
+            defines: stored_defines,
             vertex_bytecode: None,
             fragment_bytecode: None,
             compute_bytecode: None,
@@ -99,16 +105,21 @@ pub(super) fn ensure_stage_compiled(
         .map(|d| d.bindless_enabled)
         .unwrap_or(false);
 
+    // Merge target define with shader-specific defines
+    let mut defines = vec![("__DX12__", "1")];
+    for (k, v) in &shader.defines {
+        defines.push((k.as_str(), v.as_str()));
+    }
+
     // Compile Slang directly to DXIL (SM 6.6 for bindless support)
     // This bypasses FXC entirely and uses Slang's built-in DXIL emission
     let (bytecode, reflection) = if bindless_enabled {
-        // Define __DX12__ for DX12 ResourceDescriptorHeap pattern
         let compile_result = state.slang_compiler.compile_with_reflection(
             &slang_source,
             crate::slang::ShaderTarget::Dxil,
             &[(entry_point_name, stage)],
             &search_path_refs,
-            &[("__DX12__", "1")],
+            &defines,
         );
 
         let result = compile_result.with_context(|| {

@@ -259,7 +259,29 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
     ) -> Result<CompiledShaderWithReflection> {
-        let defines = Self::bindless_defines_for_target(target);
+        self.compile_bindless_with_reflection_and_defines(
+            source,
+            target,
+            entry_points,
+            search_paths,
+            &[],
+        )
+    }
+
+    /// Like [`Self::compile_bindless_with_reflection`] but with extra preprocessor defines.
+    ///
+    /// Extra defines are merged with target-specific defines (e.g. `__SPIRV__`, `__DX12__`).
+    /// Use for shader variants like `msaa`, `msaa8`, `msaa16`.
+    pub fn compile_bindless_with_reflection_and_defines(
+        &self,
+        source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        extra_defines: &[(&str, &str)],
+    ) -> Result<CompiledShaderWithReflection> {
+        let mut defines = Self::bindless_defines_for_target(target);
+        defines.extend_from_slice(extra_defines);
         self.compile_with_reflection(source, target, entry_points, search_paths, &defines)
     }
 

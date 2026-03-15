@@ -208,6 +208,17 @@ pub(super) fn dispatch(
                 workgroups_y,
                 workgroups_z,
             } => unsafe {
+                let mem_barrier = vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .dst_access_mask(
+                        vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+                    );
+                let dep_info = vk::DependencyInfo::default()
+                    .memory_barriers(std::slice::from_ref(&mem_barrier));
+                logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
                 logical_device.device.cmd_dispatch(
                     cmd,
                     *workgroups_x,
@@ -220,6 +231,22 @@ pub(super) fn dispatch(
                     .get(buffer)
                     .context("DispatchIndirect: invalid buffer handle")?;
                 unsafe {
+                    let mem_barrier = vk::MemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                        .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                        .dst_stage_mask(
+                            vk::PipelineStageFlags2::COMPUTE_SHADER
+                                | vk::PipelineStageFlags2::DRAW_INDIRECT,
+                        )
+                        .dst_access_mask(
+                            vk::AccessFlags2::SHADER_READ
+                                | vk::AccessFlags2::SHADER_WRITE
+                                | vk::AccessFlags2::INDIRECT_COMMAND_READ,
+                        );
+                    let dep_info = vk::DependencyInfo::default()
+                        .memory_barriers(std::slice::from_ref(&mem_barrier));
+                    logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
                     logical_device
                         .device
                         .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
@@ -247,6 +274,17 @@ pub(super) fn dispatch(
                             clear_size,
                             0,
                         );
+
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                            .dst_access_mask(
+                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+                            );
+                        let dep_info = vk::DependencyInfo::default()
+                            .memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
                 }
             }

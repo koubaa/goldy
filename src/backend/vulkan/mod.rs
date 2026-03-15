@@ -280,6 +280,24 @@ impl GpuBackend for VulkanBackend {
         buffer::bindless_index(&self.state.buffers, buffer_handle)
     }
 
+    fn create_buffer_view(
+        &mut self,
+        parent: BufferHandle,
+        offset: u64,
+        size: u64,
+        element_stride: Option<u32>,
+    ) -> Result<BufferHandle> {
+        buffer::create_view(
+            &mut self.state.devices,
+            &mut self.state.buffers,
+            &mut self.state.next_buffer_handle,
+            parent,
+            offset,
+            size,
+            element_stride,
+        )
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device_handle: DeviceHandle,
@@ -324,6 +342,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             slang_source,
             &[],
+            &[],
         )
     }
 
@@ -332,6 +351,7 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
@@ -340,6 +360,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             slang_source,
             search_paths,
+            defines,
         )
     }
 

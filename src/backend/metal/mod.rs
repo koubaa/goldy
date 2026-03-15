@@ -136,6 +136,16 @@ impl GpuBackend for MetalBackend {
         buffer::bindless_index(&self.state, buffer)
     }
 
+    fn create_buffer_view(
+        &mut self,
+        parent: BufferHandle,
+        offset: u64,
+        size: u64,
+        _element_stride: Option<u32>,
+    ) -> Result<BufferHandle> {
+        buffer::create_view(&mut self.state, parent, offset, size)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device: DeviceHandle,
@@ -163,6 +173,7 @@ impl GpuBackend for MetalBackend {
             device,
             slang_source,
             &[],
+            &[],
         )
     }
 
@@ -171,6 +182,7 @@ impl GpuBackend for MetalBackend {
         device: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
@@ -179,6 +191,7 @@ impl GpuBackend for MetalBackend {
             device,
             slang_source,
             search_paths,
+            defines,
         )
     }
 

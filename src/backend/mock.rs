@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::types::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 
 /// Mock GPU backend for testing.
@@ -297,6 +297,40 @@ impl GpuBackend for MockBackend {
         self.buffers.get(&buffer).map(|b| b.bindless_index)
     }
 
+    fn create_buffer_view(
+        &mut self,
+        parent: BufferHandle,
+        offset: u64,
+        size: u64,
+        _element_stride: Option<u32>,
+    ) -> Result<BufferHandle> {
+        let parent_buf = self
+            .buffers
+            .get(&parent)
+            .context("Invalid parent buffer handle")?;
+        if offset + size > parent_buf.size {
+            anyhow::bail!("View exceeds parent buffer size");
+        }
+        let device_handle = parent_buf.device_handle;
+
+        let handle = self.next_buffer_handle;
+        self.next_buffer_handle += 1;
+        let index = self.next_bindless_index;
+        self.next_bindless_index += 1;
+
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle,
+                size,
+                data: vec![0; size as usize],
+                bindless_index: index,
+            },
+        );
+
+        Ok(handle)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         _device: DeviceHandle,
@@ -338,7 +372,7 @@ impl GpuBackend for MockBackend {
     }
 
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
-        self.create_shader_with_paths(device, slang_source, &[])
+        self.create_shader_with_paths(device, slang_source, &[], &[])
     }
 
     fn create_shader_with_paths(
@@ -346,6 +380,7 @@ impl GpuBackend for MockBackend {
         device: DeviceHandle,
         slang_source: &str,
         _search_paths: &[&str],
+        _defines: &[(&str, &str)],
     ) -> Result<ShaderHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");

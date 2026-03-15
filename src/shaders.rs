@@ -338,6 +338,74 @@ mod tests {
         );
     }
 
+    /// Test that goldy_exp math and primitives utilities compile for all targets.
+    ///
+    /// Covers: `positive_mod` (float and float2), `modelview_right`,
+    /// `billboard_cylindrical_offset` — all added in the goldy_exp ergonomics pass.
+    #[test]
+    fn test_goldy_exp_math_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shader_path = manifest_dir.join("shaders");
+        let shader_path_str = shader_path.to_string_lossy();
+
+        let test_shader = std::fs::read_to_string(shader_path.join("test_goldy_exp_math.slang"))
+            .expect("Failed to read test_goldy_exp_math.slang");
+
+        let entry = &[("cs_main", SlangStage::Compute)];
+
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            &test_shader,
+            ShaderTarget::Spirv,
+            entry,
+            &[&shader_path_str],
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_goldy_exp_math failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Dxil,
+                entry,
+                &[&shader_path_str],
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_goldy_exp_math failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let metal_defines = vec![("__METAL__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Metal,
+                entry,
+                &[&shader_path_str],
+                &metal_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_goldy_exp_math failed to compile for Metal: {:?}",
+                result.err()
+            );
+        }
+    }
+
     #[test]
     fn test_rain_snow_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};

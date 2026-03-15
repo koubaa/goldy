@@ -52,6 +52,8 @@ pub(crate) struct ResourceRegistry {
     /// Maps buffer handle to its secondary SRV offset (for storage buffers that need read access)
     pub buffer_srv_offsets: HashMap<BufferHandle, u32>,
     pub texture_offsets: HashMap<TextureHandle, u32>,
+    /// Maps texture handle to UAV offset (for storage textures / SpatialAccess::Direct)
+    pub texture_uav_offsets: HashMap<TextureHandle, u32>,
     pub sampler_offsets: HashMap<SamplerHandle, u32>,
 }
 
@@ -66,6 +68,7 @@ impl ResourceRegistry {
             buffer_offsets: HashMap::new(),
             buffer_srv_offsets: HashMap::new(),
             texture_offsets: HashMap::new(),
+            texture_uav_offsets: HashMap::new(),
             sampler_offsets: HashMap::new(),
         }
     }
@@ -99,6 +102,14 @@ impl ResourceRegistry {
         offset
     }
 
+    /// Register a UAV descriptor for a texture (e.g. storage image / SpatialAccess::Direct).
+    pub fn register_texture_uav(&mut self, handle: TextureHandle) -> u32 {
+        let offset = self.next_cbv_srv_uav_offset;
+        self.next_cbv_srv_uav_offset += 1;
+        self.texture_uav_offsets.insert(handle, offset);
+        offset
+    }
+
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
         let offset = self.next_sampler_offset;
         self.next_sampler_offset += 1;
@@ -118,6 +129,7 @@ impl ResourceRegistry {
 
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
         self.texture_offsets.remove(&handle);
+        self.texture_uav_offsets.remove(&handle);
     }
 
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
@@ -177,6 +189,8 @@ pub(crate) struct BufferState {
     pub is_storage: bool,
     /// Upload buffer for DEFAULT heap resources (needed for CPU writes)
     pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
+    /// If true, this is a view into another buffer — don't free the resource on destroy.
+    pub is_view: bool,
 }
 
 /// Shader module state with cached compiled bytecode.
@@ -185,6 +199,8 @@ pub(crate) struct ShaderState {
     pub slang_source: String,
     /// Search paths for Slang module resolution
     pub search_paths: Vec<String>,
+    /// Extra preprocessor defines (e.g. msaa, msaa8)
+    pub defines: Vec<(String, String)>,
     /// Cached compiled vertex shader bytecode
     pub vertex_bytecode: Option<Vec<u8>>,
     /// Cached compiled fragment shader bytecode

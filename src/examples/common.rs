@@ -3,7 +3,7 @@
 //! This module provides shared types and utilities that work across
 //! both native (Vulkan) and web (WebGPU) platforms.
 
-use crate::types::{VertexAttribute, VertexBufferLayout, VertexFormat};
+use crate::types::{VertexBufferLayout, VertexFormat};
 use bytemuck::{Pod, Zeroable};
 
 /// Vertex with 2D position and UV coordinates.
@@ -25,21 +25,10 @@ impl VertexUv {
 
     /// Get the vertex buffer layout for this vertex type.
     pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                },
-            ],
-        }
+        VertexBufferLayout::from_formats::<Self>(&[
+            VertexFormat::Float32x2, // position
+            VertexFormat::Float32x2, // uv
+        ])
     }
 }
 
@@ -64,26 +53,11 @@ impl VertexUvTime {
 
     /// Get the vertex buffer layout for this vertex type.
     pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                },
-                VertexAttribute {
-                    location: 2,
-                    format: VertexFormat::Float32,
-                    offset: 16,
-                },
-            ],
-        }
+        VertexBufferLayout::from_formats::<Self>(&[
+            VertexFormat::Float32x2, // position
+            VertexFormat::Float32x2, // uv
+            VertexFormat::Float32,   // time
+        ])
     }
 }
 

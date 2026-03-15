@@ -231,6 +231,63 @@ impl VertexBufferLayout {
             attributes: Vec::new(),
         }
     }
+
+    /// Build a layout from a list of formats, inferring offsets and locations.
+    ///
+    /// Locations are assigned sequentially (0, 1, 2, ...). Offsets are computed
+    /// by accumulating each format's byte size. The stride is taken from
+    /// `size_of::<T>()`, and the method panics if the summed format sizes don't
+    /// match — catching field-list mismatches immediately rather than producing
+    /// silent GPU corruption.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use goldy::types::{VertexBufferLayout, VertexFormat};
+    ///
+    /// #[repr(C)]
+    /// struct MyVertex {
+    ///     pos: [f32; 3],
+    ///     uv: [f32; 2],
+    ///     color: u32,
+    /// }
+    ///
+    /// let layout = VertexBufferLayout::from_formats::<MyVertex>(&[
+    ///     VertexFormat::Float32x3, // pos
+    ///     VertexFormat::Float32x2, // uv
+    ///     VertexFormat::Uint32,    // color
+    /// ]);
+    /// assert_eq!(layout.stride, 24);
+    /// assert_eq!(layout.attributes.len(), 3);
+    /// ```
+    pub fn from_formats<T>(formats: &[VertexFormat]) -> Self {
+        let mut offset = 0u32;
+        let attributes: Vec<VertexAttribute> = formats
+            .iter()
+            .enumerate()
+            .map(|(i, fmt)| {
+                let attr = VertexAttribute {
+                    location: i as u32,
+                    offset,
+                    format: *fmt,
+                };
+                offset += fmt.size();
+                attr
+            })
+            .collect();
+        let expected_stride = std::mem::size_of::<T>() as u32;
+        assert_eq!(
+            offset,
+            expected_stride,
+            "VertexBufferLayout::from_formats: sum of format sizes ({offset}) != \
+             size_of::<{}>() ({expected_stride}). Check field order and padding.",
+            std::any::type_name::<T>(),
+        );
+        Self {
+            stride: expected_stride,
+            attributes,
+        }
+    }
 }
 
 /// Primitive topology for drawing.
@@ -305,21 +362,10 @@ impl Vertex2D {
 
     /// Get the vertex buffer layout for this vertex type.
     pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x4,
-                    offset: 8,
-                },
-            ],
-        }
+        VertexBufferLayout::from_formats::<Self>(&[
+            VertexFormat::Float32x2, // position
+            VertexFormat::Float32x4, // color
+        ])
     }
 }
 
@@ -342,21 +388,10 @@ impl Vertex2DUv {
 
     /// Get the vertex buffer layout for this vertex type.
     pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                },
-            ],
-        }
+        VertexBufferLayout::from_formats::<Self>(&[
+            VertexFormat::Float32x2, // position
+            VertexFormat::Float32x2, // uv
+        ])
     }
 }
 

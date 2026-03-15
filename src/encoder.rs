@@ -1,7 +1,7 @@
 //! Command encoding for GPU operations.
 
 use crate::backend::RenderCommand;
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, BufferSource};
 use crate::pipeline::RenderPipeline;
 use crate::types::{Color, IndexFormat};
 
@@ -82,20 +82,23 @@ impl<'a> RenderPass<'a> {
     }
 
     /// Set a vertex buffer.
-    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer) {
+    ///
+    /// Accepts either a [`Buffer`] or [`crate::BufferView`]; for pool-allocated views,
+    /// the parent buffer and offset are resolved automatically.
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl BufferSource) {
         self.encoder.commands.push(RenderCommand::SetVertexBuffer {
             slot,
-            buffer: buffer.handle,
-            offset: 0,
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
         });
     }
 
-    /// Set a vertex buffer with an offset.
-    pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &Buffer, offset: u64) {
+    /// Set a vertex buffer with an additional offset.
+    pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &impl BufferSource, offset: u64) {
         self.encoder.commands.push(RenderCommand::SetVertexBuffer {
             slot,
-            buffer: buffer.handle,
-            offset,
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset() + offset,
         });
     }
 
@@ -149,19 +152,25 @@ impl<'a> RenderPass<'a> {
     /// Set an index buffer for indexed drawing.
     ///
     /// The buffer should contain index data (u16 or u32 values).
-    pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat) {
+    /// Accepts either a [`Buffer`] or [`crate::BufferView`].
+    pub fn set_index_buffer(&mut self, buffer: &impl BufferSource, format: IndexFormat) {
         self.encoder.commands.push(RenderCommand::SetIndexBuffer {
-            buffer: buffer.handle,
-            offset: 0,
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
             format,
         });
     }
 
-    /// Set an index buffer with an offset.
-    pub fn set_index_buffer_offset(&mut self, buffer: &Buffer, offset: u64, format: IndexFormat) {
+    /// Set an index buffer with an additional offset.
+    pub fn set_index_buffer_offset(
+        &mut self,
+        buffer: &impl BufferSource,
+        offset: u64,
+        format: IndexFormat,
+    ) {
         self.encoder.commands.push(RenderCommand::SetIndexBuffer {
-            buffer: buffer.handle,
-            offset,
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset() + offset,
             format,
         });
     }

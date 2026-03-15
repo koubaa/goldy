@@ -120,7 +120,7 @@ impl PyRenderPass {
     fn set_vertex_buffer(&self, py: Python<'_>, slot: u32, buffer: &PyBuffer) {
         self.encoder.borrow(py).with_encoder(|enc| {
             let mut pass = enc.begin_render_pass();
-            pass.set_vertex_buffer(slot, &buffer.inner);
+            pass.set_vertex_buffer(slot, buffer.inner.as_ref());
         });
     }
 
@@ -133,7 +133,7 @@ impl PyRenderPass {
     fn set_index_buffer(&self, py: Python<'_>, buffer: &PyBuffer, format: PyIndexFormat) {
         self.encoder.borrow(py).with_encoder(|enc| {
             let mut pass = enc.begin_render_pass();
-            pass.set_index_buffer(&buffer.inner, format.into());
+            pass.set_index_buffer(buffer.inner.as_ref(), format.into());
         });
     }
 

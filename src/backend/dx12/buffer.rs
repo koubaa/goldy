@@ -275,6 +275,7 @@ pub(super) fn create(
             bindless_srv_offset,
             is_storage,
             upload_buffer,
+            is_view: false,
         },
     );
 
@@ -282,12 +283,169 @@ pub(super) fn create(
 }
 
 /// Destroy a buffer, unregistering it from bindless.
+/// For views, only the descriptor is unregistered — the underlying resource belongs
+/// to the parent and is not freed.
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
             device.resource_registry.unregister_buffer(buffer_handle);
         }
+        // Views don't own the resource — the parent does.
+        // When `is_view` is false the ID3D12Resource drops naturally via its Drop impl.
     }
+}
+
+/// Create a view into a sub-region of an existing storage buffer.
+///
+/// The view gets its own UAV and SRV descriptors in the bindless heap, pointing at
+/// a sub-range of the parent's resource via `FirstElement` / `NumElements`.
+pub(super) fn create_view(
+    state: &mut Dx12State,
+    parent_handle: BufferHandle,
+    offset: u64,
+    size: u64,
+    element_stride: Option<u32>,
+) -> Result<BufferHandle> {
+    let parent = state
+        .buffers
+        .get(&parent_handle)
+        .context("Invalid parent buffer handle")?;
+
+    if offset + size > parent.size {
+        anyhow::bail!(
+            "View [{}, {}) exceeds parent buffer size {}",
+            offset,
+            offset + size,
+            parent.size
+        );
+    }
+
+    if !parent.is_storage {
+        anyhow::bail!("Buffer views are only supported for storage (Scattered) buffers");
+    }
+
+    let stride = element_stride.unwrap_or(4);
+    if !offset.is_multiple_of(stride as u64) {
+        anyhow::bail!(
+            "View offset {} is not aligned to element stride {}",
+            offset,
+            stride
+        );
+    }
+
+    let device_handle = parent.device_handle;
+    let resource = parent.resource.clone();
+    let first_element = (offset / stride as u64) as u32;
+    let num_elements = (size as u32) / stride;
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+
+    let (bindless_offset, bindless_srv_offset) = {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+
+        if !logical_device.bindless_enabled || num_elements == 0 {
+            (None, None)
+        } else {
+            // UAV descriptor
+            let uav_offset = logical_device.resource_registry.register_buffer_uav(handle);
+
+            let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                Format: DXGI_FORMAT_UNKNOWN,
+                ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_UAV {
+                        FirstElement: first_element as u64,
+                        NumElements: num_elements,
+                        StructureByteStride: stride,
+                        CounterOffsetInBytes: 0,
+                        Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+                    },
+                },
+            };
+
+            let uav_cpu_handle = unsafe {
+                let mut h = logical_device
+                    .cbv_srv_uav_heap
+                    .GetCPUDescriptorHandleForHeapStart();
+                h.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                h
+            };
+
+            unsafe {
+                logical_device.device.CreateUnorderedAccessView(
+                    &resource,
+                    None,
+                    Some(&uav_desc),
+                    uav_cpu_handle,
+                );
+            }
+
+            // SRV descriptor
+            let srv_offset = logical_device.resource_registry.register_buffer_srv(handle);
+
+            let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: DXGI_FORMAT_UNKNOWN,
+                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_SRV {
+                        FirstElement: first_element as u64,
+                        NumElements: num_elements,
+                        StructureByteStride: stride,
+                        Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                    },
+                },
+            };
+
+            let srv_cpu_handle = unsafe {
+                let mut h = logical_device
+                    .cbv_srv_uav_heap
+                    .GetCPUDescriptorHandleForHeapStart();
+                h.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                h
+            };
+
+            unsafe {
+                logical_device.device.CreateShaderResourceView(
+                    &resource,
+                    Some(&srv_desc),
+                    srv_cpu_handle,
+                );
+            }
+
+            tracing::debug!(
+                "Created buffer view {} (UAV={}, SRV={}) into parent {} (offset={}, size={})",
+                handle,
+                uav_offset,
+                srv_offset,
+                parent_handle,
+                offset,
+                size
+            );
+
+            (Some(uav_offset), Some(srv_offset))
+        }
+    };
+
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            resource,
+            size,
+            bindless_offset,
+            bindless_srv_offset,
+            is_storage: true,
+            upload_buffer: None,
+            is_view: true,
+        },
+    );
+
+    Ok(handle)
 }
 
 /// Wait for a fence to reach the specified value.

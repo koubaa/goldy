@@ -90,6 +90,18 @@ public float3 billboard_position_uniform(uint vertex_id, float3 center, float si
     return billboard_position(vertex_id, center, float2(size, size), cam_right, cam_up);
 }
 
+/// Extract the camera/modelview right vector (column 0) from a 4x4 matrix.
+/// Used for cylindrical billboards where sprites expand horizontally only.
+public float3 modelview_right(float4x4 m) {
+    return float3(m[0][0], m[1][0], m[2][0]);
+}
+
+/// Cylindrical billboard offset — for vertical sprites that expand only along
+/// camera-right. Returns center + cam_right * horizontal_offset.
+public float3 billboard_cylindrical_offset(float3 center, float3 cam_right, float horizontal_offset) {
+    return center + cam_right * horizontal_offset;
+}
+
 // ============================================================================
 // Fullscreen Triangle (3 vertices, covers entire screen)
 // More efficient than fullscreen quad - use draw(0..3, 0..1) or draw_fullscreen()

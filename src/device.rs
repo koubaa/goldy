@@ -46,10 +46,8 @@ pub struct Instance {
 impl Instance {
     /// Create a new Goldy instance.
     pub fn new() -> Result<Self> {
-        let backend = backend::create_default_backend()?;
-        Ok(Self {
-            backend: Arc::new(Mutex::new(backend)),
-        })
+        let backend = backend::create_shared_backend()?;
+        Ok(Self { backend })
     }
 
     /// Enumerate available GPU adapters.

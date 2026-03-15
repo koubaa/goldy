@@ -187,6 +187,22 @@ pub trait GpuBackend: Send + Sync {
     /// Falls back to the primary bindless index on backends with unified descriptors.
     fn buffer_bindless_srv_index(&self, buffer: BufferHandle) -> Option<u32>;
 
+    /// Create a view into a sub-region of an existing buffer.
+    ///
+    /// The view gets its own bindless descriptor pointing at `[offset, offset+size)` of the
+    /// parent buffer. The shader sees the sub-region as a zero-based buffer. The view does not
+    /// own the underlying memory — dropping it unregisters its descriptor but does not free
+    /// the parent's allocation.
+    ///
+    /// `element_stride` determines the structured buffer stride for the view's descriptor.
+    fn create_buffer_view(
+        &mut self,
+        parent: BufferHandle,
+        offset: u64,
+        size: u64,
+        element_stride: Option<u32>,
+    ) -> Result<BufferHandle>;
+
     // Shader management
     fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
     fn create_shader_with_paths(
@@ -194,6 +210,7 @@ pub trait GpuBackend: Send + Sync {
         device: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
@@ -418,6 +435,32 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     {
         anyhow::bail!("No GPU backend available - enable 'vulkan', 'dx12', or 'metal' feature")
     }
+}
+
+/// Create the default backend wrapped in an `Arc<Mutex<...>>`.
+///
+/// For DX12, returns a process-wide singleton so that all `Instance` objects
+/// share one backend — the existing per-instance `Mutex` then naturally
+/// serializes all D3D12 calls, preventing debug-layer access violations
+/// when parallel test threads create independent instances.
+///
+/// For other backends, creates a fresh instance each time.
+pub fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    {
+        let wants_dx12 = match std::env::var("GOLDY_BACKEND") {
+            Ok(v) => matches!(v.to_lowercase().as_str(), "dx12" | "d3d12" | "directx"),
+            Err(_) => true, // DX12 is the Windows default
+        };
+        if wants_dx12 {
+            return dx12::shared_backend();
+        }
+    }
+
+    let backend = create_default_backend()?;
+    Ok(Arc::new(Mutex::new(backend)))
 }
 
 /// Create a specific backend by type.

@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
+    BufferPool, BufferView, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
     Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
     VertexBufferLayout,
 };
@@ -51,9 +51,11 @@ struct RenderState {
     compute_pipeline: ComputePipeline,
     // Graphics resources
     render_pipeline: RenderPipeline,
-    // Ping-pong buffers
-    buffer_a: Buffer,
-    buffer_b: Buffer,
+    // Single pool holding both ping-pong buffers as views.
+    // One GPU allocation instead of two.
+    _pool: BufferPool,
+    view_a: BufferView,
+    view_b: BufferView,
     // State: true = A is current (read from A, write to B)
     use_buffer_a: bool,
     frame_count: u32,
@@ -147,10 +149,18 @@ impl RenderState {
             include_str!("../shaders/game_of_life_render.slang"),
         )?;
 
-        // Create ping-pong buffers
+        // Allocate both ping-pong buffers from a single pool (one GPU allocation).
         let initial_state = create_initial_state();
-        let buffer_a = Buffer::with_data(&device, &initial_state, DataAccess::Scattered)?;
-        let buffer_b = Buffer::with_data(&device, &initial_state, DataAccess::Scattered)?;
+        let cell_bytes = (CELL_COUNT as usize) * std::mem::size_of::<u32>();
+        let mut pool = BufferPool::new(&device, (cell_bytes * 2 + 512) as u64)?;
+
+        let view_a = pool.alloc::<u32>(CELL_COUNT as u64)?;
+        let view_b = pool.alloc::<u32>(CELL_COUNT as u64)?;
+
+        // Write initial state into both views via the backing buffer.
+        pool.backing_buffer().write_data(0, &initial_state)?;
+        pool.backing_buffer()
+            .write_data((cell_bytes as u64 + 255) & !255, &initial_state)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
@@ -181,8 +191,9 @@ impl RenderState {
             surface,
             compute_pipeline,
             render_pipeline,
-            buffer_a,
-            buffer_b,
+            _pool: pool,
+            view_a,
+            view_b,
             use_buffer_a: true,
             frame_count: 0,
             last_update: std::time::Instant::now(),
@@ -205,21 +216,29 @@ impl RenderState {
                 let mut pass = compute_encoder.begin_compute_pass();
                 pass.set_pipeline(&self.compute_pipeline);
 
-                // Pass buffer indices via push constants
-                // Order matters: [current_state, next_state] matching shader slots
-                if self.use_buffer_a {
+                // Pass buffer indices via push constants.
+                // Order matters: [current_state, next_state] matching shader slots.
+                let (idx_read, idx_write) = if self.use_buffer_a {
                     // A -> B: read from A, write to B
-                    pass.set_push_constants(&[&self.buffer_a, &self.buffer_b]);
+                    (
+                        self.view_a.bindless_index().unwrap(),
+                        self.view_b.bindless_index().unwrap(),
+                    )
                 } else {
                     // B -> A: read from B, write to A
-                    pass.set_push_constants(&[&self.buffer_b, &self.buffer_a]);
-                }
+                    (
+                        self.view_b.bindless_index().unwrap(),
+                        self.view_a.bindless_index().unwrap(),
+                    )
+                };
+                pass.set_push_constants_raw(&[idx_read, idx_write]);
 
                 // Dispatch workgroups (8x8 threads per group)
                 let workgroups_x = (GRID_WIDTH + 7) / 8;
                 let workgroups_y = (GRID_HEIGHT + 7) / 8;
                 pass.dispatch(workgroups_x, workgroups_y, 1);
             }
+
             compute_encoder.dispatch(&self.device)?;
 
             // Toggle buffer for next frame
@@ -235,13 +254,13 @@ impl RenderState {
             pass.clear(Color::BLACK);
             pass.set_pipeline(&self.render_pipeline);
 
-            // Read from the buffer that is now "current"
-            // After the swap, use_buffer_a points to the newly computed buffer
-            if self.use_buffer_a {
-                pass.set_push_constants(&[&self.buffer_a]);
+            // Read from the view that is now "current" (after the ping-pong swap).
+            let idx_current = if self.use_buffer_a {
+                self.view_a.bindless_index().unwrap()
             } else {
-                pass.set_push_constants(&[&self.buffer_b]);
-            }
+                self.view_b.bindless_index().unwrap()
+            };
+            pass.set_push_constants_raw(&[idx_current]);
 
             // Draw fullscreen triangle
             pass.draw(0..3, 0..1);

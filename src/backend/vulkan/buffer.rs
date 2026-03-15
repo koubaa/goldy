@@ -242,6 +242,7 @@ pub(super) fn create(
             is_storage,
             staging_buffer,
             staging_memory,
+            is_view: false,
         },
     );
 
@@ -249,6 +250,8 @@ pub(super) fn create(
 }
 
 /// Destroy a buffer, unregistering it from bindless and queueing for deferred deletion.
+/// For views, only the descriptor is unregistered — the underlying VkBuffer/memory belongs
+/// to the parent and is not freed.
 pub(super) fn destroy(
     devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
@@ -259,15 +262,119 @@ pub(super) fn destroy(
             // Unregister from bindless registry
             device.resource_registry.unregister_buffer(buffer_handle);
 
-            // Queue for deferred deletion - the buffer may still be in use by in-flight commands
-            device.deletion_queue.queue(types::PendingDeletion::Buffer {
-                buffer: buffer.buffer,
-                memory: buffer.memory,
-                staging_buffer: buffer.staging_buffer,
-                staging_memory: buffer.staging_memory,
-            });
+            if !buffer.is_view {
+                // Queue for deferred deletion - the buffer may still be in use by in-flight commands
+                device.deletion_queue.queue(types::PendingDeletion::Buffer {
+                    buffer: buffer.buffer,
+                    memory: buffer.memory,
+                    staging_buffer: buffer.staging_buffer,
+                    staging_memory: buffer.staging_memory,
+                });
+            }
         }
     }
+}
+
+/// Create a view into a sub-region of an existing buffer.
+///
+/// The view gets its own bindless descriptor at `[offset, offset+size)` of the parent.
+/// It shares the parent's VkBuffer and staging resources.
+pub(super) fn create_view(
+    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
+    next_buffer_handle: &mut BufferHandle,
+    parent_handle: BufferHandle,
+    offset: u64,
+    size: u64,
+    _element_stride: Option<u32>,
+) -> Result<BufferHandle> {
+    let parent = buffers
+        .get(&parent_handle)
+        .context("Invalid parent buffer handle")?;
+
+    if offset + size > parent.size {
+        anyhow::bail!(
+            "View [{}, {}) exceeds parent buffer size {}",
+            offset,
+            offset + size,
+            parent.size
+        );
+    }
+
+    if !parent.is_storage {
+        anyhow::bail!("Buffer views are only supported for storage (Scattered) buffers");
+    }
+
+    let device_handle = parent.device_handle;
+    let vk_buffer = parent.buffer;
+    let is_storage = parent.is_storage;
+
+    let logical_device = devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
+
+    let bindless_enabled = logical_device.bindless_enabled;
+    let bindless_descriptor_set = logical_device.bindless_descriptor_set;
+
+    let bindless_index = if bindless_enabled {
+        let handle_for_registry = *next_buffer_handle;
+        let index = logical_device
+            .resource_registry
+            .register_buffer(handle_for_registry, is_storage);
+
+        if let Some(descriptor_set) = bindless_descriptor_set {
+            let buffer_info = vk::DescriptorBufferInfo::default()
+                .buffer(vk_buffer)
+                .offset(offset)
+                .range(size);
+
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(types::bindless_bindings::STORAGE_BUFFERS)
+                .dst_array_element(index)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(std::slice::from_ref(&buffer_info));
+
+            unsafe {
+                logical_device
+                    .device
+                    .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+            }
+
+            tracing::trace!(
+                "Registered buffer view {} at bindless index {} (parent={}, offset={}, size={})",
+                handle_for_registry,
+                index,
+                parent_handle,
+                offset,
+                size
+            );
+        }
+
+        Some(index)
+    } else {
+        None
+    };
+
+    let handle = *next_buffer_handle;
+    *next_buffer_handle += 1;
+
+    buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            buffer: vk_buffer,
+            memory: vk::DeviceMemory::null(),
+            size,
+            bindless_index,
+            is_storage,
+            staging_buffer: None,
+            staging_memory: None,
+            is_view: true,
+        },
+    );
+
+    Ok(handle)
 }
 
 /// Write data to a buffer at the specified offset.

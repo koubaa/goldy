@@ -9,7 +9,7 @@
 //! Both native (Vulkan) and web (WebGPU) examples import this shared code,
 //! ensuring identical rendering across platforms.
 
-use crate::types::{Color, VertexAttribute, VertexBufferLayout, VertexFormat};
+use crate::types::{Color, VertexBufferLayout, VertexFormat};
 use bytemuck::{Pod, Zeroable};
 
 /// Slang shader for the digital clock.
@@ -58,21 +58,10 @@ impl ClockVertex {
 
     /// Get the vertex buffer layout for this vertex type.
     pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x4,
-                    offset: 8,
-                },
-            ],
-        }
+        VertexBufferLayout::from_formats::<Self>(&[
+            VertexFormat::Float32x2, // position
+            VertexFormat::Float32x4, // color
+        ])
     }
 }
 

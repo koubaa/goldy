@@ -5,7 +5,8 @@
 mod common;
 
 use goldy::{
-    Buffer, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance, ShaderModule,
+    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
+    ShaderModule,
 };
 
 /// Simple compute shader that doubles each value in a buffer.
@@ -638,4 +639,384 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         "Failed to dispatch with struct buffer: {:?}",
         result.err()
     );
+}
+
+// ─── Buffer views: sub-buffer descriptor binding ──────────────────────────────
+
+/// Two views into one buffer. Shader copies from view A to view B.
+/// Proves that sub-buffer descriptors with offset/range work end-to-end.
+#[test]
+fn test_buffer_view_copy_between_sub_regions() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let mut data = vec![0u32; N * 2];
+    // First half: source values 1..=64
+    for i in 0..N {
+        data[i] = (i + 1) as u32;
+    }
+    // Second half: zeros (destination)
+
+    let pool_buf =
+        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool buffer");
+
+    let view_a = pool_buf
+        .create_view(0, (N * 4) as u64, Some(4))
+        .expect("create view A");
+    let view_b = pool_buf
+        .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
+        .expect("create view B");
+
+    let idx_a = view_a.bindless_index().expect("view A bindless index");
+    let idx_b = view_b.bindless_index().expect("view B bindless index");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[idx_a, idx_b]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    // Read back the entire pool buffer and check the second half
+    let mut output = vec![0u8; N * 2 * 4];
+    pool_buf
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for i in 0..N {
+        assert_eq!(
+            result[N + i],
+            (i + 1) as u32,
+            "dest[{}]: expected {} (copied from source view), got {}",
+            i,
+            i + 1,
+            result[N + i]
+        );
+    }
+}
+
+/// Shader doubles values in a view — the other half of the buffer must be untouched.
+#[test]
+fn test_buffer_view_isolation() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let mut data = vec![0u32; N * 2];
+    for i in 0..N {
+        data[i] = 100; // first half: sentinel
+    }
+    for i in 0..N {
+        data[N + i] = (i + 1) as u32; // second half: values to double
+    }
+
+    let pool_buf =
+        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool buffer");
+
+    // View only the second half
+    let view = pool_buf
+        .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
+        .expect("create view");
+
+    let idx = view.bindless_index().expect("view bindless index");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[idx]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; N * 2 * 4];
+    pool_buf
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+
+    // First half must be untouched
+    for i in 0..N {
+        assert_eq!(
+            result[i], 100,
+            "sentinel[{}] was modified (expected 100, got {})",
+            i, result[i]
+        );
+    }
+
+    // Second half must be doubled
+    for i in 0..N {
+        let expected = ((i + 1) as u32) * 2;
+        assert_eq!(
+            result[N + i],
+            expected,
+            "view[{}]: expected {} (doubled), got {}",
+            i,
+            expected,
+            result[N + i]
+        );
+    }
+}
+
+// ─── BufferPool convenience wrapper ───────────────────────────────────────────
+
+/// Allocate typed regions from a pool, write via the backing buffer, dispatch.
+#[test]
+fn test_buffer_pool_alloc_and_dispatch() {
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let pool_size = 256 * 3; // 3 x 256-byte aligned regions
+    let mut pool = BufferPool::new(&device, pool_size as u64).expect("create pool");
+
+    let src_view = pool.alloc::<u32>(N as u64).expect("alloc src");
+    let dst_view = pool.alloc::<u32>(N as u64).expect("alloc dst");
+
+    // Write source data into the backing buffer at the correct offset
+    let src_data: Vec<u32> = (1..=N as u32).collect();
+    pool.backing_buffer()
+        .write_data(0, &src_data)
+        .expect("write src data");
+
+    let src_idx = src_view.bindless_index().expect("src bindless index");
+    let dst_idx = dst_view.bindless_index().expect("dst bindless index");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[src_idx, dst_idx]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    // Read back entire pool and verify the destination region
+    let mut output = vec![0u8; pool_size];
+    pool.backing_buffer()
+        .read_to_cpu(&device, &mut output)
+        .expect("readback");
+
+    // Destination starts at 256 bytes (first aligned offset after 64*4=256)
+    let dst_offset = 256usize;
+    let dst_slice: &[u32] = bytemuck::cast_slice(&output[dst_offset..dst_offset + N * 4]);
+    for i in 0..N {
+        assert_eq!(
+            dst_slice[i],
+            (i + 1) as u32,
+            "pool dst[{}]: expected {}, got {}",
+            i,
+            i + 1,
+            dst_slice[i]
+        );
+    }
+
+    assert!(pool.used() > 0);
+    assert!(pool.remaining() < pool.capacity());
+}
+
+/// alloc_with_data allocates and uploads in one call; verify via readback.
+#[test]
+fn test_buffer_pool_alloc_with_data() {
+    let device = make_device();
+    const N: usize = 64;
+    let total = BufferPool::padded_size(&[(N, std::mem::size_of::<u32>())]);
+    let mut pool = BufferPool::new(&device, total).expect("create pool");
+    let data: Vec<u32> = (1..=N as u32).collect();
+    let view = pool.alloc_with_data(&data).expect("alloc_with_data");
+    assert_eq!(view.size(), (N * std::mem::size_of::<u32>()) as u64);
+
+    let mut output = vec![0u8; total as usize];
+    pool.backing_buffer()
+        .read_to_cpu(&device, &mut output)
+        .expect("readback");
+    let roundtripped: &[u32] = bytemuck::cast_slice(&output[..N * 4]);
+    for i in 0..N {
+        assert_eq!(roundtripped[i], (i + 1) as u32, "mismatch at index {}", i);
+    }
+}
+
+/// alloc_with_data with empty slice allocates zero-length view.
+#[test]
+fn test_buffer_pool_alloc_with_data_empty() {
+    let device = make_device();
+    let mut pool = BufferPool::new(&device, 1024).expect("create pool");
+    let view = pool
+        .alloc_with_data::<u32>(&[])
+        .expect("alloc_with_data empty");
+    assert_eq!(view.size(), 0);
+}
+
+// ─── goldy_exp utility correctness ────────────────────────────────────────────
+
+/// `positive_mod(x, m)` must always return a value in `[0, m)`.
+///
+/// HLSL `fmod` returns negative values when `x < 0`, which breaks UV wrapping.
+/// This test verifies the double-fmod formula on the actual GPU path.
+#[test]
+fn test_positive_mod_correctness() {
+    const SHADER: &str = r#"
+import goldy_exp;
+
+#define OUT goldy_dyn_scattered<float>(0)
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    // scalar: negative dividend
+    OUT[0] = positive_mod(-1.0, 3.0);    // 2.0
+    OUT[1] = positive_mod(-3.0, 3.0);    // 0.0
+    OUT[2] = positive_mod(-0.5, 1.0);    // 0.5
+
+    // scalar: positive / zero inputs (must be unchanged)
+    OUT[3] = positive_mod(2.5, 3.0);     // 2.5
+    OUT[4] = positive_mod(0.0, 1.0);     // 0.0
+
+    // float2 overload
+    float2 r = positive_mod(float2(-1.0, -0.5), float2(3.0, 1.0));
+    OUT[5] = r.x;   // 2.0
+    OUT[6] = r.y;   // 0.5
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile positive_mod shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let buf = Buffer::with_data(&device, &vec![0.0f32; 7], DataAccess::Scattered)
+        .expect("create output buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 7 * 4];
+    buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
+    let result: &[f32] = bytemuck::cast_slice(&raw);
+
+    let eps = 1e-5f32;
+    let cases: &[(usize, f32, &str)] = &[
+        (0, 2.0, "positive_mod(-1, 3)"),
+        (1, 0.0, "positive_mod(-3, 3)"),
+        (2, 0.5, "positive_mod(-0.5, 1)"),
+        (3, 2.5, "positive_mod(2.5, 3)"),
+        (4, 0.0, "positive_mod(0, 1)"),
+        (5, 2.0, "float2 positive_mod x"),
+        (6, 0.5, "float2 positive_mod y"),
+    ];
+    for &(i, expected, label) in cases {
+        assert!(
+            (result[i] - expected).abs() < eps,
+            "{}: expected {}, got {}",
+            label,
+            expected,
+            result[i]
+        );
+    }
+}
+
+/// `modelview_right` extracts column 0 from a 4×4 matrix, and
+/// `billboard_cylindrical_offset` offsets a point along that vector.
+#[test]
+fn test_billboard_math() {
+    const SHADER: &str = r#"
+import goldy_exp;
+
+#define OUT goldy_dyn_scattered<float>(0)
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    // Row-major construction. Column 0 = (m[0][0], m[1][0], m[2][0]) = (1, 5, 9).
+    float4x4 m = float4x4(
+        1, 0, 0, 0,
+        5, 1, 0, 0,
+        9, 0, 1, 0,
+        0, 0, 0, 1
+    );
+    float3 r = modelview_right(m);
+    OUT[0] = r.x;   // 1.0
+    OUT[1] = r.y;   // 5.0
+    OUT[2] = r.z;   // 9.0
+
+    // center=(1,2,3), cam_right=(1,0,0), offset=5 → (6, 2, 3)
+    float3 off = billboard_cylindrical_offset(
+        float3(1.0, 2.0, 3.0),
+        float3(1.0, 0.0, 0.0),
+        5.0
+    );
+    OUT[3] = off.x;  // 6.0
+    OUT[4] = off.y;  // 2.0
+    OUT[5] = off.z;  // 3.0
+
+    // Identity matrix: right = (1, 0, 0)
+    float4x4 ident = float4x4(
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    );
+    float3 ident_right = modelview_right(ident);
+    OUT[6] = ident_right.x;  // 1.0
+    OUT[7] = ident_right.y;  // 0.0
+    OUT[8] = ident_right.z;  // 0.0
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile billboard shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let buf = Buffer::with_data(&device, &vec![0.0f32; 9], DataAccess::Scattered)
+        .expect("create output buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 9 * 4];
+    buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
+    let result: &[f32] = bytemuck::cast_slice(&raw);
+
+    let eps = 1e-5f32;
+    let cases: &[(usize, f32, &str)] = &[
+        (0, 1.0, "modelview_right col0.x"),
+        (1, 5.0, "modelview_right col0.y"),
+        (2, 9.0, "modelview_right col0.z"),
+        (3, 6.0, "cylindrical offset x"),
+        (4, 2.0, "cylindrical offset y (unchanged)"),
+        (5, 3.0, "cylindrical offset z (unchanged)"),
+        (6, 1.0, "identity right.x"),
+        (7, 0.0, "identity right.y"),
+        (8, 0.0, "identity right.z"),
+    ];
+    for &(i, expected, label) in cases {
+        assert!(
+            (result[i] - expected).abs() < eps,
+            "{}: expected {}, got {}",
+            label,
+            expected,
+            result[i]
+        );
+    }
 }

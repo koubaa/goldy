@@ -311,10 +311,19 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 .filter(|(_, b)| b.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
+
             for handle in buffer_handles {
                 if let Some(buffer) = state.buffers.remove(&handle) {
-                    logical_device.device.destroy_buffer(buffer.buffer, None);
-                    logical_device.device.free_memory(buffer.memory, None);
+                    if !buffer.is_view {
+                        logical_device.device.destroy_buffer(buffer.buffer, None);
+                        logical_device.device.free_memory(buffer.memory, None);
+                        if let Some(staging) = buffer.staging_buffer {
+                            logical_device.device.destroy_buffer(staging, None);
+                        }
+                        if let Some(staging_mem) = buffer.staging_memory {
+                            logical_device.device.free_memory(staging_mem, None);
+                        }
+                    }
                 }
             }
 
