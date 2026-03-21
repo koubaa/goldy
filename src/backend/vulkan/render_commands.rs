@@ -36,20 +36,18 @@ pub(super) fn record(
                             pipeline.pipeline,
                         );
 
-                        // Bind the global bindless descriptor set if enabled
-                        // Use the PIPELINE's layout (not the global bindless_pipeline_layout)
-                        // because the pipeline has a hybrid layout with both bindless + user sets
-                        if logical_device.bindless_enabled {
-                            if let Some(bindless_set) = logical_device.bindless_descriptor_set {
-                                logical_device.device.cmd_bind_descriptor_sets(
-                                    cmd,
-                                    vk::PipelineBindPoint::GRAPHICS,
-                                    pipeline.layout, // Use pipeline's own layout
-                                    0,
-                                    std::slice::from_ref(&bindless_set),
-                                    &[],
-                                );
-                            }
+                        // Bind the global bindless descriptor set.
+                        // Use the pipeline's layout (not bindless_pipeline_layout alone)
+                        // when layouts combine bindless + user sets.
+                        if let Some(bindless_set) = logical_device.bindless_descriptor_set {
+                            logical_device.device.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline.layout,
+                                0,
+                                std::slice::from_ref(&bindless_set),
+                                &[],
+                            );
                         }
                     }
                 }
@@ -73,53 +71,47 @@ pub(super) fn record(
             RenderCommand::SetPushConstants {
                 buffers: buf_handles,
             } => {
-                // Fully bindless mode: push buffer indices directly (no bind groups needed)
-                if logical_device.bindless_enabled {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
-                        let mut indices = BindlessIndices::default();
-                        for (i, buffer_handle) in buf_handles.iter().enumerate() {
-                            if i >= MAX_PUSH_CONSTANT_INDICES {
-                                break;
-                            }
-                            indices.indices[i] = buffers
-                                .get(buffer_handle)
-                                .and_then(|b| b.bindless_index)
-                                .unwrap_or(0);
+                if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
+                    let mut indices = BindlessIndices::default();
+                    for (i, buffer_handle) in buf_handles.iter().enumerate() {
+                        if i >= MAX_PUSH_CONSTANT_INDICES {
+                            break;
                         }
-                        unsafe {
-                            logical_device.device.cmd_push_constants(
-                                cmd,
-                                pipeline.layout,
-                                vk::ShaderStageFlags::ALL,
-                                0,
-                                bytemuck::bytes_of(&indices),
-                            );
-                        }
+                        indices.indices[i] = buffers
+                            .get(buffer_handle)
+                            .and_then(|b| b.bindless_index)
+                            .unwrap_or(0);
+                    }
+                    unsafe {
+                        logical_device.device.cmd_push_constants(
+                            cmd,
+                            pipeline.layout,
+                            vk::ShaderStageFlags::ALL,
+                            0,
+                            bytemuck::bytes_of(&indices),
+                        );
                     }
                 }
             }
             RenderCommand::SetPushConstantsRaw {
                 indices: raw_indices,
             } => {
-                // Fully bindless mode: push raw indices directly (for textures/samplers)
-                if logical_device.bindless_enabled {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
-                        let mut indices = BindlessIndices::default();
-                        for (i, &idx) in raw_indices.iter().enumerate() {
-                            if i >= MAX_PUSH_CONSTANT_INDICES {
-                                break;
-                            }
-                            indices.indices[i] = idx;
+                if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
+                    let mut indices = BindlessIndices::default();
+                    for (i, &idx) in raw_indices.iter().enumerate() {
+                        if i >= MAX_PUSH_CONSTANT_INDICES {
+                            break;
                         }
-                        unsafe {
-                            logical_device.device.cmd_push_constants(
-                                cmd,
-                                pipeline.layout,
-                                vk::ShaderStageFlags::ALL,
-                                0,
-                                bytemuck::bytes_of(&indices),
-                            );
-                        }
+                        indices.indices[i] = idx;
+                    }
+                    unsafe {
+                        logical_device.device.cmd_push_constants(
+                            cmd,
+                            pipeline.layout,
+                            vk::ShaderStageFlags::ALL,
+                            0,
+                            bytemuck::bytes_of(&indices),
+                        );
                     }
                 }
             }

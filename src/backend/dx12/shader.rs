@@ -93,17 +93,9 @@ pub(super) fn ensure_stage_compiled(
     // Clone source and search paths to avoid borrow issues
     let slang_source = shader.slang_source.clone();
     let search_paths = shader.search_paths.clone();
-    let device_handle = shader.device_handle;
 
     // Convert search_paths to &str references
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
-
-    // Check if bindless is enabled on the device
-    let bindless_enabled = state
-        .devices
-        .get(&device_handle)
-        .map(|d| d.bindless_enabled)
-        .unwrap_or(false);
 
     // Merge target define with shader-specific defines
     let mut defines = vec![("__DX12__", "1")];
@@ -111,53 +103,33 @@ pub(super) fn ensure_stage_compiled(
         defines.push((k.as_str(), v.as_str()));
     }
 
-    // Compile Slang directly to DXIL (SM 6.6 for bindless support)
-    // This bypasses FXC entirely and uses Slang's built-in DXIL emission
-    let (bytecode, reflection) = if bindless_enabled {
-        let compile_result = state.slang_compiler.compile_with_reflection(
-            &slang_source,
-            crate::slang::ShaderTarget::Dxil,
-            &[(entry_point_name, stage)],
-            &search_path_refs,
-            &defines,
-        );
+    // Compile Slang directly to DXIL (SM 6.6 bindless)
+    let compile_result = state.slang_compiler.compile_with_reflection(
+        &slang_source,
+        crate::slang::ShaderTarget::Dxil,
+        &[(entry_point_name, stage)],
+        &search_path_refs,
+        &defines,
+    );
 
-        let result = compile_result.with_context(|| {
-            format!(
-                "Failed to compile {} shader to DXIL (bindless)",
-                entry_point_name
-            )
-        })?;
+    let result = compile_result.with_context(|| {
+        format!(
+            "Failed to compile {} shader to DXIL (bindless)",
+            entry_point_name
+        )
+    })?;
 
-        let dxil = result
-            .shader
-            .as_dxil()
-            .context("Invalid DXIL output")?
-            .to_vec();
-        (dxil, Some(result.reflection))
-    } else {
-        let dxil_compiled = state
-            .slang_compiler
-            .compile_with_options(
-                &slang_source,
-                crate::slang::ShaderTarget::Dxil,
-                &[(entry_point_name, stage)],
-                &search_path_refs,
-            )
-            .with_context(|| format!("Failed to compile {} shader to DXIL", entry_point_name))?;
-
-        let dxil = dxil_compiled
-            .as_dxil()
-            .context("Invalid DXIL output")?
-            .to_vec();
-        (dxil, None)
-    };
+    let bytecode = result
+        .shader
+        .as_dxil()
+        .context("Invalid DXIL output")?
+        .to_vec();
+    let new_reflection = result.reflection;
 
     tracing::debug!(
-        "Compiled {} to DXIL ({} bytes, bindless={})",
+        "Compiled {} to DXIL ({} bytes)",
         entry_point_name,
         bytecode.len(),
-        bindless_enabled
     );
 
     // Dump DXIL for debugging when GOLDY_DUMP_SHADERS is set
@@ -180,17 +152,14 @@ pub(super) fn ensure_stage_compiled(
     }
 
     // Store reflection data (merge with existing if any)
-    if let Some(new_reflection) = reflection {
-        if let Some(ref mut existing) = shader.reflection {
-            // Merge parameter blocks
-            for pb in &new_reflection.parameter_blocks {
-                if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
-                    existing.parameter_blocks.push(pb.clone());
-                }
+    if let Some(ref mut existing) = shader.reflection {
+        for pb in &new_reflection.parameter_blocks {
+            if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                existing.parameter_blocks.push(pb.clone());
             }
-        } else {
-            shader.reflection = Some(new_reflection);
         }
+    } else {
+        shader.reflection = Some(new_reflection);
     }
 
     Ok(bytecode)

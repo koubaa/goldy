@@ -274,7 +274,6 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             queue,
             queue_family: queue_family_index,
             command_pool,
-            bindless_enabled: true,
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,
             bindless_descriptor_set,

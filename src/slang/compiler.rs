@@ -411,6 +411,13 @@ impl SlangCompiler {
             } else {
                 tracing::warn!("Could not find sm_6_6 profile, using default");
             }
+            unsafe {
+                (self.library.set_target_floating_point_mode)(
+                    request,
+                    target_index,
+                    SLANG_FLOATING_POINT_MODE_PRECISE,
+                );
+            }
         }
 
         // Add translation unit (the source file)
@@ -923,6 +930,13 @@ impl SlangCompiler {
                 tracing::debug!("Set DXIL target profile to sm_6_6 (id={})", profile_id);
             } else {
                 tracing::warn!("Could not find sm_6_6 profile, using default");
+            }
+            unsafe {
+                (self.library.set_target_floating_point_mode)(
+                    request,
+                    target_index,
+                    SLANG_FLOATING_POINT_MODE_PRECISE,
+                );
             }
         }
 

@@ -119,14 +119,12 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let sampler_descriptor_size =
         unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) };
 
-    // Bindless rendering enabled via Slang's direct DXIL output (SM 6.6)
-    // Shaders must use ResourceDescriptorHeap[index] with root constants for indices
-    let bindless_enabled = true;
-    tracing::info!("DX12 bindless enabled (SM 6.6 via Slang DXIL)");
+    // Bindless rendering via Slang's direct DXIL output (SM 6.6).
+    // Shaders must use ResourceDescriptorHeap[index] with root constants for indices.
+    tracing::info!("DX12 bindless (SM 6.6 via Slang DXIL)");
 
-    // Create shared bindless root signature
-    // This will be reused by all graphics and compute pipelines
-    let bindless_root_signature = if bindless_enabled {
+    // Create shared bindless root signature (reused by all graphics and compute pipelines)
+    let bindless_root_signature = {
         let root_constants = D3D12_ROOT_PARAMETER1 {
             ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
             Anonymous: D3D12_ROOT_PARAMETER1_0 {
@@ -182,8 +180,6 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
 
         tracing::debug!("Created shared bindless root signature");
         Some(root_sig)
-    } else {
-        None
     };
 
     // Create compute indirect dispatch command signature (for ExecuteIndirect)
@@ -214,6 +210,17 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         sig
     };
 
+    // Non-shader-visible CBV/SRV/UAV heap for ClearUnorderedAccessViewUint
+    let cpu_clear_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
+        Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+        NumDescriptors: 1,
+        Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+        NodeMask: 0,
+    };
+    let cpu_clear_heap: ID3D12DescriptorHeap =
+        unsafe { device.CreateDescriptorHeap(&cpu_clear_heap_desc) }
+            .context("Failed to create CPU clear heap")?;
+
     // Create fence
     let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create fence")?;
@@ -226,6 +233,9 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         allocator: command_allocator.clone(),
         fence_value: 0, // Not yet used; GetCompletedValue() >= 0 so slot is free
     }];
+
+    let mut resource_registry = types::ResourceRegistry::new();
+    let scratch_clear_uav_offset = resource_registry.alloc_cbv_srv_uav_slot();
 
     state.devices.insert(
         handle,
@@ -245,19 +255,15 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             sampler_descriptor_size,
             fence,
             fence_value: 1,
-            bindless_enabled,
             bindless_root_signature,
             compute_dispatch_indirect_signature,
-            resource_registry: types::ResourceRegistry::new(),
+            resource_registry,
+            cpu_clear_heap,
+            scratch_clear_uav_offset,
         },
     );
 
-    tracing::info!(
-        "Created DX12 device {} for adapter {} [bindless={}]",
-        handle,
-        adapter_id,
-        bindless_enabled
-    );
+    tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);
     Ok(handle)
 }
 

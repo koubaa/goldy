@@ -629,12 +629,12 @@ impl GpuBackend for Dx12Backend {
         compute::is_fence_complete(&self.state, device_handle, token)
     }
 
-    fn wait_fence(&self, device_handle: DeviceHandle, token: FenceToken) -> Result<()> {
+    fn wait_fence(&mut self, device_handle: DeviceHandle, token: FenceToken) -> Result<()> {
         compute::wait_fence(&self.state, device_handle, token)
     }
 
     fn wait_fence_timeout(
-        &self,
+        &mut self,
         device_handle: DeviceHandle,
         token: FenceToken,
         timeout_ms: u32,

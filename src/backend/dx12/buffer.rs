@@ -17,7 +17,7 @@ pub(super) fn create(
     element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
     // First pass: create the resource (immutable borrow of device)
-    let (resource, upload_buffer, is_storage, bindless_enabled) = {
+    let (resource, upload_buffer, is_storage) = {
         let logical_device = state
             .devices
             .get(&device_handle)
@@ -28,7 +28,7 @@ pub(super) fn create(
 
         // Storage buffers need DEFAULT heap for UAV support (bindless)
         // Non-storage buffers can use UPLOAD heap for simpler CPU access
-        let (heap_type, resource_flags) = if is_storage && logical_device.bindless_enabled {
+        let (heap_type, resource_flags) = if is_storage {
             (
                 D3D12_HEAP_TYPE_DEFAULT,
                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -82,62 +82,20 @@ pub(super) fn create(
 
         let resource = resource.context("CreateCommittedResource returned null")?;
 
-        // For DEFAULT heap buffers, create an upload buffer for CPU writes
-        let upload_buffer = if heap_type == D3D12_HEAP_TYPE_DEFAULT {
-            let upload_heap_properties = D3D12_HEAP_PROPERTIES {
-                Type: D3D12_HEAP_TYPE_UPLOAD,
-                CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-                MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-                CreationNodeMask: 0,
-                VisibleNodeMask: 0,
-            };
-            let upload_desc = D3D12_RESOURCE_DESC {
-                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-                Alignment: 0,
-                Width: size,
-                Height: 1,
-                DepthOrArraySize: 1,
-                MipLevels: 1,
-                Format: DXGI_FORMAT_UNKNOWN,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-                Flags: D3D12_RESOURCE_FLAG_NONE,
-            };
-            let mut upload: Option<ID3D12Resource> = None;
-            unsafe {
-                logical_device.device.CreateCommittedResource(
-                    &upload_heap_properties,
-                    D3D12_HEAP_FLAG_NONE,
-                    &upload_desc,
-                    D3D12_RESOURCE_STATE_GENERIC_READ,
-                    None,
-                    &mut upload,
-                )
-            }
-            .context("Failed to create upload buffer")?;
-            Some(upload.context("CreateCommittedResource returned null for upload buffer")?)
-        } else {
-            None
-        };
+        // Upload buffer is created lazily on first write() to avoid doubling memory
+        // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
+        let upload_buffer = None;
 
-        (
-            resource,
-            upload_buffer,
-            is_storage,
-            logical_device.bindless_enabled,
-        )
+        (resource, upload_buffer, is_storage)
     };
 
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    // Second pass: register in bindless heap if enabled
+    // Second pass: register in bindless heap
     // Scattered access -> UAV + SRV descriptors, Broadcast access -> CBV descriptors
     let is_uniform = access == DataAccess::Broadcast;
-    let (bindless_offset, bindless_srv_offset) = if bindless_enabled && (is_storage || is_uniform) {
+    let (bindless_offset, bindless_srv_offset) = if is_storage || is_uniform {
         let logical_device = state
             .devices
             .get_mut(&device_handle)
@@ -275,6 +233,7 @@ pub(super) fn create(
             bindless_srv_offset,
             is_storage,
             upload_buffer,
+            element_stride,
             is_view: false,
         },
     );
@@ -347,7 +306,7 @@ pub(super) fn create_view(
             .get_mut(&device_handle)
             .context("Invalid device handle")?;
 
-        if !logical_device.bindless_enabled || num_elements == 0 {
+        if num_elements == 0 {
             (None, None)
         } else {
             // UAV descriptor
@@ -441,6 +400,7 @@ pub(super) fn create_view(
             bindless_srv_offset,
             is_storage: true,
             upload_buffer: None,
+            element_stride,
             is_view: true,
         },
     );
@@ -467,7 +427,15 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     Ok(())
 }
 
+/// Max size for the staging/upload buffer used in chunked writes.
+/// Large uploads are split into chunks of this size to avoid massive staging allocations.
+const UPLOAD_CHUNK_SIZE: u64 = 16 * 1024 * 1024; // 16 MB
+
 /// Write data to a buffer at the specified offset.
+///
+/// For storage buffers (DEFAULT heap), uses a capped-size upload buffer and copies
+/// in chunks to avoid doubling memory for huge buffers. For UPLOAD heap buffers
+/// (uniform), maps directly.
 pub(super) fn write(
     state: &mut Dx12State,
     buffer_handle: BufferHandle,
@@ -483,65 +451,129 @@ pub(super) fn write(
         anyhow::bail!("Write would exceed buffer bounds");
     }
 
-    // Determine which resource to map (upload buffer for DEFAULT heap, main resource for UPLOAD heap)
-    let map_resource = buffer.upload_buffer.as_ref().unwrap_or(&buffer.resource);
-
-    // Map the buffer
-    let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let read_range = D3D12_RANGE { Begin: 0, End: 0 }; // We're only writing
-
-    unsafe { map_resource.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
-        .context("Failed to map buffer")?;
-
-    // Copy data
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            data.as_ptr(),
-            (mapped_ptr as *mut u8).add(offset as usize),
-            data.len(),
-        );
+    if !buffer.is_storage {
+        // UPLOAD heap: direct map
+        let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let read_range = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { buffer.resource.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
+            .context("Failed to map buffer")?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                (mapped_ptr as *mut u8).add(offset as usize),
+                data.len(),
+            );
+        }
+        let written_range = D3D12_RANGE {
+            Begin: offset as usize,
+            End: (offset as usize) + data.len(),
+        };
+        unsafe { buffer.resource.Unmap(0, Some(&written_range)) };
+        return Ok(());
     }
 
-    // Unmap
-    let written_range = D3D12_RANGE {
-        Begin: offset as usize,
-        End: (offset as usize) + data.len(),
+    // Storage buffer (DEFAULT heap): chunked upload via a capped-size staging buffer.
+    let data_len = data.len() as u64;
+    let chunk_size = data_len.min(UPLOAD_CHUNK_SIZE);
+
+    let device_handle = buffer.device_handle;
+    let main_resource = buffer.resource.clone();
+
+    // Create or reuse the upload buffer (capped at chunk_size)
+    let upload_needed = match &buffer.upload_buffer {
+        Some(_) => false,
+        None => true,
     };
-    unsafe { map_resource.Unmap(0, Some(&written_range)) };
+    if upload_needed {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        let upload_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_UPLOAD,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+        let upload_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Alignment: 0,
+            Width: chunk_size,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_UNKNOWN,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_NONE,
+        };
+        let mut upload: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &upload_heap,
+                D3D12_HEAP_FLAG_NONE,
+                &upload_desc,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                None,
+                &mut upload,
+            )
+        }
+        .context("Failed to create upload staging buffer")?;
+        state
+            .buffers
+            .get_mut(&buffer_handle)
+            .unwrap()
+            .upload_buffer = Some(upload.context("Upload buffer is null")?);
+    }
 
-    // If we have an upload buffer, we need to copy to the main resource
-    if let Some(upload_buffer) = &buffer.upload_buffer {
-        let device_handle = buffer.device_handle;
-        let main_resource = buffer.resource.clone();
-        let upload_resource = upload_buffer.clone();
-        let size = buffer.size;
+    let upload_buf = state
+        .buffers
+        .get(&buffer_handle)
+        .unwrap()
+        .upload_buffer
+        .as_ref()
+        .unwrap()
+        .clone();
+    let upload_buf_size = chunk_size;
 
-        // Get device for copy operation
+    // Upload in chunks
+    let mut written = 0u64;
+    while written < data_len {
+        let this_chunk = (data_len - written).min(upload_buf_size);
+        let src_slice = &data[(written as usize)..((written + this_chunk) as usize)];
+
+        // Map, copy data, unmap
+        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
+            .context("Failed to map upload buffer")?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_slice.as_ptr(), mapped as *mut u8, this_chunk as usize);
+        }
+        let write_range = D3D12_RANGE {
+            Begin: 0,
+            End: this_chunk as usize,
+        };
+        unsafe { upload_buf.Unmap(0, Some(&write_range)) };
+
+        // GPU copy from staging to main buffer
         let device = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
 
-        // Create a one-shot command list for the copy
-        let copy_allocator: ID3D12CommandAllocator = unsafe {
-            device
-                .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+        let alloc: ID3D12CommandAllocator = unsafe {
+            device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
         }
-        .context("Failed to create copy command allocator")?;
-
-        let copy_list: ID3D12GraphicsCommandList = unsafe {
-            device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &copy_allocator,
-                None,
-            )
+        .context("Failed to create command allocator")?;
+        let cmd: ID3D12GraphicsCommandList = unsafe {
+            device.device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None)
         }
-        .context("Failed to create copy command list")?;
+        .context("Failed to create command list")?;
 
-        // Transition main resource from UAV to COPY_DEST
-        let barrier_to_copy = D3D12_RESOURCE_BARRIER {
+        let dst_offset = offset + written;
+        let to_copy = D3D12_RESOURCE_BARRIER {
             Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
             Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
             Anonymous: D3D12_RESOURCE_BARRIER_0 {
@@ -553,15 +585,9 @@ pub(super) fn write(
                 }),
             },
         };
-        unsafe { copy_list.ResourceBarrier(&[barrier_to_copy]) };
-
-        // Copy from upload to main
-        unsafe {
-            copy_list.CopyBufferRegion(&main_resource, 0, &upload_resource, 0, size);
-        }
-
-        // Transition back to UAV
-        let barrier_to_uav = D3D12_RESOURCE_BARRIER {
+        unsafe { cmd.ResourceBarrier(&[to_copy]) };
+        unsafe { cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk) };
+        let to_uav = D3D12_RESOURCE_BARRIER {
             Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
             Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
             Anonymous: D3D12_RESOURCE_BARRIER_0 {
@@ -573,24 +599,21 @@ pub(super) fn write(
                 }),
             },
         };
-        unsafe { copy_list.ResourceBarrier(&[barrier_to_uav]) };
+        unsafe { cmd.ResourceBarrier(&[to_uav]) };
+        unsafe { cmd.Close() }.context("Failed to close command list")?;
 
-        // Close and execute
-        unsafe { copy_list.Close() }.context("Failed to close copy command list")?;
-        let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast()?)];
+        let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        // Wait for completion using fence
         let fence_value = device.fence_value + 1;
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
-
-        // Update fence value for next operation (must be done after wait completes)
-        // Note: device_handle is captured before this block, so we can use get_mut here
         if let Some(dev) = state.devices.get_mut(&device_handle) {
             dev.fence_value = fence_value + 1;
         }
+
+        written += this_chunk;
     }
 
     Ok(())
@@ -644,7 +667,7 @@ pub(super) fn read_to_cpu(
         anyhow::bail!("Read would exceed buffer bounds");
     }
 
-    if buffer.upload_buffer.is_some() {
+    if buffer.is_storage {
         // DEFAULT heap (storage): need a READBACK buffer + GPU copy
         let device = state
             .devices
@@ -782,9 +805,130 @@ pub(super) fn read_to_cpu(
     Ok(())
 }
 
+/// GPU-side zero fill using ClearUnorderedAccessViewUint.
+///
+/// For simple buffers (stride <= 4), clears using the buffer's own UAV descriptor.
+/// For structured buffers (stride > 4), creates a temporary R32_UINT UAV at the
+/// device's scratch descriptor slot so every DWORD is cleared. The buffer's own
+/// structured descriptor is never modified; the scratch slot persists as R32_UINT
+/// until the GPU executes the clear command.
+pub(super) fn uav_clear(
+    device: &super::types::LogicalDevice,
+    buffer: &BufferState,
+    command_list: &ID3D12GraphicsCommandList,
+    offset: u64,
+    clear_size: u64,
+) -> Result<()> {
+    let stride = buffer.element_stride.unwrap_or(4);
+    let needs_scratch = stride > 4;
+
+    let (gpu_handle, clear_cpu_src) = if needs_scratch {
+        let scratch = device.scratch_clear_uav_offset;
+        let num_u32s = (buffer.size / 4) as u32;
+        let raw_uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_UINT,
+            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_UAV {
+                    FirstElement: 0,
+                    NumElements: num_u32s,
+                    StructureByteStride: 0,
+                    CounterOffsetInBytes: 0,
+                    Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+                },
+            },
+        };
+        let scratch_cpu = unsafe {
+            let mut h = device
+                .cbv_srv_uav_heap
+                .GetCPUDescriptorHandleForHeapStart();
+            h.ptr += (scratch * device.cbv_srv_uav_descriptor_size) as usize;
+            h
+        };
+        unsafe {
+            device.device.CreateUnorderedAccessView(
+                &buffer.resource,
+                None,
+                Some(&raw_uav_desc),
+                scratch_cpu,
+            );
+        }
+        let gpu = unsafe {
+            let mut h = device
+                .cbv_srv_uav_heap
+                .GetGPUDescriptorHandleForHeapStart();
+            h.ptr += (scratch as u64) * (device.cbv_srv_uav_descriptor_size as u64);
+            h
+        };
+        (gpu, scratch_cpu)
+    } else {
+        let uav_offset = buffer
+            .bindless_offset
+            .context("Storage buffer has no UAV descriptor for clear")?;
+        let gpu = unsafe {
+            let mut h = device
+                .cbv_srv_uav_heap
+                .GetGPUDescriptorHandleForHeapStart();
+            h.ptr += (uav_offset as u64) * (device.cbv_srv_uav_descriptor_size as u64);
+            h
+        };
+        let cpu = unsafe {
+            let mut h = device
+                .cbv_srv_uav_heap
+                .GetCPUDescriptorHandleForHeapStart();
+            h.ptr += (uav_offset * device.cbv_srv_uav_descriptor_size) as usize;
+            h
+        };
+        (gpu, cpu)
+    };
+
+    let cpu_dst = unsafe { device.cpu_clear_heap.GetCPUDescriptorHandleForHeapStart() };
+    unsafe {
+        device.device.CopyDescriptorsSimple(
+            1,
+            cpu_dst,
+            clear_cpu_src,
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+        );
+    }
+
+    if offset == 0 && clear_size == buffer.size {
+        unsafe {
+            command_list.ClearUnorderedAccessViewUint(
+                gpu_handle,
+                cpu_dst,
+                &buffer.resource,
+                &[0u32; 4],
+                &[],
+            );
+        }
+    } else {
+        let elem_size = if needs_scratch { 4u64 } else { stride as u64 };
+        let first_element = offset / elem_size;
+        let num_elements = clear_size / elem_size;
+        let rect = windows::Win32::Foundation::RECT {
+            left: first_element as i32,
+            top: 0,
+            right: (first_element + num_elements) as i32,
+            bottom: 1,
+        };
+        unsafe {
+            command_list.ClearUnorderedAccessViewUint(
+                gpu_handle,
+                cpu_dst,
+                &buffer.resource,
+                &[0u32; 4],
+                &[rect],
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Fill buffer region with zeros (standalone, synchronous version).
 ///
-/// For DEFAULT heap buffers (storage), zeros upload buffer and copies.
+/// For DEFAULT heap buffers (storage), uses ClearUnorderedAccessViewUint (no staging needed).
 /// For UPLOAD heap buffers (uniform), zeroes directly via Map.
 pub(super) fn clear(
     state: &mut Dx12State,
@@ -793,8 +937,6 @@ pub(super) fn clear(
     offset: u64,
     size: u64,
 ) -> Result<()> {
-    use windows::Win32::Graphics::Direct3D12::*;
-
     let buffer = state
         .buffers
         .get(&buffer_handle)
@@ -813,27 +955,8 @@ pub(super) fn clear(
         return Ok(());
     }
 
-    if let Some(upload_buf) = &buffer.upload_buffer {
-        // DEFAULT heap: zero upload buffer region, then GPU copy
-        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
-            .context("Failed to map upload buffer")?;
-        unsafe {
-            std::ptr::write_bytes(
-                (mapped as *mut u8).add(offset as usize),
-                0,
-                clear_size as usize,
-            );
-        }
-        let written = D3D12_RANGE {
-            Begin: offset as usize,
-            End: (offset + clear_size) as usize,
-        };
-        unsafe { upload_buf.Unmap(0, Some(&written)) };
-
-        let main_resource = buffer.resource.clone();
-        let upload_resource = upload_buf.clone();
+    if buffer.is_storage {
+        // DEFAULT heap storage buffer: use ClearUnorderedAccessViewUint (GPU-side, no staging)
         let device = state
             .devices
             .get(&device_handle)
@@ -844,9 +967,9 @@ pub(super) fn clear(
                 .device
                 .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
         }
-        .context("Failed to create copy command allocator")?;
+        .context("Failed to create command allocator")?;
 
-        let copy_list: ID3D12GraphicsCommandList = unsafe {
+        let cmd_list: ID3D12GraphicsCommandList = unsafe {
             device.device.CreateCommandList(
                 0,
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -854,41 +977,22 @@ pub(super) fn clear(
                 None,
             )
         }
-        .context("Failed to create copy command list")?;
+        .context("Failed to create command list")?;
 
-        let to_copy = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&main_resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
-                }),
-            },
-        };
-        unsafe { copy_list.ResourceBarrier(&[to_copy]) };
+        // Bind descriptor heaps (required for ClearUnorderedAccessViewUint)
         unsafe {
-            copy_list.CopyBufferRegion(&main_resource, offset, &upload_resource, offset, clear_size)
-        };
-        let to_uav = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&main_resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
-                    StateAfter: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                }),
-            },
-        };
-        unsafe { copy_list.ResourceBarrier(&[to_uav]) };
-        unsafe { copy_list.Close() }.context("Failed to close copy command list")?;
+            cmd_list.SetDescriptorHeaps(&[
+                Some(device.cbv_srv_uav_heap.clone()),
+                Some(device.sampler_heap.clone()),
+            ]);
+        }
+
+        uav_clear(device, buffer, &cmd_list, offset, clear_size)?;
+
+        unsafe { cmd_list.Close() }.context("Failed to close command list")?;
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(
-            copy_list.cast().context("Failed to cast command list")?,
+            cmd_list.cast().context("Failed to cast command list")?,
         )];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
@@ -896,6 +1000,11 @@ pub(super) fn clear(
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
+
+        let removed_reason = unsafe { device.device.GetDeviceRemovedReason() };
+        if removed_reason.is_err() {
+            anyhow::bail!("Device removed during UAV clear: {:?}", removed_reason);
+        }
 
         if let Some(dev) = state.devices.get_mut(&device_handle) {
             dev.fence_value = fence_value + 1;

@@ -122,6 +122,13 @@ impl ResourceRegistry {
         self.buffer_srv_offsets.get(&handle).copied()
     }
 
+    /// Allocate a raw descriptor slot (not tied to any resource).
+    pub fn alloc_cbv_srv_uav_slot(&mut self) -> u32 {
+        let offset = self.next_cbv_srv_uav_offset;
+        self.next_cbv_srv_uav_offset += 1;
+        offset
+    }
+
     pub fn unregister_buffer(&mut self, handle: BufferHandle) {
         self.buffer_offsets.remove(&handle);
         self.buffer_srv_offsets.remove(&handle);
@@ -175,8 +182,6 @@ pub(crate) struct LogicalDevice {
     pub fence_value: u64,
 
     // Bindless infrastructure
-    /// Whether bindless descriptor heap indexing is enabled
-    pub bindless_enabled: bool,
     /// Shared root signature for all bindless pipelines (graphics and compute)
     pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
     /// Command signature for indirect compute dispatch (ExecuteIndirect)
@@ -186,6 +191,13 @@ pub(crate) struct LogicalDevice {
     /// Pool of command allocators for non-blocking compute submission.
     /// Slots can be reused when fence signals completion.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
+    /// Non-shader-visible CBV/SRV/UAV heap for ClearUnorderedAccessViewUint.
+    /// DX12 requires a CPU descriptor from a non-shader-visible heap for UAV clears.
+    pub cpu_clear_heap: Direct3D12::ID3D12DescriptorHeap,
+    /// Reserved shader-visible descriptor slot for structured buffer clears.
+    /// Used to hold a temporary R32_UINT UAV so the GPU-side descriptor matches
+    /// the clear format at execution time (not just at recording time).
+    pub scratch_clear_uav_offset: u32,
 }
 
 /// GPU buffer state.
@@ -200,8 +212,10 @@ pub(crate) struct BufferState {
     pub bindless_srv_offset: Option<u32>,
     /// Whether this is a storage buffer (uses UAV instead of CBV/SRV)
     pub is_storage: bool,
-    /// Upload buffer for DEFAULT heap resources (needed for CPU writes)
+    /// Upload buffer for DEFAULT heap resources (lazy-created on first CPU write)
     pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
+    /// StructuredBuffer element stride (for UAV clear rect calculations)
+    pub element_stride: Option<u32>,
     /// If true, this is a view into another buffer — don't free the resource on destroy.
     pub is_view: bool,
 }

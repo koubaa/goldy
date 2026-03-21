@@ -133,13 +133,11 @@ pub(super) fn submit(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    if logical_device.bindless_enabled {
-        unsafe {
-            command_list.SetDescriptorHeaps(&[
-                Some(logical_device.cbv_srv_uav_heap.clone()),
-                Some(logical_device.sampler_heap.clone()),
-            ]);
-        }
+    unsafe {
+        command_list.SetDescriptorHeaps(&[
+            Some(logical_device.cbv_srv_uav_heap.clone()),
+            Some(logical_device.sampler_heap.clone()),
+        ]);
     }
 
     // Track current pipeline (reserved for future use)
@@ -158,76 +156,59 @@ pub(super) fn submit(
                 }
             }
             ComputeCommand::SetPushConstants { buffers } => {
-                // Fully bindless mode: push buffer indices directly (no bind groups needed)
-                let bindless_enabled = state
-                    .devices
-                    .get(&device_handle)
-                    .map(|d| d.bindless_enabled)
-                    .unwrap_or(false);
-
-                if bindless_enabled {
-                    let mut indices = types::BindlessIndices::default();
-                    for (i, buffer_handle) in buffers.iter().enumerate() {
-                        if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                            break;
-                        }
-                        if let Some(buf_state) = state.buffers.get(buffer_handle) {
-                            // Compute shaders use goldy_dyn_scattered() which returns RWStructuredBuffer.
-                            // RWStructuredBuffer requires UAV descriptors, not SRV.
-                            // Always use bindless_offset (UAV) for storage buffers in compute shaders.
-                            // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
-                            let offset = buf_state.bindless_offset.unwrap_or(0);
-                            indices.indices[i] = offset;
-                            tracing::trace!(
-                                "Compute push constant [{}]: buffer {} -> UAV offset {}",
-                                i,
-                                buffer_handle,
-                                offset
-                            );
-                        }
+                // Push buffer indices directly (no bind groups)
+                let mut indices = types::BindlessIndices::default();
+                for (i, buffer_handle) in buffers.iter().enumerate() {
+                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                        break;
                     }
-
-                    tracing::trace!(
-                        "Setting compute root constants: {:?}",
-                        &indices.indices[..buffers.len().min(types::MAX_ROOT_CONSTANT_INDICES)]
-                    );
-
-                    unsafe {
-                        command_list.SetComputeRoot32BitConstants(
-                            0, // Root parameter index
-                            types::MAX_ROOT_CONSTANT_INDICES as u32,
-                            indices.indices.as_ptr() as *const std::ffi::c_void,
-                            0,
+                    if let Some(buf_state) = state.buffers.get(buffer_handle) {
+                        // Compute shaders use goldy_dyn_scattered() which returns RWStructuredBuffer.
+                        // RWStructuredBuffer requires UAV descriptors, not SRV.
+                        // Always use bindless_offset (UAV) for storage buffers in compute shaders.
+                        // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
+                        let offset = buf_state.bindless_offset.unwrap_or(0);
+                        indices.indices[i] = offset;
+                        tracing::trace!(
+                            "Compute push constant [{}]: buffer {} -> UAV offset {}",
+                            i,
+                            buffer_handle,
+                            offset
                         );
                     }
+                }
+
+                tracing::trace!(
+                    "Setting compute root constants: {:?}",
+                    &indices.indices[..buffers.len().min(types::MAX_ROOT_CONSTANT_INDICES)]
+                );
+
+                unsafe {
+                    command_list.SetComputeRoot32BitConstants(
+                        0, // Root parameter index
+                        types::MAX_ROOT_CONSTANT_INDICES as u32,
+                        indices.indices.as_ptr() as *const std::ffi::c_void,
+                        0,
+                    );
                 }
             }
             ComputeCommand::SetPushConstantsRaw {
                 indices: raw_indices,
             } => {
-                // Fully bindless mode: push raw indices directly (for textures/samplers)
-                let bindless_enabled = state
-                    .devices
-                    .get(&device_handle)
-                    .map(|d| d.bindless_enabled)
-                    .unwrap_or(false);
-
-                if bindless_enabled {
-                    let mut indices = types::BindlessIndices::default();
-                    for (i, &idx) in raw_indices.iter().enumerate() {
-                        if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                            break;
-                        }
-                        indices.indices[i] = idx;
+                let mut indices = types::BindlessIndices::default();
+                for (i, &idx) in raw_indices.iter().enumerate() {
+                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                        break;
                     }
-                    unsafe {
-                        command_list.SetComputeRoot32BitConstants(
-                            0,
-                            types::MAX_ROOT_CONSTANT_INDICES as u32,
-                            indices.indices.as_ptr() as *const std::ffi::c_void,
-                            0,
-                        );
-                    }
+                    indices.indices[i] = idx;
+                }
+                unsafe {
+                    command_list.SetComputeRoot32BitConstants(
+                        0,
+                        types::MAX_ROOT_CONSTANT_INDICES as u32,
+                        indices.indices.as_ptr() as *const std::ffi::c_void,
+                        0,
+                    );
                 }
             }
             ComputeCommand::Dispatch {
@@ -259,6 +240,18 @@ pub(super) fn submit(
                     .compute_dispatch_indirect_signature
                     .as_ref()
                     .context("DispatchIndirect: compute indirect signature not available")?;
+
+                // UAV barrier to ensure prior dispatch's UAV writes are visible
+                let uav_barrier = D3D12_RESOURCE_BARRIER {
+                    Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                    Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                        UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                            pResource: std::mem::ManuallyDrop::new(None),
+                        }),
+                    },
+                };
+                unsafe { command_list.ResourceBarrier(&[uav_barrier]) };
 
                 // Transition: UAV → INDIRECT_ARGUMENT (setup shader wrote args as UAV)
                 let to_indirect = D3D12_RESOURCE_BARRIER {
@@ -320,69 +313,15 @@ pub(super) fn submit(
                     *size
                 };
                 if clear_size > 0 {
-                    if let Some(upload_buf) = &buf_state.upload_buffer {
-                        // Storage buffer (DEFAULT heap): zero the upload buffer region, then copy
-                        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-                        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-                        unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
-                            .context("ClearBuffer: failed to map upload buffer")?;
-                        unsafe {
-                            std::ptr::write_bytes(
-                                (mapped as *mut u8).add(*offset as usize),
-                                0,
-                                clear_size as usize,
-                            );
-                        }
-                        let written = D3D12_RANGE {
-                            Begin: *offset as usize,
-                            End: (*offset + clear_size) as usize,
-                        };
-                        unsafe { upload_buf.Unmap(0, Some(&written)) };
-
-                        // Transition to COPY_DEST, copy, transition back to UAV
-                        let to_copy = D3D12_RESOURCE_BARRIER {
-                            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                                Transition: std::mem::ManuallyDrop::new(
-                                    D3D12_RESOURCE_TRANSITION_BARRIER {
-                                        pResource: unsafe {
-                                            std::mem::transmute_copy(&buf_state.resource)
-                                        },
-                                        Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                        StateBefore: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                        StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
-                                    },
-                                ),
-                            },
-                        };
-                        unsafe { command_list.ResourceBarrier(&[to_copy]) };
-                        unsafe {
-                            command_list.CopyBufferRegion(
-                                &buf_state.resource,
-                                *offset,
-                                upload_buf,
-                                *offset,
-                                clear_size,
-                            );
-                        }
-                        let to_uav = D3D12_RESOURCE_BARRIER {
-                            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                                Transition: std::mem::ManuallyDrop::new(
-                                    D3D12_RESOURCE_TRANSITION_BARRIER {
-                                        pResource: unsafe {
-                                            std::mem::transmute_copy(&buf_state.resource)
-                                        },
-                                        Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                        StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
-                                        StateAfter: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                    },
-                                ),
-                            },
-                        };
-                        unsafe { command_list.ResourceBarrier(&[to_uav]) };
+                    if buf_state.is_storage {
+                        // Storage buffer (DEFAULT heap): GPU-side UAV clear (no staging needed)
+                        super::buffer::uav_clear(
+                            logical_device,
+                            buf_state,
+                            &command_list,
+                            *offset,
+                            clear_size,
+                        )?;
                     } else {
                         // UPLOAD heap buffer: CPU-accessible, just memset
                         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -473,7 +412,15 @@ pub(super) fn wait_fence(
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
-    super::utils::wait_for_fence(&logical_device.fence, token)
+    super::utils::wait_for_fence(&logical_device.fence, token)?;
+
+    // Detect TDR: device removal signals all fences with UINT64_MAX
+    let completed = unsafe { logical_device.fence.GetCompletedValue() };
+    if completed == u64::MAX {
+        let reason = unsafe { logical_device.device.GetDeviceRemovedReason() };
+        anyhow::bail!("GPU device removed (TDR) after fence wait: {:?}", reason);
+    }
+    Ok(())
 }
 
 /// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed.

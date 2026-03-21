@@ -175,8 +175,6 @@ pub(crate) struct LogicalDevice {
     pub command_pool: vk::CommandPool,
 
     // Bindless infrastructure
-    /// Whether bindless descriptor indexing is enabled
-    pub bindless_enabled: bool,
     /// Global descriptor pool for bindless resources
     pub bindless_descriptor_pool: Option<vk::DescriptorPool>,
     /// Global descriptor set layout for bindless resources
@@ -521,7 +519,8 @@ pub(super) struct VulkanState {
     pub next_sampler_handle: SamplerHandle,
     /// Per-backend Slang compiler instance (avoids global state issues in tests)
     pub slang_compiler: crate::slang::SlangCompiler,
-    /// Per-submission fences for non-blocking compute; token -> (device, VkFence)
-    pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence)>,
+    /// Per-submission fences for non-blocking compute; token -> (device, VkFence, Option<VkCommandBuffer>).
+    /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
+    pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
     pub next_compute_fence_token: u64,
 }

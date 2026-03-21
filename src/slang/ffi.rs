@@ -304,6 +304,11 @@ pub type SlangResult = i32;
 /// Success result
 pub const SLANG_OK: SlangResult = 0;
 
+/// Floating point modes
+pub const SLANG_FLOATING_POINT_MODE_DEFAULT: c_int = 0;
+pub const SLANG_FLOATING_POINT_MODE_FAST: c_int = 1;
+pub const SLANG_FLOATING_POINT_MODE_PRECISE: c_int = 2;
+
 /// Check if result is successful
 #[inline]
 pub fn slang_succeeded(result: SlangResult) -> bool {
@@ -395,6 +400,8 @@ pub type FnSpAddCodeGenTarget =
     unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int) -> c_int;
 pub type FnSpSetTargetProfile =
     unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, profile: c_int);
+pub type FnSpSetTargetFloatingPointMode =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, mode: c_int);
 /// Find a profile by name (e.g., "sm_6_6") - uses the global session
 pub type FnSpFindProfile =
     unsafe extern "C" fn(session: *mut SlangSession, name: *const c_char) -> SlangProfileID;

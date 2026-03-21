@@ -261,8 +261,9 @@ impl GpuBackend for VulkanBackend {
         data: &[u8],
     ) -> Result<()> {
         buffer::write(
+            &self.state.instance,
             &self.state.devices,
-            &self.state.buffers,
+            &mut self.state.buffers,
             buffer_handle,
             offset,
             data,
@@ -307,8 +308,9 @@ impl GpuBackend for VulkanBackend {
         output: &mut [u8],
     ) -> Result<()> {
         buffer::read_to_cpu(
+            &self.state.instance,
             &self.state.devices,
-            &self.state.buffers,
+            &mut self.state.buffers,
             device_handle,
             buffer_handle,
             output,
@@ -771,16 +773,16 @@ impl GpuBackend for VulkanBackend {
         compute::is_fence_complete(&self.state, device_handle, token)
     }
 
-    fn wait_fence(&self, device_handle: DeviceHandle, token: FenceToken) -> Result<()> {
-        compute::wait_fence(&self.state, device_handle, token)
+    fn wait_fence(&mut self, device_handle: DeviceHandle, token: FenceToken) -> Result<()> {
+        compute::wait_fence(&mut self.state, device_handle, token)
     }
 
     fn wait_fence_timeout(
-        &self,
+        &mut self,
         device_handle: DeviceHandle,
         token: FenceToken,
         timeout_ms: u32,
     ) -> Result<bool> {
-        compute::wait_fence_timeout(&self.state, device_handle, token, timeout_ms)
+        compute::wait_fence_timeout(&mut self.state, device_handle, token, timeout_ms)
     }
 }

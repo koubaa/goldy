@@ -434,12 +434,12 @@ impl GpuBackend for MetalBackend {
         compute::is_fence_complete(&self.state, device, token)
     }
 
-    fn wait_fence(&self, device: DeviceHandle, token: super::FenceToken) -> Result<()> {
+    fn wait_fence(&mut self, device: DeviceHandle, token: super::FenceToken) -> Result<()> {
         compute::wait_fence(&self.state, device, token)
     }
 
     fn wait_fence_timeout(
-        &self,
+        &mut self,
         device: DeviceHandle,
         token: super::FenceToken,
         timeout_ms: u32,

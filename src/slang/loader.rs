@@ -29,6 +29,7 @@ pub struct SlangLibrary {
     // Target configuration
     pub add_code_gen_target: FnSpAddCodeGenTarget,
     pub set_target_profile: FnSpSetTargetProfile,
+    pub set_target_floating_point_mode: FnSpSetTargetFloatingPointMode,
     pub find_profile: FnSpFindProfile,
     // Source input
     pub add_translation_unit: FnSpAddTranslationUnit,
@@ -115,6 +116,9 @@ impl SlangLibrary {
             let set_target_profile: FnSpSetTargetProfile = *library
                 .get(b"spSetTargetProfile\0")
                 .context("Failed to load spSetTargetProfile")?;
+            let set_target_floating_point_mode: FnSpSetTargetFloatingPointMode = *library
+                .get(b"spSetTargetFloatingPointMode\0")
+                .context("Failed to load spSetTargetFloatingPointMode")?;
             let find_profile: FnSpFindProfile = *library
                 .get(b"spFindProfile\0")
                 .context("Failed to load spFindProfile")?;
@@ -239,6 +243,7 @@ impl SlangLibrary {
                 destroy_compile_request,
                 add_code_gen_target,
                 set_target_profile,
+                set_target_floating_point_mode,
                 find_profile,
                 add_translation_unit,
                 add_translation_unit_source_string,

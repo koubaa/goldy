@@ -906,12 +906,12 @@ impl GpuBackend for MockBackend {
         true
     }
 
-    fn wait_fence(&self, _device: DeviceHandle, _token: FenceToken) -> Result<()> {
+    fn wait_fence(&mut self, _device: DeviceHandle, _token: FenceToken) -> Result<()> {
         Ok(())
     }
 
     fn wait_fence_timeout(
-        &self,
+        &mut self,
         _device: DeviceHandle,
         _token: FenceToken,
         _timeout_ms: u32,

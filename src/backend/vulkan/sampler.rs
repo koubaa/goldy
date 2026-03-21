@@ -44,14 +44,12 @@ pub(super) fn create(
     let sampler = unsafe { logical_device.device.create_sampler(&sampler_info, None) }
         .context("Failed to create sampler")?;
 
-    let bindless_enabled = logical_device.bindless_enabled;
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
     let handle = *next_sampler_handle;
     *next_sampler_handle += 1;
 
-    // Register sampler in bindless descriptor set if enabled
-    let bindless_index = if bindless_enabled {
+    let bindless_index = {
         let logical_device = devices.get_mut(&device_handle).unwrap();
         let index = logical_device.resource_registry.register_sampler(handle);
 
@@ -76,8 +74,6 @@ pub(super) fn create(
         }
 
         Some(index)
-    } else {
-        None
     };
 
     samplers.insert(

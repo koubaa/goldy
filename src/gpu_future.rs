@@ -28,7 +28,7 @@ impl GpuFuture {
 
     /// Block until the GPU has finished. Returns an error if the device was lost.
     pub fn wait(&self) -> Result<()> {
-        let backend = self.backend.lock().unwrap();
+        let mut backend = self.backend.lock().unwrap();
         backend.wait_fence(self.device, self.fence_token)
     }
 
@@ -37,7 +37,7 @@ impl GpuFuture {
     /// - `Ok(false)` if the timeout elapsed (GPU still busy)
     /// - `Err` if the device was lost
     pub fn wait_timeout(&self, timeout_ms: u32) -> Result<bool> {
-        let backend = self.backend.lock().unwrap();
+        let mut backend = self.backend.lock().unwrap();
         backend.wait_fence_timeout(self.device, self.fence_token, timeout_ms)
     }
 }
