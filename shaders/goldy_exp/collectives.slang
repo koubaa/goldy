@@ -29,11 +29,29 @@ public T workgroup_reduce<T : IMonoid, let N : int>(
     return val;
 }
 
+/// Map-then-reduce: apply IScannable.map to raw data, then workgroup_reduce.
+///
+/// Captures the pattern shared by pathtag_reduce (map = reduce_tag) and
+/// draw_reduce (map = map_draw_tag): the same algorithm under different
+/// (Map, Monoid) pairs.
+[ForceInline]
+public T mapped_workgroup_reduce<T : IMonoid, S : IScannable<T>, let N : int>(
+    uint raw_data, uint local_ix, groupshared T scratch[N]
+) {
+    T mapped = S.map(raw_data);
+    return workgroup_reduce<T, N>(mapped, local_ix, scratch);
+}
+
 /// Inclusive left-sweep prefix scan: each thread accumulates values from
 /// lower-indexed neighbors. Thread k holds combine(v[0], ..., v[k]).
 ///
 /// scratch[local_ix] contains the inclusive scan result.
 /// No trailing barrier — caller must sync before cross-lane reads from scratch.
+///
+/// NOTE: Due to a Slang compiler bug with cross-module [ForceInline] generics
+/// and groupshared parameters, this function may produce incorrect DXIL when
+/// called from a different module. If you encounter incorrect results, inline
+/// the scan loop directly in the calling shader as a workaround.
 [ForceInline]
 public T workgroup_inclusive_scan<T : IMonoid, let N : int>(
     T val, uint local_ix, groupshared T scratch[N]
@@ -41,8 +59,10 @@ public T workgroup_inclusive_scan<T : IMonoid, let N : int>(
     scratch[local_ix] = val;
     for (uint i = 0; i < firstbitlow(N); i++) {
         GroupMemoryBarrierWithGroupSync();
-        if (local_ix >= (1u << i))
-            val = scratch[local_ix - (1u << i)].combine(val);
+        if (local_ix >= (1u << i)) {
+            T other = scratch[local_ix - (1u << i)];
+            val = other.combine(val);
+        }
         GroupMemoryBarrierWithGroupSync();
         scratch[local_ix] = val;
     }

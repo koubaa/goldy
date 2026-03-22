@@ -30,3 +30,17 @@ extension uint : IMonoid {
     static uint identity() { return 0; }
     uint combine(uint other) { return this + other; }
 }
+
+/// A scannable type: pairs a map function with a monoid.
+///
+/// Captures the GraphBLAS insight that many parallel scan/reduce pipelines
+/// are the same algorithm under different (Map, Monoid) pairs. Defining a
+/// conformance means: "to scan this quantity, map each raw element, then
+/// combine under the monoid."
+///
+/// This separates the "what to extract from raw data" (map) from the
+/// "how to combine" (IMonoid), so adding a new scanned quantity to a
+/// pipeline requires only a new IScannable conformance — not a new shader.
+public interface IScannable<T : IMonoid> {
+    static T map(uint raw_input);
+}

@@ -1,8 +1,9 @@
 // Compile-only test for workgroup collective operations.
 //
 // Validates that workgroup_reduce, workgroup_inclusive_scan, workgroup_broadcast,
-// and workgroup_upper_bound compile with IMonoid types (including uint) and
-// ekrano's TagMonoid/DrawMonoid/Bic/Bbox2D across SPIRV, DXIL, and Metal.
+// workgroup_upper_bound, IScannable, and mapped_workgroup_reduce compile with
+// IMonoid types (including uint) and ekrano's TagMonoid/DrawMonoid/Bic/Bbox2D
+// across SPIRV, DXIL, and Metal.
 //
 // Run via: cargo test test_collectives_compiles
 
@@ -62,6 +63,16 @@ void cs_main(uint3 local_id : SV_GroupThreadID) {
     GroupMemoryBarrierWithGroupSync();
     uint found = workgroup_upper_bound<LG_WG_SIZE>(ix * 2, sh_uint);
 
+    // --- mapped_workgroup_reduce with PathTagScanner (IScannable<TagMonoid>) ---
+    TagMonoid mapped_tag = mapped_workgroup_reduce<TagMonoid, PathTagScanner>(ix, ix, sh_tag);
+
+    // --- mapped_workgroup_reduce with DrawTagScanner (IScannable<DrawMonoid>) ---
+    DrawMonoid mapped_draw = mapped_workgroup_reduce<DrawMonoid, DrawTagScanner>(ix, ix, sh_draw);
+
+    // --- IScannable.map standalone ---
+    TagMonoid from_scanner = PathTagScanner.map(0x01010101u);
+    DrawMonoid from_draw_scanner = DrawTagScanner.map(DRAWTAG_FILL_COLOR);
+
     if (ix == 0) {
         OUT[0] = t.trans_ix;
         OUT[1] = d.path_ix;
@@ -71,5 +82,9 @@ void cs_main(uint3 local_id : SV_GroupThreadID) {
         OUT[5] = count;
         OUT[6] = bcast;
         OUT[7] = found;
+        OUT[8] = mapped_tag.trans_ix;
+        OUT[9] = mapped_draw.path_ix;
+        OUT[10] = from_scanner.path_ix;
+        OUT[11] = from_draw_scanner.clip_ix;
     }
 }

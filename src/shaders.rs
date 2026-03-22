@@ -487,8 +487,11 @@ mod tests {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let goldy_shaders = manifest_dir.join("shaders");
         let goldy_path = goldy_shaders.to_string_lossy();
-        let ekrano_shaders =
-            manifest_dir.join("..").join("ekrano").join("ekrano_shaders").join("slang");
+        let ekrano_shaders = manifest_dir
+            .join("..")
+            .join("ekrano")
+            .join("ekrano_shaders")
+            .join("slang");
         let ekrano_path = ekrano_shaders.to_string_lossy();
 
         let test_shader = std::fs::read_to_string(goldy_shaders.join("test_collectives.slang"))
@@ -557,8 +560,11 @@ mod tests {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let goldy_shaders = manifest_dir.join("shaders");
         let goldy_path = goldy_shaders.to_string_lossy();
-        let ekrano_shaders =
-            manifest_dir.join("..").join("ekrano").join("ekrano_shaders").join("slang");
+        let ekrano_shaders = manifest_dir
+            .join("..")
+            .join("ekrano")
+            .join("ekrano_shaders")
+            .join("slang");
         let ekrano_path = ekrano_shaders.to_string_lossy();
 
         let test_shader = std::fs::read_to_string(goldy_shaders.join("test_ekrano_monoids.slang"))
