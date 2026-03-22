@@ -643,18 +643,21 @@ fn test_render_target_bindless_buffer_read() {
         return;
     };
 
-    // Write a known non-zero sentinel into a buffer.
-    let sentinel: u32 = 0xAB;
-    let data = vec![sentinel; 4];
+    // Write 1 (alive cell) into the buffer — same value the GOL shaders use.
+    let data = vec![1u32; 4];
     let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
 
     // Fragment shader reads buffer[0] via bindless push constant.
-    // Outputs red (1,0,0,1) when the value matches, black otherwise.
-    // If the argument buffer is not bound the GPU reads 0 → black pixels.
+    // Outputs bright green when value == 1 (alive), dark gray otherwise.
+    // Both branches are visually distinct from the black clear color, so we can
+    // tell whether the shader ran vs. the draw call being skipped entirely.
+    // If the argument buffer is not bound the GPU reads 0 → dark gray pixels.
+    // Mirrors the GOL render shader structure to avoid platform-specific
+    // Slang codegen differences (UV varying, local variable assignment).
     let shader_source = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
+#define CELLS goldy_dyn_scattered<uint>(0)
 
 static const float2 positions[3] = {
     float2(-1, -1),
@@ -662,18 +665,33 @@ static const float2 positions[3] = {
     float2(-1,  3)
 };
 
-struct VSOut { float4 pos : SV_Position; };
+static const float2 uvs[3] = {
+    float2(0, 0),
+    float2(2, 0),
+    float2(0, 2)
+};
+
+struct VSOut {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
 
 [shader("vertex")]
 VSOut vs_main(uint id : SV_VertexID) {
     VSOut o;
     o.pos = float4(positions[id], 0.0, 1.0);
+    o.uv  = uvs[id];
     return o;
 }
 
 [shader("fragment")]
 float4 fs_main(VSOut i) : SV_Target {
-    return DATA[0] == 0xABu ? float4(1, 0, 0, 1) : float4(0, 0, 0, 1);
+    uint val = CELLS[0];
+    if (val == 1u) {
+        return float4(0.2, 0.9, 0.3, 1.0);
+    } else {
+        return float4(0.05, 0.08, 0.1, 1.0);
+    }
 }
 "#;
 
@@ -708,17 +726,18 @@ float4 fs_main(VSOut i) : SV_Target {
     let pixels = target.read_to_cpu().expect("readback");
     assert_eq!(pixels.len(), 4 * 4 * 4);
 
-    // Every pixel should be red (R=255, G=0, B=0).
-    // If the argument buffer wasn't bound, the GPU reads 0 instead of the
-    // sentinel and all pixels come back black.
-    let all_red = pixels
-        .chunks(4)
-        .all(|p| p[0] > 200 && p[1] < 10 && p[2] < 10);
+    // Every pixel should be the "alive" green color (val==1 branch).
+    // Clear color:  black  → [  0,   0,   0, 255]  (draw call never ran)
+    // val==0 branch: dark  → [ 12,  20,  25, 255]  (argument buffer not bound)
+    // val==1 branch: green → [ 51, 229,  76, 255]  (correct)
+    // Checking G > 100 distinguishes the green branch from both failure modes.
+    let all_green = pixels.chunks(4).all(|p| p[1] > 100);
     assert!(
-        all_red,
-        "Expected all pixels red from bindless buffer read, but got non-red pixels.\n\
+        all_green,
+        "Expected all pixels green (alive) from bindless buffer read.\n\
          First pixel: {:?}\n\
-         This likely means the argument buffer was not bound to the render encoder.",
+         black=[0,0,0,255] means the draw call never executed;\n\
+         dark=[12,20,25,255] means the argument buffer was not bound to the render encoder.",
         &pixels[..4]
     );
 }
