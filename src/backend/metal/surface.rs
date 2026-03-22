@@ -156,7 +156,9 @@ pub(super) fn render(
         clear_depth,
     );
 
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    let sync = logical_device.command_queue.new_command_buffer();
+    sync.commit();
+    sync.wait_until_completed();
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let encoder = command_buffer.new_render_command_encoder(render_pass);

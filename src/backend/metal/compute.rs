@@ -267,7 +267,9 @@ pub(super) fn submit(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    let sync = logical_device.command_queue.new_command_buffer();
+    sync.commit();
+    sync.wait_until_completed();
 
     let command_buffer_ref = logical_device.command_queue.new_command_buffer();
     record_commands_to_buffer(state, command_buffer_ref, logical_device, commands)?;

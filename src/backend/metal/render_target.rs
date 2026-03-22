@@ -118,11 +118,16 @@ pub(super) fn render_to(
         clear_depth,
     );
 
-    // ARM store-buffer fence: ensure all prior CPU writes (argument buffer
-    // encoding, heap-buffer data) are globally visible before the GPU command
-    // buffer starts reading.  Without this, a render-only path that follows
-    // buffer creation can race against the store drain on Apple Silicon.
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    // GPU coherency fence: commit an empty command buffer so Metal
+    // synchronises CPU-written argument-buffer contents (encoded GPU
+    // addresses from ArgumentEncoder) with the GPU's view of memory.
+    // A CPU-only atomic::fence is insufficient — the GPU is a separate
+    // coherency domain.  Without this round-trip, a render-only path
+    // that immediately follows buffer creation can read stale (zero)
+    // pointers from the argument buffer on Apple Silicon CI runners.
+    let sync = logical_device.command_queue.new_command_buffer();
+    sync.commit();
+    sync.wait_until_completed();
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let encoder = command_buffer.new_render_command_encoder(render_pass);
