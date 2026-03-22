@@ -646,8 +646,7 @@ fn test_render_target_bindless_buffer_read() {
     // Write a known non-zero sentinel into a buffer.
     let sentinel: u32 = 0xAB;
     let data = vec![sentinel; 4];
-    let buffer =
-        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
 
     // Fragment shader reads buffer[0] via bindless push constant.
     // Outputs red (1,0,0,1) when the value matches, black otherwise.
@@ -678,8 +677,7 @@ float4 fs_main(VSOut i) : SV_Target {
 }
 "#;
 
-    let shader =
-        ShaderModule::from_slang(&device, shader_source).expect("compile bindless shader");
+    let shader = ShaderModule::from_slang(&device, shader_source).expect("compile bindless shader");
 
     let target =
         RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("create target");
