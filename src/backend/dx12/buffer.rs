@@ -442,6 +442,10 @@ pub(super) fn write(
     offset: u64,
     data: &[u8],
 ) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
     let buffer = state
         .buffers
         .get(&buffer_handle)

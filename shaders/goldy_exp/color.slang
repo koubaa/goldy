@@ -42,3 +42,25 @@ public float3 gamma_correct(float3 color, float gamma) {
     return pow(color, float3(1.0 / gamma, 1.0 / gamma, 1.0 / gamma));
 }
 
+// Pack/unpack RGBA8 stored in a single uint (WGSL-compatible layout, LSB first).
+public float4 unpack4x8unorm(uint x) {
+    return float4(
+        float((x >> 0) & 0xFF) / 255.0,
+        float((x >> 8) & 0xFF) / 255.0,
+        float((x >> 16) & 0xFF) / 255.0,
+        float((x >> 24) & 0xFF) / 255.0
+    );
+}
+
+public uint pack4x8unorm(float4 v) {
+    return (uint(saturate(v.x) * 255.0) << 0) |
+           (uint(saturate(v.y) * 255.0) << 8) |
+           (uint(saturate(v.z) * 255.0) << 16) |
+           (uint(saturate(v.w) * 255.0) << 24);
+}
+
+/// Premultiply RGB by alpha (straight → premultiplied).
+public float4 premul_alpha(float4 rgba) {
+    return float4(rgba.rgb * rgba.a, rgba.a);
+}
+

@@ -244,6 +244,14 @@ impl ShaderLibrary {
                     include_str!("../shaders/goldy_exp/math.slang"),
                 ),
                 (
+                    "goldy_exp/algebra",
+                    include_str!("../shaders/goldy_exp/algebra.slang"),
+                ),
+                (
+                    "goldy_exp/atomics",
+                    include_str!("../shaders/goldy_exp/atomics.slang"),
+                ),
+                (
                     "goldy_exp/color",
                     include_str!("../shaders/goldy_exp/color.slang"),
                 ),
@@ -332,6 +340,8 @@ mod tests {
         assert_eq!(lib.name(), "goldy_exp");
         assert!(lib.has_module("goldy_exp"));
         assert!(lib.has_module("goldy_exp/math"));
+        assert!(lib.has_module("goldy_exp/algebra"));
+        assert!(lib.has_module("goldy_exp/atomics"));
         assert!(lib.has_module("goldy_exp/color"));
         assert!(lib.has_module("goldy_exp/vertex"));
         assert!(lib.has_module("goldy_exp/types"));

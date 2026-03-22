@@ -15,10 +15,16 @@
 //   RWStructuredBuffer<Particle> buf = goldy_scattered<Particle>(0);
 //
 // These work on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
+//
+// Math/color also provide portable helpers shared with Ekrano: 2D `Transform`,
+// `bbox_intersect`, gradient `extend_mode*`, `erf7`, `unpack4x8unorm` / `pack4x8unorm`, `premul_alpha`.
+// `signed_atomic_min` / `signed_atomic_max` implement signed min/max on RWByteAddressBuffer (DXIL unsigned atomics workaround).
 
 module goldy_exp;
 
 __include "goldy_exp/math";
+__include "goldy_exp/algebra";
+__include "goldy_exp/atomics";
 __include "goldy_exp/color";
 __include "goldy_exp/vertex";
 __include "goldy_exp/types";
