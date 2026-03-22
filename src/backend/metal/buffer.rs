@@ -61,21 +61,17 @@ pub(super) fn create(
         unsafe {
             let dst = (logical_device.argument_buffer.contents() as *mut u8).add(offset as usize);
             std::ptr::write_unaligned(dst as *mut u64, gpu_addr);
-
-            // Verify the write landed
-            let readback = std::ptr::read_unaligned(dst as *const u64);
-            eprintln!(
-                "DIAG buffer::create: handle={}, encoding_index={}, offset={}, \
-                 encoded_length={}, gpu_addr=0x{:x}, readback=0x{:x}, match={}",
-                handle,
-                encoding_index,
-                offset,
-                encoded_length,
-                gpu_addr,
-                readback,
-                gpu_addr == readback,
-            );
         }
+        eprintln!(
+            "DIAG buffer::create: handle={}, encoding_index={}, offset={}, \
+             encoded_length={}, gpu_addr=0x{:x}, contents_ptr=0x{:x}",
+            handle,
+            encoding_index,
+            offset,
+            encoded_length,
+            gpu_addr,
+            buffer.contents() as u64,
+        );
     }
 
     logical_device.heap_buffer_count += 1;
