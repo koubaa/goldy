@@ -248,6 +248,10 @@ impl ShaderLibrary {
                     include_str!("../shaders/goldy_exp/algebra.slang"),
                 ),
                 (
+                    "goldy_exp/collectives",
+                    include_str!("../shaders/goldy_exp/collectives.slang"),
+                ),
+                (
                     "goldy_exp/atomics",
                     include_str!("../shaders/goldy_exp/atomics.slang"),
                 ),

@@ -24,3 +24,9 @@ public interface IMonoid {
     static This identity();
     This combine(This other);
 }
+
+/// uint under addition: the natural monoid for prefix-sum count scans.
+extension uint : IMonoid {
+    static uint identity() { return 0; }
+    uint combine(uint other) { return this + other; }
+}

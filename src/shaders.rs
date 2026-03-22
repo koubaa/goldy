@@ -476,6 +476,76 @@ mod tests {
         }
     }
 
+    /// Test that workgroup collectives (reduce, inclusive_scan, broadcast, upper_bound)
+    /// compile with all IMonoid types across backends.
+    #[test]
+    fn test_collectives_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let goldy_shaders = manifest_dir.join("shaders");
+        let goldy_path = goldy_shaders.to_string_lossy();
+        let ekrano_shaders =
+            manifest_dir.join("..").join("ekrano").join("ekrano_shaders").join("slang");
+        let ekrano_path = ekrano_shaders.to_string_lossy();
+
+        let test_shader = std::fs::read_to_string(goldy_shaders.join("test_collectives.slang"))
+            .expect("Failed to read test_collectives.slang");
+
+        let entry = &[("cs_main", SlangStage::Compute)];
+        let search_paths: &[&str] = &[&goldy_path, &ekrano_path];
+
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            &test_shader,
+            ShaderTarget::Spirv,
+            entry,
+            search_paths,
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_collectives failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Dxil,
+                entry,
+                search_paths,
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_collectives failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let metal_defines = vec![("__METAL__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Metal,
+                entry,
+                search_paths,
+                &metal_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_collectives failed to compile for Metal: {:?}",
+                result.err()
+            );
+        }
+    }
+
     /// Test that IMonoid conformance extensions on ekrano types (TagMonoid, DrawMonoid, Bic)
     /// compile and work with generic groupshared functions across backends.
     #[test]
