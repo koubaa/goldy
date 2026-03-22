@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(texture.width(), 64);
         assert_eq!(texture.height(), 64);
         assert_eq!(texture.format(), TextureFormat::R8Unorm);
-        assert_eq!(texture.byte_size(), 64 * 64 * 1);
+        assert_eq!(texture.byte_size(), 64 * 64);
     }
 
     #[test]

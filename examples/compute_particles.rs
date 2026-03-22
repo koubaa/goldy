@@ -146,7 +146,7 @@ impl RenderState {
             // Pass buffer indices via push constants
             pass.set_push_constants(&[&self.particle_buffer]);
             // Dispatch enough workgroups to cover all particles (64 threads per group)
-            let workgroups = (NUM_PARTICLES + 63) / 64;
+            let workgroups = NUM_PARTICLES.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
         }
         compute_encoder.dispatch(&self.device)?;

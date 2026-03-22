@@ -64,7 +64,6 @@ pub(super) fn create_with_depth(
             height,
             format: color_format,
             texture,
-            depth_format,
             depth_texture,
             has_rendered: false,
         },

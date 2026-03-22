@@ -124,7 +124,7 @@ fn create_initial_state() -> Vec<u32> {
         for x in 60..100 {
             // Simple LCG for deterministic randomness
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            if (rng >> 32) % 4 == 0 {
+            if (rng >> 32).is_multiple_of(4) {
                 cells[(y * GRID_WIDTH + x) as usize] = 1;
             }
         }
@@ -234,8 +234,8 @@ impl RenderState {
                 pass.set_push_constants_raw(&[idx_read, idx_write]);
 
                 // Dispatch workgroups (8x8 threads per group)
-                let workgroups_x = (GRID_WIDTH + 7) / 8;
-                let workgroups_y = (GRID_HEIGHT + 7) / 8;
+                let workgroups_x = GRID_WIDTH.div_ceil(8);
+                let workgroups_y = GRID_HEIGHT.div_ceil(8);
                 pass.dispatch(workgroups_x, workgroups_y, 1);
             }
 

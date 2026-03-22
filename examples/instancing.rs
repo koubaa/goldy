@@ -174,7 +174,7 @@ impl RenderState {
             pass.set_pipeline(&self.compute_pipeline);
             pass.set_push_constants(&[&self.instance_buffer, &self.params_buffer]);
             // Dispatch enough workgroups for all instances (64 threads per group)
-            let workgroups = (NUM_QUADS + 63) / 64;
+            let workgroups = NUM_QUADS.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
         }
         compute_encoder.dispatch(&self.device)?;
@@ -214,7 +214,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title(&format!(
+                            .with_title(format!(
                                 "Goldy - Instancing ({} quads, GPU-driven)",
                                 NUM_QUADS
                             ))

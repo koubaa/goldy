@@ -272,7 +272,7 @@ impl WindowState {
         device: &Arc<goldy::Device>,
         effect_type: EffectType,
     ) -> anyhow::Result<Self> {
-        let surface = Surface::new(&device, window.as_ref())?;
+        let surface = Surface::new(device, window.as_ref())?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
         let pipeline = RenderPipeline::new(
             device,

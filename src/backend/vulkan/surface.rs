@@ -76,6 +76,7 @@ pub(super) fn create_platform_surface(
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
+        let _ = (entry, instance);
         anyhow::bail!(
             "Surface creation not supported on this platform - use Metal backend on macOS"
         )
