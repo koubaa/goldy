@@ -22,8 +22,8 @@
 
 module goldy_exp;
 
-__include "goldy_exp/math";
 __include "goldy_exp/algebra";
+__include "goldy_exp/math";
 __include "goldy_exp/atomics";
 __include "goldy_exp/color";
 __include "goldy_exp/vertex";

@@ -60,6 +60,22 @@ public struct Transform {
     public float2 translate;
 }
 
+public Transform operator*(Transform a, Transform b) {
+    Transform r;
+    r.matrx = float4(
+        a.matrx.x * b.matrx.x + a.matrx.z * b.matrx.y,
+        a.matrx.y * b.matrx.x + a.matrx.w * b.matrx.y,
+        a.matrx.x * b.matrx.z + a.matrx.z * b.matrx.w,
+        a.matrx.y * b.matrx.z + a.matrx.w * b.matrx.w
+    );
+    r.translate = a.matrx.xy * b.translate.x + a.matrx.zw * b.translate.y + a.translate;
+    return r;
+}
+
+public float2 operator*(Transform t, float2 p) {
+    return t.matrx.xy * p.x + t.matrx.zw * p.y + t.translate;
+}
+
 public float2 transform_apply(Transform transform, float2 p) {
     return transform.matrx.xy * p.x + transform.matrx.zw * p.y + transform.translate;
 }
@@ -109,7 +125,7 @@ public Transform two_point_to_unit_line(float2 p0, float2 p1) {
     Transform tmp1 = from_poly2(p0, p1);
     Transform inv = transform_inverse(tmp1);
     Transform tmp2 = from_poly2(float2(0.0, 0.0), float2(1.0, 0.0));
-    return transform_mul(tmp2, inv);
+    return tmp2 * inv;
 }
 
 // ============================================================================
@@ -118,6 +134,53 @@ public Transform two_point_to_unit_line(float2 p0, float2 p1) {
 
 public float4 bbox_intersect(float4 a, float4 b) {
     return float4(max(a.xy, b.xy), min(a.zw, b.zw));
+}
+
+/// Axis-aligned bounding box with algebraic operations.
+/// Layout-compatible with float4 (min.xy, max.zw).
+public struct Bbox2D {
+    public float4 v;
+
+    static Bbox2D empty() {
+        Bbox2D b;
+        b.v = float4(1e31, 1e31, -1e31, -1e31);
+        return b;
+    }
+
+    static Bbox2D infinite() {
+        Bbox2D b;
+        b.v = float4(-1e9, -1e9, 1e9, 1e9);
+        return b;
+    }
+
+    static Bbox2D from_float4(float4 f) {
+        Bbox2D b;
+        b.v = f;
+        return b;
+    }
+
+    Bbox2D intersect(Bbox2D other) {
+        Bbox2D b;
+        b.v = float4(max(this.v.xy, other.v.xy), min(this.v.zw, other.v.zw));
+        return b;
+    }
+
+    Bbox2D union_with(Bbox2D other) {
+        Bbox2D b;
+        b.v = float4(min(this.v.xy, other.v.xy), max(this.v.zw, other.v.zw));
+        return b;
+    }
+
+    Bbox2D grow(float2 p) {
+        Bbox2D b;
+        b.v = float4(min(this.v.xy, p), max(this.v.zw, p));
+        return b;
+    }
+}
+
+extension Bbox2D : IMonoid {
+    static Bbox2D identity() { return Bbox2D.infinite(); }
+    Bbox2D combine(Bbox2D other) { return this.intersect(other); }
 }
 
 // ============================================================================
