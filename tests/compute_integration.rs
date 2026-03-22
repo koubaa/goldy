@@ -1020,3 +1020,79 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         );
     }
 }
+
+// ─── RWStructuredBuffer<T> typed variable assignment ──────────────────────────
+
+/// Verify that `goldy_dyn_scattered<T>(n)` can be assigned to a local
+/// `StorageBuffer<T>` variable (the cross-platform type alias).
+/// On Metal, `StorageBuffer<T>` resolves to `Ptr<T>`, on SPIRV/DX12 to
+/// `RWStructuredBuffer<T>`, ensuring the same shader code works everywhere.
+#[test]
+fn test_dyn_scattered_typed_variable_assignment() {
+    const SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> output = goldy_dyn_scattered<Pair>(1);
+    uint idx = id.x;
+    if (idx >= 8) return;
+    Pair p = input[idx];
+    output[idx].a = p.a + p.b;
+    output[idx].b = p.a * p.b;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile typed-var shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+
+    let input_data: Vec<Pair> = (0..8).map(|i| Pair { a: i + 1, b: i + 10 }).collect();
+    let input_buf =
+        Buffer::with_data(&device, &input_data, DataAccess::Scattered).expect("input buffer");
+    let output_buf = Buffer::with_data(
+        &device,
+        &vec![Pair { a: 0, b: 0 }; 8],
+        DataAccess::Scattered,
+    )
+    .expect("output buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 8 * std::mem::size_of::<Pair>()];
+    output_buf.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[Pair] = bytemuck::cast_slice(&raw);
+
+    for i in 0..8u32 {
+        let expected_a = (i + 1) + (i + 10);
+        let expected_b = (i + 1) * (i + 10);
+        assert_eq!(
+            result[i as usize].a, expected_a,
+            "output[{}].a: expected {}, got {}",
+            i, expected_a, result[i as usize].a
+        );
+        assert_eq!(
+            result[i as usize].b, expected_b,
+            "output[{}].b: expected {}, got {}",
+            i, expected_b, result[i as usize].b
+        );
+    }
+}
