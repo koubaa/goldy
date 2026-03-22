@@ -53,21 +53,23 @@ pub(super) fn create(
         arg_buffer_index
     );
 
-    // Encode buffer into argument buffer using ArgumentEncoder.
-    // Use encoding_index (global) for offset so the buffer lands at the correct
-    // position in the flat argument buffer (Broadcast buffers start at slot 64).
+    // Write the buffer's GPU address directly into the argument buffer.
+    // We bypass ArgumentEncoder because it can defer writes internally,
+    // causing a subsequent render pass to read a stale (zero) pointer.
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
-        logical_device
-            .argument_encoder
-            .set_argument_buffer(&logical_device.argument_buffer, offset);
-        logical_device.argument_encoder.set_buffer(0, &buffer, 0);
+        let gpu_addr = buffer.gpu_address();
+        unsafe {
+            let dst = (logical_device.argument_buffer.contents() as *mut u8).add(offset as usize);
+            std::ptr::write_unaligned(dst as *mut u64, gpu_addr);
+        }
         tracing::trace!(
-            "Encoded buffer {} at arg buffer offset {} (slot {})",
+            "Encoded buffer {} at arg buffer offset {} (slot {}, gpu_addr=0x{:x})",
             handle,
             offset,
-            arg_buffer_index
+            arg_buffer_index,
+            gpu_addr,
         );
     }
 
@@ -128,12 +130,12 @@ pub(super) fn create_view(
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let ab_offset = (arg_buffer_index as u64) * encoded_length;
     if ab_offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
-        logical_device
-            .argument_encoder
-            .set_argument_buffer(&logical_device.argument_buffer, ab_offset);
-        logical_device
-            .argument_encoder
-            .set_buffer(0, &parent_mtl_buffer, offset);
+        let gpu_addr = parent_mtl_buffer.gpu_address() + offset;
+        unsafe {
+            let dst =
+                (logical_device.argument_buffer.contents() as *mut u8).add(ab_offset as usize);
+            std::ptr::write_unaligned(dst as *mut u64, gpu_addr);
+        }
     }
 
     state.buffers.insert(
