@@ -128,6 +128,15 @@ pub(super) fn render_to(
     if logical_device.heap_texture_count > 0 {
         encoder.use_heap_at(&logical_device.texture_heap, render_stages);
     }
+    for buf_state in state.buffers.values() {
+        if buf_state.device_handle == render_target.device_handle {
+            encoder.use_resource_at(
+                &buf_state.buffer,
+                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
+                render_stages,
+            );
+        }
+    }
 
     encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
