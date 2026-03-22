@@ -260,7 +260,7 @@ pub(super) fn write(
     let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     let read_range = D3D12_RANGE { Begin: 0, End: 0 };
     unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
-        .context("Failed to map staging buffer")?;
+        .context("Failed to map staging buffer (texture with_data)")?;
 
     let texture_format = texture.format;
     let bytes_per_row = (width * texture_format.bytes_per_pixel()) as usize;
@@ -509,7 +509,7 @@ pub(super) fn write_region(
     let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     let read_range = D3D12_RANGE { Begin: 0, End: 0 };
     unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
-        .context("Failed to map staging buffer")?;
+        .context("Failed to map staging buffer (texture write_region)")?;
 
     let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
     for row in 0..height {
@@ -710,6 +710,15 @@ pub(super) fn read_to_cpu(
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
 
+    // Check for device removal before allocating (TDR during prior compute work)
+    let removed_reason = unsafe { logical_device.device.GetDeviceRemovedReason() };
+    if removed_reason.is_err() {
+        anyhow::bail!(
+            "Device removed before texture readback: {:?}",
+            removed_reason
+        );
+    }
+
     let mut staging_buffer: Option<ID3D12Resource> = None;
     unsafe {
         logical_device.device.CreateCommittedResource(
@@ -721,7 +730,7 @@ pub(super) fn read_to_cpu(
             &mut staging_buffer,
         )
     }
-    .context("Failed to create staging buffer")?;
+    .context("Failed to create staging buffer (texture read_to_cpu)")?;
     let staging_buffer = staging_buffer.context("CreateCommittedResource returned null")?;
 
     // Reset allocator before reuse (required after prior compute/render work that used it)
@@ -811,6 +820,11 @@ pub(super) fn read_to_cpu(
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
         dev.fence_value += 1;
+        // Check for device removal (compute passes may have caused TDR)
+        let removed = unsafe { dev.device.GetDeviceRemovedReason() };
+        if removed.is_err() {
+            anyhow::bail!("Device removed before texture readback map: {:?}", removed);
+        }
     }
 
     let mut mapped_data: *mut u8 = std::ptr::null_mut();
@@ -821,7 +835,7 @@ pub(super) fn read_to_cpu(
             Some(&mut mapped_data as *mut *mut u8 as *mut *mut _),
         )
     }
-    .context("Failed to map staging buffer")?;
+    .context("Failed to map staging buffer (texture read_to_cpu)")?;
 
     let bytes_per_row = (width * format.bytes_per_pixel()) as usize;
     let row_pitch_bytes = footprint.Footprint.RowPitch as usize;

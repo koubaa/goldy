@@ -69,6 +69,10 @@ pub type SwapchainImageHandle = u64;
 pub type TextureHandle = u64;
 pub type SamplerHandle = u64;
 
+/// Fence token for non-blocking compute submission.
+/// Backends use this to identify a specific GPU submission for polling and waiting.
+pub type FenceToken = u64;
+
 /// Render command for command buffer recording.
 #[derive(Debug, Clone)]
 pub enum RenderCommand {
@@ -179,7 +183,7 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<()>;
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
     /// Get the buffer's index in the global bindless descriptor set.
-    /// Returns None if bindless is not enabled or the buffer is not registered.
+    /// Returns None if the buffer is not registered.
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32>;
     /// Get the buffer's SRV (read-only) bindless index.
     /// For DX12, scattered buffers have both a UAV (write) and SRV (read-only) descriptor.
@@ -298,7 +302,7 @@ pub trait GpuBackend: Send + Sync {
     /// The texture must have been created with TextureFlags::COPY_SRC.
     fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()>;
     /// Get the texture's index in the global bindless descriptor set.
-    /// Returns None if bindless is not enabled or the texture is not registered.
+    /// Returns None if the texture is not registered.
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
 
     // Sampler management
@@ -306,7 +310,7 @@ pub trait GpuBackend: Send + Sync {
         -> Result<SamplerHandle>;
     fn destroy_sampler(&mut self, sampler: SamplerHandle);
     /// Get the sampler's index in the global bindless descriptor set.
-    /// Returns None if bindless is not enabled or the sampler is not registered.
+    /// Returns None if the sampler is not registered.
     fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32>;
 
     // Surface API - zero-copy presentation to window
@@ -365,8 +369,40 @@ pub trait GpuBackend: Send + Sync {
 
     /// Execute compute commands.
     /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[ComputeCommand])
-        -> Result<()>;
+    fn dispatch_compute(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[ComputeCommand],
+    ) -> Result<()> {
+        let token = self.submit_compute(device, commands)?;
+        self.wait_fence(device, token)
+    }
+
+    /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+    fn submit_compute(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[ComputeCommand],
+    ) -> Result<FenceToken>;
+
+    /// Check if the fence for the given token has signaled (work complete).
+    fn is_fence_complete(&self, device: DeviceHandle, token: FenceToken) -> bool;
+
+    /// Block until the fence signals. Returns an error if the device was lost.
+    ///
+    /// Implementations should remove and destroy the fence for `token` after waiting.
+    fn wait_fence(&mut self, device: DeviceHandle, token: FenceToken) -> Result<()>;
+
+    /// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed, Err if device lost.
+    ///
+    /// On success or unrecoverable error, implementations should remove and destroy the fence.
+    /// On timeout the fence remains valid for a later wait.
+    fn wait_fence_timeout(
+        &mut self,
+        device: DeviceHandle,
+        token: FenceToken,
+        timeout_ms: u32,
+    ) -> Result<bool>;
 }
 
 /// Create the default backend for the current platform.

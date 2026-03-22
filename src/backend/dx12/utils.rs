@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use windows::Win32::{
-    Foundation::CloseHandle,
+    Foundation::{CloseHandle, WAIT_OBJECT_0},
     Graphics::Direct3D12::ID3D12Fence,
     System::Threading::{CreateEventA, WaitForSingleObject, INFINITE},
 };
@@ -199,4 +199,26 @@ pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
         unsafe { CloseHandle(event) }.ok();
     }
     Ok(())
+}
+
+/// Wait for a fence with timeout. Returns true if signaled, false if timeout elapsed.
+pub(super) fn wait_for_fence_timeout(
+    fence: &ID3D12Fence,
+    value: u64,
+    timeout_ms: u32,
+) -> Result<bool> {
+    if unsafe { fence.GetCompletedValue() } >= value {
+        return Ok(true);
+    }
+    let event =
+        unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+
+    unsafe { fence.SetEventOnCompletion(value, event) }
+        .context("Failed to set event on completion")?;
+
+    let result = unsafe { WaitForSingleObject(event, timeout_ms) };
+    unsafe { CloseHandle(event) }.ok();
+
+    // WAIT_OBJECT_0 when signaled, WAIT_TIMEOUT when timeout elapses
+    Ok(result == WAIT_OBJECT_0)
 }

@@ -90,9 +90,6 @@ pub(super) fn create(
         }
     };
 
-    // All buffers are registered for bindless access
-    let should_register_bindless = true;
-    let bindless_enabled = logical_device.bindless_enabled;
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
     let buffer_info = vk::BufferCreateInfo::default()
@@ -131,56 +128,16 @@ pub(super) fn create(
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
         .context("Failed to bind buffer memory")?;
 
-    // For storage buffers, create a HOST_VISIBLE staging buffer for CPU upload/readback
-    let (staging_buffer, staging_memory) = if is_storage {
-        let staging_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
-        let staging_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(staging_usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let stg_buf = unsafe { logical_device.device.create_buffer(&staging_info, None) }
-            .context("Failed to create staging buffer")?;
-
-        let stg_reqs = unsafe {
-            logical_device
-                .device
-                .get_buffer_memory_requirements(stg_buf)
-        };
-
-        let stg_mem_type = find_memory_type(
-            instance,
-            logical_device.physical_device,
-            stg_reqs.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )
-        .context("Failed to find HOST_VISIBLE memory type for staging buffer")?;
-
-        let stg_alloc = vk::MemoryAllocateInfo::default()
-            .allocation_size(stg_reqs.size)
-            .memory_type_index(stg_mem_type);
-
-        let stg_mem = unsafe { logical_device.device.allocate_memory(&stg_alloc, None) }
-            .context("Failed to allocate staging buffer memory")?;
-
-        unsafe {
-            logical_device
-                .device
-                .bind_buffer_memory(stg_buf, stg_mem, 0)
-        }
-        .context("Failed to bind staging buffer memory")?;
-
-        (Some(stg_buf), Some(stg_mem))
-    } else {
-        (None, None)
-    };
+    // Staging buffer is created lazily on first write() to avoid doubling memory
+    // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
+    // Clear uses vkCmdFillBuffer (GPU-side) so staging isn't needed for that.
+    let (staging_buffer, staging_memory) = (None, None);
 
     let handle = *next_buffer_handle;
     *next_buffer_handle += 1;
 
-    // Register buffer in bindless descriptor set if enabled AND buffer is UNIFORM or STORAGE
-    // (VERTEX/INDEX buffers should not be in the uniform/storage descriptor arrays)
-    let bindless_index = if bindless_enabled && should_register_bindless {
+    // Register buffer in bindless descriptor set (UNIFORM or STORAGE)
+    let bindless_index = {
         let logical_device = devices.get_mut(&device_handle).unwrap();
         let index = logical_device
             .resource_registry
@@ -227,8 +184,6 @@ pub(super) fn create(
         }
 
         Some(index)
-    } else {
-        None
     };
 
     buffers.insert(
@@ -313,10 +268,9 @@ pub(super) fn create_view(
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
-    let bindless_enabled = logical_device.bindless_enabled;
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
-    let bindless_index = if bindless_enabled {
+    let bindless_index = {
         let handle_for_registry = *next_buffer_handle;
         let index = logical_device
             .resource_registry
@@ -352,8 +306,6 @@ pub(super) fn create_view(
         }
 
         Some(index)
-    } else {
-        None
     };
 
     let handle = *next_buffer_handle;
@@ -377,17 +329,83 @@ pub(super) fn create_view(
     Ok(handle)
 }
 
+/// Lazily create the HOST_VISIBLE staging buffer for a DEVICE_LOCAL storage buffer.
+pub(super) fn ensure_staging(
+    instance: &ash::Instance,
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+) -> Result<()> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+    if !buffer.is_storage || buffer.staging_buffer.is_some() {
+        return Ok(());
+    }
+    let size = buffer.size;
+    let device = devices
+        .get(&buffer.device_handle)
+        .context("Buffer's device is invalid")?;
+
+    let staging_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+    let staging_info = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(staging_usage)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let stg_buf = unsafe { device.device.create_buffer(&staging_info, None) }
+        .context("Failed to create staging buffer")?;
+
+    let stg_reqs = unsafe { device.device.get_buffer_memory_requirements(stg_buf) };
+
+    let stg_mem_type = find_memory_type(
+        instance,
+        device.physical_device,
+        stg_reqs.memory_type_bits,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )
+    .context("Failed to find HOST_VISIBLE memory type for staging buffer")?;
+
+    let stg_alloc = vk::MemoryAllocateInfo::default()
+        .allocation_size(stg_reqs.size)
+        .memory_type_index(stg_mem_type);
+
+    let stg_mem = unsafe { device.device.allocate_memory(&stg_alloc, None) }
+        .context("Failed to allocate staging buffer memory")?;
+
+    unsafe { device.device.bind_buffer_memory(stg_buf, stg_mem, 0) }
+        .context("Failed to bind staging buffer memory")?;
+
+    let buf = buffers.get_mut(&buffer_handle).unwrap();
+    buf.staging_buffer = Some(stg_buf);
+    buf.staging_memory = Some(stg_mem);
+    Ok(())
+}
+
 /// Write data to a buffer at the specified offset.
 ///
-/// For DEVICE_LOCAL storage buffers, writes go through the staging buffer then
-/// a GPU copy. For HOST_VISIBLE uniform buffers, maps directly.
+/// For DEVICE_LOCAL storage buffers, lazily creates a staging buffer then
+/// copies via GPU. For HOST_VISIBLE uniform buffers, maps directly.
 pub(super) fn write(
+    instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,
-    buffers: &HashMap<BufferHandle, BufferState>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
     offset: u64,
     data: &[u8],
 ) -> Result<()> {
+    {
+        let buffer = buffers
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        if offset + data.len() as u64 > buffer.size {
+            anyhow::bail!("Write would exceed buffer bounds");
+        }
+    }
+
+    // Lazily create staging buffer for storage buffers
+    ensure_staging(instance, devices, buffers, buffer_handle)?;
+
     let buffer = buffers
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;
@@ -395,10 +413,6 @@ pub(super) fn write(
     let device = devices
         .get(&buffer.device_handle)
         .context("Buffer's device is invalid")?;
-
-    if offset + data.len() as u64 > buffer.size {
-        anyhow::bail!("Write would exceed buffer bounds");
-    }
 
     if let (Some(stg_buf), Some(stg_mem)) = (buffer.staging_buffer, buffer.staging_memory) {
         // DEVICE_LOCAL path: write to staging, then GPU copy
@@ -462,15 +476,19 @@ pub(super) fn bindless_index(
 
 /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
 ///
-/// For DEVICE_LOCAL storage buffers, issues a GPU copy to the staging buffer
-/// then maps the staging buffer. For HOST_VISIBLE uniform buffers, maps directly.
+/// For DEVICE_LOCAL storage buffers, lazily creates a staging buffer, then issues
+/// a GPU copy and maps. For HOST_VISIBLE uniform buffers, maps directly.
 pub(super) fn read_to_cpu(
+    instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,
-    buffers: &HashMap<BufferHandle, BufferState>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
     output: &mut [u8],
 ) -> Result<()> {
+    // Lazily create staging buffer for storage buffers
+    ensure_staging(instance, devices, buffers, buffer_handle)?;
+
     let buffer = buffers
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;

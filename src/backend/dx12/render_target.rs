@@ -322,13 +322,11 @@ pub(super) fn render(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    if logical_device.bindless_enabled {
-        unsafe {
-            cmd.SetDescriptorHeaps(&[
-                Some(logical_device.cbv_srv_uav_heap.clone()),
-                Some(logical_device.sampler_heap.clone()),
-            ]);
-        }
+    unsafe {
+        cmd.SetDescriptorHeaps(&[
+            Some(logical_device.cbv_srv_uav_heap.clone()),
+            Some(logical_device.sampler_heap.clone()),
+        ]);
     }
 
     // Execute render commands

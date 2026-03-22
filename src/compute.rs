@@ -116,6 +116,21 @@ impl ComputeEncoder {
         let mut backend = device.backend.lock().unwrap();
         backend.dispatch_compute(device.handle, &self.commands)
     }
+
+    /// Submit the recorded compute commands without blocking.
+    ///
+    /// Returns a [`GpuFuture`](crate::GpuFuture) that can be polled via
+    /// [`is_complete`](crate::GpuFuture::is_complete) or awaited via
+    /// [`wait`](crate::GpuFuture::wait) / [`wait_timeout`](crate::GpuFuture::wait_timeout).
+    pub fn submit(&self, device: &Device) -> Result<crate::GpuFuture> {
+        let mut backend = device.backend.lock().unwrap();
+        let token = backend.submit_compute(device.handle, &self.commands)?;
+        Ok(crate::GpuFuture {
+            backend: Arc::clone(&device.backend),
+            device: device.handle,
+            fence_token: token,
+        })
+    }
 }
 
 impl Default for ComputeEncoder {

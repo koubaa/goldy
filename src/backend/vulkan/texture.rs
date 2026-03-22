@@ -122,7 +122,6 @@ pub(super) fn create(
     let view = unsafe { logical_device.device.create_image_view(&view_info, None) }
         .context("Failed to create texture view")?;
 
-    let bindless_enabled = logical_device.bindless_enabled;
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
     let handle = *next_texture_handle;
@@ -130,8 +129,7 @@ pub(super) fn create(
 
     let is_storage_image = matches!(access, SpatialAccess::Direct);
 
-    // Register texture in bindless descriptor set if enabled
-    let bindless_index = if bindless_enabled {
+    let bindless_index = {
         let logical_device = devices.get_mut(&device_handle).unwrap();
         let index = logical_device
             .resource_registry
@@ -183,8 +181,6 @@ pub(super) fn create(
         }
 
         Some(index)
-    } else {
-        None
     };
 
     let initial_layout = if is_storage_image {

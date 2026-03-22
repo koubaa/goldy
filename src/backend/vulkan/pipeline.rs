@@ -103,24 +103,11 @@ pub(super) fn create(
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-    // Pipeline layout - reuse global bindless layout when enabled
-    let (layout, owns_layout) = if logical_device.bindless_enabled {
-        // Bindless mode: reuse the device's shared bindless pipeline layout
-        let shared_layout = logical_device
-            .bindless_pipeline_layout
-            .context("Bindless enabled but no pipeline layout")?;
-        (shared_layout, false) // Don't own - it's the global layout
-    } else {
-        // Traditional mode: create empty layout (rare code path)
-        let layout_info = vk::PipelineLayoutCreateInfo::default();
-        let layout = unsafe {
-            logical_device
-                .device
-                .create_pipeline_layout(&layout_info, None)
-        }
-        .context("Failed to create pipeline layout")?;
-        (layout, true) // Own this layout
-    };
+    // Reuse the device's shared bindless pipeline layout
+    let layout = logical_device
+        .bindless_pipeline_layout
+        .context("Bindless pipeline layout required")?;
+    let owns_layout = false;
 
     // Dynamic rendering info (Vulkan 1.4)
     let color_format = format_to_vk(target_format);
@@ -349,11 +336,7 @@ pub(super) fn create_with_depth(
         },
     );
 
-    tracing::debug!(
-        "Created pipeline with depth stencil (handle={}, bindless={})",
-        handle,
-        !owns_layout
-    );
+    tracing::debug!("Created pipeline with depth stencil (handle={})", handle);
     Ok(handle)
 }
 
