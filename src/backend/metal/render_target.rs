@@ -118,6 +118,12 @@ pub(super) fn render_to(
         clear_depth,
     );
 
+    // ARM store-buffer fence: ensure all prior CPU writes (argument buffer
+    // encoding, heap-buffer data) are globally visible before the GPU command
+    // buffer starts reading.  Without this, a render-only path that follows
+    // buffer creation can race against the store drain on Apple Silicon.
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let encoder = command_buffer.new_render_command_encoder(render_pass);
 

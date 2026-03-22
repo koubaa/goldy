@@ -5,10 +5,10 @@
 mod common;
 
 use goldy::{
-    Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DataAccess,
-    DepthFormat, DepthStencilState, DeviceType, IndexFormat, Instance, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule, TextureFormat, Vertex2D,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
+    DeviceType, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 
 fn create_device() -> Option<goldy::Device> {
@@ -643,52 +643,8 @@ fn test_render_target_bindless_buffer_read() {
         return;
     };
 
-    // Write 1 (alive cell) into the buffer — same value the GOL shaders use.
     let data = vec![1u32; 4];
     let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
-
-    // Diagnostic: verify CPU-side data survives the round-trip
-    let idx = buffer.bindless_index().expect("bindless index");
-    let mut readback = vec![0u8; 16];
-    buffer
-        .read_to_cpu(&device, &mut readback)
-        .expect("cpu readback");
-    eprintln!(
-        "DIAG: bindless_index={}, buffer_size={}, first_4_bytes={:?}",
-        idx,
-        buffer.size(),
-        &readback[..4]
-    );
-
-    // Diagnostic: verify GPU can read the buffer via bindless in a compute pass
-    let output_buf =
-        Buffer::with_data(&device, &[0u32; 4], DataAccess::Scattered).expect("output buffer");
-    let compute_src = r#"
-import goldy_exp;
-#define IN  goldy_dyn_scattered<uint>(0)
-#define OUT goldy_dyn_scattered<uint>(1)
-[shader("compute")]
-[numthreads(1,1,1)]
-void cs_main(uint3 id : SV_DispatchThreadID) { OUT[0] = IN[0]; }
-"#;
-    let cs = ShaderModule::from_slang(&device, compute_src).expect("compile compute");
-    let cp = ComputePipeline::new(&device, &cs).expect("compute pipeline");
-    let mut ce = ComputeEncoder::new();
-    {
-        let mut pass = ce.begin_compute_pass();
-        pass.set_pipeline(&cp);
-        pass.set_push_constants(&[&buffer, &output_buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    ce.dispatch(&device).expect("compute dispatch");
-    let mut compute_readback = vec![0u8; 16];
-    output_buf
-        .read_to_cpu(&device, &mut compute_readback)
-        .expect("compute readback");
-    eprintln!(
-        "DIAG compute: output first_4_bytes={:?} (expect [1,0,0,0])",
-        &compute_readback[..4]
-    );
 
     // Fragment shader reads buffer[0] via bindless push constant.
     // Outputs bright green when value == 1 (alive), dark gray otherwise.
