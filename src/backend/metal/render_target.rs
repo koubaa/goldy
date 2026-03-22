@@ -129,6 +129,9 @@ pub(super) fn render_to(
         encoder.use_heap_at(&logical_device.texture_heap, render_stages);
     }
 
+    encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
+    encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
+
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
         originY: 0.0,

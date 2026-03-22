@@ -6,8 +6,9 @@ mod common;
 
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
-    DeviceType, IndexFormat, Instance, RenderPipeline, RenderPipelineDesc, RenderTarget,
-    ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    DeviceType, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 
 fn create_device() -> Option<goldy::Device> {
@@ -629,5 +630,97 @@ fn test_depth_occlusion_green_beats_red() {
         total,
         green_count,
         red_count
+    );
+}
+
+/// Render a fullscreen triangle whose fragment shader reads a value from a bindless buffer
+/// via push constants. Verifies the global argument buffer is correctly bound to offscreen
+/// render targets (a bug that produces a completely blank output if missing).
+#[test]
+fn test_render_target_bindless_buffer_read() {
+    let Some(device) = create_device() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+
+    // Write a known non-zero sentinel into a buffer.
+    let sentinel: u32 = 0xAB;
+    let data = vec![sentinel; 4];
+    let buffer =
+        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+
+    // Fragment shader reads buffer[0] via bindless push constant.
+    // Outputs red (1,0,0,1) when the value matches, black otherwise.
+    // If the argument buffer is not bound the GPU reads 0 → black pixels.
+    let shader_source = r#"
+import goldy_exp;
+
+#define DATA goldy_dyn_scattered<uint>(0)
+
+static const float2 positions[3] = {
+    float2(-1, -1),
+    float2( 3, -1),
+    float2(-1,  3)
+};
+
+struct VSOut { float4 pos : SV_Position; };
+
+[shader("vertex")]
+VSOut vs_main(uint id : SV_VertexID) {
+    VSOut o;
+    o.pos = float4(positions[id], 0.0, 1.0);
+    return o;
+}
+
+[shader("fragment")]
+float4 fs_main(VSOut i) : SV_Target {
+    return DATA[0] == 0xABu ? float4(1, 0, 0, 1) : float4(0, 0, 0, 1);
+}
+"#;
+
+    let shader =
+        ShaderModule::from_slang(&device, shader_source).expect("compile bindless shader");
+
+    let target =
+        RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("create target");
+
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: VertexBufferLayout::default(),
+            topology: PrimitiveTopology::TriangleList,
+            target_format: TextureFormat::Rgba8Unorm,
+            ..Default::default()
+        },
+    )
+    .expect("create pipeline");
+
+    let mut encoder = CommandEncoder::new();
+    {
+        let mut pass = encoder.begin_render_pass();
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buffer]);
+        pass.draw(0..3, 0..1);
+    }
+    target.render(encoder).expect("render");
+
+    let pixels = target.read_to_cpu().expect("readback");
+    assert_eq!(pixels.len(), 4 * 4 * 4);
+
+    // Every pixel should be red (R=255, G=0, B=0).
+    // If the argument buffer wasn't bound, the GPU reads 0 instead of the
+    // sentinel and all pixels come back black.
+    let all_red = pixels
+        .chunks(4)
+        .all(|p| p[0] > 200 && p[1] < 10 && p[2] < 10);
+    assert!(
+        all_red,
+        "Expected all pixels red from bindless buffer read, but got non-red pixels.\n\
+         First pixel: {:?}\n\
+         This likely means the argument buffer was not bound to the render encoder.",
+        &pixels[..4]
     );
 }
