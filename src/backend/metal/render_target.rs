@@ -141,31 +141,6 @@ pub(super) fn render_to(
     encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
 
-    // Diagnostic: dump argument buffer + each buffer's first bytes
-    unsafe {
-        let ab_ptr = logical_device.argument_buffer.contents() as *const u8;
-        let addr0 = std::ptr::read_unaligned(ab_ptr as *const u64);
-        eprintln!(
-            "DIAG render_to: arg_buffer slot0=0x{:x}, heap_buffer_count={}",
-            addr0, logical_device.heap_buffer_count,
-        );
-    }
-    for (handle, buf_state) in state.buffers.iter() {
-        unsafe {
-            let ptr = buf_state.buffer.contents() as *const u8;
-            let first_16: Vec<u8> = (0..buf_state.size.min(16))
-                .map(|i| *ptr.add(i as usize))
-                .collect();
-            eprintln!(
-                "DIAG render_to: buffer handle={}, size={}, gpu_addr=0x{:x}, contents={:?}",
-                handle,
-                buf_state.size,
-                buf_state.buffer.gpu_address(),
-                first_16,
-            );
-        }
-    }
-
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
         originY: 0.0,

@@ -55,9 +55,8 @@ fn compile_stage_with_reflection(
             result.reflection.parameter_blocks.len()
         );
         for pb in &result.reflection.parameter_blocks {
-            eprintln!(
-                "DIAG shader reflect: entry={}, PB={}, slot={}, size={}, align={}, fields={}",
-                entry_point,
+            tracing::info!(
+                "  - {} at slot {} (size={}, alignment={}, fields={})",
                 pb.name,
                 pb.binding_slot,
                 pb.size,
@@ -65,9 +64,12 @@ fn compile_stage_with_reflection(
                 pb.fields.len()
             );
             for field in &pb.fields {
-                eprintln!(
-                    "DIAG   field: {}  kind={:?}  offset={}  size={}",
-                    field.name, field.resource_kind, field.offset, field.size
+                tracing::debug!(
+                    "    - {}: {:?} at offset {} (size={})",
+                    field.name,
+                    field.resource_kind,
+                    field.offset,
+                    field.size
                 );
             }
         }
@@ -83,11 +85,6 @@ fn compile_stage_with_reflection(
         "Compiled MSL {} shader ({} bytes)",
         entry_point,
         msl_source.len()
-    );
-    eprintln!(
-        "DIAG MSL source for {}:\n{}",
-        entry_point,
-        &msl_source[..msl_source.len().min(2000)]
     );
 
     let library = device

@@ -60,10 +60,6 @@ pub(super) fn record(
                     }
                     if let Some(buf) = buffers.get(buffer_handle) {
                         indices.indices[i] = buf.arg_buffer_index;
-                        eprintln!(
-                            "DIAG push_constants: slot {} = arg_buffer_index {}",
-                            i, buf.arg_buffer_index
-                        );
                     }
                 }
                 let indices_bytes: &[u8] = unsafe {

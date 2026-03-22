@@ -53,24 +53,18 @@ pub(super) fn create(
         arg_buffer_index
     );
 
-    // Write the buffer's GPU address directly into the argument buffer.
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
-        let gpu_addr = buffer.gpu_address();
-        unsafe {
-            let dst = (logical_device.argument_buffer.contents() as *mut u8).add(offset as usize);
-            std::ptr::write_unaligned(dst as *mut u64, gpu_addr);
-        }
-        eprintln!(
-            "DIAG buffer::create: handle={}, encoding_index={}, offset={}, \
-             encoded_length={}, gpu_addr=0x{:x}, contents_ptr=0x{:x}",
+        logical_device
+            .argument_encoder
+            .set_argument_buffer(&logical_device.argument_buffer, offset);
+        logical_device.argument_encoder.set_buffer(0, &buffer, 0);
+        tracing::trace!(
+            "Encoded buffer {} at arg buffer offset {} (slot {})",
             handle,
-            encoding_index,
             offset,
-            encoded_length,
-            gpu_addr,
-            buffer.contents() as u64,
+            arg_buffer_index,
         );
     }
 
@@ -131,12 +125,12 @@ pub(super) fn create_view(
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let ab_offset = (arg_buffer_index as u64) * encoded_length;
     if ab_offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
-        let gpu_addr = parent_mtl_buffer.gpu_address() + offset;
-        unsafe {
-            let dst =
-                (logical_device.argument_buffer.contents() as *mut u8).add(ab_offset as usize);
-            std::ptr::write_unaligned(dst as *mut u64, gpu_addr);
-        }
+        logical_device
+            .argument_encoder
+            .set_argument_buffer(&logical_device.argument_buffer, ab_offset);
+        logical_device
+            .argument_encoder
+            .set_buffer(0, &parent_mtl_buffer, offset);
     }
 
     state.buffers.insert(
