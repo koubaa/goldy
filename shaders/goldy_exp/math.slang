@@ -141,37 +141,37 @@ public float4 bbox_intersect(float4 a, float4 b) {
 public struct Bbox2D {
     public float4 v;
 
-    static Bbox2D empty() {
+    public static Bbox2D empty() {
         Bbox2D b;
         b.v = float4(1e31, 1e31, -1e31, -1e31);
         return b;
     }
 
-    static Bbox2D infinite() {
+    public static Bbox2D infinite() {
         Bbox2D b;
         b.v = float4(-1e9, -1e9, 1e9, 1e9);
         return b;
     }
 
-    static Bbox2D from_float4(float4 f) {
+    public static Bbox2D from_float4(float4 f) {
         Bbox2D b;
         b.v = f;
         return b;
     }
 
-    Bbox2D intersect(Bbox2D other) {
+    public Bbox2D intersect(Bbox2D other) {
         Bbox2D b;
         b.v = float4(max(this.v.xy, other.v.xy), min(this.v.zw, other.v.zw));
         return b;
     }
 
-    Bbox2D union_with(Bbox2D other) {
+    public Bbox2D union_with(Bbox2D other) {
         Bbox2D b;
         b.v = float4(min(this.v.xy, other.v.xy), max(this.v.zw, other.v.zw));
         return b;
     }
 
-    Bbox2D grow(float2 p) {
+    public Bbox2D grow(float2 p) {
         Bbox2D b;
         b.v = float4(min(this.v.xy, p), max(this.v.zw, p));
         return b;
