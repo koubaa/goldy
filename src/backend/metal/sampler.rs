@@ -1,7 +1,7 @@
 //! Sampler management logic.
 
 use super::super::{DeviceHandle, SamplerHandle};
-use super::types::{MetalState, ARGUMENT_BUFFER_SIZE};
+use super::types::{MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE};
 use super::utils::{address_mode_to_mtl, compare_to_mtl, filter_to_mtl, mipmap_mode_to_mtl};
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -39,9 +39,15 @@ pub(super) fn create(
     let sampler = logical_device.device.new_sampler(&descriptor);
 
     let index = logical_device.resource_registry.register_sampler(handle);
-    tracing::debug!("Registered sampler {} at bindless index {}", handle, index);
+    let encoding_index = ResourceRegistry::sampler_global_index(index);
+    tracing::debug!(
+        "Registered sampler {} at bindless local={} global={}",
+        handle,
+        index,
+        encoding_index
+    );
 
-    let offset = (index as u64) * 8;
+    let offset = (encoding_index as u64) * 8;
     if offset + 8 <= ARGUMENT_BUFFER_SIZE {
         let gpu_id = sampler.gpu_resource_id();
         unsafe {

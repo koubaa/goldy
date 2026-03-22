@@ -110,6 +110,20 @@ Goldy is also inspired by:
 
 Read more in [Design Philosophy](https://koubaa.github.io/goldy/design/motivation.html).
 
+## Matrix Convention
+
+Goldy uses **column-major** matrix layout in uniform/constant buffers across all backends. This matches the native memory layout of Rust math libraries (glam, nalgebra, ultraviolet), so you can upload matrices directly without transposing:
+
+```rust
+let uniforms = MyUniforms {
+    projection: proj.to_cols_array_2d(),
+    modelview: view.to_cols_array_2d(),
+};
+buffer.write_data(0, &[uniforms])?;
+```
+
+Goldy sets `SLANG_MATRIX_LAYOUT_COLUMN_MAJOR` at the Slang session level, which emits `column_major` qualifiers in HLSL/DXIL output. This means DX12, Vulkan, and Metal all interpret `float4x4` the same way — no platform-specific transpose needed.
+
 ## Target Hardware
 
 | Platform | Minimum |

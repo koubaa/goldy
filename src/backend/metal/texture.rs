@@ -1,7 +1,7 @@
 //! Texture management logic.
 
 use super::super::{DeviceHandle, TextureHandle};
-use super::types::{MetalState, TextureState, ARGUMENT_BUFFER_SIZE};
+use super::types::{MetalState, ResourceRegistry, TextureState, ARGUMENT_BUFFER_SIZE};
 use super::utils::format_to_mtl;
 use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use ::metal as mtl;
@@ -52,24 +52,26 @@ pub(super) fn create(
         .context("Metal texture heap is full — increase heap size")?;
 
     let arg_buffer_index = logical_device.resource_registry.register_texture(handle);
+    let encoding_index = ResourceRegistry::texture_global_index(arg_buffer_index);
     tracing::debug!(
-        "Allocated texture {} from heap at bindless index {}",
+        "Allocated texture {} from heap at bindless local={} global={}",
         handle,
-        arg_buffer_index
+        arg_buffer_index,
+        encoding_index
     );
 
     let encoded_length = logical_device.texture_encoder.encoded_length();
-    let offset = (arg_buffer_index as u64) * encoded_length;
+    let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
         logical_device
             .texture_encoder
             .set_argument_buffer(&logical_device.argument_buffer, offset);
         logical_device.texture_encoder.set_texture(0, &texture);
         tracing::trace!(
-            "Encoded texture {} at arg buffer offset {} (slot {})",
+            "Encoded texture {} at arg buffer offset {} (global slot {})",
             handle,
             offset,
-            arg_buffer_index
+            encoding_index
         );
     }
 

@@ -82,7 +82,6 @@ pub(super) fn create(
             layer: layer as *mut std::ffi::c_void,
         },
     );
-
     tracing::info!("Created Metal surface {}", handle);
     Ok(handle)
 }
@@ -148,7 +147,6 @@ pub(super) fn render(
             _ => {}
         }
     }
-
     let render_pass = create_render_pass(
         texture,
         surface_state.depth_texture.as_deref(),

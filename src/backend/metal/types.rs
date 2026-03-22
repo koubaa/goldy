@@ -35,6 +35,11 @@ pub const ARGUMENT_BUFFER_SIZE: u64 = 16 * 1024 * 8; // 8 bytes per resource ID
 /// Slang assigns gGoldyDynamic to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
 pub const PUSH_CONSTANTS_SLOT: u64 = 1;
 
+/// Starting Metal buffer index for vertex attributes.
+/// Slots 0 and 1 are reserved for the argument buffer (gGoldy) and push constants
+/// (gGoldyDynamic). Vertex data must use higher indices to avoid collisions.
+pub const VERTEX_BUFFER_START_SLOT: u64 = 2;
+
 /// Maximum number of resource indices in push constants
 pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
 
@@ -138,18 +143,36 @@ impl ResourceRegistry {
         local_index + MAX_RESOURCES_PER_CATEGORY
     }
 
+    /// Register a texture — returns the LOCAL index (0-63) for push constants.
+    /// Use `texture_global_index()` to get the argument buffer encoding offset.
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
-        let index = self.next_texture_index;
+        let global_index = self.next_texture_index;
+        let local_index = global_index - 2 * MAX_RESOURCES_PER_CATEGORY;
         self.next_texture_index += 1;
-        self.texture_indices.insert(handle, index);
-        index
+        self.texture_indices.insert(handle, local_index);
+        local_index
     }
 
+    /// Returns the global argument buffer index for a texture,
+    /// needed for encoding offsets.
+    pub fn texture_global_index(local_index: u32) -> u32 {
+        local_index + 2 * MAX_RESOURCES_PER_CATEGORY
+    }
+
+    /// Register a sampler — returns the LOCAL index (0-63) for push constants.
+    /// Use `sampler_global_index()` to get the argument buffer encoding offset.
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
-        let index = self.next_sampler_index;
+        let global_index = self.next_sampler_index;
+        let local_index = global_index - 4 * MAX_RESOURCES_PER_CATEGORY;
         self.next_sampler_index += 1;
-        self.sampler_indices.insert(handle, index);
-        index
+        self.sampler_indices.insert(handle, local_index);
+        local_index
+    }
+
+    /// Returns the global argument buffer index for a sampler,
+    /// needed for encoding offsets.
+    pub fn sampler_global_index(local_index: u32) -> u32 {
+        local_index + 4 * MAX_RESOURCES_PER_CATEGORY
     }
 
     pub fn unregister_buffer(&mut self, handle: BufferHandle) {

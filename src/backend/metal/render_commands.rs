@@ -40,7 +40,8 @@ pub(super) fn record(
                 offset,
             } => {
                 if let Some(buf) = buffers.get(buffer) {
-                    encoder.set_vertex_buffer(*slot as u64, Some(&buf.buffer), *offset);
+                    let metal_slot = (*slot as u64) + super::types::VERTEX_BUFFER_START_SLOT;
+                    encoder.set_vertex_buffer(metal_slot, Some(&buf.buffer), *offset);
                 }
             }
             RenderCommand::SetIndexBuffer {
