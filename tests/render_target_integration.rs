@@ -6,8 +6,9 @@ mod common;
 
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
-    DeviceType, IndexFormat, Instance, RenderPipeline, RenderPipelineDesc, RenderTarget,
-    ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    DeviceType, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 
 fn create_device() -> Option<goldy::Device> {
@@ -629,5 +630,121 @@ fn test_depth_occlusion_green_beats_red() {
         total,
         green_count,
         red_count
+    );
+}
+
+/// Render a fullscreen triangle whose fragment shader reads a value from a bindless buffer
+/// via push constants. Verifies the global argument buffer is correctly bound to offscreen
+/// render targets (a bug that produces a completely blank output if missing).
+#[test]
+fn test_render_target_bindless_buffer_read() {
+    let Some(device) = create_device() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+
+    let data = vec![1u32; 4];
+    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+
+    // Fragment shader reads buffer[0] via bindless push constant.
+    // Outputs bright green when value == 1 (alive), dark gray otherwise.
+    // Both branches are visually distinct from the black clear color, so we can
+    // tell whether the shader ran vs. the draw call being skipped entirely.
+    // If the argument buffer is not bound the GPU reads 0 → dark gray pixels.
+    // Mirrors the GOL render shader structure to avoid platform-specific
+    // Slang codegen differences (UV varying, local variable assignment).
+    let shader_source = r#"
+import goldy_exp;
+
+#define CELLS goldy_dyn_scattered<uint>(0)
+
+static const float2 positions[3] = {
+    float2(-1, -1),
+    float2( 3, -1),
+    float2(-1,  3)
+};
+
+static const float2 uvs[3] = {
+    float2(0, 0),
+    float2(2, 0),
+    float2(0, 2)
+};
+
+struct VSOut {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
+
+[shader("vertex")]
+VSOut vs_main(uint id : SV_VertexID) {
+    VSOut o;
+    o.pos = float4(positions[id], 0.0, 1.0);
+    o.uv  = uvs[id];
+    return o;
+}
+
+[shader("fragment")]
+float4 fs_main(VSOut i) : SV_Target {
+    uint val = CELLS[0];
+    if (val == 1u) {
+        return float4(0.2, 0.9, 0.3, 1.0);
+    } else {
+        return float4(0.05, 0.08, 0.1, 1.0);
+    }
+}
+"#;
+
+    let shader = ShaderModule::from_slang(&device, shader_source).expect("compile bindless shader");
+
+    let target =
+        RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("create target");
+
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            // Empty vertex layout: this shader uses SV_VertexID with no vertex
+            // attributes, so no vertex descriptor should be set on the pipeline.
+            // Using VertexBufferLayout::default() (Vertex2D) would set
+            // buffer_index(0) for vertex data, conflicting with the argument
+            // buffer also at slot 0.
+            vertex_layout: VertexBufferLayout {
+                attributes: vec![],
+                stride: 0,
+            },
+            topology: PrimitiveTopology::TriangleList,
+            target_format: TextureFormat::Rgba8Unorm,
+            ..Default::default()
+        },
+    )
+    .expect("create pipeline");
+
+    let mut encoder = CommandEncoder::new();
+    {
+        let mut pass = encoder.begin_render_pass();
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buffer]);
+        pass.draw(0..3, 0..1);
+    }
+    target.render(encoder).expect("render");
+
+    let pixels = target.read_to_cpu().expect("readback");
+    assert_eq!(pixels.len(), 4 * 4 * 4);
+
+    // Every pixel should be the "alive" green color (val==1 branch).
+    // Clear color:  black  → [  0,   0,   0, 255]  (draw call never ran)
+    // val==0 branch: dark  → [ 12,  20,  25, 255]  (argument buffer not bound)
+    // val==1 branch: green → [ 51, 229,  76, 255]  (correct)
+    // Checking G > 100 distinguishes the green branch from both failure modes.
+    let all_green = pixels.chunks(4).all(|p| p[1] > 100);
+    assert!(
+        all_green,
+        "Expected all pixels green (alive) from bindless buffer read.\n\
+         First pixel: {:?}\n\
+         black=[0,0,0,255] means the draw call never executed;\n\
+         dark=[12,20,25,255] means the argument buffer was not bound to the render encoder.",
+        &pixels[..4]
     );
 }

@@ -53,9 +53,6 @@ pub(super) fn create(
         arg_buffer_index
     );
 
-    // Encode buffer into argument buffer using ArgumentEncoder.
-    // Use encoding_index (global) for offset so the buffer lands at the correct
-    // position in the flat argument buffer (Broadcast buffers start at slot 64).
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
@@ -67,7 +64,7 @@ pub(super) fn create(
             "Encoded buffer {} at arg buffer offset {} (slot {})",
             handle,
             offset,
-            arg_buffer_index
+            arg_buffer_index,
         );
     }
 
