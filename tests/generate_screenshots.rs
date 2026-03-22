@@ -228,7 +228,7 @@ fn create_gol_initial_state() -> Vec<u32> {
     for y in 60..100 {
         for x in 60..100 {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            if (rng >> 32) % 4 == 0 {
+            if (rng >> 32).is_multiple_of(4) {
                 cells[(y * GOL_GRID_WIDTH + x) as usize] = 1;
             }
         }
@@ -273,8 +273,8 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     .expect("Failed to create render pipeline");
 
     let mut use_buffer_a = true;
-    let workgroups_x = (GOL_GRID_WIDTH + 7) / 8;
-    let workgroups_y = (GOL_GRID_HEIGHT + 7) / 8;
+    let workgroups_x = GOL_GRID_WIDTH.div_ceil(8);
+    let workgroups_y = GOL_GRID_HEIGHT.div_ceil(8);
 
     for _ in 0..updates {
         let mut compute_encoder = ComputeEncoder::new();

@@ -37,7 +37,7 @@ fn generate_waveform(time: f32, channel: usize) -> Vec<f32> {
             y += (x * freq * 5.1 + time * 2.3 + phase).sin() * 0.1;
 
             // Add some noise
-            let noise = ((i as f32 * 1234.5 + time * 100.0).sin() * 43758.5453).fract() - 0.5;
+            let noise = ((i as f32 * 1234.5 + time * 100.0).sin() * 43_758.547_f32).fract() - 0.5;
             y += noise * 0.05;
 
             y.clamp(-1.0, 1.0)

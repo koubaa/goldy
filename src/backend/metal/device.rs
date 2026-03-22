@@ -123,7 +123,6 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         LogicalDevice {
             device,
             command_queue,
-            adapter_id,
             buffer_heap,
             texture_heap,
             argument_buffer,

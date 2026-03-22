@@ -217,7 +217,7 @@ impl RenderState {
             pass.set_pipeline(&self.compute_pipeline);
             // Pass buffer indices via push constants
             pass.set_push_constants(&[&self.particle_buffer, &self.params_buffer]);
-            let workgroups = (NUM_PARTICLES + 63) / 64;
+            let workgroups = NUM_PARTICLES.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
         }
         compute_encoder.dispatch(&self.device)?;

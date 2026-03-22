@@ -186,17 +186,17 @@ fn write_png(
     encoder.set_compression(compression);
 
     let mut writer = encoder.write_header().map_err(|e| {
-        ImageComparisonError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to write PNG header: {}", e),
-        ))
+        ImageComparisonError::IoError(std::io::Error::other(format!(
+            "Failed to write PNG header: {}",
+            e
+        )))
     })?;
 
     writer.write_image_data(data).map_err(|e| {
-        ImageComparisonError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to write PNG data: {}", e),
-        ))
+        ImageComparisonError::IoError(std::io::Error::other(format!(
+            "Failed to write PNG data: {}",
+            e
+        )))
     })?;
 
     Ok(())

@@ -151,7 +151,7 @@ impl RenderState {
             // Pass buffer indices via push constants
             pass.set_push_constants(&[&self.line_buffer]);
             // Only 20 lines, but dispatch at least 1 workgroup
-            let workgroups = (NUM_LINES + 63) / 64;
+            let workgroups = NUM_LINES.div_ceil(64);
             pass.dispatch(workgroups.max(1), 1, 1);
         }
         compute_encoder.dispatch(&self.device)?;

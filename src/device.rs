@@ -441,6 +441,13 @@ impl Device {
     }
 }
 
+impl Drop for Device {
+    fn drop(&mut self) {
+        let mut backend = self.backend.lock().unwrap();
+        backend.destroy_device(self.handle);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,12 +544,5 @@ mod tests {
             "goldy_exp/math.slang should exist at {:?}",
             math_file
         );
-    }
-}
-
-impl Drop for Device {
-    fn drop(&mut self) {
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_device(self.handle);
     }
 }

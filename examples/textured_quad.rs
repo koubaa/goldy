@@ -79,7 +79,7 @@ fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> 
         for x in 0..width {
             let checker_x = (x / checker_size) % 2;
             let checker_y = (y / checker_size) % 2;
-            let is_white = (checker_x + checker_y) % 2 == 0;
+            let is_white = (checker_x + checker_y).is_multiple_of(2);
 
             if is_white {
                 data.extend_from_slice(&[255, 255, 255, 255]); // White

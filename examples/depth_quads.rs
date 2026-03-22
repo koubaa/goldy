@@ -63,6 +63,7 @@ fn depth_vertex_layout() -> VertexBufferLayout {
 }
 
 /// Build 6 vertices for a screen-space quad (two triangles, CCW).
+#[allow(clippy::too_many_arguments)]
 fn quad_verts(
     x0: f32,
     y0: f32,

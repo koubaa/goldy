@@ -325,7 +325,7 @@ fn test_buffer_clear_partial() {
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for (i, &val) in result.iter().enumerate() {
-        let expected = if i >= 16 && i < 32 { 0 } else { sentinel };
+        let expected = if (16..32).contains(&i) { 0 } else { sentinel };
         assert_eq!(
             val, expected,
             "element {} expected {:#x} got {:#x}",
@@ -655,8 +655,8 @@ fn test_buffer_view_copy_between_sub_regions() {
     const N: usize = 64;
     let mut data = vec![0u32; N * 2];
     // First half: source values 1..=64
-    for i in 0..N {
-        data[i] = (i + 1) as u32;
+    for (i, slot) in data.iter_mut().take(N).enumerate() {
+        *slot = (i + 1) as u32;
     }
     // Second half: zeros (destination)
 
@@ -689,14 +689,14 @@ fn test_buffer_view_copy_between_sub_regions() {
         .expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
-    for i in 0..N {
+    for (i, &val) in result[N..].iter().enumerate() {
         assert_eq!(
-            result[N + i],
+            val,
             (i + 1) as u32,
             "dest[{}]: expected {} (copied from source view), got {}",
             i,
             i + 1,
-            result[N + i]
+            val
         );
     }
 }
@@ -711,11 +711,9 @@ fn test_buffer_view_isolation() {
 
     const N: usize = 64;
     let mut data = vec![0u32; N * 2];
-    for i in 0..N {
-        data[i] = 100; // first half: sentinel
-    }
-    for i in 0..N {
-        data[N + i] = (i + 1) as u32; // second half: values to double
+    data[..N].fill(100); // first half: sentinel
+    for (i, slot) in data[N..].iter_mut().enumerate() {
+        *slot = (i + 1) as u32; // second half: values to double
     }
 
     let pool_buf =
@@ -745,24 +743,21 @@ fn test_buffer_view_isolation() {
     let result: &[u32] = bytemuck::cast_slice(&output);
 
     // First half must be untouched
-    for i in 0..N {
+    for (i, &val) in result[..N].iter().enumerate() {
         assert_eq!(
-            result[i], 100,
+            val, 100,
             "sentinel[{}] was modified (expected 100, got {})",
-            i, result[i]
+            i, val
         );
     }
 
     // Second half must be doubled
-    for i in 0..N {
+    for (i, &val) in result[N..].iter().enumerate() {
         let expected = ((i + 1) as u32) * 2;
         assert_eq!(
-            result[N + i],
-            expected,
+            val, expected,
             "view[{}]: expected {} (doubled), got {}",
-            i,
-            expected,
-            result[N + i]
+            i, expected, val
         );
     }
 }
@@ -810,14 +805,14 @@ fn test_buffer_pool_alloc_and_dispatch() {
     // Destination starts at 256 bytes (first aligned offset after 64*4=256)
     let dst_offset = 256usize;
     let dst_slice: &[u32] = bytemuck::cast_slice(&output[dst_offset..dst_offset + N * 4]);
-    for i in 0..N {
+    for (i, &val) in dst_slice.iter().enumerate() {
         assert_eq!(
-            dst_slice[i],
+            val,
             (i + 1) as u32,
             "pool dst[{}]: expected {}, got {}",
             i,
             i + 1,
-            dst_slice[i]
+            val
         );
     }
 
@@ -841,8 +836,8 @@ fn test_buffer_pool_alloc_with_data() {
         .read_to_cpu(&device, &mut output)
         .expect("readback");
     let roundtripped: &[u32] = bytemuck::cast_slice(&output[..N * 4]);
-    for i in 0..N {
-        assert_eq!(roundtripped[i], (i + 1) as u32, "mismatch at index {}", i);
+    for (i, &val) in roundtripped.iter().enumerate() {
+        assert_eq!(val, (i + 1) as u32, "mismatch at index {}", i);
     }
 }
 
@@ -893,7 +888,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile positive_mod shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let buf = Buffer::with_data(&device, &vec![0.0f32; 7], DataAccess::Scattered)
+    let buf = Buffer::with_data(&device, &[0.0f32; 7], DataAccess::Scattered)
         .expect("create output buffer");
 
     let mut encoder = ComputeEncoder::new();
@@ -982,7 +977,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile billboard shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let buf = Buffer::with_data(&device, &vec![0.0f32; 9], DataAccess::Scattered)
+    let buf = Buffer::with_data(&device, &[0.0f32; 9], DataAccess::Scattered)
         .expect("create output buffer");
 
     let mut encoder = ComputeEncoder::new();
@@ -1017,6 +1012,83 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             label,
             expected,
             result[i]
+        );
+    }
+}
+
+// ─── RWStructuredBuffer<T> typed variable assignment ──────────────────────────
+
+/// Verify that `goldy_dyn_scattered<T>(n)` can be assigned to a local
+/// `StorageBuffer<T>` variable (the cross-platform type alias).
+/// On Metal, `StorageBuffer<T>` resolves to `Ptr<T>`, on SPIRV/DX12 to
+/// `RWStructuredBuffer<T>`, ensuring the same shader code works everywhere.
+#[test]
+fn test_dyn_scattered_typed_variable_assignment() {
+    const SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> output = goldy_dyn_scattered<Pair>(1);
+    uint idx = id.x;
+    if (idx >= 8) return;
+    Pair p = input[idx];
+    output[idx].a = p.a + p.b;
+    output[idx].b = p.a * p.b;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile typed-var shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+
+    let input_data: Vec<Pair> = (0..8)
+        .map(|i| Pair {
+            a: i + 1,
+            b: i + 10,
+        })
+        .collect();
+    let input_buf =
+        Buffer::with_data(&device, &input_data, DataAccess::Scattered).expect("input buffer");
+    let output_buf = Buffer::with_data(&device, &[Pair { a: 0, b: 0 }; 8], DataAccess::Scattered)
+        .expect("output buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 8 * std::mem::size_of::<Pair>()];
+    output_buf.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[Pair] = bytemuck::cast_slice(&raw);
+
+    for i in 0..8u32 {
+        let expected_a = (i + 1) + (i + 10);
+        let expected_b = (i + 1) * (i + 10);
+        assert_eq!(
+            result[i as usize].a, expected_a,
+            "output[{}].a: expected {}, got {}",
+            i, expected_a, result[i as usize].a
+        );
+        assert_eq!(
+            result[i as usize].b, expected_b,
+            "output[{}].b: expected {}, got {}",
+            i, expected_b, result[i as usize].b
         );
     }
 }

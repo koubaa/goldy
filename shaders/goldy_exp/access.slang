@@ -38,8 +38,8 @@
 //   [shader("compute")]
 //   void cs_main(uint3 id : SV_DispatchThreadID) {
 //       // Rust: set_push_constants(&[read_buf_slot, write_buf_slot])
-//       RWStructuredBuffer<uint> current = goldy_dyn_scattered<uint>(0);
-//       RWStructuredBuffer<uint> next = goldy_dyn_scattered<uint>(1);
+//       StorageBuffer<uint> current = goldy_dyn_scattered<uint>(0);
+//       StorageBuffer<uint> next = goldy_dyn_scattered<uint>(1);
 //       next[id.x] = current[id.x] + 1;
 //   }
 //
@@ -50,6 +50,30 @@
 // - Metal:  Uses gGoldy ParameterBlock arrays (Argument Buffers Tier 2 required)
 
 implementing goldy_exp;
+
+// =============================================================================
+// Cross-platform buffer type aliases
+//
+// On SPIRV/DX12, RWStructuredBuffer<T> is the native type for storage buffers.
+// On Metal, Slang cannot construct RWStructuredBuffer<T> from device pointers;
+// the equivalent is Ptr<T, Access.ReadWrite, AddressSpace.Device> which supports
+// the same subscript operator. StorageBuffer<T> normalizes this across platforms.
+//
+// Usage:
+//   StorageBuffer<Particle> buf = goldy_dyn_scattered<Particle>(0);
+//   buf[idx] = ...;
+//
+// Alternatively, use `var` for type inference:
+//   var buf = goldy_dyn_scattered<Particle>(0);
+// =============================================================================
+
+#if defined(__METAL__)
+public typealias StorageBuffer<T> = Ptr<T, Access.ReadWrite, AddressSpace.Device>;
+// ByteAddressView is defined as a struct later in the Metal section.
+#else
+public typealias StorageBuffer<T> = RWStructuredBuffer<T>;
+public typealias ByteAddressView = RWByteAddressBuffer;
+#endif
 
 // =============================================================================
 // Dynamic Slot Infrastructure
@@ -142,8 +166,7 @@ GoldyDynamicSlots __goldy_get_dynamic() {
 #ifdef __SPIRV__
 
 /// Dynamic scattered access - reads slot index from gGoldyDynamic.slots[n].
-/// Requires GOLDY_DECLARE_DYNAMIC in shader.
-public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
+public StorageBuffer<T> goldy_dyn_scattered<T>(uint n)
 {
     return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWStructuredBuffer<T>>();
 }
@@ -151,7 +174,7 @@ public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
 /// Dynamic read-only scattered access - reads slot index from gGoldyDynamic.slots[n].
 /// On SPIRV, SSBOs are inherently read-write; returns RWStructuredBuffer for API
 /// consistency with DX12 (which also returns RWStructuredBuffer to avoid SRV barriers).
-public RWStructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+public StorageBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
     return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWStructuredBuffer<T>>();
 }
@@ -165,7 +188,7 @@ public T goldy_dyn_broadcast<T>(uint n)
 
 /// Dynamic byte-address buffer access for InterlockedMin/Max (e.g. path_bboxes).
 /// Same buffer as goldy_dyn_scattered but with byte-address view.
-public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
+public ByteAddressView goldy_dyn_byte_address(uint n)
 {
     return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWByteAddressBuffer>();
 }
@@ -176,8 +199,8 @@ public T goldy_broadcast<T>(uint slot)
     return g_GoldyUniformHeap[slot].asOpaqueDescriptor<ConstantBuffer<T>>();
 }
 
-/// Get a RWStructuredBuffer handle for scattered access (SPIRV).
-public RWStructuredBuffer<T> goldy_scattered<T>(uint slot)
+/// Get a storage buffer handle for scattered access (SPIRV).
+public StorageBuffer<T> goldy_scattered<T>(uint slot)
 {
     return g_GoldyStorageHeap[slot].asOpaqueDescriptor<RWStructuredBuffer<T>>();
 }
@@ -226,7 +249,7 @@ public SamplerState goldy_filter(uint slot)
 
 /// Dynamic scattered access - reads slot index from push constants.
 /// Uses __goldy_get_slot for proper cbuffer component access.
-public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
+public StorageBuffer<T> goldy_dyn_scattered<T>(uint n)
 {
     uint slot = __goldy_get_slot(n);
     DescriptorHandle<RWStructuredBuffer<T>> handle;
@@ -237,9 +260,9 @@ public RWStructuredBuffer<T> goldy_dyn_scattered<T>(uint n)
 /// Dynamic read-only scattered access - reads slot index from push constants.
 /// On DX12, uses RWStructuredBuffer<T> (UAV) to avoid resource state transitions.
 /// Buffers start in D3D12_RESOURCE_STATE_UNORDERED_ACCESS; SRV would need a barrier.
-/// Declare the result as RWStructuredBuffer<T> and only read from it.
+/// Declare the result as StorageBuffer<T> and only read from it.
 /// TODO: revisit with enhanced buffers
-public RWStructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+public StorageBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
     uint slot = __goldy_get_slot(n);
     DescriptorHandle<RWStructuredBuffer<T>> handle;
@@ -266,8 +289,8 @@ public T goldy_broadcast<T>(uint slot)
     return *handle;
 }
 
-/// Get a RWStructuredBuffer handle for scattered access (DX12).
-public RWStructuredBuffer<T> goldy_scattered<T>(uint slot)
+/// Get a storage buffer handle for scattered access (DX12).
+public StorageBuffer<T> goldy_scattered<T>(uint slot)
 {
     DescriptorHandle<RWStructuredBuffer<T>> handle;
     handle = DescriptorHandle<RWStructuredBuffer<T>>(uint2(slot, 0));
@@ -326,7 +349,7 @@ public SamplerState goldy_dyn_filter(uint n)
 }
 
 /// Dynamic byte-address buffer access for InterlockedMin/Max (e.g. path_bboxes).
-public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
+public ByteAddressView goldy_dyn_byte_address(uint n)
 {
     uint slot = __goldy_get_slot(n);
     DescriptorHandle<RWByteAddressBuffer> handle;
@@ -341,32 +364,32 @@ public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
 #elif defined(__METAL__)
 
 // -----------------------------------------------------------------------------
-// Public access functions - return typed device pointer
-// Using Ptr<T, Access, AddressSpace> syntax for generic pointer return
+// Public access functions
+// Return RWStructuredBuffer<T> on all platforms for a unified API.
+// On Metal, reinterpret device pointers as RWStructuredBuffer<T> so that
+// callers can assign the result to an RWStructuredBuffer<T> local variable
+// (the pattern used by ekrano shaders) without a type mismatch.
 // -----------------------------------------------------------------------------
 
-/// Dynamic scattered access - returns typed pointer for read/write access.
-/// Usage: goldy_dyn_scattered<Particle>(0)[idx]
-public Ptr<T, Access.ReadWrite, AddressSpace.Device> goldy_dyn_scattered<T>(uint n)
+/// Dynamic scattered access - read/write storage buffer from push constant slot n.
+public StorageBuffer<T> goldy_dyn_scattered<T>(uint n)
 {
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.storageBuffers[slot];
     return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
 }
 
-/// Dynamic read-only scattered access - returns typed read-only pointer.
-/// Usage: goldy_dyn_buf_ro<Particle>(0)[idx]
-/// On Metal, read-only device pointers use the same argument buffer slot as RW.
-public Ptr<T, Access.Read, AddressSpace.Device> goldy_dyn_buf_ro<T>(uint n)
+/// Dynamic read-only scattered access from push constant slot n.
+/// Returns StorageBuffer<T> for API consistency (read-only intent is caller's contract).
+public StorageBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.storageBuffers[slot];
-    return (Ptr<T, Access.Read, AddressSpace.Device>)basePtr;
+    return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
 }
 
-/// Static scattered access - returns typed pointer for read/write access.
-/// Usage: goldy_scattered<Particle>(0)[idx]
-public Ptr<T, Access.ReadWrite, AddressSpace.Device> goldy_scattered<T>(uint slot)
+/// Static scattered access - read/write storage buffer by compile-time slot index.
+public StorageBuffer<T> goldy_scattered<T>(uint slot)
 {
     uint* basePtr = gGoldy.storageBuffers[slot];
     return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
@@ -429,14 +452,54 @@ public SamplerState goldy_dyn_filter(uint n)
     return gGoldy.samplers[slot];
 }
 
+// Free-function wrappers for atomic intrinsics (avoids name shadowing inside
+// ByteAddressView methods where InterlockedMin would resolve to `this.InterlockedMin`).
+void __goldy_atomic_min(StorageBuffer<uint> buf, uint word_idx, uint value, out uint original) {
+    InterlockedMin(buf[word_idx], value, original);
+}
+void __goldy_atomic_max(StorageBuffer<uint> buf, uint word_idx, uint value, out uint original) {
+    InterlockedMax(buf[word_idx], value, original);
+}
+void __goldy_atomic_cmpxchg(StorageBuffer<uint> buf, uint word_idx, uint compare, uint value, out uint original) {
+    InterlockedCompareExchange(buf[word_idx], compare, value, original);
+}
+
+/// Wrapper providing RWByteAddressBuffer-compatible methods over a device uint pointer.
+/// On Metal, Slang's `reinterpret<RWByteAddressBuffer>(ptr)` triggers a
+/// "type cannot be packed for dynamic dispatch" error when any shader in the
+/// same compilation unit uses interface constraints. This struct avoids that by
+/// implementing the byte-address API on top of a typed device pointer.
+public struct ByteAddressView {
+    StorageBuffer<uint> _ptr;
+
+    [ForceInline]
+    public uint Load(uint addr) { return _ptr[addr >> 2u]; }
+
+    [ForceInline]
+    public void Store(uint addr, uint value) { _ptr[addr >> 2u] = value; }
+
+    [ForceInline]
+    public void InterlockedMin(uint addr, uint value, out uint original_value) {
+        __goldy_atomic_min(_ptr, addr >> 2u, value, original_value);
+    }
+
+    [ForceInline]
+    public void InterlockedMax(uint addr, uint value, out uint original_value) {
+        __goldy_atomic_max(_ptr, addr >> 2u, value, original_value);
+    }
+
+    [ForceInline]
+    public void InterlockedCompareExchange(uint addr, uint compare, uint value, out uint original_value) {
+        __goldy_atomic_cmpxchg(_ptr, addr >> 2u, compare, value, original_value);
+    }
+};
+
 /// Dynamic byte-address buffer access for InterlockedMin/Max on Metal.
-/// Returns device pointer reinterpreted as RWByteAddressBuffer; Slang compiles
-/// .Store/.Load/InterlockedMin/Max into Metal atomic_* intrinsics on the pointer.
-public RWByteAddressBuffer goldy_dyn_byte_address(uint n)
+public ByteAddressView goldy_dyn_byte_address(uint n)
 {
-    uint slot = gGoldyDynamic.slots[n];
-    uint* basePtr = gGoldy.storageBuffers[slot];
-    return reinterpret<RWByteAddressBuffer>(basePtr);
+    ByteAddressView v;
+    v._ptr = goldy_dyn_scattered<uint>(n);
+    return v;
 }
 
 #endif

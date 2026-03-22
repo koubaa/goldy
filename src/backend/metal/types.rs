@@ -55,7 +55,6 @@ pub struct BindlessIndices {
 pub(crate) struct LogicalDevice {
     pub device: MTLDevice,
     pub command_queue: CommandQueue,
-    pub adapter_id: u32,
 
     // Bindless infrastructure (always present — Tier 2 required)
     /// Heap for buffer allocations
@@ -218,7 +217,6 @@ pub(crate) struct RenderTargetState {
     /// GPU render target texture
     pub texture: MTLTexture,
     /// Depth buffer (optional)
-    pub depth_format: Option<DepthFormat>,
     pub depth_texture: Option<MTLTexture>,
     /// Track if we've rendered (for readback validation)
     pub has_rendered: bool,
@@ -238,6 +236,8 @@ pub(crate) struct TextureState {
 /// GPU sampler state.
 pub(crate) struct SamplerState_ {
     pub device_handle: DeviceHandle,
+    /// Held so the GPU sampler stays resident while its ID is in the argument buffer.
+    #[allow(dead_code)]
     pub sampler: SamplerState,
     /// Index in the global argument buffer (always present).
     pub arg_buffer_index: u32,
