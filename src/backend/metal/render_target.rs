@@ -132,6 +132,18 @@ pub(super) fn render_to(
     encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
 
+    // Diagnostic: dump first 16 bytes of argument buffer at render time
+    unsafe {
+        let ab_ptr = logical_device.argument_buffer.contents() as *const u8;
+        let first_16: Vec<u8> = (0..16).map(|i| *ab_ptr.add(i)).collect();
+        let addr0 = std::ptr::read_unaligned(ab_ptr as *const u64);
+        let addr1 = std::ptr::read_unaligned(ab_ptr.add(8) as *const u64);
+        eprintln!(
+            "DIAG render_to: arg_buffer first 16 bytes={:?}, slot0=0x{:x}, slot1=0x{:x}",
+            first_16, addr0, addr1,
+        );
+    }
+
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
         originY: 0.0,

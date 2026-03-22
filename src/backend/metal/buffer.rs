@@ -54,8 +54,6 @@ pub(super) fn create(
     );
 
     // Write the buffer's GPU address directly into the argument buffer.
-    // We bypass ArgumentEncoder because it can defer writes internally,
-    // causing a subsequent render pass to read a stale (zero) pointer.
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
@@ -63,14 +61,21 @@ pub(super) fn create(
         unsafe {
             let dst = (logical_device.argument_buffer.contents() as *mut u8).add(offset as usize);
             std::ptr::write_unaligned(dst as *mut u64, gpu_addr);
+
+            // Verify the write landed
+            let readback = std::ptr::read_unaligned(dst as *const u64);
+            eprintln!(
+                "DIAG buffer::create: handle={}, encoding_index={}, offset={}, \
+                 encoded_length={}, gpu_addr=0x{:x}, readback=0x{:x}, match={}",
+                handle,
+                encoding_index,
+                offset,
+                encoded_length,
+                gpu_addr,
+                readback,
+                gpu_addr == readback,
+            );
         }
-        tracing::trace!(
-            "Encoded buffer {} at arg buffer offset {} (slot {}, gpu_addr=0x{:x})",
-            handle,
-            offset,
-            arg_buffer_index,
-            gpu_addr,
-        );
     }
 
     logical_device.heap_buffer_count += 1;
