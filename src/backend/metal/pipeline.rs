@@ -72,7 +72,10 @@ pub(super) fn create_with_depth(
 
     if !vertex_layout.attributes.is_empty() {
         let vertex_descriptor = mtl::VertexDescriptor::new();
-        let layout = vertex_descriptor.layouts().object_at(0).unwrap();
+        let layout = vertex_descriptor
+            .layouts()
+            .object_at(super::types::VERTEX_BUFFER_START_SLOT)
+            .unwrap();
         layout.set_stride(vertex_layout.stride as u64);
         layout.set_step_function(mtl::MTLVertexStepFunction::PerVertex);
 
@@ -83,7 +86,7 @@ pub(super) fn create_with_depth(
                 .unwrap();
             attr_desc.set_format(vertex_format_to_mtl(attr.format));
             attr_desc.set_offset(attr.offset as u64);
-            attr_desc.set_buffer_index(0);
+            attr_desc.set_buffer_index(super::types::VERTEX_BUFFER_START_SLOT);
         }
 
         descriptor.set_vertex_descriptor(Some(vertex_descriptor));

@@ -61,6 +61,12 @@ impl Default for TargetDesc {
     }
 }
 
+/// Slang matrix layout modes (matches SlangMatrixLayoutMode enum in slang.h).
+/// Controls how `float4x4` in constant buffers is interpreted in memory.
+pub const SLANG_MATRIX_LAYOUT_MODE_UNKNOWN: i32 = 0;
+pub const SLANG_MATRIX_LAYOUT_ROW_MAJOR: i32 = 1;
+pub const SLANG_MATRIX_LAYOUT_COLUMN_MAJOR: i32 = 2;
+
 /// Session description for creating sessions with options.
 /// This must match the C++ SessionDesc struct exactly (including padding).
 #[repr(C)]
@@ -92,7 +98,7 @@ impl Default for SessionDesc {
             targets: std::ptr::null(),
             target_count: 0,
             flags: 0,
-            default_matrix_layout_mode: 0, // SLANG_MATRIX_LAYOUT_ROW_MAJOR
+            default_matrix_layout_mode: SLANG_MATRIX_LAYOUT_COLUMN_MAJOR,
             search_paths: std::ptr::null(),
             search_path_count: 0,
             preprocessor_macros: std::ptr::null(),
