@@ -362,7 +362,11 @@ pub(super) fn wait_fence(
         .get(&stored_device)
         .context("Device for fence no longer exists")?;
 
-    let wait_result = unsafe { logical_device.device.wait_for_fences(&[fence], true, u64::MAX) };
+    let wait_result = unsafe {
+        logical_device
+            .device
+            .wait_for_fences(&[fence], true, u64::MAX)
+    };
 
     // Fence done (or failed) — safe to free command buffer and fence now.
     if let Some(cb) = cmd_buf {
@@ -406,7 +410,11 @@ pub(super) fn wait_fence_timeout(
     // vkWaitForFences uses nanoseconds
     let timeout_ns = u64::from(timeout_ms) * 1_000_000;
 
-    let result = unsafe { logical_device.device.wait_for_fences(&[fence], true, timeout_ns) };
+    let result = unsafe {
+        logical_device
+            .device
+            .wait_for_fences(&[fence], true, timeout_ns)
+    };
 
     match result {
         Ok(()) => {

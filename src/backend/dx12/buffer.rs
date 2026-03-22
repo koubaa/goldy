@@ -455,8 +455,12 @@ pub(super) fn write(
         // UPLOAD heap: direct map
         let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let read_range = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { buffer.resource.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
-            .context("Failed to map buffer")?;
+        unsafe {
+            buffer
+                .resource
+                .Map(0, Some(&read_range), Some(&mut mapped_ptr))
+        }
+        .context("Failed to map buffer")?;
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr(),
@@ -480,10 +484,7 @@ pub(super) fn write(
     let main_resource = buffer.resource.clone();
 
     // Create or reuse the upload buffer (capped at chunk_size)
-    let upload_needed = match &buffer.upload_buffer {
-        Some(_) => false,
-        None => true,
-    };
+    let upload_needed = buffer.upload_buffer.is_none();
     if upload_needed {
         let logical_device = state
             .devices
@@ -504,7 +505,10 @@ pub(super) fn write(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             Flags: D3D12_RESOURCE_FLAG_NONE,
         };
@@ -520,11 +524,8 @@ pub(super) fn write(
             )
         }
         .context("Failed to create upload staging buffer")?;
-        state
-            .buffers
-            .get_mut(&buffer_handle)
-            .unwrap()
-            .upload_buffer = Some(upload.context("Upload buffer is null")?);
+        state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer =
+            Some(upload.context("Upload buffer is null")?);
     }
 
     let upload_buf = state
@@ -549,7 +550,11 @@ pub(super) fn write(
         unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
             .context("Failed to map upload buffer")?;
         unsafe {
-            std::ptr::copy_nonoverlapping(src_slice.as_ptr(), mapped as *mut u8, this_chunk as usize);
+            std::ptr::copy_nonoverlapping(
+                src_slice.as_ptr(),
+                mapped as *mut u8,
+                this_chunk as usize,
+            );
         }
         let write_range = D3D12_RANGE {
             Begin: 0,
@@ -564,11 +569,15 @@ pub(super) fn write(
             .context("Invalid device handle")?;
 
         let alloc: ID3D12CommandAllocator = unsafe {
-            device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+            device
+                .device
+                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
         }
         .context("Failed to create command allocator")?;
         let cmd: ID3D12GraphicsCommandList = unsafe {
-            device.device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None)
+            device
+                .device
+                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None)
         }
         .context("Failed to create command list")?;
 
@@ -839,9 +848,7 @@ pub(super) fn uav_clear(
             },
         };
         let scratch_cpu = unsafe {
-            let mut h = device
-                .cbv_srv_uav_heap
-                .GetCPUDescriptorHandleForHeapStart();
+            let mut h = device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
             h.ptr += (scratch * device.cbv_srv_uav_descriptor_size) as usize;
             h
         };
@@ -854,9 +861,7 @@ pub(super) fn uav_clear(
             );
         }
         let gpu = unsafe {
-            let mut h = device
-                .cbv_srv_uav_heap
-                .GetGPUDescriptorHandleForHeapStart();
+            let mut h = device.cbv_srv_uav_heap.GetGPUDescriptorHandleForHeapStart();
             h.ptr += (scratch as u64) * (device.cbv_srv_uav_descriptor_size as u64);
             h
         };
@@ -866,16 +871,12 @@ pub(super) fn uav_clear(
             .bindless_offset
             .context("Storage buffer has no UAV descriptor for clear")?;
         let gpu = unsafe {
-            let mut h = device
-                .cbv_srv_uav_heap
-                .GetGPUDescriptorHandleForHeapStart();
+            let mut h = device.cbv_srv_uav_heap.GetGPUDescriptorHandleForHeapStart();
             h.ptr += (uav_offset as u64) * (device.cbv_srv_uav_descriptor_size as u64);
             h
         };
         let cpu = unsafe {
-            let mut h = device
-                .cbv_srv_uav_heap
-                .GetCPUDescriptorHandleForHeapStart();
+            let mut h = device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
             h.ptr += (uav_offset * device.cbv_srv_uav_descriptor_size) as usize;
             h
         };
