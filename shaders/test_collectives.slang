@@ -12,6 +12,42 @@ import ekrano_shared;
 
 #define OUT goldy_dyn_scattered<uint>(0)
 
+// --- IMonoid conformance for ekrano types ---
+
+extension TagMonoid : IMonoid {
+    static TagMonoid identity() { return tag_monoid_identity(); }
+    TagMonoid combine(TagMonoid other) { return combine_tag_monoid(this, other); }
+}
+
+extension DrawMonoid : IMonoid {
+    static DrawMonoid identity() { return draw_monoid_identity(); }
+    DrawMonoid combine(DrawMonoid other) { return combine_draw_monoid(this, other); }
+}
+
+extension Bic : IMonoid {
+    static Bic identity() { Bic r; r.a = 0; r.b = 0; return r; }
+    Bic combine(Bic other) { return bic_combine(this, other); }
+}
+
+public struct Bbox2D {
+    public float4 v;
+};
+
+extension Bbox2D : IMonoid {
+    static Bbox2D identity() { Bbox2D r; r.v = float4(-1e9, -1e9, 1e9, 1e9); return r; }
+    Bbox2D combine(Bbox2D other) { Bbox2D r; r.v = bbox_intersect(this.v, other.v); return r; }
+}
+
+// --- IScannable conformance for ekrano map functions ---
+
+struct PathTagScanner : IScannable<TagMonoid> {
+    static TagMonoid map(uint raw_input) { return reduce_tag(raw_input); }
+};
+
+struct DrawTagScanner : IScannable<DrawMonoid> {
+    static DrawMonoid map(uint raw_input) { return map_draw_tag(raw_input); }
+};
+
 static const uint WG_SIZE = 256;
 static const uint LG_WG_SIZE = 8;
 

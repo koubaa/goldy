@@ -10,6 +10,23 @@ import ekrano_shared;
 
 #define OUT goldy_dyn_scattered<uint>(0)
 
+// --- IMonoid conformance for ekrano types ---
+
+extension TagMonoid : IMonoid {
+    static TagMonoid identity() { return tag_monoid_identity(); }
+    TagMonoid combine(TagMonoid other) { return combine_tag_monoid(this, other); }
+}
+
+extension DrawMonoid : IMonoid {
+    static DrawMonoid identity() { return draw_monoid_identity(); }
+    DrawMonoid combine(DrawMonoid other) { return combine_draw_monoid(this, other); }
+}
+
+extension Bic : IMonoid {
+    static Bic identity() { Bic r; r.a = 0; r.b = 0; return r; }
+    Bic combine(Bic other) { return bic_combine(this, other); }
+}
+
 [ForceInline]
 T test_reduce<T : IMonoid, let N : int>(
     T val, uint local_ix, groupshared T scratch[N]
