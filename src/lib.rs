@@ -49,3 +49,6 @@ pub use shader_library::ShaderLibrary;
 pub use surface::{Surface, SurfaceFrame};
 pub use texture::Texture;
 pub use types::*;
+
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+pub use backend::dx12::WARP_ADAPTER_ID;
