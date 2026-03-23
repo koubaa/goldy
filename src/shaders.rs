@@ -341,7 +341,7 @@ mod tests {
     /// Test that goldy_exp math and primitives utilities compile for all targets.
     ///
     /// Covers: `positive_mod` (float and float2), `modelview_right`,
-    /// `billboard_cylindrical_offset` — all added in the goldy_exp ergonomics pass.
+    /// `billboard_cylindrical_offset`, `erf7`, `signed_atomic_min` / `signed_atomic_max`.
     #[test]
     fn test_goldy_exp_math_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
@@ -401,6 +401,213 @@ mod tests {
             assert!(
                 result.is_ok(),
                 "test_goldy_exp_math failed to compile for Metal: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    /// Test that IMonoid interface and generic groupshared T[N] function parameters
+    /// compile across all backends. This is the gate for the goldy shader stdlib:
+    /// if this fails, the generic workgroup collectives strategy needs a fallback.
+    #[test]
+    fn test_algebra_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shader_path = manifest_dir.join("shaders");
+        let shader_path_str = shader_path.to_string_lossy();
+
+        let test_shader = std::fs::read_to_string(shader_path.join("test_algebra.slang"))
+            .expect("Failed to read test_algebra.slang");
+
+        let entry = &[("cs_main", SlangStage::Compute)];
+
+        // SPIRV (Vulkan)
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            &test_shader,
+            ShaderTarget::Spirv,
+            entry,
+            &[&shader_path_str],
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_algebra failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        // DXIL (DX12)
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Dxil,
+                entry,
+                &[&shader_path_str],
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_algebra failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        // Metal
+        #[cfg(target_os = "macos")]
+        {
+            let metal_defines = vec![("__METAL__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Metal,
+                entry,
+                &[&shader_path_str],
+                &metal_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_algebra failed to compile for Metal: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    /// Test that workgroup collectives (reduce, inclusive_scan, broadcast, upper_bound)
+    /// compile with all IMonoid types across backends.
+    #[test]
+    fn test_collectives_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let goldy_shaders = manifest_dir.join("shaders");
+        let goldy_path = goldy_shaders.to_string_lossy();
+
+        let test_shader = std::fs::read_to_string(goldy_shaders.join("test_collectives.slang"))
+            .expect("Failed to read test_collectives.slang");
+
+        let entry = &[("cs_main", SlangStage::Compute)];
+        let search_paths: &[&str] = &[&goldy_path];
+
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            &test_shader,
+            ShaderTarget::Spirv,
+            entry,
+            search_paths,
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_collectives failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Dxil,
+                entry,
+                search_paths,
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_collectives failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let metal_defines = vec![("__METAL__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Metal,
+                entry,
+                search_paths,
+                &metal_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_collectives failed to compile for Metal: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    /// Test that IMonoid conformance extensions on representative GPU types
+    /// compile and work with generic groupshared functions across backends.
+    #[test]
+    fn test_ekrano_monoids_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let goldy_shaders = manifest_dir.join("shaders");
+        let goldy_path = goldy_shaders.to_string_lossy();
+
+        let test_shader = std::fs::read_to_string(goldy_shaders.join("test_ekrano_monoids.slang"))
+            .expect("Failed to read test_ekrano_monoids.slang");
+
+        let entry = &[("cs_main", SlangStage::Compute)];
+        let search_paths: &[&str] = &[&goldy_path];
+
+        // SPIRV (Vulkan)
+        let spirv_defines = vec![("__SPIRV__", "1")];
+        let result = compiler.compile_with_defines(
+            &test_shader,
+            ShaderTarget::Spirv,
+            entry,
+            search_paths,
+            &spirv_defines,
+        );
+        assert!(
+            result.is_ok(),
+            "test_ekrano_monoids failed to compile for SPIRV: {:?}",
+            result.err()
+        );
+
+        // DXIL (DX12)
+        #[cfg(windows)]
+        {
+            let dxil_defines = vec![("__DX12__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Dxil,
+                entry,
+                search_paths,
+                &dxil_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_ekrano_monoids failed to compile for DXIL: {:?}",
+                result.err()
+            );
+        }
+
+        // Metal
+        #[cfg(target_os = "macos")]
+        {
+            let metal_defines = vec![("__METAL__", "1")];
+            let result = compiler.compile_with_defines(
+                &test_shader,
+                ShaderTarget::Metal,
+                entry,
+                search_paths,
+                &metal_defines,
+            );
+            assert!(
+                result.is_ok(),
+                "test_ekrano_monoids failed to compile for Metal: {:?}",
                 result.err()
             );
         }

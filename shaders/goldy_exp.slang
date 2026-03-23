@@ -15,9 +15,16 @@
 //   RWStructuredBuffer<Particle> buf = goldy_scattered<Particle>(0);
 //
 // These work on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
+//
+// Note: Transform, bbox_intersect, Bbox2D, extend_mode*, erf7, unpack4x8unorm,
+// pack4x8unorm, premul_alpha, signed_atomic_min/max are defined in
+// ekrano_shared.slang to avoid Slang cross-module ambiguity.
+// They are NOT re-exported here.
 
 module goldy_exp;
 
+__include "goldy_exp/algebra";
+__include "goldy_exp/collectives";
 __include "goldy_exp/math";
 __include "goldy_exp/color";
 __include "goldy_exp/vertex";

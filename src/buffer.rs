@@ -116,6 +116,9 @@ impl Buffer {
 
     /// Write data to the buffer.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
         let mut backend = self.backend.lock().unwrap();
         backend.write_buffer(self.handle, offset, data)
     }

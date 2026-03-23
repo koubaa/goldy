@@ -1,8 +1,10 @@
 // Compile-only test for goldy_exp math and primitives utilities.
 //
-// This shader exercises positive_mod, modelview_right, and
-// billboard_cylindrical_offset so that Slang-level type errors or syntax
-// regressions are caught at compile time across all targets.
+// Exercises positive_mod, modelview_right, billboard_cylindrical_offset,
+// hash, scale_uv, center_uv, to_polar, smootherstep, rainbow, palette, heat.
+//
+// Note: Transform, bbox_intersect, erf7, unpack4x8unorm, signed_atomic_*
+// are defined in ekrano_shared (not goldy_exp) to avoid cross-module ambiguity.
 //
 // Run via: cargo test test_goldy_exp_math_compiles
 
@@ -14,19 +16,16 @@ import goldy_exp;
 [numthreads(1, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
     // ── positive_mod ─────────────────────────────────────────────────────────
-    // negative dividend wraps into [0, m)
-    OUT[0] = positive_mod(-1.0, 3.0);    // expected 2.0
-    OUT[1] = positive_mod(2.5, 3.0);     // expected 2.5
-    OUT[2] = positive_mod(0.0, 1.0);     // expected 0.0
-    OUT[3] = positive_mod(-3.0, 3.0);    // expected 0.0
+    OUT[0] = positive_mod(-1.0, 3.0);
+    OUT[1] = positive_mod(2.5, 3.0);
+    OUT[2] = positive_mod(0.0, 1.0);
+    OUT[3] = positive_mod(-3.0, 3.0);
 
-    // float2 overload
     float2 r2 = positive_mod(float2(-1.0, 2.5), float2(3.0, 3.0));
-    OUT[4] = r2.x;  // expected 2.0
-    OUT[5] = r2.y;  // expected 2.5
+    OUT[4] = r2.x;
+    OUT[5] = r2.y;
 
     // ── modelview_right ───────────────────────────────────────────────────────
-    // Row-major construction: col 0 = (m[0][0], m[1][0], m[2][0]) = (1, 5, 9)
     float4x4 m = float4x4(
         1, 0, 0, 0,
         5, 1, 0, 0,
@@ -34,18 +33,48 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         0, 0, 0, 1
     );
     float3 right = modelview_right(m);
-    OUT[6] = right.x;  // expected 1.0
-    OUT[7] = right.y;  // expected 5.0
-    OUT[8] = right.z;  // expected 9.0
+    OUT[6] = right.x;
+    OUT[7] = right.y;
+    OUT[8] = right.z;
 
     // ── billboard_cylindrical_offset ─────────────────────────────────────────
-    // center=(1,2,3), cam_right=(1,0,0), offset=5 → (6, 2, 3)
     float3 off = billboard_cylindrical_offset(
         float3(1.0, 2.0, 3.0),
         float3(1.0, 0.0, 0.0),
         5.0
     );
-    OUT[9]  = off.x;  // expected 6.0
-    OUT[10] = off.y;  // expected 2.0
-    OUT[11] = off.z;  // expected 3.0
+    OUT[9]  = off.x;
+    OUT[10] = off.y;
+    OUT[11] = off.z;
+
+    // ── Hash / UV / Polar ────────────────────────────────────────────────────
+    OUT[12] = hash(42.0);
+    OUT[13] = hash2(float2(1.0, 2.0));
+
+    float2 cuv = center_uv(float2(0.75, 0.25));
+    OUT[14] = cuv.x;
+    OUT[15] = cuv.y;
+
+    float2 suv = scale_uv(float2(0.5, 0.5), 4.0);
+    OUT[16] = suv.x;
+
+    float2 pol = to_polar(float2(1.0, 0.0));
+    OUT[17] = pol.x;
+
+    OUT[18] = smootherstep(0.0, 1.0, 0.5);
+
+    // ── Color utilities ──────────────────────────────────────────────────────
+    float3 rb = rainbow(0.5);
+    OUT[19] = rb.r;
+
+    float3 pal = palette(0.5, float3(1.0, 1.0, 1.0), float3(0.0, 0.0, 0.0));
+    OUT[20] = pal.r;
+
+    float3 h = heat(0.5);
+    OUT[21] = h.r;
+
+    float3 hsv = hsv_to_rgb(float3(0.0, 1.0, 1.0));
+    OUT[22] = hsv.r;
+
+    OUT[23] = luminance(float3(1.0, 0.0, 0.0));
 }
