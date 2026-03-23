@@ -487,18 +487,12 @@ mod tests {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let goldy_shaders = manifest_dir.join("shaders");
         let goldy_path = goldy_shaders.to_string_lossy();
-        let ekrano_shaders = manifest_dir
-            .join("..")
-            .join("ekrano")
-            .join("ekrano_shaders")
-            .join("slang");
-        let ekrano_path = ekrano_shaders.to_string_lossy();
 
         let test_shader = std::fs::read_to_string(goldy_shaders.join("test_collectives.slang"))
             .expect("Failed to read test_collectives.slang");
 
         let entry = &[("cs_main", SlangStage::Compute)];
-        let search_paths: &[&str] = &[&goldy_path, &ekrano_path];
+        let search_paths: &[&str] = &[&goldy_path];
 
         let spirv_defines = vec![("__SPIRV__", "1")];
         let result = compiler.compile_with_defines(
@@ -549,7 +543,7 @@ mod tests {
         }
     }
 
-    /// Test that IMonoid conformance extensions on ekrano types (TagMonoid, DrawMonoid, Bic)
+    /// Test that IMonoid conformance extensions on representative GPU types
     /// compile and work with generic groupshared functions across backends.
     #[test]
     fn test_ekrano_monoids_compiles() {
@@ -560,18 +554,12 @@ mod tests {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let goldy_shaders = manifest_dir.join("shaders");
         let goldy_path = goldy_shaders.to_string_lossy();
-        let ekrano_shaders = manifest_dir
-            .join("..")
-            .join("ekrano")
-            .join("ekrano_shaders")
-            .join("slang");
-        let ekrano_path = ekrano_shaders.to_string_lossy();
 
         let test_shader = std::fs::read_to_string(goldy_shaders.join("test_ekrano_monoids.slang"))
             .expect("Failed to read test_ekrano_monoids.slang");
 
         let entry = &[("cs_main", SlangStage::Compute)];
-        let search_paths: &[&str] = &[&goldy_path, &ekrano_path];
+        let search_paths: &[&str] = &[&goldy_path];
 
         // SPIRV (Vulkan)
         let spirv_defines = vec![("__SPIRV__", "1")];
