@@ -149,7 +149,8 @@ mod tests {
         let shader_path = manifest_dir.join("shaders");
         let shader_path_str = shader_path.to_string_lossy();
 
-        // Test SPIRV compilation (Vulkan) - needs __SPIRV__ define
+        // Test SPIRV compilation (Vulkan) - needs __SPIRV__ define for imported goldy_exp
+        // (may warn about redefinition vs Slang's target define; harmless)
         let spirv_defines = vec![("__SPIRV__", "1")];
         let result = compiler.compile_with_defines(
             PLASMA,

@@ -15,6 +15,30 @@ use crate::{goldy_event, goldy_span};
 // Include the generated embedded module from build.rs
 include!(concat!(env!("OUT_DIR"), "/slang_embedded.rs"));
 
+#[cfg(windows)]
+#[link(name = "kernel32", kind = "dylib")]
+extern "system" {
+    fn SetDllDirectoryW(lp_path_name: *const u16) -> i32;
+}
+
+/// On Windows, dependent DLLs (`slang-glslang.dll`, `spirv-opt`, etc.) live next to the primary
+/// Slang DLL. `LoadLibraryW` does not search that directory for dependencies unless we add it via
+/// [`SetDllDirectoryW`] (see DLL search order).
+#[cfg(windows)]
+fn set_dll_directory_for_slang_dependencies(lib_path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let Some(dir) = lib_path.parent() else {
+        return Ok(());
+    };
+    let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let ok = unsafe { SetDllDirectoryW(wide.as_ptr()) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Loaded Slang library with function pointers.
 pub struct SlangLibrary {
     _library: Library,
@@ -80,6 +104,14 @@ impl SlangLibrary {
 
         let lib_path = Self::find_library()?;
         tracing::info!("Loading Slang library from: {}", lib_path.display());
+
+        #[cfg(windows)]
+        set_dll_directory_for_slang_dependencies(&lib_path).with_context(|| {
+            format!(
+                "SetDllDirectoryW failed for Slang dependency search ({})",
+                lib_path.display()
+            )
+        })?;
 
         // Safety: We're loading a known library with a stable C ABI
         let library = unsafe { Library::new(&lib_path) }
