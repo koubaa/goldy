@@ -414,6 +414,17 @@ impl Device {
             .collect()
     }
 
+    /// Notify the backend that a frame has completed and all transient buffers
+    /// have been freed. On Metal, this allows the heap allocator to right-size
+    /// the primary heap based on observed peak usage, eliminating overflow heaps
+    /// for subsequent frames.
+    ///
+    /// Call this after the GPU has completed and all transient resources have
+    /// been released (e.g. after `clear_transients` in ekrano).
+    pub fn reset_buffer_heaps(&self) {
+        self.backend.lock().unwrap().reset_buffer_heaps(self.handle);
+    }
+
     /// Get search paths for shader compilation (internal use).
     pub(crate) fn get_shader_search_paths(&self) -> Result<Vec<PathBuf>> {
         self.library_registry.lock().unwrap().get_search_paths()

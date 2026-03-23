@@ -1,7 +1,9 @@
 //! Device management logic.
 
 use super::super::DeviceHandle;
-use super::types::{LogicalDevice, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE};
+use super::types::{
+    HeapAllocator, LogicalDevice, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE,
+};
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -67,14 +69,18 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     // TODO(#heap-config): Heap sizes are intentionally hardcoded for now.
     let heap_size: u64 = 64 * 1024 * 1024; // 64 MB per heap
 
-    tracing::info!("Creating buffer heap...");
+    tracing::info!("Creating buffer heap allocator...");
     let buffer_heap_desc = HeapDescriptor::new();
     buffer_heap_desc.set_size(heap_size);
     buffer_heap_desc.set_storage_mode(MTLStorageMode::Shared);
     buffer_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
     buffer_heap_desc.set_heap_type(MTLHeapType::Automatic);
     let buffer_heap = device.new_heap(&buffer_heap_desc);
-    tracing::info!("Created buffer heap (size={}MB)", heap_size / 1024 / 1024);
+    let heap_allocator = HeapAllocator::new(device.clone(), buffer_heap, heap_size);
+    tracing::info!(
+        "Created buffer heap allocator (primary={}MB)",
+        heap_size / 1024 / 1024
+    );
 
     tracing::info!("Creating texture heap...");
     let texture_heap_desc = HeapDescriptor::new();
@@ -123,13 +129,12 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         LogicalDevice {
             device,
             command_queue,
-            buffer_heap,
+            heap_allocator,
             texture_heap,
             argument_buffer,
             argument_encoder,
             texture_encoder,
             resource_registry: ResourceRegistry::new(),
-            heap_buffer_count: 0,
             heap_texture_count: 0,
         },
     );

@@ -403,6 +403,11 @@ pub trait GpuBackend: Send + Sync {
         token: FenceToken,
         timeout_ms: u32,
     ) -> Result<bool>;
+
+    /// Notify the backend that a frame has completed and all transient buffers
+    /// have been freed. Backends may use this to right-size internal heap
+    /// allocations. No-op by default.
+    fn reset_buffer_heaps(&mut self, _device: DeviceHandle) {}
 }
 
 /// Create the default backend for the current platform.

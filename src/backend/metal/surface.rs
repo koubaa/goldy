@@ -158,9 +158,9 @@ pub(super) fn render(
     let encoder = command_buffer.new_render_command_encoder(render_pass);
 
     let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
-    if logical_device.heap_buffer_count > 0 {
-        encoder.use_heap_at(&logical_device.buffer_heap, render_stages);
-    }
+    logical_device
+        .heap_allocator
+        .use_heaps_for_render(encoder, render_stages);
     if logical_device.heap_texture_count > 0 {
         encoder.use_heap_at(&logical_device.texture_heap, render_stages);
     }
