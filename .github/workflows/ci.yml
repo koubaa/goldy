@@ -318,15 +318,16 @@ jobs:
             ${{ runner.os }}-cargo-dx12-warp-
 
       - name: Add Windows SDK DXC to PATH
-        shell: bash
+        shell: pwsh
         run: |
-          SDK_BIN=$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin/"10.0.*/x64 2>/dev/null | sort -V | tail -1)
-          if [ -f "$SDK_BIN/dxcompiler.dll" ]; then
-            echo "Found DXC at: $SDK_BIN"
-            echo "$SDK_BIN" >> $GITHUB_PATH
-          else
-            echo "WARNING: dxcompiler.dll not found in Windows SDK"
-          fi
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
+                    Sort-Object Name | Select-Object -Last 1
+          if ($sdkBin -and (Test-Path "$($sdkBin.FullName)\dxcompiler.dll")) {
+            Write-Host "Found DXC at: $($sdkBin.FullName)"
+            "$($sdkBin.FullName)" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          } else {
+            Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
+          }
 
       - name: Run tests (DX12 + WARP)
         env:
