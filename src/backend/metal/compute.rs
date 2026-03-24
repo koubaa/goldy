@@ -73,16 +73,29 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 }
 
 /// Begin a fresh compute encoder on the command buffer with heap and argument buffer bindings.
+///
+/// Calls `use_resource` on each individual buffer so Metal's hazard tracking
+/// can detect cross-encoder dependencies (e.g. compute→blit→compute). Without
+/// this, Metal may overlap encoders that share buffers accessed via argument
+/// buffers, since the indirect access is opaque to automatic hazard tracking.
 fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
+    state: &MetalState,
     logical_device: &super::types::LogicalDevice,
+    device_handle: DeviceHandle,
 ) -> &'a mtl::ComputeCommandEncoderRef {
     let encoder = command_buffer.new_compute_command_encoder();
-    if logical_device.heap_buffer_count > 0 {
-        encoder.use_heap(&logical_device.buffer_heap);
-    }
+    logical_device.heap_allocator.use_heaps_for_compute(encoder);
     if logical_device.heap_texture_count > 0 {
         encoder.use_heap(&logical_device.texture_heap);
+    }
+    for buf_state in state.buffers.values() {
+        if buf_state.device_handle == device_handle {
+            encoder.use_resource(
+                &buf_state.buffer,
+                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
+            );
+        }
     }
     encoder.set_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder
@@ -93,6 +106,7 @@ fn record_commands_to_buffer(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     logical_device: &super::types::LogicalDevice,
+    device_handle: DeviceHandle,
     commands: &[ComputeCommand],
 ) -> Result<()> {
     let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
@@ -109,7 +123,8 @@ fn record_commands_to_buffer(
     macro_rules! ensure_compute {
         () => {
             if encoder.is_none() {
-                let enc = begin_compute_encoder(command_buffer, logical_device);
+                let enc =
+                    begin_compute_encoder(command_buffer, state, logical_device, device_handle);
                 if let Some(pipeline) = current_pipeline {
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
                 }
@@ -268,7 +283,13 @@ pub(super) fn submit(
         .context("Invalid device handle")?;
 
     let command_buffer_ref = logical_device.command_queue.new_command_buffer();
-    record_commands_to_buffer(state, command_buffer_ref, logical_device, commands)?;
+    record_commands_to_buffer(
+        state,
+        command_buffer_ref,
+        logical_device,
+        device_handle,
+        commands,
+    )?;
 
     let owned_buffer = command_buffer_ref.to_owned();
     let token = state

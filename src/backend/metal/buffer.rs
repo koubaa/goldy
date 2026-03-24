@@ -23,14 +23,14 @@ pub(super) fn create(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    // Allocate buffer from heap with Shared storage (CPU-accessible).
+    // Allocate buffer from heap allocator with Shared storage (CPU-accessible).
     let options =
         MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
 
     let buffer = logical_device
-        .buffer_heap
-        .new_buffer(size, options)
-        .context("Metal buffer heap is full — increase heap size")?;
+        .heap_allocator
+        .allocate(size, options)
+        .context("Metal buffer heap allocation failed — all heaps exhausted")?;
 
     // Register in bindless registry based on access pattern.
     // arg_buffer_index is the LOCAL shader slot (0-63 for both Scattered and Broadcast).
@@ -67,8 +67,6 @@ pub(super) fn create(
             arg_buffer_index,
         );
     }
-
-    logical_device.heap_buffer_count += 1;
 
     state.buffers.insert(
         handle,

@@ -1092,3 +1092,72 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         );
     }
 }
+
+// ─── Heap overflow: allocations exceeding primary heap ────────────────────────
+
+/// Allocate 80 MB across 10 buffers (exceeds the default 64 MB primary heap),
+/// copy from the first to the last via a compute shader, and verify correctness.
+/// This proves that overflow heap creation and multi-heap `use_heap` work.
+#[test]
+fn test_heap_overflow_allocation() {
+    const LARGE_COPY_SHADER: &str = r#"
+import goldy_exp;
+
+#define INPUT  goldy_dyn_scattered<uint>(0)
+#define OUTPUT goldy_dyn_scattered<uint>(1)
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    uint idx = id.x;
+    if (idx >= 2097152) return;  // 8 MB / 4 bytes = 2M elements
+    OUTPUT[idx] = INPUT[idx];
+}
+"#;
+
+    let device = make_device();
+    let shader =
+        ShaderModule::from_slang(&device, LARGE_COPY_SHADER).expect("compile large copy shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const BUF_SIZE: u64 = 8 * 1024 * 1024; // 8 MB each
+    const NUM_BUFFERS: usize = 10; // 80 MB total > 64 MB primary
+    const ELEM_COUNT: usize = (BUF_SIZE / 4) as usize;
+
+    let mut buffers = Vec::with_capacity(NUM_BUFFERS);
+    for i in 0..NUM_BUFFERS {
+        let data: Vec<u32> = if i == 0 {
+            (0..ELEM_COUNT as u32).collect()
+        } else {
+            vec![0u32; ELEM_COUNT]
+        };
+        buffers.push(
+            Buffer::with_data(&device, &data, DataAccess::Scattered)
+                .unwrap_or_else(|e| panic!("Failed to create buffer {}: {}", i, e)),
+        );
+    }
+
+    let workgroups = (ELEM_COUNT as u32 + 63) / 64;
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]);
+        pass.dispatch(workgroups, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; BUF_SIZE as usize];
+    buffers[NUM_BUFFERS - 1]
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    for i in (0..ELEM_COUNT).step_by(1024) {
+        assert_eq!(
+            result[i], i as u32,
+            "element {} expected {} got {} — overflow heap copy failed",
+            i, i, result[i]
+        );
+    }
+}

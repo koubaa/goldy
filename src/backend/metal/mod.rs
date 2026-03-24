@@ -446,6 +446,12 @@ impl GpuBackend for MetalBackend {
     ) -> Result<bool> {
         compute::wait_fence_timeout(&self.state, device, token, timeout_ms)
     }
+
+    fn reset_buffer_heaps(&mut self, device: DeviceHandle) {
+        if let Some(logical_device) = self.state.devices.get_mut(&device) {
+            logical_device.heap_allocator.reset_for_frame();
+        }
+    }
 }
 
 #[cfg(test)]

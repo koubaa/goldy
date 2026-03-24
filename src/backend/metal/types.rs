@@ -24,8 +24,8 @@ use ::metal as mtl;
 use mtl::{
     ArgumentEncoder, Buffer as MTLBuffer, CommandQueue,
     ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState,
-    Device as MTLDevice, Heap, Library, MTLPrimitiveType, RenderPipelineState, SamplerState,
-    Texture as MTLTexture,
+    Device as MTLDevice, Heap, Library, MTLPrimitiveType, MTLResourceOptions, RenderPipelineState,
+    SamplerState, Texture as MTLTexture,
 };
 
 /// Maximum size of the argument buffer (supports up to 16K resources)
@@ -54,6 +54,154 @@ pub struct BindlessIndices {
     pub indices: [u32; MAX_PUSH_CONSTANT_INDICES],
 }
 
+/// Minimum primary heap size (64 MB).
+const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Minimum overflow heap size (16 MB).
+const MIN_OVERFLOW_HEAP_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Multi-heap allocator for Metal buffer allocations.
+///
+/// Uses a long-lived primary heap that is right-sized between frames, plus
+/// ephemeral overflow heaps created on demand when the primary fills up.
+/// Fragmentation is not a concern within a frame because ekrano's allocation
+/// pattern is strictly monotonic (all frees are deferred until after recording).
+pub(crate) struct HeapAllocator {
+    device: MTLDevice,
+    primary: Heap,
+    overflow: Vec<Heap>,
+    high_water_mark: u64,
+    primary_size: u64,
+    buffer_count: u32,
+}
+
+impl HeapAllocator {
+    pub fn new(device: MTLDevice, primary: Heap, primary_size: u64) -> Self {
+        Self {
+            device,
+            primary,
+            overflow: Vec::new(),
+            high_water_mark: 0,
+            primary_size,
+            buffer_count: 0,
+        }
+    }
+
+    /// Allocate a buffer from the heap hierarchy.
+    ///
+    /// Tries primary, then the last overflow heap, then creates a new overflow.
+    pub fn allocate(&mut self, size: u64, options: MTLResourceOptions) -> Option<MTLBuffer> {
+        if let Some(buf) = self.primary.new_buffer(size, options) {
+            self.buffer_count += 1;
+            self.update_high_water_mark();
+            return Some(buf);
+        }
+
+        if let Some(last) = self.overflow.last() {
+            if let Some(buf) = last.new_buffer(size, options) {
+                self.buffer_count += 1;
+                self.update_high_water_mark();
+                return Some(buf);
+            }
+        }
+
+        let overflow_size = (size * 2).max(MIN_OVERFLOW_HEAP_SIZE);
+        let new_heap = self.create_heap(overflow_size);
+        tracing::info!(
+            "Created overflow buffer heap (size={}MB, overflow_count={})",
+            overflow_size / 1024 / 1024,
+            self.overflow.len() + 1
+        );
+        let buf = new_heap.new_buffer(size, options);
+        self.overflow.push(new_heap);
+
+        if buf.is_some() {
+            self.buffer_count += 1;
+            self.update_high_water_mark();
+        }
+        buf
+    }
+
+    pub fn has_buffers(&self) -> bool {
+        self.buffer_count > 0
+    }
+
+    /// Declare all buffer heaps resident for a compute encoder.
+    pub fn use_heaps_for_compute(&self, encoder: &mtl::ComputeCommandEncoderRef) {
+        if !self.has_buffers() {
+            return;
+        }
+        encoder.use_heap(&self.primary);
+        for heap in &self.overflow {
+            encoder.use_heap(heap);
+        }
+    }
+
+    /// Declare all buffer heaps resident for a render encoder at the given stages.
+    pub fn use_heaps_for_render(
+        &self,
+        encoder: &mtl::RenderCommandEncoderRef,
+        stages: mtl::MTLRenderStages,
+    ) {
+        if !self.has_buffers() {
+            return;
+        }
+        encoder.use_heap_at(&self.primary, stages);
+        for heap in &self.overflow {
+            encoder.use_heap_at(heap, stages);
+        }
+    }
+
+    /// Right-size the primary heap after a frame completes.
+    ///
+    /// If overflow heaps were used, the primary is replaced with a larger one
+    /// sized to 1.5x the peak usage (rounded up to a power of two). Overflow
+    /// heaps are dropped since all buffers have been freed by this point.
+    pub fn reset_for_frame(&mut self) {
+        if !self.overflow.is_empty() {
+            let recommended_max = self.device.recommended_max_working_set_size();
+            let new_size = (self.high_water_mark * 3 / 2)
+                .next_power_of_two()
+                .max(MIN_HEAP_SIZE)
+                .min(recommended_max / 2);
+
+            if new_size > self.primary_size {
+                let new_primary = self.create_heap(new_size);
+                tracing::info!(
+                    "Resized primary buffer heap: {}MB -> {}MB (high_water_mark={}MB)",
+                    self.primary_size / 1024 / 1024,
+                    new_size / 1024 / 1024,
+                    self.high_water_mark / 1024 / 1024,
+                );
+                self.primary = new_primary;
+                self.primary_size = new_size;
+            }
+
+            let overflow_count = self.overflow.len();
+            self.overflow.clear();
+            tracing::debug!("Cleared {} overflow buffer heaps", overflow_count);
+        }
+        self.high_water_mark = 0;
+    }
+
+    fn update_high_water_mark(&mut self) {
+        let mut total = self.primary.used_size();
+        for heap in &self.overflow {
+            total += heap.used_size();
+        }
+        self.high_water_mark = self.high_water_mark.max(total);
+    }
+
+    fn create_heap(&self, size: u64) -> Heap {
+        let desc = mtl::HeapDescriptor::new();
+        desc.set_size(size);
+        desc.set_storage_mode(mtl::MTLStorageMode::Shared);
+        desc.set_cpu_cache_mode(mtl::MTLCPUCacheMode::DefaultCache);
+        desc.set_heap_type(mtl::MTLHeapType::Automatic);
+        self.device.new_heap(&desc)
+    }
+}
+
 /// A logical Metal device with associated resources.
 ///
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
@@ -62,8 +210,8 @@ pub(crate) struct LogicalDevice {
     pub command_queue: CommandQueue,
 
     // Bindless infrastructure (always present — Tier 2 required)
-    /// Heap for buffer allocations
-    pub buffer_heap: Heap,
+    /// Multi-heap allocator for buffer allocations (grows on demand)
+    pub heap_allocator: HeapAllocator,
     /// Heap for texture allocations
     pub texture_heap: Heap,
     /// Global argument buffer containing resource IDs
@@ -74,8 +222,6 @@ pub(crate) struct LogicalDevice {
     pub texture_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
-    /// Count of buffers allocated from heap (for use_heap_at safety)
-    pub heap_buffer_count: u32,
     /// Count of textures allocated from heap (for use_heap_at safety)
     pub heap_texture_count: u32,
 }
