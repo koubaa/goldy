@@ -3,6 +3,13 @@
 //! Targets D3D12 Feature Level 12.0+ on Windows.
 //! Uses Slang for shader compilation (Slang -> DXIL directly with SM 6.6).
 //!
+//! ## WARP (software D3D12)
+//!
+//! Set `GOLDY_DX12_ALLOW_WARP=1` to register the WARP adapter (`IDXGIFactory4::EnumWarpAdapter`).
+//! Use on headless CI or machines with no hardware GPU. Select it with [`WARP_ADAPTER_ID`] and
+//! `Instance::create_device_for_adapter`, or use `Instance::create_device` when WARP is the only
+//! adapter.
+//!
 //! ## Module Structure
 //!
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
@@ -27,8 +34,17 @@ use super::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Once, OnceLock};
+use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug};
 use windows::Win32::Graphics::Dxgi::*;
+
+/// Adapter ID for the WARP device from [`IDXGIFactory4::EnumWarpAdapter`].
+/// Used when `GOLDY_DX12_ALLOW_WARP=1` (CI, headless, or software-only machines).
+pub const WARP_ADAPTER_ID: u32 = u32::MAX;
+
+fn env_allow_warp() -> bool {
+    std::env::var("GOLDY_DX12_ALLOW_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
 
 static DEBUG_LAYER_INIT: Once = Once::new();
 
@@ -135,7 +151,37 @@ impl Dx12Backend {
             }
         }
 
-        tracing::info!("Found {} DX12 adapters", adapters.len());
+        tracing::info!("Found {} hardware DXGI adapters", adapters.len());
+
+        if env_allow_warp() {
+            let warp_result: windows::core::Result<IDXGIAdapter> =
+                unsafe { factory.EnumWarpAdapter() };
+            match warp_result {
+                Ok(warp) => match warp.cast::<IDXGIAdapter1>() {
+                    Ok(adapter) => match unsafe { adapter.GetDesc1() } {
+                        Ok(desc) => {
+                            let name = String::from_utf16_lossy(&desc.Description)
+                                .trim_end_matches('\0')
+                                .to_string();
+                            tracing::info!("  [{}] {} (WARP)", WARP_ADAPTER_ID, name);
+                            adapters.push(DxgiAdapterInfo {
+                                adapter,
+                                desc,
+                                adapter_id: WARP_ADAPTER_ID,
+                            });
+                        }
+                        Err(e) => tracing::warn!("WARP GetDesc1 failed: {:?}", e),
+                    },
+                    Err(e) => tracing::warn!("WARP IDXGIAdapter cast failed: {:?}", e),
+                },
+                Err(e) => tracing::warn!("EnumWarpAdapter failed: {:?}", e),
+            }
+        }
+
+        tracing::info!(
+            "Total {} DX12 adapters (including WARP if enabled)",
+            adapters.len()
+        );
 
         // Create Slang compiler
         let slang_compiler =

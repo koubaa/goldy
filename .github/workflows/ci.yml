@@ -3,6 +3,7 @@
 # - Linux: lavapipe (Mesa's Vulkan software renderer)
 #          Requires Mesa 25.0+ for Vulkan 1.4 support in lavapipe. 
 # - macOS: Native Metal backend (Apple Silicon GPU, Tier 2, pinned macos-15)
+# - Windows: DX12 on WARP (GOLDY_DX12_ALLOW_WARP=1; no discrete GPU on hosted runners)
 
 name: CI
 
@@ -292,6 +293,48 @@ jobs:
       # Run mock backend tests only (no GPU on CI)
       - name: Run mock tests
         run: cargo test --lib backend::mock
+
+  # DirectX 12 GPU tests using WARP (software rasterizer; no discrete GPU on runner)
+  test-dx12-warp:
+    name: DX12 Tests (WARP)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-dx12-warp-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-dx12-warp-
+
+      - name: Add Windows SDK DXC to PATH
+        shell: pwsh
+        run: |
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
+                    Sort-Object Name | Select-Object -Last 1
+          if ($sdkBin -and (Test-Path "$($sdkBin.FullName)\dxcompiler.dll")) {
+            Write-Host "Found DXC at: $($sdkBin.FullName)"
+            "$($sdkBin.FullName)" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          } else {
+            Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
+          }
+
+      - name: Run tests (DX12 + WARP)
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+        run: cargo test --features dx12
 
   # Python bindings build and test (Linux with lavapipe)
   python-linux:
