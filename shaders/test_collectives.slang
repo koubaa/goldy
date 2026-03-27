@@ -5,15 +5,11 @@
 // IMonoid types (including uint) and representative multi-field struct monoids
 // across SPIRV, DXIL, and Metal.
 //
-// Self-contained: all types defined locally (no ekrano dependency).
-//
 // Run via: cargo test test_collectives_compiles
 
 import goldy_exp;
 
 #define OUT goldy_dyn_scattered<uint>(0)
-
-// --- Simplified ekrano-like types ---
 
 struct TagMonoid {
     uint trans_ix;

@@ -1,17 +1,17 @@
 // Compile-only test for IMonoid conformance extensions on representative GPU types.
 //
-// Validates that struct types resembling ekrano's TagMonoid, DrawMonoid, and Bic
-// can conform to IMonoid and be used with generic groupshared T[N] functions.
+// Validates that struct types resembling a 2D renderer's TagMonoid, DrawMonoid,
+// and Bic can conform to IMonoid and be used with generic groupshared T[N] functions.
 //
-// Self-contained: all types defined locally (no ekrano dependency).
+// Self-contained: all types defined locally (no external dependency).
 //
-// Run via: cargo test test_ekrano_monoids_compiles
+// Run via: cargo test test_monoids_compiles
 
 import goldy_exp;
 
 #define OUT goldy_dyn_scattered<uint>(0)
 
-// --- Simplified ekrano-like types ---
+// --- Simplified 2D-renderer-like types ---
 
 struct TagMonoid {
     uint trans_ix;

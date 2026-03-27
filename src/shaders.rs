@@ -547,7 +547,7 @@ mod tests {
     /// Test that IMonoid conformance extensions on representative GPU types
     /// compile and work with generic groupshared functions across backends.
     #[test]
-    fn test_ekrano_monoids_compiles() {
+    fn test_monoids_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
 
         let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
@@ -556,8 +556,8 @@ mod tests {
         let goldy_shaders = manifest_dir.join("shaders");
         let goldy_path = goldy_shaders.to_string_lossy();
 
-        let test_shader = std::fs::read_to_string(goldy_shaders.join("test_ekrano_monoids.slang"))
-            .expect("Failed to read test_ekrano_monoids.slang");
+        let test_shader = std::fs::read_to_string(goldy_shaders.join("test_monoids.slang"))
+            .expect("Failed to read test_monoids.slang");
 
         let entry = &[("cs_main", SlangStage::Compute)];
         let search_paths: &[&str] = &[&goldy_path];
@@ -573,7 +573,7 @@ mod tests {
         );
         assert!(
             result.is_ok(),
-            "test_ekrano_monoids failed to compile for SPIRV: {:?}",
+            "test_monoids failed to compile for SPIRV: {:?}",
             result.err()
         );
 
@@ -590,7 +590,7 @@ mod tests {
             );
             assert!(
                 result.is_ok(),
-                "test_ekrano_monoids failed to compile for DXIL: {:?}",
+                "test_monoids failed to compile for DXIL: {:?}",
                 result.err()
             );
         }
@@ -608,7 +608,7 @@ mod tests {
             );
             assert!(
                 result.is_ok(),
-                "test_ekrano_monoids failed to compile for Metal: {:?}",
+                "test_monoids failed to compile for Metal: {:?}",
                 result.err()
             );
         }

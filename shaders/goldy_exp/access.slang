@@ -367,8 +367,7 @@ public ByteAddressView goldy_dyn_byte_address(uint n)
 // Public access functions
 // Return RWStructuredBuffer<T> on all platforms for a unified API.
 // On Metal, reinterpret device pointers as RWStructuredBuffer<T> so that
-// callers can assign the result to an RWStructuredBuffer<T> local variable
-// (the pattern used by ekrano shaders) without a type mismatch.
+// callers can assign the result to an RWStructuredBuffer<T> local variable.
 // -----------------------------------------------------------------------------
 
 /// Dynamic scattered access - read/write storage buffer from push constant slot n.
