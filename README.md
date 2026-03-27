@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
 | Attribute | Description |
 |-----------|-------------|
 | **Rust-native** | Idiomatic Rust API, not a wrapper around C |
-| **Modern-only** | Vulkan 1.4+, DX12, Metal baseline |
+| **Modern-only** | Vulkan 1.4+, DX12, Metal Tier 2 |
 | **Slang shaders** | Single shader language for all backends |
 | **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL |
 | **Unified** | Graphics and compute in one API |
