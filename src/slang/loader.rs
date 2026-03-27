@@ -386,7 +386,6 @@ impl SlangLibrary {
     ///
     /// Returns the path to the primary library if successful.
     fn ensure_cached_library() -> Option<PathBuf> {
-        // Check if we have embedded binaries
         if SLANG_FILES.is_empty() {
             tracing::debug!("No embedded Slang binaries available");
             return None;
@@ -397,7 +396,6 @@ impl SlangLibrary {
         let sentinel_path = cache_dir.join("version.txt");
 
         // Cache is valid only if the sentinel matches the embedded version.
-        // This prevents stale caches from surviving a version bump.
         let cache_valid = fs::read_to_string(&sentinel_path)
             .map(|v| v.trim() == SLANG_VERSION)
             .unwrap_or(false);
@@ -406,7 +404,9 @@ impl SlangLibrary {
             return Some(primary_path);
         }
 
-        // Cache is missing or stale — extract everything from scratch
+        // Cache is missing or stale — extract. Multiple processes (e.g. nextest
+        // workers) may race here; extract_to_cache uses PID-unique temp files so
+        // concurrent extractions don't interfere with each other.
         static EXTRACT_ONCE: Once = Once::new();
         let mut extract_result = Ok(());
 
@@ -414,7 +414,12 @@ impl SlangLibrary {
             extract_result = Self::extract_to_cache(&cache_dir);
         });
 
-        if extract_result.is_ok() && primary_path.exists() {
+        if let Err(ref e) = extract_result {
+            tracing::warn!("Slang extraction failed: {e:#}");
+        }
+
+        // Even if *our* extraction failed, another process may have succeeded.
+        if primary_path.exists() {
             Some(primary_path)
         } else {
             None
@@ -434,31 +439,42 @@ impl SlangLibrary {
             format!("Failed to create cache directory: {}", cache_dir.display())
         })?;
 
-        // Extract each file (always overwrite — we only get here when cache is stale)
+        // Extract each file. PID-scoped temp names avoid conflicts when multiple
+        // processes extract concurrently (e.g. cargo-nextest parallel workers).
+        let pid = std::process::id();
         for (filename, bytes) in SLANG_FILES {
             let dest_path = cache_dir.join(filename);
-
-            // Write to a temp file first, then rename for atomicity
-            let temp_path = cache_dir.join(format!("{}.tmp", filename));
+            let temp_path = cache_dir.join(format!("{}.{}.tmp", filename, pid));
 
             fs::write(&temp_path, bytes).with_context(|| {
                 format!("Failed to write Slang library: {}", temp_path.display())
             })?;
 
-            fs::rename(&temp_path, &dest_path).with_context(|| {
-                format!(
-                    "Failed to rename {} to {}",
-                    temp_path.display(),
-                    dest_path.display()
-                )
-            })?;
-
-            tracing::debug!("Extracted: {} ({} bytes)", filename, bytes.len());
+            // rename is atomic on POSIX; on Windows it replaces the target.
+            // If another process already placed the file, that's fine.
+            if let Err(e) = fs::rename(&temp_path, &dest_path) {
+                if dest_path.exists() {
+                    let _ = fs::remove_file(&temp_path);
+                    tracing::debug!("Extracted by another process: {filename}");
+                } else {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "Failed to rename {} to {}",
+                            temp_path.display(),
+                            dest_path.display()
+                        )
+                    });
+                }
+            } else {
+                tracing::debug!("Extracted: {filename} ({} bytes)", bytes.len());
+            }
         }
 
-        // Write the sentinel last so a partial extraction never leaves a valid marker
-        fs::write(cache_dir.join("version.txt"), SLANG_VERSION)
+        // Write the sentinel last so a partial extraction never leaves a valid marker.
+        let sentinel_tmp = cache_dir.join(format!("version.{}.txt", pid));
+        fs::write(&sentinel_tmp, SLANG_VERSION)
             .context("Failed to write Slang version sentinel")?;
+        let _ = fs::rename(&sentinel_tmp, cache_dir.join("version.txt"));
 
         goldy_event!(
             "slang.cache.extracted",

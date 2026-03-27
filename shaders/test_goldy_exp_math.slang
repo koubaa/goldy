@@ -3,9 +3,7 @@
 // Exercises positive_mod, modelview_right, billboard_cylindrical_offset,
 // hash, scale_uv, center_uv, to_polar, smootherstep, rainbow, palette, heat.
 //
-// Note: Transform, bbox_intersect, erf7, unpack4x8unorm, signed_atomic_*
-// are defined in ekrano_shared (not goldy_exp) to avoid cross-module ambiguity.
-//
+
 // Run via: cargo test test_goldy_exp_math_compiles
 
 import goldy_exp;

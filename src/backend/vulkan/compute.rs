@@ -100,7 +100,7 @@ pub(super) fn submit(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    // `ekrano` coarse pass uses blocking `dispatch_compute` per command, then
+    // The coarse pass pattern uses blocking `dispatch_compute` per command, then
     // `submit_recording` calls `submit` on a fresh encoder (often empty). Submitting an
     // empty primary command buffer + fence breaks on some Vulkan drivers (device lost /
     // wait failure on the trailing fence). A pre-signaled fence matches "no GPU work"

@@ -49,7 +49,3 @@ public float smootherstep(float edge0, float edge1, float x) {
     x = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
 }
-
-// NOTE: Transform, bbox_intersect, Bbox2D, extend_mode*, erf7 are defined
-// in ekrano_shared.slang to avoid Slang cross-module ambiguity.
-// They are NOT part of goldy_exp.

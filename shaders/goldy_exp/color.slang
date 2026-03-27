@@ -42,7 +42,3 @@ public float3 gamma_correct(float3 color, float gamma) {
     return pow(color, float3(1.0 / gamma, 1.0 / gamma, 1.0 / gamma));
 }
 
-// NOTE: unpack4x8unorm, pack4x8unorm, premul_alpha are defined in
-// ekrano_shared.slang to avoid Slang cross-module ambiguity.
-// They are NOT part of goldy_exp.
-
