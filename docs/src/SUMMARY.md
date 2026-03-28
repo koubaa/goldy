@@ -12,10 +12,14 @@
 
 - [Devices and Instances](./concepts/devices.md)
 - [Buffers](./concepts/buffers.md)
+- [Textures and Samplers](./concepts/textures.md)
 - [Shaders](./concepts/shaders.md)
+- [Shader Libraries](./concepts/shader-libraries.md)
 - [Pipelines](./concepts/pipelines.md)
 - [Command Encoding](./concepts/commands.md)
+- [Compute](./concepts/compute.md)
 - [Frame Output](./concepts/frames.md)
+- [GpuFuture](./concepts/gpu-future.md)
 
 # Examples
 
@@ -46,6 +50,13 @@
 - [NumPy Integration](./python/numpy.md)
 - [Compute Shaders](./python/compute.md)
 - [API Reference](./python/api.md)
+
+# .NET Bindings
+
+- [Installation](./dotnet/installation.md)
+- [Quick Start](./dotnet/quickstart.md)
+- [Compute Shaders](./dotnet/compute.md)
+- [API Reference](./dotnet/api.md)
 
 # Reference
 
