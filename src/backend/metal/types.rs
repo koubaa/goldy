@@ -234,12 +234,15 @@ pub const MAX_RESOURCES_PER_CATEGORY: u32 = 64;
 /// The layout matches GoldyBindlessResources in bindless_resources.slang:
 /// - storageBuffers[64] at indices 0-63   (Scattered access)
 /// - uniformBuffers[64] at indices 64-127 (Broadcast access)
-/// - textures, storageImages, samplers at higher offsets
+/// - textures[64] at indices 128-191      (Interpolated / Texture2D)
+/// - storageImages[64] at indices 192-255 (Direct / RWTexture2D)
+/// - samplers[64] at indices 256-319      (Filter config)
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    next_storage_buffer_index: u32, // Scattered: 0-63
-    next_uniform_buffer_index: u32, // Broadcast: 64-127
+    next_storage_buffer_index: u32,
+    next_uniform_buffer_index: u32,
     next_texture_index: u32,
+    next_storage_image_index: u32,
     next_sampler_index: u32,
     pub buffer_indices: HashMap<BufferHandle, u32>,
     pub texture_indices: HashMap<TextureHandle, u32>,
@@ -253,9 +256,11 @@ impl ResourceRegistry {
             next_storage_buffer_index: 0,
             // Uniform buffers (Broadcast) at indices 64-127, bytes 512-1023
             next_uniform_buffer_index: MAX_RESOURCES_PER_CATEGORY,
-            // Textures at indices 128-191, bytes 1024-1535 (after storageBuffers[64]+uniformBuffers[64])
+            // Textures (Interpolated) at indices 128-191, bytes 1024-1535
             next_texture_index: 2 * MAX_RESOURCES_PER_CATEGORY,
-            // Samplers at indices 256-319, bytes 2048-2559 (after textures[64]+storageImages[64])
+            // Storage images (Direct) at indices 192-255, bytes 1536-2047
+            next_storage_image_index: 3 * MAX_RESOURCES_PER_CATEGORY,
+            // Samplers at indices 256-319, bytes 2048-2559
             next_sampler_index: 4 * MAX_RESOURCES_PER_CATEGORY,
             buffer_indices: HashMap::new(),
             texture_indices: HashMap::new(),
@@ -289,7 +294,7 @@ impl ResourceRegistry {
         local_index + MAX_RESOURCES_PER_CATEGORY
     }
 
-    /// Register a texture — returns the LOCAL index (0-63) for push constants.
+    /// Register a sampled texture (Interpolated / Texture2D) — returns the LOCAL index (0-63).
     /// Use `texture_global_index()` to get the argument buffer encoding offset.
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
         let global_index = self.next_texture_index;
@@ -299,10 +304,24 @@ impl ResourceRegistry {
         local_index
     }
 
-    /// Returns the global argument buffer index for a texture,
-    /// needed for encoding offsets.
+    /// Returns the global argument buffer index for a sampled texture.
     pub fn texture_global_index(local_index: u32) -> u32 {
         local_index + 2 * MAX_RESOURCES_PER_CATEGORY
+    }
+
+    /// Register a storage image (Direct / RWTexture2D) — returns the LOCAL index (0-63).
+    /// Use `storage_image_global_index()` to get the argument buffer encoding offset.
+    pub fn register_storage_image(&mut self, handle: TextureHandle) -> u32 {
+        let global_index = self.next_storage_image_index;
+        let local_index = global_index - 3 * MAX_RESOURCES_PER_CATEGORY;
+        self.next_storage_image_index += 1;
+        self.texture_indices.insert(handle, local_index);
+        local_index
+    }
+
+    /// Returns the global argument buffer index for a storage image.
+    pub fn storage_image_global_index(local_index: u32) -> u32 {
+        local_index + 3 * MAX_RESOURCES_PER_CATEGORY
     }
 
     /// Register a sampler — returns the LOCAL index (0-63) for push constants.

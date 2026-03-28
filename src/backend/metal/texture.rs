@@ -51,13 +51,22 @@ pub(super) fn create(
         .new_texture(&descriptor)
         .context("Metal texture heap is full — increase heap size")?;
 
-    let arg_buffer_index = logical_device.resource_registry.register_texture(handle);
-    let encoding_index = ResourceRegistry::texture_global_index(arg_buffer_index);
+    let is_storage_image = matches!(access, SpatialAccess::Direct);
+    let (arg_buffer_index, encoding_index) = if is_storage_image {
+        let local = logical_device
+            .resource_registry
+            .register_storage_image(handle);
+        (local, ResourceRegistry::storage_image_global_index(local))
+    } else {
+        let local = logical_device.resource_registry.register_texture(handle);
+        (local, ResourceRegistry::texture_global_index(local))
+    };
     tracing::debug!(
-        "Allocated texture {} from heap at bindless local={} global={}",
+        "Allocated texture {} from heap at bindless local={} global={} storage_image={}",
         handle,
         arg_buffer_index,
-        encoding_index
+        encoding_index,
+        is_storage_image,
     );
 
     let encoded_length = logical_device.texture_encoder.encoded_length();
