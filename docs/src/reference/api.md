@@ -356,6 +356,240 @@ impl Color {
 }
 ```
 
+## Texture
+
+```rust
+pub struct Texture { /* ... */ }
+
+impl Texture {
+    pub fn new(
+        device: &Device,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: SpatialAccess,
+        flags: TextureFlags,
+    ) -> Result<Self>;
+
+    pub fn write(&self, data: &[u8]) -> Result<()>;
+    pub fn width(&self) -> u32;
+    pub fn height(&self) -> u32;
+    pub fn format(&self) -> TextureFormat;
+
+    /// Bindless descriptor index for use in push constants.
+    pub fn bindless_index(&self) -> Option<u32>;
+}
+```
+
+## Sampler
+
+```rust
+pub struct Sampler { /* ... */ }
+
+impl Sampler {
+    pub fn new(device: &Device, desc: &SamplerDesc) -> Result<Self>;
+    /// Bindless descriptor index for use in push constants.
+    pub fn bindless_index(&self) -> Option<u32>;
+}
+```
+
+### SamplerDesc
+
+```rust
+pub struct SamplerDesc {
+    pub mag_filter: FilterMode,
+    pub min_filter: FilterMode,
+    pub address_mode_u: AddressMode,
+    pub address_mode_v: AddressMode,
+}
+
+impl Default for SamplerDesc { /* linear + repeat */ }
+
+pub enum FilterMode  { Nearest, Linear }
+pub enum AddressMode { Repeat, MirrorRepeat, ClampToEdge, ClampToBorder }
+```
+
+### SpatialAccess
+
+```rust
+pub enum SpatialAccess {
+    /// Hardware-filtered texture sampling (bilinear etc.). Maps to Texture2D + sampler.
+    Interpolated,
+    /// Direct pixel read/write, no filtering. Maps to RWTexture2D.
+    Direct,
+}
+```
+
+### TextureFlags
+
+```rust
+bitflags! {
+    pub struct TextureFlags: u32 {
+        const COPY_SRC = 1 << 0;
+        const COPY_DST = 1 << 1;
+    }
+}
+```
+
+## ShaderLibrary
+
+```rust
+pub struct ShaderLibrary { /* ... */ }
+
+impl ShaderLibrary {
+    /// Create a single-module library from inline Slang source.
+    pub fn from_source(name: &str, source: &str) -> Self;
+
+    /// Load a multi-file library from a directory of .slang files.
+    pub fn from_directory(name: &str, path: &Path) -> Result<Self>;
+}
+
+// Registration:
+impl Device {
+    pub fn register_library(&self, library: ShaderLibrary) -> Result<()>;
+    pub fn has_library(&self, name: &str) -> bool;
+}
+```
+
+## Compute
+
+```rust
+pub struct ComputePipeline { /* ... */ }
+
+impl ComputePipeline {
+    pub fn new(device: &Device, compute_shader: &ShaderModule) -> Result<Self>;
+}
+
+pub struct ComputeEncoder { /* ... */ }
+
+impl ComputeEncoder {
+    pub fn new() -> Self;
+    pub fn begin_compute_pass(&mut self) -> ComputePass<'_>;
+    /// Submit and block until complete.
+    pub fn dispatch(&self, device: &Device) -> Result<()>;
+    /// Submit without blocking; returns a GpuFuture.
+    pub fn submit(&self, device: &Device) -> Result<GpuFuture>;
+}
+
+pub struct ComputePass<'a> { /* ... */ }
+
+impl<'a> ComputePass<'a> {
+    pub fn set_pipeline(&mut self, pipeline: &ComputePipeline);
+    /// Bind buffers via bindless indices (push constants).
+    pub fn set_push_constants(&mut self, buffers: &[&Buffer]);
+    /// Pass raw u32 indices (for textures/samplers or mixed resources).
+    pub fn set_push_constants_raw(&mut self, indices: &[u32]);
+    pub fn dispatch(&mut self, x: u32, y: u32, z: u32);
+    /// Workgroup counts read from buffer at offset (3 × u32).
+    pub fn dispatch_indirect(&mut self, buffer: &Buffer, offset: u64);
+    /// Record a buffer clear into the command stream.
+    pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64);
+}
+```
+
+## GpuFuture
+
+```rust
+pub struct GpuFuture { /* ... */ }
+
+impl GpuFuture {
+    /// Non-blocking poll.
+    pub fn is_complete(&self) -> bool;
+    /// Block until done.
+    pub fn wait(&self) -> Result<()>;
+    /// Block with timeout. Returns Ok(true) = done, Ok(false) = timed out.
+    pub fn wait_timeout(&self, timeout_ms: u32) -> Result<bool>;
+}
+```
+
+## Additional Types
+
+### Vertex2DUv
+
+```rust
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Vertex2DUv {
+    pub position: [f32; 2],
+    pub uv: [f32; 2],
+}
+
+impl Vertex2DUv {
+    pub fn new(x: f32, y: f32, u: f32, v: f32) -> Self;
+    pub fn layout() -> VertexBufferLayout;
+}
+```
+
+### Common 2D/3D Structs
+
+```rust
+/// Per-frame data uploaded to a Broadcast buffer each frame.
+pub struct FrameUniforms {
+    pub time: f32,
+    pub delta_time: f32,
+    pub resolution: [f32; 2],
+}
+
+/// 2D instance data for instanced rendering.
+pub struct Instance2D {
+    pub position: [f32; 2],
+    pub scale: f32,
+    pub rotation: f32,
+    pub color: [f32; 4],
+}
+
+/// 2D transform matrix (column-major).
+pub struct Transform2D {
+    pub matrix: [[f32; 4]; 4],
+}
+
+/// 2D particle state.
+pub struct Particle2D {
+    pub position: [f32; 2],
+    pub velocity: [f32; 2],
+    pub life: f32,
+    pub size: f32,
+}
+
+/// 3D particle state.
+pub struct Particle3D {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub life: f32,
+    pub size: f32,
+}
+```
+
+### Depth State
+
+```rust
+pub enum DepthFormat {
+    Depth32Float,
+    Depth24Stencil8,
+}
+
+pub enum CompareFunction {
+    Never, Less, Equal, LessEqual,
+    Greater, NotEqual, GreaterEqual, Always,
+}
+
+pub struct DepthStencilState {
+    pub depth_write_enabled: bool,
+    pub depth_compare: CompareFunction,
+}
+```
+
+### BufferFlags
+
+```rust
+bitflags! {
+    pub struct BufferFlags: u32 {
+        const COPY_SRC = 1 << 0;
+        const COPY_DST = 1 << 1;
+    }
+}
+```
+
 ## Re-exports
 
 ```rust
@@ -363,9 +597,15 @@ pub use types::*;
 pub use device::*;
 pub use buffer::*;
 pub use shader::*;
+pub use shader_library::*;
 pub use pipeline::*;
 pub use encoder::*;
 pub use surface::*;
 pub use render_target::*;
+pub use texture::*;
+pub use sampler::*;
+pub use compute::*;
+pub use gpu_future::*;
+pub use common_types::*;
 ```
 

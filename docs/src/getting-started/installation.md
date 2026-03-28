@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- **Rust** 1.70 or later
-- **Vulkan SDK** 1.4+ (for Vulkan backend)
+- **Rust** stable (recent version recommended)
+- **Vulkan SDK** 1.4+ (Linux/Windows Vulkan backend only)
 - A [supported GPU](../design/hardware.md)
 
 ## Adding Goldy to Your Project
@@ -67,7 +67,7 @@ Goldy automatically selects the best backend for your platform:
 |----------|-----------------|
 | Windows  | DX12            |
 | Linux    | Vulkan          |
-| macOS    | Metal (planned) |
+| macOS    | Metal           |
 
 You can override this at runtime using the `GOLDY_BACKEND` environment variable:
 
@@ -103,10 +103,10 @@ sudo pacman -S vulkan-icd-loader vulkan-tools
 
 ### macOS
 
-Goldy's Metal backend is planned but not yet implemented. For now, use MoltenVK:
+Goldy uses the native Metal backend on macOS — no additional SDK or MoltenVK layer needed. Ensure your macOS is 12+ and Xcode command-line tools are installed:
 
 ```bash
-brew install molten-vk
+xcode-select --install
 ```
 
 ## Windowing (for examples)

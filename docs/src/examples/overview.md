@@ -1,6 +1,6 @@
 # Examples Overview
 
-Goldy includes 20 examples demonstrating various GPU rendering techniques.
+Goldy includes 21 examples demonstrating various GPU rendering techniques.
 
 ## Running Examples
 
@@ -55,6 +55,7 @@ All examples support:
 | Example | Description | Key Concepts |
 |---------|-------------|--------------|
 | `solid_cube` | Solid 3D cube | 3D rendering, depth buffer |
+| `depth_quads` | Overlapping quads with depth testing | Depth buffer, `DepthStencilState`, draw order |
 | `textured_quad` | Textured 2D quad | Texture loading, samplers |
 
 ### Compute
@@ -92,6 +93,7 @@ goldy/examples/
 ├── particles.rs        # Rain/snow
 ├── waveform.rs         # Audio visualizer
 ├── solid_cube.rs       # Solid 3D cube
+├── depth_quads.rs      # Depth buffer demo
 ├── textured_quad.rs    # Textured quad
 ├── compute_particles.rs# GPU particles
 ├── game_of_life.rs     # Cellular automaton
