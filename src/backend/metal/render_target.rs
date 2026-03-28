@@ -125,9 +125,9 @@ pub(super) fn render_to(
     logical_device
         .heap_allocator
         .use_heaps_for_render(encoder, render_stages);
-    if logical_device.heap_texture_count > 0 {
-        encoder.use_heap_at(&logical_device.texture_heap, render_stages);
-    }
+    logical_device
+        .texture_heap
+        .use_heaps_for_render(encoder, render_stages);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == render_target.device_handle {
             encoder.use_resource_at(

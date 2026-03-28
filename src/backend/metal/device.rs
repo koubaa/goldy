@@ -2,7 +2,8 @@
 
 use super::super::DeviceHandle;
 use super::types::{
-    HeapAllocator, LogicalDevice, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE,
+    HeapAllocator, LogicalDevice, MetalState, ResourceRegistry, TextureHeapAllocator,
+    ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
@@ -88,7 +89,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     texture_heap_desc.set_storage_mode(MTLStorageMode::Shared);
     texture_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
     texture_heap_desc.set_heap_type(MTLHeapType::Automatic);
-    let texture_heap = device.new_heap(&texture_heap_desc);
+    let texture_heap_raw = device.new_heap(&texture_heap_desc);
+    let texture_heap = TextureHeapAllocator::new(device.clone(), texture_heap_raw, heap_size);
     tracing::info!("Created texture heap (size={}MB)", heap_size / 1024 / 1024);
 
     // Create ArgumentEncoder for encoding buffers into the argument buffer
@@ -135,7 +137,6 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             argument_encoder,
             texture_encoder,
             resource_registry: ResourceRegistry::new(),
-            heap_texture_count: 0,
         },
     );
 

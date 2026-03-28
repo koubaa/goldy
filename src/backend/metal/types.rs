@@ -202,6 +202,103 @@ impl HeapAllocator {
     }
 }
 
+/// Multi-heap allocator for Metal texture allocations.
+///
+/// Mirrors `HeapAllocator` for buffers: a long-lived primary heap plus
+/// ephemeral overflow heaps created on demand when the primary fills up.
+pub(crate) struct TextureHeapAllocator {
+    device: MTLDevice,
+    primary: Heap,
+    overflow: Vec<Heap>,
+    #[allow(dead_code)]
+    primary_size: u64,
+    texture_count: u32,
+}
+
+impl TextureHeapAllocator {
+    pub fn new(device: MTLDevice, primary: Heap, primary_size: u64) -> Self {
+        Self {
+            device,
+            primary,
+            overflow: Vec::new(),
+            primary_size,
+            texture_count: 0,
+        }
+    }
+
+    /// Allocate a texture from the heap hierarchy.
+    ///
+    /// Tries primary, then the last overflow heap, then creates a new overflow.
+    pub fn allocate(&mut self, descriptor: &mtl::TextureDescriptorRef) -> Option<MTLTexture> {
+        if let Some(tex) = self.primary.new_texture(descriptor) {
+            self.texture_count += 1;
+            return Some(tex);
+        }
+
+        if let Some(last) = self.overflow.last() {
+            if let Some(tex) = last.new_texture(descriptor) {
+                self.texture_count += 1;
+                return Some(tex);
+            }
+        }
+
+        let alloc_size = self.device.heap_texture_size_and_align(descriptor).size as u64;
+        let overflow_size = (alloc_size * 2).max(MIN_OVERFLOW_HEAP_SIZE);
+        let new_heap = self.create_heap(overflow_size);
+        tracing::info!(
+            "Created overflow texture heap (size={}MB, overflow_count={})",
+            overflow_size / 1024 / 1024,
+            self.overflow.len() + 1
+        );
+        let tex = new_heap.new_texture(descriptor);
+        self.overflow.push(new_heap);
+
+        if tex.is_some() {
+            self.texture_count += 1;
+        }
+        tex
+    }
+
+    pub fn has_textures(&self) -> bool {
+        self.texture_count > 0
+    }
+
+    /// Declare all texture heaps resident for a compute encoder.
+    pub fn use_heaps_for_compute(&self, encoder: &mtl::ComputeCommandEncoderRef) {
+        if !self.has_textures() {
+            return;
+        }
+        encoder.use_heap(&self.primary);
+        for heap in &self.overflow {
+            encoder.use_heap(heap);
+        }
+    }
+
+    /// Declare all texture heaps resident for a render encoder at the given stages.
+    pub fn use_heaps_for_render(
+        &self,
+        encoder: &mtl::RenderCommandEncoderRef,
+        stages: mtl::MTLRenderStages,
+    ) {
+        if !self.has_textures() {
+            return;
+        }
+        encoder.use_heap_at(&self.primary, stages);
+        for heap in &self.overflow {
+            encoder.use_heap_at(heap, stages);
+        }
+    }
+
+    fn create_heap(&self, size: u64) -> Heap {
+        let desc = mtl::HeapDescriptor::new();
+        desc.set_size(size);
+        desc.set_storage_mode(mtl::MTLStorageMode::Shared);
+        desc.set_cpu_cache_mode(mtl::MTLCPUCacheMode::DefaultCache);
+        desc.set_heap_type(mtl::MTLHeapType::Automatic);
+        self.device.new_heap(&desc)
+    }
+}
+
 /// A logical Metal device with associated resources.
 ///
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
@@ -212,8 +309,8 @@ pub(crate) struct LogicalDevice {
     // Bindless infrastructure (always present — Tier 2 required)
     /// Multi-heap allocator for buffer allocations (grows on demand)
     pub heap_allocator: HeapAllocator,
-    /// Heap for texture allocations
-    pub texture_heap: Heap,
+    /// Multi-heap allocator for texture allocations (grows on demand)
+    pub texture_heap: TextureHeapAllocator,
     /// Global argument buffer containing resource IDs
     pub argument_buffer: MTLBuffer,
     /// Encoder for writing buffers to the argument buffer
@@ -222,8 +319,6 @@ pub(crate) struct LogicalDevice {
     pub texture_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
-    /// Count of textures allocated from heap (for use_heap_at safety)
-    pub heap_texture_count: u32,
 }
 
 /// Maximum resources per access pattern category (must match GOLDY_MAX_RESOURCES in shaders)
