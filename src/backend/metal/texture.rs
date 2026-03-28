@@ -48,8 +48,8 @@ pub(super) fn create(
 
     let texture = logical_device
         .texture_heap
-        .new_texture(&descriptor)
-        .context("Metal texture heap is full — increase heap size")?;
+        .allocate(&descriptor)
+        .context("Metal texture heap is full — all overflow heaps exhausted")?;
 
     let is_storage_image = matches!(access, SpatialAccess::Direct);
     let (arg_buffer_index, encoding_index) = if is_storage_image {
@@ -83,8 +83,6 @@ pub(super) fn create(
             encoding_index
         );
     }
-
-    logical_device.heap_texture_count += 1;
 
     state.textures.insert(
         handle,

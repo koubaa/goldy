@@ -86,9 +86,7 @@ fn begin_compute_encoder<'a>(
 ) -> &'a mtl::ComputeCommandEncoderRef {
     let encoder = command_buffer.new_compute_command_encoder();
     logical_device.heap_allocator.use_heaps_for_compute(encoder);
-    if logical_device.heap_texture_count > 0 {
-        encoder.use_heap(&logical_device.texture_heap);
-    }
+    logical_device.texture_heap.use_heaps_for_compute(encoder);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == device_handle {
             encoder.use_resource(
