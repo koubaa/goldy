@@ -154,7 +154,10 @@ pub(super) fn ensure_stage_compiled(
     // Dump SPIR-V for debugging when GOLDY_DUMP_SHADERS is set
     if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
         use std::io::Write;
-        let path = std::path::Path::new(&dump_dir).join(format!("{}_vulkan.spv", entry_point_name));
+        let path = std::path::Path::new(&dump_dir).join(format!(
+            "{}_h{}_vulkan.spv",
+            entry_point_name, shader_handle
+        ));
         if let Ok(mut file) = std::fs::File::create(&path) {
             let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
             let _ = file.write_all(spirv_bytes);
