@@ -408,20 +408,13 @@ impl GpuBackend for Dx12Backend {
         buffer::clear(&mut self.state, device, buffer, offset, size)
     }
 
-    fn create_shader(
-        &mut self,
-        device_handle: DeviceHandle,
-        slang_source: &str,
-    ) -> Result<ShaderHandle> {
-        shader::create(&mut self.state, device_handle, slang_source)
-    }
-
     fn create_shader_with_paths(
         &mut self,
         device_handle: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
         defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle> {
         shader::create_with_paths(
             &mut self.state,
@@ -429,6 +422,7 @@ impl GpuBackend for Dx12Backend {
             slang_source,
             search_paths,
             defines,
+            optimization_level,
         )
     }
 

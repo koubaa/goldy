@@ -4,15 +4,6 @@ use super::types::{Dx12State, ShaderState};
 use super::{DeviceHandle, ShaderHandle};
 use anyhow::{Context, Result};
 
-/// Create a shader from Slang source code.
-pub(super) fn create(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    slang_source: &str,
-) -> Result<ShaderHandle> {
-    create_with_paths(state, device_handle, slang_source, &[], &[])
-}
-
 /// Create a shader from Slang source code with custom search paths.
 pub(super) fn create_with_paths(
     state: &mut Dx12State,
@@ -20,6 +11,7 @@ pub(super) fn create_with_paths(
     slang_source: &str,
     search_paths: &[&str],
     defines: &[(&str, &str)],
+    optimization_level: crate::types::OptimizationLevel,
 ) -> Result<ShaderHandle> {
     let _ = state
         .devices
@@ -42,6 +34,7 @@ pub(super) fn create_with_paths(
             slang_source: slang_source.to_string(),
             search_paths: stored_paths,
             defines: stored_defines,
+            optimization_level,
             vertex_bytecode: None,
             fragment_bytecode: None,
             compute_bytecode: None,
@@ -93,13 +86,15 @@ pub(super) fn ensure_stage_compiled(
     // Clone source and search paths to avoid borrow issues
     let slang_source = shader.slang_source.clone();
     let search_paths = shader.search_paths.clone();
+    let optimization_level = shader.optimization_level;
+    let extra_defines: Vec<(String, String)> = shader.defines.clone();
 
     // Convert search_paths to &str references
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
     // Merge target define with shader-specific defines
-    let mut defines = vec![("__DX12__", "1")];
-    for (k, v) in &shader.defines {
+    let mut defines: Vec<(&str, &str)> = vec![("__DX12__", "1")];
+    for (k, v) in &extra_defines {
         defines.push((k.as_str(), v.as_str()));
     }
 
@@ -110,6 +105,7 @@ pub(super) fn ensure_stage_compiled(
         &[(entry_point_name, stage)],
         &search_path_refs,
         &defines,
+        optimization_level,
     );
 
     let result = compile_result.with_context(|| {

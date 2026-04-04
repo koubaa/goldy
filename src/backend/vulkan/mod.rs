@@ -334,28 +334,13 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn create_shader(
-        &mut self,
-        device_handle: DeviceHandle,
-        slang_source: &str,
-    ) -> Result<ShaderHandle> {
-        shader::create(
-            &self.state.devices,
-            &mut self.state.shaders,
-            &mut self.state.next_shader_handle,
-            device_handle,
-            slang_source,
-            &[],
-            &[],
-        )
-    }
-
     fn create_shader_with_paths(
         &mut self,
         device_handle: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
         defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
@@ -365,6 +350,7 @@ impl GpuBackend for VulkanBackend {
             slang_source,
             search_paths,
             defines,
+            optimization_level,
         )
     }
 

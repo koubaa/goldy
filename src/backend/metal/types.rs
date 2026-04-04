@@ -465,6 +465,8 @@ pub(crate) struct ShaderState {
     pub search_paths: Vec<String>,
     /// Extra preprocessor defines (e.g. msaa, msaa8)
     pub defines: Vec<(String, String)>,
+    /// Per-shader Slang optimization level
+    pub optimization_level: crate::types::OptimizationLevel,
     /// Compiled vertex shader library
     pub vertex_library: Option<Library>,
     /// Compiled fragment shader library

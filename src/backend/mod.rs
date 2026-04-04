@@ -208,13 +208,13 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<BufferHandle>;
 
     // Shader management
-    fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle>;
     fn create_shader_with_paths(
         &mut self,
         device: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
         defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle>;
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
