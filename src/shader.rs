@@ -118,12 +118,30 @@ impl ShaderModule {
         extra_paths: &[&str],
         defines: &[(&str, &str)],
     ) -> Result<Self> {
-        // Get search paths from registered libraries
+        Self::from_slang_with_options(
+            device,
+            source,
+            extra_paths,
+            defines,
+            crate::types::OptimizationLevel::Default,
+        )
+    }
+
+    /// Create a shader module with full control over compilation options.
+    ///
+    /// Use `OptimizationLevel::None` to disable compiler optimizations for
+    /// shaders that hit driver bugs on software renderers (e.g. lavapipe).
+    pub fn from_slang_with_options(
+        device: &Device,
+        source: &str,
+        extra_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
+    ) -> Result<Self> {
         let library_paths = device
             .get_shader_search_paths()
             .context("Failed to prepare shader library paths")?;
 
-        // Combine library paths with extra paths
         let all_paths: Vec<String> = library_paths
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
@@ -133,8 +151,13 @@ impl ShaderModule {
         let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
 
         let mut backend = device.backend.lock().unwrap();
-        let handle =
-            backend.create_shader_with_paths(device.handle, source, &path_refs, defines)?;
+        let handle = backend.create_shader_with_paths(
+            device.handle,
+            source,
+            &path_refs,
+            defines,
+            optimization_level,
+        )?;
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
