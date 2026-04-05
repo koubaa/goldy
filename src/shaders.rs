@@ -48,6 +48,8 @@ pub const DEPTH_TEST: &str = include_str!("../shaders/depth_test.slang");
 mod tests {
     use super::*;
 
+    use crate::types::OptimizationLevel;
+
     /// Verify all shaders are non-empty and contain expected Slang syntax
     #[test]
     fn test_all_shaders_non_empty() {
@@ -149,15 +151,13 @@ mod tests {
         let shader_path = manifest_dir.join("shaders");
         let shader_path_str = shader_path.to_string_lossy();
 
-        // Test SPIRV compilation (Vulkan) - needs __SPIRV__ define for imported goldy_exp
-        // (may warn about redefinition vs Slang's target define; harmless)
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             PLASMA,
             ShaderTarget::Spirv,
             &[],
             &[&shader_path_str],
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -165,17 +165,16 @@ mod tests {
             result.err()
         );
 
-        // Test DXIL compilation (DX12) - needs __DX12__ define
         // Only run on Windows since DXC compiler is not available on other platforms
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 PLASMA,
                 ShaderTarget::Dxil,
                 &[],
                 &[&shader_path_str],
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -184,17 +183,15 @@ mod tests {
             );
         }
 
-        // Test Metal compilation - needs __METAL__ define
-        // Only run on macOS since Metal is Apple-only
         #[cfg(target_os = "macos")]
         {
-            let metal_defines = vec![("__METAL__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 PLASMA,
                 ShaderTarget::Metal,
                 &[],
                 &[&shader_path_str],
-                &metal_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -221,14 +218,13 @@ mod tests {
         let test_shader = std::fs::read_to_string(shader_path.join("test_descriptor_handle.slang"))
             .expect("Failed to read test_descriptor_handle.slang");
 
-        // Test SPIRV compilation - the key test for custom getDescriptorFromHandle
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             &test_shader,
             ShaderTarget::Spirv,
             &[],
             &[&shader_path_str],
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -236,16 +232,15 @@ mod tests {
             result.err()
         );
 
-        // Test DXIL compilation (DX12)
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Dxil,
                 &[],
                 &[&shader_path_str],
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -254,14 +249,13 @@ mod tests {
             );
         }
 
-        // Test Metal compilation
-        let metal_defines = vec![("__METAL__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             &test_shader,
             ShaderTarget::Metal,
             &[],
             &[&shader_path_str],
-            &metal_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -290,14 +284,13 @@ mod tests {
             .to_string();
         let shader_path_str = shader_path.as_str();
 
-        // Test SPIRV compilation - uses goldy_broadcast<T>()
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             test_shader,
             ShaderTarget::Spirv,
             &[],
             &[shader_path_str],
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -305,16 +298,15 @@ mod tests {
             result.err()
         );
 
-        // Test DXIL compilation (DX12) - uses goldy_broadcast<T>()
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 test_shader,
                 ShaderTarget::Dxil,
                 &[],
                 &[shader_path_str],
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -323,14 +315,13 @@ mod tests {
             );
         }
 
-        // Test Metal compilation (bindless) - uses goldy_broadcast<T>()
-        let metal_defines = vec![("__METAL__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             test_shader,
             ShaderTarget::Metal,
             &[],
             &[shader_path_str],
-            &metal_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -358,13 +349,13 @@ mod tests {
 
         let entry = &[("cs_main", SlangStage::Compute)];
 
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             &test_shader,
             ShaderTarget::Spirv,
             entry,
             &[&shader_path_str],
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -374,13 +365,13 @@ mod tests {
 
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Dxil,
                 entry,
                 &[&shader_path_str],
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -391,13 +382,13 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         {
-            let metal_defines = vec![("__METAL__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Metal,
                 entry,
                 &[&shader_path_str],
-                &metal_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -425,14 +416,13 @@ mod tests {
 
         let entry = &[("cs_main", SlangStage::Compute)];
 
-        // SPIRV (Vulkan)
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             &test_shader,
             ShaderTarget::Spirv,
             entry,
             &[&shader_path_str],
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -440,16 +430,15 @@ mod tests {
             result.err()
         );
 
-        // DXIL (DX12)
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Dxil,
                 entry,
                 &[&shader_path_str],
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -458,16 +447,15 @@ mod tests {
             );
         }
 
-        // Metal
         #[cfg(target_os = "macos")]
         {
-            let metal_defines = vec![("__METAL__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Metal,
                 entry,
                 &[&shader_path_str],
-                &metal_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -495,13 +483,13 @@ mod tests {
         let entry = &[("cs_main", SlangStage::Compute)];
         let search_paths: &[&str] = &[&goldy_path];
 
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             &test_shader,
             ShaderTarget::Spirv,
             entry,
             search_paths,
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -511,13 +499,13 @@ mod tests {
 
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Dxil,
                 entry,
                 search_paths,
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -528,13 +516,13 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         {
-            let metal_defines = vec![("__METAL__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Metal,
                 entry,
                 search_paths,
-                &metal_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -562,14 +550,13 @@ mod tests {
         let entry = &[("cs_main", SlangStage::Compute)];
         let search_paths: &[&str] = &[&goldy_path];
 
-        // SPIRV (Vulkan)
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             &test_shader,
             ShaderTarget::Spirv,
             entry,
             search_paths,
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -577,16 +564,15 @@ mod tests {
             result.err()
         );
 
-        // DXIL (DX12)
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Dxil,
                 entry,
                 search_paths,
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -595,16 +581,15 @@ mod tests {
             );
         }
 
-        // Metal
         #[cfg(target_os = "macos")]
         {
-            let metal_defines = vec![("__METAL__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 &test_shader,
                 ShaderTarget::Metal,
                 entry,
                 search_paths,
-                &metal_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),
@@ -628,14 +613,14 @@ mod tests {
             .to_string();
         let shader_path_str = shader_path.as_str();
 
-        // Test SPIRV compilation
-        let spirv_defines = vec![("__SPIRV__", "1")];
-        let result = compiler.compile_with_defines(
+        let entry = &[("cs_main", SlangStage::Compute)];
+        let result = compiler.compile_bindless_with_reflection_and_defines(
             test_shader,
             ShaderTarget::Spirv,
-            &[("cs_main", SlangStage::Compute)],
+            entry,
             &[shader_path_str],
-            &spirv_defines,
+            &[],
+            OptimizationLevel::Default,
         );
         assert!(
             result.is_ok(),
@@ -643,16 +628,15 @@ mod tests {
             result.err()
         );
 
-        // Test DXIL compilation (DX12)
         #[cfg(windows)]
         {
-            let dxil_defines = vec![("__DX12__", "1")];
-            let result = compiler.compile_with_defines(
+            let result = compiler.compile_bindless_with_reflection_and_defines(
                 test_shader,
                 ShaderTarget::Dxil,
-                &[("cs_main", SlangStage::Compute)],
+                entry,
                 &[shader_path_str],
-                &dxil_defines,
+                &[],
+                OptimizationLevel::Default,
             );
             assert!(
                 result.is_ok(),

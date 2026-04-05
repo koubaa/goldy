@@ -394,6 +394,12 @@ pub enum SlangSourceLanguage {
 /// Profile ID type (opaque integral type for shader profiles like sm_6_6)
 pub type SlangProfileID = c_int;
 
+/// Slang optimization levels (matches SlangOptimizationLevel in slang.h).
+pub const SLANG_OPTIMIZATION_LEVEL_NONE: c_int = 0;
+pub const SLANG_OPTIMIZATION_LEVEL_DEFAULT: c_int = 1;
+pub const SLANG_OPTIMIZATION_LEVEL_HIGH: c_int = 2;
+pub const SLANG_OPTIMIZATION_LEVEL_MAXIMAL: c_int = 3;
+
 /// Function pointer types for dynamic loading
 pub type FnSpCreateSession = unsafe extern "C" fn(deprecated: *const c_char) -> *mut SlangSession;
 pub type FnSpDestroySession = unsafe extern "C" fn(session: *mut SlangSession);
@@ -435,6 +441,8 @@ pub type FnSpAddEntryPoint = unsafe extern "C" fn(
     name: *const c_char,
     stage: c_int,
 ) -> c_int;
+pub type FnSpSetOptimizationLevel =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, level: c_int);
 pub type FnSpCompile = unsafe extern "C" fn(request: *mut SlangCompileRequest) -> SlangResult;
 pub type FnSpGetDiagnosticOutput =
     unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *const c_char;

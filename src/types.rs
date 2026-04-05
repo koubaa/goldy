@@ -334,6 +334,24 @@ pub enum DeviceType {
     Other,
 }
 
+/// Shader compiler optimization level.
+///
+/// Controls how aggressively the Slang compiler optimizes generated SPIR-V / DXIL / Metal IR.
+/// Use `None` to work around driver bugs in software renderers (e.g. lavapipe SSA corruption
+/// across barriers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OptimizationLevel {
+    /// No optimization — preserves all loads and barriers exactly as written.
+    None,
+    /// Default balanced optimization.
+    #[default]
+    Default,
+    /// Aggressive optimization.
+    High,
+    /// Maximum optimization (may be very slow to compile).
+    Maximal,
+}
+
 /// Graphics backend type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendType {
