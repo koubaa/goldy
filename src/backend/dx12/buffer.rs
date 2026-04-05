@@ -1,5 +1,6 @@
 //! Buffer management logic.
 
+use super::barriers;
 use super::types::{BufferState, Dx12State};
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::DataAccess;
@@ -64,7 +65,8 @@ pub(super) fn create(
         let initial_state = if heap_type == D3D12_HEAP_TYPE_UPLOAD {
             D3D12_RESOURCE_STATE_GENERIC_READ
         } else {
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS // Start in UAV state for compute access
+            // Enhanced barriers: COMMON initial state; access is expressed via Barrier().
+            D3D12_RESOURCE_STATE_COMMON
         };
 
         let mut resource: Option<ID3D12Resource> = None;
@@ -584,35 +586,28 @@ pub(super) fn write(
                 .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None)
         }
         .context("Failed to create command list")?;
+        let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
         let dst_offset = offset + written;
-        let to_copy = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&main_resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
-                }),
-            },
-        };
-        unsafe { cmd.ResourceBarrier(&[to_copy]) };
-        unsafe { cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk) };
-        let to_uav = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&main_resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
-                    StateAfter: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                }),
-            },
-        };
-        unsafe { cmd.ResourceBarrier(&[to_uav]) };
+        let b_to_copy = barriers::buffer_barrier_full(
+            &main_resource,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+        );
+        let b_to_uav = barriers::buffer_barrier_full(
+            &main_resource,
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        );
+        unsafe {
+            barriers::barrier_buffers(&cmd7, &[b_to_copy]);
+            cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk);
+            barriers::barrier_buffers(&cmd7, &[b_to_uav]);
+        }
         unsafe { cmd.Close() }.context("Failed to close command list")?;
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
@@ -742,34 +737,28 @@ pub(super) fn read_to_cpu(
             )
         }
         .context("Failed to create copy command list")?;
+        let copy_list7: ID3D12GraphicsCommandList7 =
+            copy_list.cast().context("ID3D12GraphicsCommandList7")?;
 
-        let to_copy_src = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&main_resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    StateAfter: D3D12_RESOURCE_STATE_COPY_SOURCE,
-                }),
-            },
-        };
-        unsafe { copy_list.ResourceBarrier(&[to_copy_src]) };
-        unsafe { copy_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len) };
-        let to_uav = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&main_resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: D3D12_RESOURCE_STATE_COPY_SOURCE,
-                    StateAfter: D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                }),
-            },
-        };
-        unsafe { copy_list.ResourceBarrier(&[to_uav]) };
+        let b_to_src = barriers::buffer_barrier_full(
+            &main_resource,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        );
+        let b_to_uav = barriers::buffer_barrier_full(
+            &main_resource,
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_ACCESS_COPY_SOURCE,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        );
+        unsafe {
+            barriers::barrier_buffers(&copy_list7, &[b_to_src]);
+            copy_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
+            barriers::barrier_buffers(&copy_list7, &[b_to_uav]);
+        }
         unsafe { copy_list.Close() }.context("Failed to close copy command list")?;
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(

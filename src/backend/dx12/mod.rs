@@ -15,6 +15,7 @@
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
 //! - `utils`: Format conversion and helpers
 
+mod barriers;
 mod buffer;
 mod compute;
 mod device;

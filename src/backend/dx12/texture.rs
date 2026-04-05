@@ -1,5 +1,6 @@
 //! Texture management operations.
 
+use super::barriers;
 use super::types::{Dx12State, TextureState};
 use super::utils::{format_to_dxgi, wait_for_fence};
 use super::{DeviceHandle, TextureHandle};
@@ -7,6 +8,27 @@ use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
+
+/// [`D3D12_BARRIER_ACCESS`] that matches `layout` for texture barriers.
+fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
+    if layout == D3D12_BARRIER_LAYOUT_COMMON {
+        D3D12_BARRIER_ACCESS_COMMON
+    } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
+        || layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+    {
+        D3D12_BARRIER_ACCESS_SHADER_RESOURCE
+    } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+        || layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+    {
+        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
+    } else if layout == D3D12_BARRIER_LAYOUT_COPY_DEST {
+        D3D12_BARRIER_ACCESS_COPY_DEST
+    } else if layout == D3D12_BARRIER_LAYOUT_COPY_SOURCE {
+        D3D12_BARRIER_ACCESS_COPY_SOURCE
+    } else {
+        D3D12_BARRIER_ACCESS_COMMON
+    }
+}
 
 /// Create a texture.
 pub(super) fn create(
@@ -54,11 +76,8 @@ pub(super) fn create(
         Flags: resource_flags,
     };
 
-    let initial_state = if is_storage {
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-    } else {
-        D3D12_RESOURCE_STATE_COPY_DEST
-    };
+    // Enhanced barriers: COMMON initial layout; transitions use Barrier().
+    let initial_state = D3D12_RESOURCE_STATE_COMMON;
 
     let mut resource: Option<ID3D12Resource> = None;
     unsafe {
@@ -159,7 +178,7 @@ pub(super) fn create(
             resource,
             srv_offset,
             bindless_offset,
-            current_state: initial_state,
+            last_layout: D3D12_BARRIER_LAYOUT_COMMON,
         },
     );
 
@@ -296,27 +315,22 @@ pub(super) fn write(
         )
     }
     .context("Failed to create command list")?;
+    let command_list7: ID3D12GraphicsCommandList7 =
+        command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
     let texture = state.textures.get(&texture_handle).unwrap();
-    let state_before = texture.current_state;
+    let layout_before = texture.last_layout;
 
-    // Transition to COPY_DEST only if not already in that state
-    // (non-storage textures are created in COPY_DEST; redundant transitions are invalid)
-    if state_before != D3D12_RESOURCE_STATE_COPY_DEST {
-        let barrier_to_copy = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: state_before,
-                    StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
-                }),
-            },
-        };
-        unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
-    }
+    let b_to_copy = barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_SYNC_COPY,
+        access_for_layout(layout_before),
+        D3D12_BARRIER_ACCESS_COPY_DEST,
+        layout_before,
+        D3D12_BARRIER_LAYOUT_COPY_DEST,
+    );
+    unsafe { barriers::barrier_textures(&command_list7, &[b_to_copy]) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&staging) },
@@ -337,29 +351,25 @@ pub(super) fn write(
         },
     };
 
+    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+    let b_to_shader = barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_COPY,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_ACCESS_COPY_DEST,
+        D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+        D3D12_BARRIER_LAYOUT_COPY_DEST,
+        after_layout,
+    );
     unsafe {
         command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None);
-
-        // Transition to shader resource state for sampling
-        let barrier = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: std::mem::transmute_copy(&texture.resource),
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
-                    StateAfter: D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                }),
-            },
-        };
-        command_list.ResourceBarrier(&[barrier]);
+        barriers::barrier_textures(&command_list7, &[b_to_shader]);
         command_list.Close()
     }
     .context("Failed to close command list")?;
 
     if let Some(tex) = state.textures.get_mut(&texture_handle) {
-        tex.current_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        tex.last_layout = after_layout;
     }
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
@@ -542,25 +552,22 @@ pub(super) fn write_region(
         )
     }
     .context("Failed to create command list")?;
+    let command_list7: ID3D12GraphicsCommandList7 =
+        command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
     let texture = state.textures.get(&texture_handle).unwrap();
-    let state_before = texture.current_state;
+    let layout_before = texture.last_layout;
 
-    if state_before != D3D12_RESOURCE_STATE_COPY_DEST {
-        let barrier_to_copy = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                    pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                    StateBefore: state_before,
-                    StateAfter: D3D12_RESOURCE_STATE_COPY_DEST,
-                }),
-            },
-        };
-        unsafe { command_list.ResourceBarrier(&[barrier_to_copy]) };
-    }
+    let b_to_copy = barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_SYNC_COPY,
+        access_for_layout(layout_before),
+        D3D12_BARRIER_ACCESS_COPY_DEST,
+        layout_before,
+        D3D12_BARRIER_LAYOUT_COPY_DEST,
+    );
+    unsafe { barriers::barrier_textures(&command_list7, &[b_to_copy]) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&staging) },
@@ -581,24 +588,19 @@ pub(super) fn write_region(
         },
     };
 
+    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+    let b_to_shader = barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_COPY,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_ACCESS_COPY_DEST,
+        D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+        D3D12_BARRIER_LAYOUT_COPY_DEST,
+        after_layout,
+    );
     unsafe {
         command_list.CopyTextureRegion(&dst_location, x, y, 0, &src_location, None);
-    }
-
-    let barrier_to_shader = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
-                StateAfter: D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            }),
-        },
-    };
-    unsafe {
-        command_list.ResourceBarrier(&[barrier_to_shader]);
+        barriers::barrier_textures(&command_list7, &[b_to_shader]);
         command_list.Close()
     }
     .context("Failed to close command list")?;
@@ -626,7 +628,7 @@ pub(super) fn write_region(
     }
 
     if let Some(tex) = state.textures.get_mut(&texture_handle) {
-        tex.current_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        tex.last_layout = after_layout;
     }
 
     tracing::debug!("Wrote {}x{} region at ({},{})", width, height, x, y);
@@ -746,24 +748,23 @@ pub(super) fn read_to_cpu(
         )
     }
     .context("Failed to create command list")?;
+    let command_list7: ID3D12GraphicsCommandList7 =
+        command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
     // Newly created list is already in recording state; Reset is for reusing a closed list
 
-    let state_before = texture.current_state;
+    let layout_before = texture.last_layout;
 
-    let barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: state_before,
-                StateAfter: D3D12_RESOURCE_STATE_COPY_SOURCE,
-            }),
-        },
-    };
-    unsafe { command_list.ResourceBarrier(&[barrier]) };
+    let b_to_src = barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_SYNC_COPY,
+        access_for_layout(layout_before),
+        D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        layout_before,
+        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+    );
+    unsafe { barriers::barrier_textures(&command_list7, &[b_to_src]) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
@@ -784,21 +785,19 @@ pub(super) fn read_to_cpu(
         },
     };
 
-    unsafe { command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
-
-    let barrier_back = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: D3D12_RESOURCE_STATE_COPY_SOURCE,
-                StateAfter: state_before,
-            }),
-        },
-    };
-    unsafe { command_list.ResourceBarrier(&[barrier_back]) };
+    let b_back = barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_COPY,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        access_for_layout(layout_before),
+        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+        layout_before,
+    );
+    unsafe {
+        command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None);
+        barriers::barrier_textures(&command_list7, &[b_back]);
+    }
 
     unsafe { command_list.Close() }.context("Failed to close command list")?;
 

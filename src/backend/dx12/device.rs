@@ -4,7 +4,30 @@ use super::types::{self, DxgiAdapterInfo, LogicalDevice};
 use super::{utils, DeviceHandle, Dx12State};
 use crate::backend::{AdapterInfo, BackendType};
 use anyhow::{Context, Result};
+use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D::*, Direct3D12::*, Dxgi::*};
+
+/// Query enhanced barriers support and upgrade the device to [`ID3D12Device10`].
+fn device_with_enhanced_barriers(device: ID3D12Device) -> Result<ID3D12Device10> {
+    let mut options12 = D3D12_FEATURE_DATA_D3D12_OPTIONS12::default();
+    unsafe {
+        device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS12,
+                &mut options12 as *mut _ as *mut _,
+                std::mem::size_of_val(&options12) as u32,
+            )
+            .context("CheckFeatureSupport(D3D12_OPTIONS12) failed")?;
+    }
+    if !options12.EnhancedBarriersSupported.as_bool() {
+        anyhow::bail!(
+            "Goldy DX12 requires D3D12 enhanced barriers (Windows 11 + WDDM 3.0+ driver, or WARP with GOLDY_DX12_ALLOW_WARP=1 on Win11)"
+        );
+    }
+    device
+        .cast::<ID3D12Device10>()
+        .context("ID3D12Device10 required for enhanced barriers")
+}
 
 /// Enumerate available adapters.
 pub(super) fn enumerate(adapters: &[DxgiAdapterInfo]) -> Vec<AdapterInfo> {
@@ -44,6 +67,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         .context("Failed to create D3D12 device")?;
 
     let device = device.context("D3D12CreateDevice returned null")?;
+    let device = device_with_enhanced_barriers(device)?;
 
     // Create command queue
     let queue_desc = D3D12_COMMAND_QUEUE_DESC {

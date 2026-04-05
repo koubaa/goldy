@@ -258,15 +258,13 @@ public StorageBuffer<T> goldy_dyn_scattered<T>(uint n)
 }
 
 /// Dynamic read-only scattered access - reads slot index from push constants.
-/// On DX12, uses RWStructuredBuffer<T> (UAV) to avoid resource state transitions.
-/// Buffers start in D3D12_RESOURCE_STATE_UNORDERED_ACCESS; SRV would need a barrier.
-/// Declare the result as StorageBuffer<T> and only read from it.
-/// TODO: revisit with enhanced buffers
-public StorageBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+/// On DX12, uses StructuredBuffer<T> (SRV). Requires D3D12 enhanced barriers and
+/// push constants with `bindless_srv_index()` for the slot (e.g. `set_push_constants_raw`).
+public StructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
     uint slot = __goldy_get_slot(n);
-    DescriptorHandle<RWStructuredBuffer<T>> handle;
-    handle = DescriptorHandle<RWStructuredBuffer<T>>(uint2(slot, 0));
+    DescriptorHandle<StructuredBuffer<T>> handle;
+    handle = DescriptorHandle<StructuredBuffer<T>>(uint2(slot, 0));
     return *handle;
 }
 

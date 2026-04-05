@@ -1032,7 +1032,7 @@ struct Pair { uint a; uint b; };
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
+    StructuredBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
     StorageBuffer<Pair> output = goldy_dyn_scattered<Pair>(1);
     uint idx = id.x;
     if (idx >= 8) return;
@@ -1068,7 +1068,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&input_buf, &output_buf]);
+        // goldy_dyn_buf_ro uses SRV on DX12; goldy_dyn_scattered uses UAV
+        pass.set_push_constants_raw(&[
+            input_buf.bindless_srv_index().expect("srv"),
+            output_buf.bindless_index().expect("uav"),
+        ]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
