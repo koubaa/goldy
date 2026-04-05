@@ -9,7 +9,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use goldy::slang::{SlangCompiler, ShaderTarget};
+//! use goldy::slang::{SlangCompiler, ShaderTarget, SlangStage};
+//! use goldy::types::OptimizationLevel;
 //!
 //! let compiler = SlangCompiler::new().unwrap();
 //!
@@ -25,8 +26,17 @@
 //!     }
 //! "#;
 //!
-//! let spirv = compiler.compile(source, ShaderTarget::Spirv).unwrap();
-//! println!("Compiled {} bytes of SPIR-V", spirv.data.len());
+//! let out = compiler
+//!     .compile_bindless_with_reflection_and_defines(
+//!         source,
+//!         ShaderTarget::Spirv,
+//!         &[("vs_main", SlangStage::Vertex)],
+//!         &[],
+//!         &[],
+//!         OptimizationLevel::Default,
+//!     )
+//!     .unwrap();
+//! println!("Compiled {} bytes of SPIR-V", out.shader.data.len());
 //! ```
 
 pub mod compiler;

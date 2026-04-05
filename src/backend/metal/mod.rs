@@ -167,24 +167,13 @@ impl GpuBackend for MetalBackend {
         buffer::clear(&self.state, device, buffer, offset, size)
     }
 
-    fn create_shader(&mut self, device: DeviceHandle, slang_source: &str) -> Result<ShaderHandle> {
-        shader::create(
-            &self.state.devices,
-            &mut self.state.shaders,
-            &mut self.state.next_shader_handle,
-            device,
-            slang_source,
-            &[],
-            &[],
-        )
-    }
-
     fn create_shader_with_paths(
         &mut self,
         device: DeviceHandle,
         slang_source: &str,
         search_paths: &[&str],
         defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
@@ -194,6 +183,7 @@ impl GpuBackend for MetalBackend {
             slang_source,
             search_paths,
             defines,
+            optimization_level,
         )
     }
 
