@@ -7,6 +7,7 @@ use ash::vk;
 use std::collections::HashMap;
 
 /// Create a shader from Slang source code.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
@@ -15,6 +16,7 @@ pub(super) fn create(
     slang_source: &str,
     search_paths: &[&str],
     defines: &[(&str, &str)],
+    optimization_level: crate::types::OptimizationLevel,
 ) -> Result<ShaderHandle> {
     // Just validate the device exists - actual compilation happens at pipeline creation
     let _ = devices
@@ -34,6 +36,7 @@ pub(super) fn create(
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            optimization_level,
             vertex_module: None,
             fragment_module: None,
             compute_module: None,
@@ -110,6 +113,7 @@ pub(super) fn ensure_stage_compiled(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let device_handle = shader.device_handle;
+    let optimization_level = shader.optimization_level;
 
     // Compile shader with reflection data for resource binding
     let result = slang_compiler
@@ -119,6 +123,7 @@ pub(super) fn ensure_stage_compiled(
             &[(entry_point_name, stage)],
             &search_paths,
             &extra_defines,
+            optimization_level,
         )
         .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
 
@@ -154,7 +159,10 @@ pub(super) fn ensure_stage_compiled(
     // Dump SPIR-V for debugging when GOLDY_DUMP_SHADERS is set
     if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
         use std::io::Write;
-        let path = std::path::Path::new(&dump_dir).join(format!("{}_vulkan.spv", entry_point_name));
+        let path = std::path::Path::new(&dump_dir).join(format!(
+            "{}_h{}_vulkan.spv",
+            entry_point_name, shader_handle
+        ));
         if let Ok(mut file) = std::fs::File::create(&path) {
             let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
             let _ = file.write_all(spirv_bytes);

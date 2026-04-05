@@ -81,6 +81,14 @@ impl Instance {
     /// libraries using [`Device::register_library`].
     pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
         let mut backend = self.backend.lock().unwrap();
+
+        let device_type = backend
+            .enumerate_adapters()
+            .into_iter()
+            .find(|a| a.id == adapter_id)
+            .map(|a| a.device_type)
+            .unwrap_or(DeviceType::Other);
+
         let handle = backend.create_device(adapter_id)?;
 
         // Create registry with built-in goldy_exp library
@@ -91,6 +99,7 @@ impl Instance {
             backend: Arc::clone(&self.backend),
             handle,
             adapter_id,
+            device_type,
             library_registry: Arc::new(Mutex::new(registry)),
         })
     }
@@ -203,6 +212,7 @@ pub struct Device {
     pub(crate) backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: DeviceHandle,
     adapter_id: u32,
+    device_type: DeviceType,
     /// Shader library registry
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
 }
@@ -315,6 +325,11 @@ impl Device {
     /// Get the adapter ID this device was created on.
     pub fn adapter_id(&self) -> u32 {
         self.adapter_id
+    }
+
+    /// Get the device type (discrete GPU, integrated GPU, CPU/software, etc.).
+    pub fn device_type(&self) -> DeviceType {
+        self.device_type
     }
 
     /// Check if the device is still valid.
@@ -447,6 +462,7 @@ impl Device {
             backend,
             handle,
             adapter_id: 0,
+            device_type: DeviceType::Other,
             library_registry: Arc::new(Mutex::new(registry)),
         })
     }

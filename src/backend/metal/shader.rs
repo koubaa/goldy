@@ -35,6 +35,7 @@ fn compile_stage_with_reflection(
     entry_point: &str,
     stage: SlangStage,
     extra_defines: &[(&str, &str)],
+    optimization_level: crate::types::OptimizationLevel,
 ) -> Result<(Library, Option<crate::slang::ShaderReflection>)> {
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
@@ -45,6 +46,7 @@ fn compile_stage_with_reflection(
             &[(entry_point, stage)],
             &search_path_refs,
             extra_defines,
+            optimization_level,
         )
         .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
 
@@ -136,6 +138,7 @@ pub(super) fn ensure_stage_compiled(
     let device_handle = shader.device_handle;
     let slang_source = shader.slang_source.clone();
     let search_paths = shader.search_paths.clone();
+    let optimization_level = shader.optimization_level;
     let extra_defines: Vec<(&str, &str)> = shader
         .defines
         .iter()
@@ -154,6 +157,7 @@ pub(super) fn ensure_stage_compiled(
         entry_point,
         stage,
         &extra_defines,
+        optimization_level,
     )?;
 
     let shader = shaders.get_mut(&shader_handle).unwrap();
@@ -179,6 +183,7 @@ pub(super) fn create(
     slang_source: &str,
     search_paths: &[&str],
     defines: &[(&str, &str)],
+    optimization_level: crate::types::OptimizationLevel,
 ) -> Result<ShaderHandle> {
     devices
         .get(&device_handle)
@@ -197,6 +202,7 @@ pub(super) fn create(
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            optimization_level,
             vertex_library: None,
             fragment_library: None,
             compute_library: None,

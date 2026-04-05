@@ -40,6 +40,16 @@ fn submit_copy(
         device
             .device
             .cmd_copy_buffer(cmd, src, dst, std::slice::from_ref(&region));
+
+        let mem_barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+        let dep_info =
+            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+        device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
         device.device.end_command_buffer(cmd)?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
@@ -587,6 +597,16 @@ pub(super) fn clear(
         device
             .device
             .cmd_fill_buffer(cmd, buffer.buffer, offset, clear_size, 0);
+
+        let mem_barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+        let dep_info =
+            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+        device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
         device.device.end_command_buffer(cmd)?;
     }
 

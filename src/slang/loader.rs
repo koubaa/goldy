@@ -62,6 +62,7 @@ pub struct SlangLibrary {
     pub add_search_path: FnSpAddSearchPath,
     pub add_preprocessor_define: FnSpAddPreprocessorDefine,
     // Compilation
+    pub set_optimization_level: FnSpSetOptimizationLevel,
     pub compile: FnSpCompile,
     pub get_diagnostic_output: FnSpGetDiagnosticOutput,
     // Output
@@ -169,6 +170,9 @@ impl SlangLibrary {
             let add_preprocessor_define: FnSpAddPreprocessorDefine = *library
                 .get(b"spAddPreprocessorDefine\0")
                 .context("Failed to load spAddPreprocessorDefine")?;
+            let set_optimization_level: FnSpSetOptimizationLevel = *library
+                .get(b"spSetOptimizationLevel\0")
+                .context("Failed to load spSetOptimizationLevel")?;
             let compile: FnSpCompile = *library
                 .get(b"spCompile\0")
                 .context("Failed to load spCompile")?;
@@ -282,6 +286,7 @@ impl SlangLibrary {
                 add_entry_point,
                 add_search_path,
                 add_preprocessor_define,
+                set_optimization_level,
                 compile,
                 get_diagnostic_output,
                 get_entry_point_code_blob,
