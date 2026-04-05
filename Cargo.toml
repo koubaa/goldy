@@ -34,6 +34,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 # Utilities
 bitflags = "2.6"
 bytemuck = { version = "1.21", features = ["derive"] }
+# Optional: `update-screenshots` binary only
+image = { version = "0.25", optional = true }
 dirs = "6.0"
 scopeguard = "1.2"
 
@@ -68,7 +70,7 @@ core-graphics-types = { version = "0.2", optional = true }
 foreign-types = { version = "0.5", optional = true }
 
 [dev-dependencies]
-# PNG output for examples
+# PNG output for examples / integration tests that save images
 image = "0.25"
 
 # FLIP perceptual image comparison for screenshot tests
@@ -88,6 +90,8 @@ default = ["vulkan", "metal", "dx12", "instrumentation"]
 vulkan = ["dep:ash"]
 dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core"]
 metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types"]
+# Regenerate `tests/screenshots/*.png` via `cargo run --bin update-screenshots --features update-screenshots`
+update-screenshots = ["dep:image"]
 # Structured instrumentation with named observation points (zero-cost when disabled)
 instrumentation = ["dep:tracing-subscriber"]
 
@@ -162,4 +166,9 @@ path = "examples/game_of_life.rs"
 [[example]]
 name = "depth_quads"
 path = "examples/depth_quads.rs"
+
+[[bin]]
+name = "update-screenshots"
+path = "tools/update_screenshots.rs"
+required-features = ["update-screenshots"]
 

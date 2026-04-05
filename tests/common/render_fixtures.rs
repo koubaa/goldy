@@ -1,8 +1,4 @@
-//! Utility to generate reference screenshots for FLIP tests.
-//!
-//! Run with: cargo test --test generate_screenshots -- --nocapture
-
-mod common;
+//! Shared offscreen rendering helpers for FLIP screenshot tests and the `update-screenshots` tool.
 
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DataAccess,
@@ -10,21 +6,13 @@ use goldy::{
     RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule, TextureFormat, Vertex2D,
     VertexAttribute, VertexBufferLayout, VertexFormat,
 };
-use std::path::Path;
 
-fn create_device() -> Option<Device> {
+pub fn create_device() -> Option<Device> {
     let instance = Instance::new().ok()?;
     instance.create_device(DeviceType::DiscreteGpu).ok()
 }
 
-fn save_png(path: &Path, width: u32, height: u32, rgba_data: &[u8]) {
-    let img = image::RgbaImage::from_raw(width, height, rgba_data.to_vec())
-        .expect("Failed to create image");
-    img.save(path).expect("Failed to save PNG");
-    println!("Saved: {}", path.display());
-}
-
-fn render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u8> {
+pub fn render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u8> {
     let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)
         .expect("Failed to create render target");
 
@@ -38,7 +26,7 @@ fn render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u
     target.read_to_cpu().expect("Failed to read pixels")
 }
 
-fn render_triangle(
+pub fn render_triangle(
     device: &Device,
     width: u32,
     height: u32,
@@ -103,75 +91,15 @@ fn render_triangle(
     target.read_to_cpu().expect("Failed to read pixels")
 }
 
-#[test]
-fn generate_solid_red() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping: no GPU available");
-        return;
-    };
-
-    let pixels = render_clear(&device, 64, 64, Color::RED);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/solid_red.png");
-    save_png(&path, 64, 64, &pixels);
-}
-
-#[test]
-fn generate_solid_blue() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping: no GPU available");
-        return;
-    };
-
-    let pixels = render_clear(&device, 64, 64, Color::BLUE);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/solid_blue.png");
-    save_png(&path, 64, 64, &pixels);
-}
-
-#[test]
-fn generate_rgb_triangle() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping: no GPU available");
-        return;
-    };
-
-    let vertices = [
-        Vertex2D::new(0.0, -0.8, Color::RED),
-        Vertex2D::new(-0.8, 0.8, Color::GREEN),
-        Vertex2D::new(0.8, 0.8, Color::BLUE),
-    ];
-
-    let pixels = render_triangle(&device, 256, 256, Color::BLACK, vertices);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/rgb_triangle.png");
-    save_png(&path, 256, 256, &pixels);
-}
-
-#[test]
-fn generate_white_triangle() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping: no GPU available");
-        return;
-    };
-
-    let vertices = [
-        Vertex2D::new(0.0, -0.5, Color::WHITE),
-        Vertex2D::new(-0.5, 0.5, Color::WHITE),
-        Vertex2D::new(0.5, 0.5, Color::WHITE),
-    ];
-
-    let pixels = render_triangle(&device, 128, 128, Color::BLACK, vertices);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/white_triangle.png");
-    save_png(&path, 128, 128, &pixels);
-}
-
 // ============================================================================
 // Game of Life
 // ============================================================================
 
-const GOL_GRID_WIDTH: u32 = 128;
-const GOL_GRID_HEIGHT: u32 = 128;
-const GOL_CELL_COUNT: u32 = GOL_GRID_WIDTH * GOL_GRID_HEIGHT;
+pub const GOL_GRID_WIDTH: u32 = 128;
+pub const GOL_GRID_HEIGHT: u32 = 128;
+pub const GOL_CELL_COUNT: u32 = GOL_GRID_WIDTH * GOL_GRID_HEIGHT;
 
-fn create_gol_initial_state() -> Vec<u32> {
+pub fn create_gol_initial_state() -> Vec<u32> {
     let mut cells = vec![0u32; GOL_CELL_COUNT as usize];
 
     let gun = [
@@ -237,17 +165,19 @@ fn create_gol_initial_state() -> Vec<u32> {
     cells
 }
 
-fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
+pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     let render_width = 512u32;
     let render_height = 512u32;
 
     let compute_shader =
-        ShaderModule::from_slang(device, include_str!("../shaders/game_of_life.slang"))
+        ShaderModule::from_slang(device, include_str!("../../shaders/game_of_life.slang"))
             .expect("Failed to load compute shader");
 
-    let render_shader =
-        ShaderModule::from_slang(device, include_str!("../shaders/game_of_life_render.slang"))
-            .expect("Failed to load render shader");
+    let render_shader = ShaderModule::from_slang(
+        device,
+        include_str!("../../shaders/game_of_life_render.slang"),
+    )
+    .expect("Failed to load render shader");
 
     let initial_state = create_gol_initial_state();
     let buffer_a = Buffer::with_data(device, &initial_state, DataAccess::Scattered)
@@ -255,7 +185,6 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     let buffer_b = Buffer::with_data(device, &initial_state, DataAccess::Scattered)
         .expect("Failed to create buffer B");
 
-    // Create pipelines
     let compute_pipeline =
         ComputePipeline::new(device, &compute_shader).expect("Failed to create compute pipeline");
 
@@ -281,7 +210,6 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&compute_pipeline);
-            // Bindless: pass buffer indices via push constants
             if use_buffer_a {
                 pass.set_push_constants(&[&buffer_a, &buffer_b]);
             } else {
@@ -308,7 +236,6 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         let mut pass = encoder.begin_render_pass();
         pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);
-        // Bindless: pass buffer index via push constants
         if use_buffer_a {
             pass.set_push_constants(&[&buffer_a]);
         } else {
@@ -321,42 +248,18 @@ fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     target.read_to_cpu().expect("Failed to read pixels")
 }
 
-#[test]
-fn generate_game_of_life_50() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping: no GPU available");
-        return;
-    };
-
-    let pixels = render_game_of_life(&device, 50);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/game_of_life_50.png");
-    save_png(&path, 512, 512, &pixels);
-}
-
-#[test]
-fn generate_game_of_life_100() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping: no GPU available");
-        return;
-    };
-
-    let pixels = render_game_of_life(&device, 100);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/game_of_life_100.png");
-    save_png(&path, 512, 512, &pixels);
-}
-
 // ============================================================================
-// Depth Occlusion
+// Depth occlusion
 // ============================================================================
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct Depth3DVertex {
-    position: [f32; 3],
-    color: [f32; 4],
+pub struct Depth3DVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 4],
 }
 
-fn depth_vertex_layout() -> VertexBufferLayout {
+pub fn depth_vertex_layout() -> VertexBufferLayout {
     VertexBufferLayout {
         stride: std::mem::size_of::<Depth3DVertex>() as u32,
         attributes: vec![
@@ -374,7 +277,7 @@ fn depth_vertex_layout() -> VertexBufferLayout {
     }
 }
 
-fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
+pub fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
     let target = RenderTarget::new_with_depth(
         device,
         width,
@@ -384,7 +287,7 @@ fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
     )
     .expect("Failed to create render target with depth");
 
-    let shader_source = include_str!("../shaders/depth_test.slang");
+    let shader_source = include_str!("../../shaders/depth_test.slang");
     let shader = ShaderModule::from_slang(device, shader_source).expect("Failed to create shader");
 
     let pipeline = RenderPipeline::new(
@@ -443,16 +346,4 @@ fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
 
     target.render(encoder).expect("Failed to render");
     target.read_to_cpu().expect("Failed to read pixels")
-}
-
-#[test]
-fn generate_depth_occlusion() {
-    let Some(device) = create_device() else {
-        eprintln!("Skipping: no GPU available");
-        return;
-    };
-
-    let pixels = render_depth_occlusion(&device, 64, 64);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots/depth_occlusion.png");
-    save_png(&path, 64, 64, &pixels);
 }
