@@ -1018,10 +1018,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 // ─── RWStructuredBuffer<T> typed variable assignment ──────────────────────────
 
-/// Verify that `goldy_dyn_scattered<T>(n)` can be assigned to a local
-/// `StorageBuffer<T>` variable (the cross-platform type alias).
-/// On Metal, `StorageBuffer<T>` resolves to `Ptr<T>`, on SPIRV/DX12 to
-/// `RWStructuredBuffer<T>`, ensuring the same shader code works everywhere.
+/// Verify `goldy_dyn_buf_ro` / `goldy_dyn_scattered` can be assigned to locals and used together.
+/// `goldy_dyn_buf_ro` returns `StructuredBuffer<T>` on DX12 (SRV) but `StorageBuffer<T>` on SPIRV/Metal;
+/// use `var` so Slang infers the correct type per target. Push constants: slot 0 = read buffer
+/// (`bindless_srv_index()` on DX12, same as `bindless_index()` on Vulkan), slot 1 = UAV.
 #[test]
 fn test_dyn_scattered_typed_variable_assignment() {
     const SHADER: &str = r#"
@@ -1032,7 +1032,7 @@ struct Pair { uint a; uint b; };
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
+    ReadOnlyBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
     StorageBuffer<Pair> output = goldy_dyn_scattered<Pair>(1);
     uint idx = id.x;
     if (idx >= 8) return;
@@ -1068,7 +1068,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&input_buf, &output_buf]);
+        // goldy_dyn_buf_ro uses SRV on DX12; goldy_dyn_scattered uses UAV
+        pass.set_push_constants_raw(&[
+            input_buf.bindless_srv_index().expect("srv"),
+            output_buf.bindless_index().expect("uav"),
+        ]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");

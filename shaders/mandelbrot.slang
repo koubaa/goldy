@@ -9,8 +9,8 @@ struct ViewUniforms {
     float _padding;
 };
 
-#define CENTER goldy_broadcast<ViewUniforms>(0).center
-#define ZOOM goldy_broadcast<ViewUniforms>(0).zoom
+#define CENTER goldy_dyn_broadcast<ViewUniforms>(0).center
+#define ZOOM goldy_dyn_broadcast<ViewUniforms>(0).zoom
 
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {

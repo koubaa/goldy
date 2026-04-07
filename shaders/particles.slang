@@ -10,8 +10,8 @@ struct ParticleParams {
     float _pad2;
 };
 
-#define TIME goldy_broadcast<ParticleParams>(0).time
-#define IS_SNOW goldy_broadcast<ParticleParams>(0).is_snow
+#define TIME goldy_dyn_broadcast<ParticleParams>(0).time
+#define IS_SNOW goldy_dyn_broadcast<ParticleParams>(0).is_snow
 
 [shader("vertex")]
 FullscreenVarying vs_main(FullscreenVertex input) {

@@ -165,7 +165,7 @@ pub(crate) struct ComputeAllocatorSlot {
 /// A logical D3D12 device with associated resources.
 #[allow(dead_code)]
 pub(crate) struct LogicalDevice {
-    pub device: Direct3D12::ID3D12Device,
+    pub device: Direct3D12::ID3D12Device10,
     pub adapter_id: u32,
     pub command_queue: Direct3D12::ID3D12CommandQueue,
     /// Legacy single allocator for non-compute paths (e.g. render target). Compute uses the pool.
@@ -282,7 +282,7 @@ pub(crate) struct RenderTargetState {
     /// Staging buffer for CPU readback (lazy-created on first read)
     pub staging_buffer: Option<Direct3D12::ID3D12Resource>,
     /// Command list for rendering
-    pub command_list: Direct3D12::ID3D12GraphicsCommandList,
+    pub command_list: Direct3D12::ID3D12GraphicsCommandList7,
     /// Track if we've rendered (for readback validation)
     pub has_rendered: bool,
 }
@@ -299,8 +299,8 @@ pub(crate) struct TextureState {
     pub srv_offset: u32,
     /// Bindless descriptor heap offset (same as srv_offset when bindless is enabled)
     pub bindless_offset: Option<u32>,
-    /// Current resource state (for subregion writes)
-    pub current_state: Direct3D12::D3D12_RESOURCE_STATES,
+    /// Last known layout for enhanced texture barriers (replaces legacy `current_state`).
+    pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
 }
 
 /// GPU sampler state.
@@ -320,7 +320,7 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 /// Per-frame synchronization resources for proper swapchain pipelining.
 #[allow(dead_code)]
 pub(crate) struct FrameSync {
-    pub command_list: Direct3D12::ID3D12GraphicsCommandList,
+    pub command_list: Direct3D12::ID3D12GraphicsCommandList7,
     pub command_allocator: Direct3D12::ID3D12CommandAllocator,
     pub fence_value: u64,
 }

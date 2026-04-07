@@ -26,7 +26,7 @@ Goldy uses access-pattern-based resource binding instead of traditional graphics
 ```rust
 pub enum DataAccess {
     /// Any thread, any address, read/write. No coherence assumptions.
-    /// Maps to StructuredBuffer, RWStructuredBuffer in shaders.
+    /// Maps to RWStructuredBuffer in shaders.
     Scattered,
     
     /// All threads read same address. Hardware broadcast optimization.
@@ -38,6 +38,8 @@ pub enum DataAccess {
 Choose based on access pattern:
 - **Scattered**: General-purpose storage (particles, compute data)
 - **Broadcast**: Uniform data (transforms, time, settings)
+
+For read-only input buffers, use `DataAccess::Scattered` on the Rust side but access via `goldy_dyn_buf_ro<T>()` in the shader. This tells the GPU the buffer won't be written, enabling hardware read cache optimizations (larger L1/L2 caches, bypassed coherency tracking).
 
 ## Writing Data
 

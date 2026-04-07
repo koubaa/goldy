@@ -11,11 +11,13 @@ use windows::Win32::Graphics::Direct3D12::*;
 /// Record render commands into a command list.
 /// This is shared between render_to_target and surface_render to avoid duplication.
 pub(super) fn record(
-    cmd: &ID3D12GraphicsCommandList,
+    cmd: &ID3D12GraphicsCommandList7,
     commands: &[RenderCommand],
     _device_handle: DeviceHandle,
     state: &Dx12State,
 ) {
+    // COM: same pointer as ID3D12GraphicsCommandList for method calls.
+    let cmd: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let mut current_vertex_stride = 24u32; // Default stride
     for command in commands {
         match command {

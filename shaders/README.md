@@ -191,7 +191,7 @@ device.register_library(ShaderLibrary::from_source("myutils", r#"
 
 | File | Description | Uses Module |
 |------|-------------|-------------|
-| `plasma.slang` | Classic demoscene plasma (uses `goldy_broadcast<T>()`) | ✓ `import goldy_exp` |
+| `plasma.slang` | Classic demoscene plasma (uses `goldy_dyn_broadcast<T>()`) | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
 | `gradient.slang` | Animated color gradient | ✓ `import goldy_exp` |
 | `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
@@ -311,7 +311,8 @@ struct TimeUniforms { float time; };
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
     // Unified access - works on SPIRV, DX12, and Metal!
-    float t = goldy_broadcast<TimeUniforms>(0).time;
+    // Rust side: pass.set_push_constants(&[uniform_buffer]);
+    float t = goldy_dyn_broadcast<TimeUniforms>(0).time;
     return float4(rainbow(t), 1.0);
 }
 ```
@@ -321,7 +322,8 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | Function | Access Pattern | Use For |
 |----------|----------------|---------|
 | `goldy_broadcast<T>(slot)` | All threads read same address | Uniforms, material params |
-| `goldy_scattered<T>(slot)` | Any thread, any address | Particle buffers, compute storage |
+| `goldy_scattered<T>(slot)` | Any thread, any address, read/write | Particle buffers, compute storage |
+| `goldy_dyn_buf_ro<T>(slot)` | Any thread, any address, read-only | Input buffers (hardware read cache) |
 | `goldy_interpolated<T>(slot)` | Hardware-filtered texture reads | Material textures |
 | `goldy_direct_spatial<T>(slot)` | Unfiltered read/write texture | Compute output, framebuffer effects |
 | `goldy_filter(slot)` | Sampler state for filtering | Texture sampling config |
@@ -357,7 +359,7 @@ Vulkan descriptor layout.
 
 | Binding | Access Pattern | What Hardware Does | Slang Types |
 |---------|----------------|-------------------|-------------|
-| 0 | **Scattered** | Any thread, any address, read/write | `StructuredBuffer<T>`, `RWStructuredBuffer<T>` |
+| 0 | **Scattered** | Any thread, any address (read/write or read-only) | `RWStructuredBuffer<T>`, `StructuredBuffer<T>` (NonWritable) |
 | 1 | **Broadcast** | All threads same address (cache optimized) | `ConstantBuffer<T>` |
 | 2 | **Interpolated** | Hardware filtering between neighbors | `Texture2D<T>` with sampler |
 | 3 | **Direct Spatial** | 2D/3D indexing, no filtering, read/write | `RWTexture2D<T>` |

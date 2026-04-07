@@ -2,6 +2,7 @@
 //!
 //! Handles window surface creation, presentation, and resize.
 
+use super::barriers;
 use super::render_commands;
 use super::types::{FrameSync, LogicalDevice, SurfaceState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::{depth_format_to_dxgi, dxgi_to_format};
@@ -156,7 +157,7 @@ pub(super) fn create(
                 &heap_properties,
                 D3D12_HEAP_FLAG_NONE,
                 &depth_desc,
-                D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                D3D12_RESOURCE_STATE_COMMON,
                 Some(&depth_clear),
                 &mut depth_tex,
             )
@@ -202,6 +203,8 @@ pub(super) fn create(
             )
         }
         .context("Failed to create command list")?;
+        let command_list: ID3D12GraphicsCommandList7 =
+            command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
         unsafe { command_list.Close() }.ok();
 
@@ -290,6 +293,7 @@ pub(super) fn render(
     let current_frame = surface.current_frame;
     let frame = &surface.frame_sync[current_frame];
     let cmd = &frame.command_list;
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let width = surface.width;
     let height = surface.height;
     let render_target = &surface.render_targets[image_index as usize];
@@ -297,22 +301,34 @@ pub(super) fn render(
 
     // Reset command allocator and list
     unsafe { frame.command_allocator.Reset() }.context("Failed to reset command allocator")?;
-    unsafe { cmd.Reset(&frame.command_allocator, None) }.context("Failed to reset command list")?;
+    unsafe { cmd_gfx.Reset(&frame.command_allocator, None) }
+        .context("Failed to reset command list")?;
 
-    // Transition to render target
-    let barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(render_target) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: D3D12_RESOURCE_STATE_PRESENT,
-                StateAfter: D3D12_RESOURCE_STATE_RENDER_TARGET,
-            }),
-        },
-    };
-    unsafe { cmd.ResourceBarrier(&[barrier]) };
+    // PRESENT -> RENDER_TARGET (enhanced barrier, per MS DirectX-Graphics-Samples).
+    // SYNC_NONE + NO_ACCESS: no preceding work on this resource in this command list.
+    let to_rt = barriers::texture_barrier_full(
+        render_target,
+        D3D12_BARRIER_SYNC_NONE,
+        D3D12_BARRIER_SYNC_RENDER_TARGET,
+        D3D12_BARRIER_ACCESS_NO_ACCESS,
+        D3D12_BARRIER_ACCESS_RENDER_TARGET,
+        D3D12_BARRIER_LAYOUT_PRESENT,
+        D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+    );
+    let mut start_barriers = vec![to_rt];
+    if let Some(ref depth_res) = surface.depth_texture {
+        start_barriers.push(barriers::texture_barrier_full(
+            depth_res,
+            D3D12_BARRIER_SYNC_NONE,
+            D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+            D3D12_BARRIER_ACCESS_NO_ACCESS,
+            D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+            D3D12_BARRIER_LAYOUT_COMMON,
+            D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+        ));
+    }
+    unsafe { barriers::barrier_textures(cmd, &start_barriers) };
+    unsafe { barriers::drop_texture_barriers(&mut start_barriers) };
 
     // Get RTV handle
     let rtv_handle = unsafe {
@@ -338,7 +354,7 @@ pub(super) fn render(
         .unwrap_or(1.0);
 
     unsafe {
-        cmd.ClearRenderTargetView(
+        cmd_gfx.ClearRenderTargetView(
             rtv_handle,
             &[clear_color.r, clear_color.g, clear_color.b, clear_color.a],
             None,
@@ -353,12 +369,12 @@ pub(super) fn render(
             handle
         };
         unsafe {
-            cmd.ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
-            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, Some(&dsv_handle));
+            cmd_gfx.ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
+            cmd_gfx.OMSetRenderTargets(1, Some(&rtv_handle), false, Some(&dsv_handle));
         }
     } else {
         unsafe {
-            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
+            cmd_gfx.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
         }
     }
 
@@ -378,8 +394,8 @@ pub(super) fn render(
         bottom: height as i32,
     };
     unsafe {
-        cmd.RSSetViewports(&[viewport]);
-        cmd.RSSetScissorRects(&[scissor]);
+        cmd_gfx.RSSetViewports(&[viewport]);
+        cmd_gfx.RSSetScissorRects(&[scissor]);
     }
 
     // Bind descriptor heaps for bindless rendering
@@ -389,7 +405,7 @@ pub(super) fn render(
         .context("Invalid device handle")?;
 
     unsafe {
-        cmd.SetDescriptorHeaps(&[
+        cmd_gfx.SetDescriptorHeaps(&[
             Some(logical_device.cbv_srv_uav_heap.clone()),
             Some(logical_device.sampler_heap.clone()),
         ]);
@@ -398,25 +414,24 @@ pub(super) fn render(
     // Execute render commands
     render_commands::record(cmd, commands, device_handle, state);
 
-    // Transition to present
-    let barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(render_target) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: D3D12_RESOURCE_STATE_RENDER_TARGET,
-                StateAfter: D3D12_RESOURCE_STATE_PRESENT,
-            }),
-        },
-    };
-    unsafe { cmd.ResourceBarrier(&[barrier]) };
+    // RENDER_TARGET -> PRESENT (enhanced barrier, per MS DirectX-Graphics-Samples).
+    // SYNC_NONE + NO_ACCESS: no subsequent work on this resource in this command list.
+    let mut end_barriers = vec![barriers::texture_barrier_full(
+        render_target,
+        D3D12_BARRIER_SYNC_RENDER_TARGET,
+        D3D12_BARRIER_SYNC_NONE,
+        D3D12_BARRIER_ACCESS_RENDER_TARGET,
+        D3D12_BARRIER_ACCESS_NO_ACCESS,
+        D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+        D3D12_BARRIER_LAYOUT_PRESENT,
+    )];
+    unsafe { barriers::barrier_textures(cmd, &end_barriers) };
+    unsafe { barriers::drop_texture_barriers(&mut end_barriers) };
 
     // Close and execute
-    unsafe { cmd.Close() }.context("Failed to close command list")?;
+    unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
 
-    let cmd_list: ID3D12CommandList = cmd.cast().context("Failed to cast command list")?;
+    let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     unsafe {
         logical_device
             .command_queue
@@ -616,7 +631,7 @@ pub(super) fn resize(
                 &heap_properties,
                 D3D12_HEAP_FLAG_NONE,
                 &depth_desc,
-                D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                D3D12_RESOURCE_STATE_COMMON,
                 Some(&depth_clear),
                 &mut depth_tex,
             )

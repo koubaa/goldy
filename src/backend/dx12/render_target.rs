@@ -2,6 +2,7 @@
 //!
 //! Handles creation, destruction, rendering, and readback of off-screen render targets.
 
+use super::barriers;
 use super::types::RenderTargetState;
 use super::utils::{depth_format_to_dxgi, format_to_dxgi};
 use super::{render_commands, DeviceHandle, Dx12State, RenderTargetHandle};
@@ -80,7 +81,7 @@ pub(super) fn create_with_depth(
             &heap_properties,
             D3D12_HEAP_FLAG_NONE,
             &resource_desc,
-            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_COMMON,
             Some(&clear_value),
             &mut texture,
         )
@@ -137,7 +138,7 @@ pub(super) fn create_with_depth(
                 &heap_properties,
                 D3D12_HEAP_FLAG_NONE,
                 &depth_desc,
-                D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                D3D12_RESOURCE_STATE_COMMON,
                 Some(&depth_clear),
                 &mut depth_tex,
             )
@@ -174,6 +175,8 @@ pub(super) fn create_with_depth(
         )
     }
     .context("Failed to create command list")?;
+    let command_list: ID3D12GraphicsCommandList7 =
+        command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
     // Close the command list initially
     unsafe { command_list.Close() }.ok();
@@ -242,10 +245,11 @@ pub(super) fn render(
     }
 
     let cmd = &render_target.command_list;
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let width = render_target.width;
     let height = render_target.height;
 
-    unsafe { cmd.Reset(&logical_device.command_allocator, None) }
+    unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }
         .context("Failed to reset command list")?;
 
     // Get RTV handle
@@ -271,9 +275,36 @@ pub(super) fn render(
         })
         .unwrap_or(1.0);
 
+    // COMMON -> render target layout for color + optional depth.
+    // SYNC_NONE + NO_ACCESS: no preceding work on these resources in this command list.
+    let color_tex = barriers::texture_barrier_full(
+        &render_target.texture,
+        D3D12_BARRIER_SYNC_NONE,
+        D3D12_BARRIER_SYNC_RENDER_TARGET,
+        D3D12_BARRIER_ACCESS_NO_ACCESS,
+        D3D12_BARRIER_ACCESS_RENDER_TARGET,
+        D3D12_BARRIER_LAYOUT_COMMON,
+        D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+    );
+    let mut initial_tex_barriers = vec![color_tex];
+    if let Some(ref depth_res) = render_target.depth_texture {
+        initial_tex_barriers.push(barriers::texture_barrier_full(
+            depth_res,
+            D3D12_BARRIER_SYNC_NONE,
+            D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+            D3D12_BARRIER_ACCESS_NO_ACCESS,
+            D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+            D3D12_BARRIER_LAYOUT_COMMON,
+            D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+        ));
+    }
+    unsafe {
+        barriers::barrier_textures(cmd, &initial_tex_barriers);
+    }
+
     // Clear color and set render target (with optional depth/stencil)
     unsafe {
-        cmd.ClearRenderTargetView(
+        cmd_gfx.ClearRenderTargetView(
             rtv_handle,
             &[clear_color.r, clear_color.g, clear_color.b, clear_color.a],
             None,
@@ -287,12 +318,12 @@ pub(super) fn render(
             handle
         };
         unsafe {
-            cmd.ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
-            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, Some(&dsv_handle));
+            cmd_gfx.ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
+            cmd_gfx.OMSetRenderTargets(1, Some(&rtv_handle), false, Some(&dsv_handle));
         }
     } else {
         unsafe {
-            cmd.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
+            cmd_gfx.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
         }
     }
 
@@ -312,8 +343,8 @@ pub(super) fn render(
         bottom: height as i32,
     };
     unsafe {
-        cmd.RSSetViewports(&[viewport]);
-        cmd.RSSetScissorRects(&[scissor]);
+        cmd_gfx.RSSetViewports(&[viewport]);
+        cmd_gfx.RSSetScissorRects(&[scissor]);
     }
 
     // Bind descriptor heaps for bindless rendering
@@ -323,7 +354,7 @@ pub(super) fn render(
         .context("Invalid device handle")?;
 
     unsafe {
-        cmd.SetDescriptorHeaps(&[
+        cmd_gfx.SetDescriptorHeaps(&[
             Some(logical_device.cbv_srv_uav_heap.clone()),
             Some(logical_device.sampler_heap.clone()),
         ]);
@@ -332,25 +363,22 @@ pub(super) fn render(
     // Execute render commands
     render_commands::record(cmd, commands, device_handle, state);
 
-    // Transition to copy source for potential readback
-    let barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(&render_target.texture) },
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: D3D12_RESOURCE_STATE_RENDER_TARGET,
-                StateAfter: D3D12_RESOURCE_STATE_COPY_SOURCE,
-            }),
-        },
-    };
-    unsafe { cmd.ResourceBarrier(&[barrier]) };
+    // RENDER_TARGET -> COPY_SOURCE for potential readback
+    let to_copy = barriers::texture_barrier_full(
+        &render_target.texture,
+        D3D12_BARRIER_SYNC_RENDER_TARGET,
+        D3D12_BARRIER_SYNC_COPY,
+        D3D12_BARRIER_ACCESS_RENDER_TARGET,
+        D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+    );
+    unsafe { barriers::barrier_textures(cmd, &[to_copy]) };
 
     // Close and execute
-    unsafe { cmd.Close() }.context("Failed to close command list")?;
+    unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
 
-    let cmd_list: ID3D12CommandList = cmd.cast().context("Failed to cast command list")?;
+    let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     unsafe {
         logical_device
             .command_queue

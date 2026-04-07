@@ -95,7 +95,9 @@ impl Buffer {
 /// Describes how threads will access the buffer, determining hardware optimizations.
 pub enum DataAccess {
     /// Any thread, any address, read/write. No coherence assumptions.
-    /// Maps to StructuredBuffer, RWStructuredBuffer in shaders.
+    /// Maps to RWStructuredBuffer in shaders (goldy_scattered/goldy_dyn_scattered).
+    /// For read-only access, use goldy_dyn_buf_ro<T>() in the shader to enable
+    /// hardware read cache optimizations (StructuredBuffer/NonWritable SSBO/const device*).
     Scattered,
     
     /// All threads read same address. Hardware broadcast optimization.
