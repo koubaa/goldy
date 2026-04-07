@@ -47,29 +47,49 @@ impl Instance {
     /// Create a new Goldy instance.
     pub fn new() -> Result<Self> {
         let backend = backend::create_shared_backend()?;
+        let backend_type = backend.lock().unwrap().backend_type();
+        tracing::info!(?backend_type, "Goldy instance created");
         Ok(Self { backend })
     }
 
     /// Enumerate available GPU adapters.
     pub fn enumerate_adapters(&self) -> Vec<Adapter> {
         let backend = self.backend.lock().unwrap();
-        backend
+        let adapters: Vec<Adapter> = backend
             .enumerate_adapters()
             .into_iter()
             .map(|info| Adapter { info })
-            .collect()
+            .collect();
+        tracing::debug!(count = adapters.len(), "Enumerated GPU adapters");
+        for adapter in &adapters {
+            tracing::debug!(
+                id = adapter.info.id,
+                name = %adapter.info.name,
+                vendor = %adapter.info.vendor,
+                device_type = ?adapter.info.device_type,
+                "  adapter"
+            );
+        }
+        adapters
     }
 
     /// Create a device on the first adapter matching the given type.
     pub fn create_device(&self, preferred_type: DeviceType) -> Result<Device> {
+        tracing::info!(?preferred_type, "Requesting GPU device");
         let adapters = self.enumerate_adapters();
 
-        // Find preferred adapter
         let adapter = adapters
             .iter()
             .find(|a| a.info.device_type == preferred_type)
             .or_else(|| adapters.first())
             .context("No GPU adapters available")?;
+
+        tracing::info!(
+            adapter_id = adapter.info.id,
+            adapter_name = %adapter.info.name,
+            adapter_type = ?adapter.info.device_type,
+            "Selected GPU adapter"
+        );
 
         self.create_device_for_adapter(adapter.info.id)
     }
@@ -80,6 +100,7 @@ impl Instance {
     /// (experimental) shader library registered. You can register additional
     /// libraries using [`Device::register_library`].
     pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
+        tracing::debug!(adapter_id, "Creating device for adapter");
         let mut backend = self.backend.lock().unwrap();
 
         let device_type = backend
@@ -91,9 +112,10 @@ impl Instance {
 
         let handle = backend.create_device(adapter_id)?;
 
-        // Create registry with built-in goldy_exp library
         let mut registry = ShaderLibraryRegistry::new();
         registry.register(ShaderLibrary::goldy_experimental())?;
+
+        tracing::info!(adapter_id, ?device_type, "GPU device created");
 
         Ok(Device {
             backend: Arc::clone(&self.backend),
@@ -388,6 +410,7 @@ impl Device {
     /// // Now shaders can use: import myutils;
     /// ```
     pub fn register_library(&self, library: ShaderLibrary) -> Result<()> {
+        tracing::debug!(library_name = %library.name(), "Registering shader library");
         self.library_registry.lock().unwrap().register(library)
     }
 
@@ -470,6 +493,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
+        tracing::debug!(adapter_id = self.adapter_id, "Destroying GPU device");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_device(self.handle);
     }

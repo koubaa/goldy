@@ -145,7 +145,7 @@ impl ApplicationHandler for App {
 
             // Initialize GPU resources and create surface
             if let Err(e) = self.init_gpu(&window) {
-                eprintln!("Failed to initialize GPU: {}", e);
+                tracing::error!("Failed to initialize GPU: {}", e);
             }
             window.request_redraw();
         }
@@ -163,7 +163,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
+                    tracing::error!("Render error: {}", e);
                 }
                 // Request another frame for animation
                 if let Some(window) = &self.window {

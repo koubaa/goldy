@@ -328,7 +328,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
+                    tracing::error!("Render error: {}", e);
                 }
                 self.window.as_ref().unwrap().request_redraw();
             }

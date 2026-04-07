@@ -63,10 +63,16 @@ impl RenderPipeline {
         fragment_shader: &ShaderModule,
         desc: &RenderPipelineDesc,
     ) -> Result<Self> {
+        tracing::debug!(
+            target_format = ?desc.target_format,
+            topology = ?desc.topology,
+            has_depth = desc.depth_stencil.is_some(),
+            "Creating render pipeline"
+        );
+
         let mut backend = device.backend.lock().unwrap();
 
         let handle = if desc.depth_stencil.is_some() {
-            // Use extended pipeline creation with depth/stencil support
             backend.create_pipeline_with_depth(
                 device.handle,
                 vertex_shader.handle,
@@ -77,7 +83,6 @@ impl RenderPipeline {
                 desc.depth_stencil.as_ref(),
             )?
         } else {
-            // Simple pipeline creation (no depth)
             backend.create_pipeline(
                 device.handle,
                 vertex_shader.handle,
@@ -88,6 +93,8 @@ impl RenderPipeline {
             )?
         };
 
+        tracing::debug!("Render pipeline created");
+
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,
@@ -97,6 +104,7 @@ impl RenderPipeline {
 
 impl Drop for RenderPipeline {
     fn drop(&mut self) {
+        tracing::trace!("Destroying render pipeline");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_pipeline(self.handle);
     }

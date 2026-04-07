@@ -138,6 +138,14 @@ impl ShaderModule {
         defines: &[(&str, &str)],
         optimization_level: crate::types::OptimizationLevel,
     ) -> Result<Self> {
+        tracing::debug!(
+            source_len = source.len(),
+            extra_paths = extra_paths.len(),
+            defines = defines.len(),
+            ?optimization_level,
+            "Compiling shader module"
+        );
+
         let library_paths = device
             .get_shader_search_paths()
             .context("Failed to prepare shader library paths")?;
@@ -159,6 +167,8 @@ impl ShaderModule {
             optimization_level,
         )?;
 
+        tracing::debug!("Shader module compiled");
+
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,
@@ -168,6 +178,7 @@ impl ShaderModule {
 
 impl Drop for ShaderModule {
     fn drop(&mut self) {
+        tracing::trace!("Destroying shader module");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_shader(self.handle);
     }

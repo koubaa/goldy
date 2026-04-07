@@ -179,7 +179,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
+                    tracing::error!("Render error: {}", e);
                 }
             }
             WindowEvent::Resized(new_size) => {

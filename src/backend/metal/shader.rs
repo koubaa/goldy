@@ -27,6 +27,7 @@ pub(super) fn parse_numthreads(source: &str) -> Option<[u32; 3]> {
 }
 
 /// Compile a shader stage to MSL and create a Metal library.
+#[allow(clippy::too_many_arguments)] // Mirrors Slang compile API surface.
 fn compile_stage_with_reflection(
     slang_compiler: &SlangCompiler,
     device: &MTLDevice,
@@ -175,6 +176,7 @@ pub(super) fn ensure_stage_compiled(
 }
 
 /// Create a shader handle (compilation deferred to pipeline creation).
+#[allow(clippy::too_many_arguments)] // Backend entry point; parameters map 1:1 to GpuBackend::create_shader.
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, super::types::LogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
