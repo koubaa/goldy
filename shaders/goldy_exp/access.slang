@@ -54,24 +54,27 @@ implementing goldy_exp;
 // =============================================================================
 // Cross-platform buffer type aliases
 //
-// On SPIRV/DX12, RWStructuredBuffer<T> is the native type for storage buffers.
-// On Metal, Slang cannot construct RWStructuredBuffer<T> from device pointers;
-// the equivalent is Ptr<T, Access.ReadWrite, AddressSpace.Device> which supports
-// the same subscript operator. StorageBuffer<T> normalizes this across platforms.
+// StorageBuffer<T>  - Read/write scattered access (any thread, any address)
+// ReadOnlyBuffer<T> - Read-only scattered access (hardware read cache path)
+//
+// On SPIRV/DX12, these map to RWStructuredBuffer<T> and StructuredBuffer<T>.
+// On Metal, these map to device T* and const device T* respectively.
+// Metal cannot construct RWStructuredBuffer<T> from device pointers, so these
+// aliases normalize the types across platforms.
 //
 // Usage:
-//   StorageBuffer<Particle> buf = goldy_dyn_scattered<Particle>(0);
-//   buf[idx] = ...;
-//
-// Alternatively, use `var` for type inference:
-//   var buf = goldy_dyn_scattered<Particle>(0);
+//   var buf = goldy_dyn_scattered<Particle>(0);   // read/write
+//   var input = goldy_dyn_buf_ro<Particle>(0);     // read-only (hardware hint)
+//   buf[idx] = input[idx] + 1;
 // =============================================================================
 
 #if defined(__METAL__)
 public typealias StorageBuffer<T> = Ptr<T, Access.ReadWrite, AddressSpace.Device>;
+public typealias ReadOnlyBuffer<T> = Ptr<T, Access.Read, AddressSpace.Device>;
 // ByteAddressView is defined as a struct later in the Metal section.
 #else
 public typealias StorageBuffer<T> = RWStructuredBuffer<T>;
+public typealias ReadOnlyBuffer<T> = StructuredBuffer<T>;
 public typealias ByteAddressView = RWByteAddressBuffer;
 #endif
 
@@ -172,11 +175,11 @@ public StorageBuffer<T> goldy_dyn_scattered<T>(uint n)
 }
 
 /// Dynamic read-only scattered access - reads slot index from gGoldyDynamic.slots[n].
-/// On SPIRV, SSBOs are inherently read-write; returns RWStructuredBuffer for API
-/// consistency with DX12 (which also returns RWStructuredBuffer to avoid SRV barriers).
-public StorageBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+/// Returns StructuredBuffer<T> which Slang emits as a NonWritable SSBO in SPIR-V,
+/// enabling read cache optimizations and bypassed coherency tracking.
+public ReadOnlyBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
-    return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<RWStructuredBuffer<T>>();
+    return g_GoldyStorageHeap[gGoldyDynamic.slots[n]].asOpaqueDescriptor<StructuredBuffer<T>>();
 }
 
 /// Dynamic broadcast access - reads slot index from gGoldyDynamic.slots[n].
@@ -258,9 +261,8 @@ public StorageBuffer<T> goldy_dyn_scattered<T>(uint n)
 }
 
 /// Dynamic read-only scattered access - reads slot index from push constants.
-/// On DX12, uses StructuredBuffer<T> (SRV). Requires D3D12 enhanced barriers and
-/// push constants with `bindless_srv_index()` for the slot (e.g. `set_push_constants_raw`).
-public StructuredBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+/// On DX12, uses StructuredBuffer<T> (SRV descriptor), enabling read cache optimizations.
+public ReadOnlyBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
     uint slot = __goldy_get_slot(n);
     DescriptorHandle<StructuredBuffer<T>> handle;
@@ -377,12 +379,12 @@ public StorageBuffer<T> goldy_dyn_scattered<T>(uint n)
 }
 
 /// Dynamic read-only scattered access from push constant slot n.
-/// Returns StorageBuffer<T> for API consistency (read-only intent is caller's contract).
-public StorageBuffer<T> goldy_dyn_buf_ro<T>(uint n)
+/// Returns const device T* (read-only), enabling Metal read cache optimizations.
+public ReadOnlyBuffer<T> goldy_dyn_buf_ro<T>(uint n)
 {
     uint slot = gGoldyDynamic.slots[n];
     uint* basePtr = gGoldy.storageBuffers[slot];
-    return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
+    return (Ptr<T, Access.Read, AddressSpace.Device>)basePtr;
 }
 
 /// Static scattered access - read/write storage buffer by compile-time slot index.

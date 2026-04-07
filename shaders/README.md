@@ -321,7 +321,8 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | Function | Access Pattern | Use For |
 |----------|----------------|---------|
 | `goldy_broadcast<T>(slot)` | All threads read same address | Uniforms, material params |
-| `goldy_scattered<T>(slot)` | Any thread, any address | Particle buffers, compute storage |
+| `goldy_scattered<T>(slot)` | Any thread, any address, read/write | Particle buffers, compute storage |
+| `goldy_dyn_buf_ro<T>(slot)` | Any thread, any address, read-only | Input buffers (hardware read cache) |
 | `goldy_interpolated<T>(slot)` | Hardware-filtered texture reads | Material textures |
 | `goldy_direct_spatial<T>(slot)` | Unfiltered read/write texture | Compute output, framebuffer effects |
 | `goldy_filter(slot)` | Sampler state for filtering | Texture sampling config |
@@ -357,7 +358,7 @@ Vulkan descriptor layout.
 
 | Binding | Access Pattern | What Hardware Does | Slang Types |
 |---------|----------------|-------------------|-------------|
-| 0 | **Scattered** | Any thread, any address, read/write | `StructuredBuffer<T>`, `RWStructuredBuffer<T>` |
+| 0 | **Scattered** | Any thread, any address (read/write or read-only) | `RWStructuredBuffer<T>`, `StructuredBuffer<T>` (NonWritable) |
 | 1 | **Broadcast** | All threads same address (cache optimized) | `ConstantBuffer<T>` |
 | 2 | **Interpolated** | Hardware filtering between neighbors | `Texture2D<T>` with sampler |
 | 3 | **Direct Spatial** | 2D/3D indexing, no filtering, read/write | `RWTexture2D<T>` |
