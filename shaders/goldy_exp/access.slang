@@ -19,7 +19,7 @@
 // Push constants are automatically declared when you import goldy_exp.
 // No additional declarations (like GOLDY_DECLARE_DYNAMIC) are needed in user shaders.
 //
-// == Usage: Static Slots ==
+// == Usage: Push Constants (recommended) ==
 //
 //   import goldy_exp;
 //   
@@ -27,7 +27,8 @@
 //   
 //   [shader("fragment")]
 //   float4 fs_main(FullscreenVarying input) : SV_Target {
-//       float t = goldy_broadcast<MyUniforms>(0).time;
+//       // Rust: pass.set_push_constants(&[uniform_buffer]);
+//       float t = goldy_dyn_broadcast<MyUniforms>(0).time;
 //       return float4(t, 0, 0, 1);
 //   }
 //

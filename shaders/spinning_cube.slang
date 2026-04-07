@@ -7,7 +7,7 @@ struct TimeUniforms {
     float time;
 };
 
-#define TIME goldy_broadcast<TimeUniforms>(0).time
+#define TIME goldy_dyn_broadcast<TimeUniforms>(0).time
 
 [shader("vertex")]
 FullscreenVarying vs_main(FullscreenVertex input) {

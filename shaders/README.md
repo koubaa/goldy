@@ -191,7 +191,7 @@ device.register_library(ShaderLibrary::from_source("myutils", r#"
 
 | File | Description | Uses Module |
 |------|-------------|-------------|
-| `plasma.slang` | Classic demoscene plasma (uses `goldy_broadcast<T>()`) | ✓ `import goldy_exp` |
+| `plasma.slang` | Classic demoscene plasma (uses `goldy_dyn_broadcast<T>()`) | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
 | `gradient.slang` | Animated color gradient | ✓ `import goldy_exp` |
 | `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
@@ -311,7 +311,8 @@ struct TimeUniforms { float time; };
 [shader("fragment")]
 float4 fs_main(FullscreenVarying input) : SV_Target {
     // Unified access - works on SPIRV, DX12, and Metal!
-    float t = goldy_broadcast<TimeUniforms>(0).time;
+    // Rust side: pass.set_push_constants(&[uniform_buffer]);
+    float t = goldy_dyn_broadcast<TimeUniforms>(0).time;
     return float4(rainbow(t), 1.0);
 }
 ```

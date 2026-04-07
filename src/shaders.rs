@@ -128,10 +128,9 @@ mod tests {
     /// Verify PLASMA structure
     #[test]
     fn test_plasma_structure() {
-        // Plasma should use goldy_broadcast for unified cross-platform access
         assert!(
-            PLASMA.contains("goldy_broadcast"),
-            "PLASMA should use goldy_broadcast<T>() for unified access"
+            PLASMA.contains("goldy_dyn_broadcast"),
+            "PLASMA should use goldy_dyn_broadcast<T>() for push-constant-based access"
         );
         assert!(
             PLASMA.contains("import goldy_exp"),

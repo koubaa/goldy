@@ -328,6 +328,7 @@ pub(super) fn render(
         ));
     }
     unsafe { barriers::barrier_textures(cmd, &start_barriers) };
+    unsafe { barriers::drop_texture_barriers(&mut start_barriers) };
 
     // Get RTV handle
     let rtv_handle = unsafe {
@@ -415,7 +416,7 @@ pub(super) fn render(
 
     // RENDER_TARGET -> PRESENT (enhanced barrier, per MS DirectX-Graphics-Samples).
     // SYNC_NONE + NO_ACCESS: no subsequent work on this resource in this command list.
-    let to_present = barriers::texture_barrier_full(
+    let mut end_barriers = vec![barriers::texture_barrier_full(
         render_target,
         D3D12_BARRIER_SYNC_RENDER_TARGET,
         D3D12_BARRIER_SYNC_NONE,
@@ -423,8 +424,9 @@ pub(super) fn render(
         D3D12_BARRIER_ACCESS_NO_ACCESS,
         D3D12_BARRIER_LAYOUT_RENDER_TARGET,
         D3D12_BARRIER_LAYOUT_PRESENT,
-    );
-    unsafe { barriers::barrier_textures(cmd, &[to_present]) };
+    )];
+    unsafe { barriers::barrier_textures(cmd, &end_barriers) };
+    unsafe { barriers::drop_texture_barriers(&mut end_barriers) };
 
     // Close and execute
     unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
