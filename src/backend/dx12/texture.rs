@@ -76,7 +76,6 @@ pub(super) fn create(
         Flags: resource_flags,
     };
 
-    // Enhanced barriers: COMMON initial layout; transitions use Barrier().
     let initial_state = D3D12_RESOURCE_STATE_COMMON;
 
     let mut resource: Option<ID3D12Resource> = None;
@@ -168,6 +167,71 @@ pub(super) fn create(
         Some(srv_offset)
     };
 
+    let last_layout = if is_storage {
+        // Storage textures need explicit layout transition from COMMON to UAV-compatible
+        // layout. Global compute barriers don't change texture layouts, so this must
+        // happen once at creation. Without this, UAV writes via compute shaders may
+        // silently fail on some drivers when the texture is still in COMMON layout.
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle for storage texture initial barrier")?;
+
+        unsafe { logical_device.command_allocator.Reset() }
+            .context("Failed to reset command allocator for texture init barrier")?;
+        let init_cmd: ID3D12GraphicsCommandList = unsafe {
+            logical_device.device.CreateCommandList(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                &logical_device.command_allocator,
+                None,
+            )
+        }
+        .context("Failed to create init barrier command list")?;
+        let init_cmd7: ID3D12GraphicsCommandList7 =
+            init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
+
+        let b = barriers::texture_barrier_full(
+            &resource,
+            D3D12_BARRIER_SYNC_NONE,
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            D3D12_BARRIER_ACCESS_NO_ACCESS,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_LAYOUT_COMMON,
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+        );
+        unsafe {
+            barriers::barrier_textures(&init_cmd7, &[b]);
+            init_cmd.Close()
+        }
+        .context("Failed to close init barrier command list")?;
+
+        let cmd_list: ID3D12CommandList = init_cmd
+            .cast()
+            .context("Failed to cast init command list")?;
+        unsafe {
+            logical_device
+                .command_queue
+                .ExecuteCommandLists(&[Some(cmd_list)]);
+        }
+
+        let fence_value = logical_device.fence_value;
+        unsafe {
+            logical_device
+                .command_queue
+                .Signal(&logical_device.fence, fence_value)
+        }
+        .context("Failed to signal fence for init barrier")?;
+        super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
+        if let Some(dev) = state.devices.get_mut(&device_handle) {
+            dev.fence_value += 1;
+        }
+
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+    } else {
+        D3D12_BARRIER_LAYOUT_COMMON
+    };
+
     state.textures.insert(
         handle,
         TextureState {
@@ -178,7 +242,7 @@ pub(super) fn create(
             resource,
             srv_offset,
             bindless_offset,
-            last_layout: D3D12_BARRIER_LAYOUT_COMMON,
+            last_layout,
         },
     );
 

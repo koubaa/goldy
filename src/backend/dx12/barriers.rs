@@ -99,16 +99,6 @@ pub unsafe fn drop_texture_barriers(barriers: &mut [D3D12_TEXTURE_BARRIER]) {
     }
 }
 
-/// Release COM references inside buffer barriers (same rationale as texture variant).
-///
-/// # Safety
-/// Each barrier's `pResource` must not be used after this call.
-pub unsafe fn drop_buffer_barriers(barriers: &mut [D3D12_BUFFER_BARRIER]) {
-    for b in barriers {
-        ManuallyDrop::drop(&mut b.pResource);
-    }
-}
-
 /// "All subresources" range for a texture barrier.
 /// When `NumMipLevels == 0`, `IndexOrFirstMipLevel` is a subresource index;
 /// `0xffffffff` means "all subresources" (same as `CD3DX12_BARRIER_SUBRESOURCE_RANGE(0xffffffff)`).

@@ -220,12 +220,15 @@ pub(super) fn submit(
                 workgroups_y,
                 workgroups_z,
             } => {
-                // UAV memory barrier so previous dispatch's writes are visible
+                // Global barrier: previous dispatch's UAV writes visible to next dispatch's UAV+SRV reads
                 let g = D3D12_GLOBAL_BARRIER {
                     SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    AccessAfter: D3D12_BARRIER_ACCESS(
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                    ),
                 };
                 unsafe { barriers::barrier_globals(&command_list7, &[g]) };
                 unsafe {
@@ -246,7 +249,10 @@ pub(super) fn submit(
                     SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    AccessAfter: D3D12_BARRIER_ACCESS(
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                    ),
                 };
                 unsafe { barriers::barrier_globals(&command_list7, &[g]) };
 

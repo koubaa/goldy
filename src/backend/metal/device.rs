@@ -9,8 +9,8 @@ use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{
-    Device as MTLDevice, HeapDescriptor, MTLCPUCacheMode, MTLHeapType, MTLResourceOptions,
-    MTLStorageMode,
+    Device as MTLDevice, HeapDescriptor, MTLCPUCacheMode, MTLHazardTrackingMode, MTLHeapType,
+    MTLResourceOptions, MTLStorageMode,
 };
 
 /// Enumerate available Metal devices/adapters.
@@ -76,6 +76,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     buffer_heap_desc.set_storage_mode(MTLStorageMode::Shared);
     buffer_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
     buffer_heap_desc.set_heap_type(MTLHeapType::Automatic);
+    buffer_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
     let buffer_heap = device.new_heap(&buffer_heap_desc);
     let heap_allocator = HeapAllocator::new(device.clone(), buffer_heap, heap_size);
     tracing::info!(
@@ -89,6 +90,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     texture_heap_desc.set_storage_mode(MTLStorageMode::Shared);
     texture_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
     texture_heap_desc.set_heap_type(MTLHeapType::Automatic);
+    texture_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
     let texture_heap_raw = device.new_heap(&texture_heap_desc);
     let texture_heap = TextureHeapAllocator::new(device.clone(), texture_heap_raw, heap_size);
     tracing::info!("Created texture heap (size={}MB)", heap_size / 1024 / 1024);

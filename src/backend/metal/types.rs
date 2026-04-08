@@ -198,6 +198,7 @@ impl HeapAllocator {
         desc.set_storage_mode(mtl::MTLStorageMode::Shared);
         desc.set_cpu_cache_mode(mtl::MTLCPUCacheMode::DefaultCache);
         desc.set_heap_type(mtl::MTLHeapType::Automatic);
+        desc.set_hazard_tracking_mode(mtl::MTLHazardTrackingMode::Tracked);
         self.device.new_heap(&desc)
     }
 }
@@ -295,6 +296,7 @@ impl TextureHeapAllocator {
         desc.set_storage_mode(mtl::MTLStorageMode::Shared);
         desc.set_cpu_cache_mode(mtl::MTLCPUCacheMode::DefaultCache);
         desc.set_heap_type(mtl::MTLHeapType::Automatic);
+        desc.set_hazard_tracking_mode(mtl::MTLHazardTrackingMode::Tracked);
         self.device.new_heap(&desc)
     }
 }

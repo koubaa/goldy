@@ -5,8 +5,9 @@
 mod common;
 
 use goldy::{
+    types::{SpatialAccess, TextureFlags, TextureFormat},
     Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
-    ShaderModule,
+    ShaderModule, Texture,
 };
 
 /// Simple compute shader that doubles each value in a buffer.
@@ -1164,4 +1165,69 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             i, i, result[i]
         );
     }
+}
+
+#[test]
+fn test_compute_write_to_texture() {
+    const SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(0);
+    uint2 dims;
+    output.GetDimensions(dims.x, dims.y);
+    if (id.x < dims.x && id.y < dims.y) {
+        output[id.xy] = float4(1.0, 0.0, 0.0, 1.0);
+    }
+}
+"#;
+
+    let instance = Instance::new().expect("instance");
+    let device = instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .or_else(|_| instance.create_device(DeviceType::Other))
+        .expect("device");
+
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    let width = 16u32;
+    let height = 16u32;
+    let texture = Texture::new(
+        &device,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        SpatialAccess::Direct,
+        TextureFlags::COPY_SRC,
+    )
+    .expect("texture");
+
+    let wg_x = (width + 7) / 8;
+    let wg_y = (height + 7) / 8;
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[texture.bindless_index().expect("tex bindless")]);
+        pass.dispatch(wg_x, wg_y, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; (width * height * 4) as usize];
+    texture.read_to_cpu(&mut output).expect("readback");
+
+    let nonzero = output.iter().filter(|&&b| b != 0).count();
+    assert!(
+        nonzero > 0,
+        "Texture readback is all zeros after compute write ({} bytes)",
+        output.len()
+    );
+    assert_eq!(output[0], 255, "R channel should be 255 (solid red)");
+    assert_eq!(output[1], 0, "G channel should be 0");
+    assert_eq!(output[2], 0, "B channel should be 0");
+    assert_eq!(output[3], 255, "A channel should be 255");
 }
