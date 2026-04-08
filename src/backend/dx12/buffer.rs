@@ -601,7 +601,7 @@ pub(super) fn write(
             D3D12_BARRIER_SYNC_COPY,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_ACCESS_COPY_DEST,
-            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_ACCESS_COMMON,
         );
         unsafe {
             barriers::barrier_buffers(&cmd7, &[b_to_copy]);
@@ -809,11 +809,10 @@ pub(super) fn read_to_cpu(
 
 /// GPU-side zero fill using ClearUnorderedAccessViewUint.
 ///
-/// For simple buffers (stride <= 4), clears using the buffer's own UAV descriptor.
-/// For structured buffers (stride > 4), creates a temporary R32_UINT UAV at the
-/// device's scratch descriptor slot so every DWORD is cleared. The buffer's own
-/// structured descriptor is never modified; the scratch slot persists as R32_UINT
-/// until the GPU executes the clear command.
+/// Always creates a R32_UINT UAV (stride=0) so ClearUnorderedAccessViewUint works
+/// regardless of the buffer's native structured stride. The UAV is created in both
+/// the shader-visible heap (GPU handle) and the non-shader-visible cpu_clear_heap
+/// (CPU handle), as required by the D3D12 API.
 pub(super) fn uav_clear(
     device: &super::types::LogicalDevice,
     buffer: &BufferState,
@@ -821,68 +820,54 @@ pub(super) fn uav_clear(
     offset: u64,
     clear_size: u64,
 ) -> Result<()> {
-    let stride = buffer.element_stride.unwrap_or(4);
-    let needs_scratch = stride > 4;
+    let scratch = device.scratch_clear_uav_offset;
+    let num_u32s = (buffer.size / 4) as u32;
 
-    let (gpu_handle, clear_cpu_src) = if needs_scratch {
-        let scratch = device.scratch_clear_uav_offset;
-        let num_u32s = (buffer.size / 4) as u32;
-        let raw_uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-            Format: DXGI_FORMAT_R32_UINT,
-            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
-            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                Buffer: D3D12_BUFFER_UAV {
-                    FirstElement: 0,
-                    NumElements: num_u32s,
-                    StructureByteStride: 0,
-                    CounterOffsetInBytes: 0,
-                    Flags: D3D12_BUFFER_UAV_FLAG_NONE,
-                },
+    let raw_uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+        Format: DXGI_FORMAT_R32_UINT,
+        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+            Buffer: D3D12_BUFFER_UAV {
+                FirstElement: 0,
+                NumElements: num_u32s,
+                StructureByteStride: 0,
+                CounterOffsetInBytes: 0,
+                Flags: D3D12_BUFFER_UAV_FLAG_NONE,
             },
-        };
-        let scratch_cpu = unsafe {
-            let mut h = device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
-            h.ptr += (scratch * device.cbv_srv_uav_descriptor_size) as usize;
-            h
-        };
-        unsafe {
-            device.device.CreateUnorderedAccessView(
-                &buffer.resource,
-                None,
-                Some(&raw_uav_desc),
-                scratch_cpu,
-            );
-        }
-        let gpu = unsafe {
-            let mut h = device.cbv_srv_uav_heap.GetGPUDescriptorHandleForHeapStart();
-            h.ptr += (scratch as u64) * (device.cbv_srv_uav_descriptor_size as u64);
-            h
-        };
-        (gpu, scratch_cpu)
-    } else {
-        let uav_offset = buffer
-            .bindless_offset
-            .context("Storage buffer has no UAV descriptor for clear")?;
-        let gpu = unsafe {
-            let mut h = device.cbv_srv_uav_heap.GetGPUDescriptorHandleForHeapStart();
-            h.ptr += (uav_offset as u64) * (device.cbv_srv_uav_descriptor_size as u64);
-            h
-        };
-        let cpu = unsafe {
-            let mut h = device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
-            h.ptr += (uav_offset * device.cbv_srv_uav_descriptor_size) as usize;
-            h
-        };
-        (gpu, cpu)
+        },
     };
 
-    let cpu_dst = unsafe { device.cpu_clear_heap.GetCPUDescriptorHandleForHeapStart() };
+    let scratch_cpu = unsafe {
+        let mut h = device
+            .cbv_srv_uav_heap
+            .GetCPUDescriptorHandleForHeapStart();
+        h.ptr += (scratch * device.cbv_srv_uav_descriptor_size) as usize;
+        h
+    };
     unsafe {
-        device.device.CopyDescriptorsSimple(
-            1,
-            cpu_dst,
-            clear_cpu_src,
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+        device.device.CreateUnorderedAccessView(
+            &buffer.resource,
+            None,
+            Some(&raw_uav_desc),
+            scratch_cpu,
+        );
+    }
+
+    let gpu_handle = unsafe {
+        let mut h = device
+            .cbv_srv_uav_heap
+            .GetGPUDescriptorHandleForHeapStart();
+        h.ptr += (scratch as u64) * (device.cbv_srv_uav_descriptor_size as u64);
+        h
+    };
+
+    let cpu_handle = unsafe { device.cpu_clear_heap.GetCPUDescriptorHandleForHeapStart() };
+    unsafe {
+        device.device.CreateUnorderedAccessView(
+            &buffer.resource,
+            None,
+            Some(&raw_uav_desc),
+            cpu_handle,
         );
     }
 
@@ -890,16 +875,15 @@ pub(super) fn uav_clear(
         unsafe {
             command_list.ClearUnorderedAccessViewUint(
                 gpu_handle,
-                cpu_dst,
+                cpu_handle,
                 &buffer.resource,
                 &[0u32; 4],
                 &[],
             );
         }
     } else {
-        let elem_size = if needs_scratch { 4u64 } else { stride as u64 };
-        let first_element = offset / elem_size;
-        let num_elements = clear_size / elem_size;
+        let first_element = offset / 4;
+        let num_elements = clear_size / 4;
         let rect = windows::Win32::Foundation::RECT {
             left: first_element as i32,
             top: 0,
@@ -909,7 +893,7 @@ pub(super) fn uav_clear(
         unsafe {
             command_list.ClearUnorderedAccessViewUint(
                 gpu_handle,
-                cpu_dst,
+                cpu_handle,
                 &buffer.resource,
                 &[0u32; 4],
                 &[rect],
