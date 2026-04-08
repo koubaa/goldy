@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "goldy"
 version = "0.1.0"
 description = "Python bindings for the Goldy GPU library"
-readme = "README.md"
+readme = "PYPI_README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
 classifiers = [

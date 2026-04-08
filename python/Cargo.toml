@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT"
 description = "Python bindings for the Goldy GPU library"
 repository = "https://github.com/koubaa/goldy"
+readme = false
 keywords = ["gpu", "graphics", "python", "pyo3"]
 
 [lib]
