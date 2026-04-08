@@ -30,7 +30,7 @@ use super::*;
 use anyhow::{Context, Result};
 use ash::{khr, vk};
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 
 /// Vulkan backend.
 pub struct VulkanBackend {
@@ -67,7 +67,7 @@ impl VulkanBackend {
             .api_version(vk::make_api_version(0, 1, 4, 0));
 
         // Surface extensions for windowed presentation
-        let mut extensions: Vec<*const i8> = vec![khr::surface::NAME.as_ptr()];
+        let mut extensions: Vec<*const c_char> = vec![khr::surface::NAME.as_ptr()];
 
         #[cfg(target_os = "windows")]
         extensions.push(khr::win32_surface::NAME.as_ptr());
@@ -79,7 +79,7 @@ impl VulkanBackend {
         let enable_validation = std::env::var("RAG_VALIDATION")
             .map(|v| v == "1")
             .unwrap_or(false);
-        let validation_layers: Vec<*const i8> = if enable_validation {
+        let validation_layers: Vec<*const c_char> = if enable_validation {
             tracing::info!("Vulkan validation layers ENABLED");
             extensions.push(ash::ext::debug_utils::NAME.as_ptr());
             vec![c"VK_LAYER_KHRONOS_validation".as_ptr()]
