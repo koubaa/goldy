@@ -7,6 +7,7 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -178,6 +179,7 @@ jobs:
   # Publish all wheels + sdist to PyPI
   publish:
     name: Publish to PyPI
+    if: github.event_name == 'release'
     needs:
       - build-sdist
       - build-linux-x86_64
