@@ -105,8 +105,13 @@ pub(super) fn create(
 
         if is_storage {
             // For storage buffers, create BOTH UAV (for compute write) and SRV (for graphics read)
-            // Use the provided element stride, or default to 4 bytes (uint/float) for compatibility
             let stride = element_stride.unwrap_or(4);
+            debug_assert!(
+                stride > 0 && size as u32 % stride == 0,
+                "buffer size {size} not evenly divisible by element stride {stride} — \
+                 likely a stride mismatch (set BufferProxy::element_stride or \
+                 update element_stride_for_buffer)"
+            );
             let num_elements = (size as u32) / stride;
 
             // Register UAV to get the next available descriptor offset
@@ -286,6 +291,10 @@ pub(super) fn create_view(
     }
 
     let stride = element_stride.unwrap_or(4);
+    debug_assert!(
+        stride > 0 && size as u32 % stride == 0,
+        "view size {size} not evenly divisible by element stride {stride}"
+    );
     if !offset.is_multiple_of(stride as u64) {
         anyhow::bail!(
             "View offset {} is not aligned to element stride {}",
@@ -455,6 +464,20 @@ pub(super) fn write(
 
     if offset + data.len() as u64 > buffer.size {
         anyhow::bail!("Write would exceed buffer bounds");
+    }
+
+    if buffer.is_storage {
+        if let Some(stride) = buffer.element_stride {
+            if stride > 0 && data.len() as u32 % stride != 0 {
+                tracing::warn!(
+                    "write of {} bytes to buffer (handle={}) with element stride {} \
+                     — data length is not a multiple of stride, possible type mismatch",
+                    data.len(),
+                    buffer_handle,
+                    stride,
+                );
+            }
+        }
     }
 
     if !buffer.is_storage {
