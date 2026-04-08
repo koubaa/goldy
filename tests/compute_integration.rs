@@ -5,9 +5,9 @@
 mod common;
 
 use goldy::{
+    types::{SpatialAccess, TextureFlags, TextureFormat},
     Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
     ShaderModule, Texture,
-    types::{SpatialAccess, TextureFlags, TextureFormat},
 };
 
 /// Simple compute shader that doubles each value in a buffer.

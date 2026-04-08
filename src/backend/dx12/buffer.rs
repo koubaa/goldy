@@ -107,7 +107,7 @@ pub(super) fn create(
             // For storage buffers, create BOTH UAV (for compute write) and SRV (for graphics read)
             let stride = element_stride.unwrap_or(4);
             debug_assert!(
-                stride > 0 && size as u32 % stride == 0,
+                stride > 0 && (size as u32).is_multiple_of(stride),
                 "buffer size {size} not evenly divisible by element stride {stride} — \
                  likely a stride mismatch (set BufferProxy::element_stride or \
                  update element_stride_for_buffer)"
@@ -292,7 +292,7 @@ pub(super) fn create_view(
 
     let stride = element_stride.unwrap_or(4);
     debug_assert!(
-        stride > 0 && size as u32 % stride == 0,
+        stride > 0 && (size as u32).is_multiple_of(stride),
         "view size {size} not evenly divisible by element stride {stride}"
     );
     if !offset.is_multiple_of(stride as u64) {
@@ -468,7 +468,7 @@ pub(super) fn write(
 
     if buffer.is_storage {
         if let Some(stride) = buffer.element_stride {
-            if stride > 0 && data.len() as u32 % stride != 0 {
+            if stride > 0 && !(data.len() as u32).is_multiple_of(stride) {
                 tracing::warn!(
                     "write of {} bytes to buffer (handle={}) with element stride {} \
                      — data length is not a multiple of stride, possible type mismatch",
@@ -861,9 +861,7 @@ pub(super) fn uav_clear(
     };
 
     let scratch_cpu = unsafe {
-        let mut h = device
-            .cbv_srv_uav_heap
-            .GetCPUDescriptorHandleForHeapStart();
+        let mut h = device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
         h.ptr += (scratch * device.cbv_srv_uav_descriptor_size) as usize;
         h
     };
@@ -877,9 +875,7 @@ pub(super) fn uav_clear(
     }
 
     let gpu_handle = unsafe {
-        let mut h = device
-            .cbv_srv_uav_heap
-            .GetGPUDescriptorHandleForHeapStart();
+        let mut h = device.cbv_srv_uav_heap.GetGPUDescriptorHandleForHeapStart();
         h.ptr += (scratch as u64) * (device.cbv_srv_uav_descriptor_size as u64);
         h
     };

@@ -206,8 +206,9 @@ pub(super) fn create(
         }
         .context("Failed to close init barrier command list")?;
 
-        let cmd_list: ID3D12CommandList =
-            init_cmd.cast().context("Failed to cast init command list")?;
+        let cmd_list: ID3D12CommandList = init_cmd
+            .cast()
+            .context("Failed to cast init command list")?;
         unsafe {
             logical_device
                 .command_queue
