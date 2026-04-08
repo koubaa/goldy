@@ -445,7 +445,7 @@ impl ApplicationHandler for App {
             match self.instance.create_device(DeviceType::DiscreteGpu) {
                 Ok(device) => self.device = Some(Arc::new(device)),
                 Err(e) => {
-                    eprintln!("Failed to create device: {}", e);
+                    tracing::error!("Failed to create device: {}", e);
                     event_loop.exit();
                     return;
                 }
@@ -460,7 +460,7 @@ impl ApplicationHandler for App {
             let y = 100;
 
             if let Err(e) = self.create_window(event_loop, effect, (x, y)) {
-                eprintln!("Failed to create window for {:?}: {}", effect.title(), e);
+                tracing::error!("Failed to create window for {:?}: {}", effect.title(), e);
             }
         }
     }
@@ -559,7 +559,7 @@ impl ApplicationHandler for App {
 
         for state in self.windows.values_mut() {
             if let Err(e) = state.render(&device) {
-                eprintln!("[{}] Render error: {}", state.effect_type.title(), e);
+                tracing::error!("[{}] Render error: {}", state.effect_type.title(), e);
             }
         }
     }

@@ -117,6 +117,12 @@ impl RenderTarget {
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<Self> {
+        tracing::debug!(
+            width, height,
+            color_format = ?color_format,
+            ?depth_format,
+            "Creating render target"
+        );
         let handle = {
             let mut backend = device.backend.lock().unwrap();
             backend.create_render_target_with_depth(
@@ -227,6 +233,12 @@ impl RenderTarget {
 
 impl Drop for RenderTarget {
     fn drop(&mut self) {
+        tracing::trace!(
+            width = self.width,
+            height = self.height,
+            format = ?self.format,
+            "Destroying render target"
+        );
         if let Ok(mut backend) = self.backend.lock() {
             backend.destroy_render_target(self.handle);
         }

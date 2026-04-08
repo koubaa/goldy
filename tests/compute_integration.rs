@@ -1141,7 +1141,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         );
     }
 
-    let workgroups = (ELEM_COUNT as u32 + 63) / 64;
+    let workgroups = (ELEM_COUNT as u32).div_ceil(64);
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();

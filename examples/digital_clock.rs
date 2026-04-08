@@ -156,7 +156,7 @@ impl ApplicationHandler for App {
             self.window = Some(window.clone());
 
             if let Err(e) = self.init_gpu(&window) {
-                eprintln!("Failed to initialize GPU: {}", e);
+                tracing::error!("Failed to initialize GPU: {}", e);
             }
             window.request_redraw();
         }
@@ -184,7 +184,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
+                    tracing::error!("Render error: {}", e);
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();

@@ -204,7 +204,7 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
                 Err(e) => {
-                    eprintln!("Failed to create render state: {}", e);
+                    tracing::error!("Failed to create render state: {}", e);
                     event_loop.exit();
                 }
             }
@@ -231,7 +231,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let Some(state) = &mut self.state {
                     if let Err(e) = state.render() {
-                        eprintln!("Render error: {}", e);
+                        tracing::error!("Render error: {}", e);
                     }
                 }
             }

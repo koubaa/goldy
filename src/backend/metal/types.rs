@@ -242,7 +242,7 @@ impl TextureHeapAllocator {
             }
         }
 
-        let alloc_size = self.device.heap_texture_size_and_align(descriptor).size as u64;
+        let alloc_size = self.device.heap_texture_size_and_align(descriptor).size;
         let overflow_size = (alloc_size * 2).max(MIN_OVERFLOW_HEAP_SIZE);
         let new_heap = self.create_heap(overflow_size);
         tracing::info!(

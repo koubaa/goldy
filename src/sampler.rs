@@ -47,6 +47,12 @@ impl Sampler {
     ///
     /// Returns an error if GPU resource allocation fails.
     pub fn new(device: &Device, desc: &SamplerDesc) -> Result<Self> {
+        tracing::debug!(
+            mag_filter = ?desc.mag_filter,
+            min_filter = ?desc.min_filter,
+            address_u = ?desc.address_mode_u,
+            "Creating sampler"
+        );
         let handle = {
             let mut backend = device.backend.lock().unwrap();
             backend.create_sampler(device.handle, desc)?
@@ -134,6 +140,7 @@ impl Sampler {
 
 impl Drop for Sampler {
     fn drop(&mut self) {
+        tracing::trace!("Destroying sampler");
         if let Ok(mut backend) = self.backend.lock() {
             backend.destroy_sampler(self.handle);
         }

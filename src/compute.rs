@@ -46,9 +46,12 @@ pub struct ComputePipeline {
 impl ComputePipeline {
     /// Create a new compute pipeline.
     pub fn new(device: &Device, compute_shader: &ShaderModule) -> Result<Self> {
+        tracing::debug!("Creating compute pipeline");
         let mut backend = device.backend.lock().unwrap();
 
         let handle = backend.create_compute_pipeline(device.handle, compute_shader.handle)?;
+
+        tracing::debug!("Compute pipeline created");
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
@@ -59,6 +62,7 @@ impl ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
+        tracing::trace!("Destroying compute pipeline");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_compute_pipeline(self.handle);
     }
@@ -113,6 +117,10 @@ impl ComputeEncoder {
     ///
     /// This submits the compute work to the GPU and waits for completion.
     pub fn dispatch(&self, device: &Device) -> Result<()> {
+        tracing::debug!(
+            command_count = self.commands.len(),
+            "Dispatching compute commands"
+        );
         let mut backend = device.backend.lock().unwrap();
         backend.dispatch_compute(device.handle, &self.commands)
     }

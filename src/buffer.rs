@@ -34,6 +34,7 @@ impl Buffer {
         access: DataAccess,
         element_stride: Option<u32>,
     ) -> Result<Self> {
+        tracing::debug!(size, ?access, element_stride, "Creating buffer");
         let mut backend = device.backend.lock().unwrap();
         let handle = backend.create_buffer(device.handle, size, access, element_stride)?;
 
@@ -214,6 +215,7 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
+        tracing::trace!(size = self.size, access = ?self.access, "Destroying buffer");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_buffer(self.handle);
     }
@@ -397,6 +399,7 @@ impl BufferPool {
             alignment.is_power_of_two(),
             "alignment must be a power of two"
         );
+        tracing::debug!(total_size, alignment, "Creating buffer pool");
         let backing = Buffer::new(device, total_size, DataAccess::Scattered)?;
         Ok(Self {
             backing,

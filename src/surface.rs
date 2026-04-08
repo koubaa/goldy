@@ -105,6 +105,8 @@ impl Surface {
             backend.surface_size(handle)
         };
 
+        tracing::debug!(width, height, ?depth_format, "Surface created");
+
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,
@@ -147,9 +149,10 @@ impl Surface {
     /// with the new dimensions.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
-            return Ok(()); // Ignore zero-sized resize (minimized)
+            return Ok(());
         }
 
+        tracing::debug!(width, height, "Resizing surface");
         {
             let mut backend = self.backend.lock().unwrap();
             backend.surface_resize(self.handle, width, height)?;
@@ -227,6 +230,11 @@ impl Surface {
 
 impl Drop for Surface {
     fn drop(&mut self) {
+        tracing::debug!(
+            width = self.width,
+            height = self.height,
+            "Destroying surface"
+        );
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_surface(self.handle);
     }

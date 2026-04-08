@@ -57,6 +57,7 @@ impl Texture {
         access: SpatialAccess,
         flags: TextureFlags,
     ) -> Result<Self> {
+        tracing::debug!(width, height, ?format, ?access, ?flags, "Creating texture");
         let handle = {
             let mut backend = device.backend.lock().unwrap();
             backend.create_texture(device.handle, width, height, format, access, flags)?
@@ -249,6 +250,12 @@ impl Texture {
 
 impl Drop for Texture {
     fn drop(&mut self) {
+        tracing::trace!(
+            width = self.width,
+            height = self.height,
+            format = ?self.format,
+            "Destroying texture"
+        );
         if let Ok(mut backend) = self.backend.lock() {
             backend.destroy_texture(self.handle);
         }
