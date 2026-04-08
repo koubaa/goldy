@@ -12,6 +12,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Build source distribution
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: python
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+          path: python/dist
+
   # Build wheels for Linux x86_64
   build-linux-x86_64:
     name: Build Linux x86_64
@@ -41,8 +60,34 @@ jobs:
           name: wheels-linux-x86_64
           path: python/dist
 
-  # TODO: Linux aarch64 cross-compilation has Docker/QEMU issues
-  # Add back once resolved (possibly using native ARM runners)
+  # Build wheels for Linux aarch64 (native ARM runner)
+  build-linux-aarch64:
+    name: Build Linux aarch64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Download and bundle Slang
+        run: |
+          cd slang && chmod +x download.sh && ./download.sh
+          cd ../python && python build-slang.py
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64
+          args: --release --out dist
+          working-directory: python
+          manylinux: auto
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux-aarch64
+          path: python/dist
 
   # Build wheels for Windows x64
   build-windows:
@@ -130,13 +175,13 @@ jobs:
           name: wheels-macos-aarch64
           path: python/dist
 
-  # Publish all wheels to PyPI
-  # Note: sdist skipped because python/Cargo.toml depends on parent goldy crate via path
-  # Note: Linux aarch64 skipped due to cross-compilation issues
+  # Publish all wheels + sdist to PyPI
   publish:
     name: Publish to PyPI
     needs:
+      - build-sdist
       - build-linux-x86_64
+      - build-linux-aarch64
       - build-windows
       - build-macos-x86_64
       - build-macos-aarch64
