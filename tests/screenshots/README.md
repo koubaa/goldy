@@ -1,29 +1,27 @@
 # Screenshot Reference Images
 
-This directory contains reference PNG images for FLIP-based screenshot tests.
+This directory contains reference PNG images for FLIP-based screenshot tests (`tests/screenshot_tests.rs`).
 
-## Creating Reference Images
+## Generating or updating all references
 
-Reference images must be created manually:
+Run the dedicated tool (this is **not** part of `cargo test`):
 
-1. Run the example or test that generates the image
-2. Verify the output looks correct visually
-3. Save the output as a PNG file in this directory
+```bash
+cargo run --bin update-screenshots --features update-screenshots
+```
+
+From the `goldy` crate root. That overwrites the PNGs in this directory; commit only after visually verifying output.
 
 ## Requirements
 
 - Format: RGBA PNG, 8-bit depth
 - Dimensions: Must match the test's expected width/height
-- Naming: Should match the test name (e.g., `triangle.png` for `test_triangle_screenshot`)
+- Naming: Matches the test (e.g. `solid_red.png`, `rgb_triangle.png`)
 
-## Updating Reference Images
+## Updating reference images after a deliberate rendering change
 
-If rendering changes intentionally:
-
-1. Delete the old reference image
-2. Run the test to generate new `-actual.png` output
-3. Verify the new output is correct
-4. Rename `-actual.png` to the reference name
+1. Run `update-screenshots` as above (or adjust a single PNG by hand).
+2. Run `cargo test --test screenshot_tests` and confirm all comparisons pass.
 
 ## Debugging Failed Tests
 
@@ -31,4 +29,3 @@ When a test fails, two debug images are generated:
 
 - `{name}-actual.png` - What was actually rendered
 - `{name}-diff.png` - FLIP difference map (magma colormap: blue=similar, red=different)
-
