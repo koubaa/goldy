@@ -16,5 +16,6 @@ To run all examples in a row interactively, use
 
 ## Debugging
 
-For debugging tips, see DEBUGGING.md
-For conditional compilation, see [Conditional Compilation](docs/src/architecture/conditional-compilation.md) 
+For debugging tips, see [DEBUGGING.md](DEBUGGING.md).
+
+For conditional compilation, see [Conditional Compilation](docs/src/architecture/conditional-compilation.md).

@@ -55,6 +55,18 @@ let shader = ShaderModule::from_slang(&device, r#"
 "#)?;
 ```
 
+## Rust vs Slang struct layout (optional)
+
+If your Rust `#[repr(C)]` types must match Slang `struct` layouts (uniforms, structured buffers), you can validate them on the **same** compile that produces GPU bytecode—no extra Slang invocation.
+
+1. Name the Rust struct like the Slang type (reflection uses `FindTypeByName`).
+2. Add **`#[derive(LayoutCheckable)]`** (from the `goldy` crate).
+3. Pass **`&[YourType::LAYOUT_CHECK]`** to **`ShaderModule::from_slang_with_options`** as the last argument.
+
+Validation runs only when **`GOLDY_VALIDATE_LAYOUTS`** is set to `1`, `true`, or `yes`; otherwise the checks are skipped.
+
+The **`gradient`** and **`checkerboard`** examples use this pattern with `TimeUniforms`. For tables of other environment variables, logging, and shader dumps, see **[DEBUGGING.md](https://github.com/koubaa/goldy/blob/main/DEBUGGING.md)** in the repository.
+
 ## The `goldy_exp` Library (Experimental)
 
 Every `Device` comes with the `goldy_exp` shader library pre-registered.

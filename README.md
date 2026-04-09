@@ -56,6 +56,8 @@ Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation
 
 For FFI bindings (Python, .NET, C++), Slang libraries are bundled automatically by the respective build scripts. See [PACKAGING.md](PACKAGING.md) for architecture details and [DEBUGGING.md](DEBUGGING.md) for troubleshooting.
 
+Optional **Rust vs Slang struct layout checks** at shader compile time: set `GOLDY_VALIDATE_LAYOUTS=1` and pass `LayoutCheck` data from `#[derive(LayoutCheckable)]` into `ShaderModule::from_slang_with_options` (see [DEBUGGING.md](DEBUGGING.md) and the `gradient` / `checkerboard` examples).
+
 ## Documentation
 
 📖 **[Full Documentation](https://koubaa.github.io/goldy/)**

@@ -13,6 +13,8 @@ All examples support:
 - **Escape** - Exit the application
 - **Window resize** - Automatic adaptation
 
+The **`gradient`** and **`checkerboard`** examples pass `LayoutCheck` metadata from `#[derive(LayoutCheckable)]` into `ShaderModule::from_slang_with_options`. Run with **`GOLDY_VALIDATE_LAYOUTS=1`** to assert Rust uniform layouts match Slang at shader compile time (see [Shaders: layout validation](../concepts/shaders.md#rust-vs-slang-struct-layout-optional) and [DEBUGGING.md](https://github.com/koubaa/goldy/blob/main/DEBUGGING.md)).
+
 ## Example Gallery
 
 ### Basic
@@ -20,7 +22,7 @@ All examples support:
 | Example | Description | Key Concepts |
 |---------|-------------|--------------|
 | `triangle` | Colored triangle | Vertex buffers, basic pipeline |
-| `gradient` | Animated gradient | Fragment shaders, UV coordinates |
+| `gradient` | Animated gradient | Fragment shaders, UV coordinates, optional `GOLDY_VALIDATE_LAYOUTS` |
 | `window` | Triangle with animation | Surface API basics |
 
 ### Classic Demoscene
@@ -46,7 +48,7 @@ All examples support:
 |---------|-------------|--------------|
 | `bouncing_lines` | Lines bouncing off walls | Line primitive, physics |
 | `spinning_cube` | 3D wireframe cube | 3D projection, rotation matrices |
-| `checkerboard` | Animated procedural texture | UV distortion, patterns |
+| `checkerboard` | Animated procedural texture | UV distortion, patterns, optional `GOLDY_VALIDATE_LAYOUTS` |
 | `waveform` | Audio waveform visualizer | Line strips, multiple draw calls |
 | `instancing` | 400 rotating quads | Many objects, HSV colors |
 
