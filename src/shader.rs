@@ -43,6 +43,7 @@
 
 use crate::backend::{GpuBackend, ShaderHandle};
 use crate::device::Device;
+use crate::slang::{layout_validation_enabled, LayoutCheck, OwnedLayoutCheck};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 
@@ -79,7 +80,7 @@ impl ShaderModule {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn from_slang(device: &Device, source: &str) -> Result<Self> {
-        Self::from_slang_with_paths(device, source, &[])
+        Self::from_slang_with_options(device, source, &[], &[], Default::default(), &[])
     }
 
     /// Create a shader module with additional search paths.
@@ -106,7 +107,7 @@ impl ShaderModule {
         source: &str,
         extra_paths: &[&str],
     ) -> Result<Self> {
-        Self::from_slang_with_paths_and_defines(device, source, extra_paths, &[])
+        Self::from_slang_with_options(device, source, extra_paths, &[], Default::default(), &[])
     }
 
     /// Create a shader module with search paths and preprocessor defines.
@@ -123,11 +124,16 @@ impl ShaderModule {
             source,
             extra_paths,
             defines,
-            crate::types::OptimizationLevel::Default,
+            Default::default(),
+            &[],
         )
     }
 
     /// Create a shader module with full control over compilation options.
+    ///
+    /// `layout_checks` declares Rust struct layouts to validate against Slang reflection.
+    /// Validation only runs when `GOLDY_VALIDATE_LAYOUTS=1` is set; otherwise the checks
+    /// are ignored (zero cost). Pass `&[]` when no validation is needed.
     ///
     /// Use `OptimizationLevel::None` to disable compiler optimizations for
     /// shaders that hit driver bugs on software renderers (e.g. lavapipe).
@@ -137,11 +143,16 @@ impl ShaderModule {
         extra_paths: &[&str],
         defines: &[(&str, &str)],
         optimization_level: crate::types::OptimizationLevel,
+        layout_checks: &[LayoutCheck<'_>],
     ) -> Result<Self> {
+        let validate = layout_validation_enabled() && !layout_checks.is_empty();
+
         tracing::debug!(
             source_len = source.len(),
             extra_paths = extra_paths.len(),
             defines = defines.len(),
+            layout_checks = layout_checks.len(),
+            validate,
             ?optimization_level,
             "Compiling shader module"
         );
@@ -159,15 +170,30 @@ impl ShaderModule {
         let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
 
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_shader_with_paths(
-            device.handle,
-            source,
-            &path_refs,
-            defines,
-            optimization_level,
-        )?;
+        let handle = if validate {
+            let owned_checks: Vec<OwnedLayoutCheck> = layout_checks
+                .iter()
+                .map(OwnedLayoutCheck::from_layout_check)
+                .collect();
+            backend.create_shader_with_checks(
+                device.handle,
+                source,
+                &path_refs,
+                defines,
+                optimization_level,
+                owned_checks,
+            )?
+        } else {
+            backend.create_shader_with_paths(
+                device.handle,
+                source,
+                &path_refs,
+                defines,
+                optimization_level,
+            )?
+        };
 
-        tracing::debug!("Shader module compiled");
+        tracing::debug!("Shader module created");
 
         Ok(Self {
             backend: Arc::clone(&device.backend),

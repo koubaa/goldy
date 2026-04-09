@@ -26,6 +26,7 @@
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
 use crate::shader_library::ShaderLibrary;
+use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -466,6 +467,33 @@ impl Device {
     /// Get search paths for shader compilation (internal use).
     pub(crate) fn get_shader_search_paths(&self) -> Result<Vec<PathBuf>> {
         self.library_registry.lock().unwrap().get_search_paths()
+    }
+
+    /// Reflect the memory layout of a Slang `struct` by compiling `shader_source` once for reflection.
+    ///
+    /// Search paths include registered shader libraries (same as [`ShaderModule::from_slang`](crate::ShaderModule::from_slang)). The
+    /// active backend's codegen target (SPIR-V / DXIL / Metal) is used so reported layout matches
+    /// real shader compilation.
+    ///
+    /// `shader_source` must declare a vertex entry point named **`vs_main`**.
+    pub fn reflect_struct(&self, shader_source: &str, type_name: &str) -> Result<StructLayout> {
+        let paths = self.get_shader_search_paths()?;
+        let path_strings: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let path_refs: Vec<&str> = path_strings.iter().map(|s| s.as_str()).collect();
+        let target = match self.backend.lock().unwrap().backend_type() {
+            BackendType::Vulkan => ShaderTarget::Spirv,
+            BackendType::Dx12 => ShaderTarget::Dxil,
+            BackendType::Metal => ShaderTarget::Metal,
+            BackendType::WebGPU => {
+                anyhow::bail!("reflect_struct is not supported on the WebGPU backend yet");
+            }
+        };
+        let compiler =
+            SlangCompiler::new().context("Failed to create Slang compiler for reflect_struct")?;
+        compiler.reflect_struct_layout(shader_source, target, &path_refs, type_name)
     }
 
     /// Create a device from a backend for testing purposes.

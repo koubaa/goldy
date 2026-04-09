@@ -417,13 +417,33 @@ impl GpuBackend for Dx12Backend {
         defines: &[(&str, &str)],
         optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle> {
-        shader::create_with_paths(
+        self.create_shader_with_checks(
+            device_handle,
+            slang_source,
+            search_paths,
+            defines,
+            optimization_level,
+            vec![],
+        )
+    }
+
+    fn create_shader_with_checks(
+        &mut self,
+        device_handle: DeviceHandle,
+        slang_source: &str,
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
+        layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    ) -> Result<ShaderHandle> {
+        shader::create_with_checks(
             &mut self.state,
             device_handle,
             slang_source,
             search_paths,
             defines,
             optimization_level,
+            layout_checks,
         )
     }
 

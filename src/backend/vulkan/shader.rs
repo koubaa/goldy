@@ -17,6 +17,7 @@ pub(super) fn create(
     search_paths: &[&str],
     defines: &[(&str, &str)],
     optimization_level: crate::types::OptimizationLevel,
+    layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
 ) -> Result<ShaderHandle> {
     // Just validate the device exists - actual compilation happens at pipeline creation
     let _ = devices
@@ -41,6 +42,7 @@ pub(super) fn create(
             fragment_module: None,
             compute_module: None,
             reflection: None,
+            layout_checks,
         },
     );
 
@@ -114,6 +116,7 @@ pub(super) fn ensure_stage_compiled(
         .collect();
     let device_handle = shader.device_handle;
     let optimization_level = shader.optimization_level;
+    let layout_checks_snapshot = shader.layout_checks.clone();
 
     // Compile shader with reflection data for resource binding
     let result = slang_compiler
@@ -123,6 +126,7 @@ pub(super) fn ensure_stage_compiled(
             &[(entry_point_name, stage)],
             &search_paths,
             &extra_defines,
+            &layout_checks_snapshot,
             optimization_level,
         )
         .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
@@ -177,6 +181,10 @@ pub(super) fn ensure_stage_compiled(
         crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
         crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
         _ => {} // Already validated above, shouldn't reach here
+    }
+
+    if !layout_checks_snapshot.is_empty() {
+        shader.layout_checks.clear();
     }
 
     // Store reflection data (merge with existing if any)

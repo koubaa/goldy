@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "python", "ffi"]
+members = [".", "python", "ffi", "derive"]
 resolver = "2"
 
 [package]
@@ -17,6 +17,8 @@ categories = ["graphics", "rendering"]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }
 
 [dependencies]
+goldy_derive = { version = "0.1.0", path = "derive" }
+
 # Vulkan bindings (native only)
 ash = { version = "0.38", optional = true }
 

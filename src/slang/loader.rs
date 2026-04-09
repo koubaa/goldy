@@ -70,6 +70,8 @@ pub struct SlangLibrary {
     pub get_target_code_blob: FnSpGetTargetCodeBlob,
     // Reflection API
     pub get_reflection: FnSpGetReflection,
+    pub reflection_find_type_by_name: FnSpReflectionFindTypeByName,
+    pub reflection_get_type_layout: FnSpReflectionGetTypeLayout,
     pub reflection_get_parameter_count: FnSpReflectionGetParameterCount,
     pub reflection_get_parameter_by_index: FnSpReflectionGetParameterByIndex,
     pub reflection_parameter_get_type_layout: FnSpReflectionParameterGetTypeLayout,
@@ -192,6 +194,12 @@ impl SlangLibrary {
             let get_reflection: FnSpGetReflection = *library
                 .get(b"spGetReflection\0")
                 .context("Failed to load spGetReflection")?;
+            let reflection_find_type_by_name: FnSpReflectionFindTypeByName = *library
+                .get(b"spReflection_FindTypeByName\0")
+                .context("Failed to load spReflection_FindTypeByName")?;
+            let reflection_get_type_layout: FnSpReflectionGetTypeLayout = *library
+                .get(b"spReflection_GetTypeLayout\0")
+                .context("Failed to load spReflection_GetTypeLayout")?;
             let reflection_get_parameter_count: FnSpReflectionGetParameterCount = *library
                 .get(b"spReflection_GetParameterCount\0")
                 .context("Failed to load spReflection_GetParameterCount")?;
@@ -293,6 +301,8 @@ impl SlangLibrary {
                 get_target_code_blob,
                 // Reflection API
                 get_reflection,
+                reflection_find_type_by_name,
+                reflection_get_type_layout,
                 reflection_get_parameter_count,
                 reflection_get_parameter_by_index,
                 reflection_parameter_get_type_layout,

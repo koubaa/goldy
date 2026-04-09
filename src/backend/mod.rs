@@ -216,6 +216,33 @@ pub trait GpuBackend: Send + Sync {
         defines: &[(&str, &str)],
         optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle>;
+
+    /// Like [`Self::create_shader_with_paths`], but when `layout_checks` is non-empty, each struct
+    /// is validated against Slang reflection on the first per-stage compile (same compile as GPU IR).
+    ///
+    /// Default: only empty `layout_checks` is allowed; non-empty returns an error.
+    fn create_shader_with_checks(
+        &mut self,
+        device: DeviceHandle,
+        slang_source: &str,
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
+        layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    ) -> Result<ShaderHandle> {
+        if layout_checks.is_empty() {
+            self.create_shader_with_paths(
+                device,
+                slang_source,
+                search_paths,
+                defines,
+                optimization_level,
+            )
+        } else {
+            anyhow::bail!("Layout validation requires the Vulkan, DX12, or Metal backend")
+        }
+    }
+
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
     // Pipeline management

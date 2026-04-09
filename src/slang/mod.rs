@@ -33,6 +33,7 @@
 //!         &[("vs_main", SlangStage::Vertex)],
 //!         &[],
 //!         &[],
+//!         &[],
 //!         OptimizationLevel::Default,
 //!     )
 //!     .unwrap();
@@ -44,7 +45,8 @@ pub mod ffi;
 pub mod loader;
 
 pub use compiler::{
-    CompiledShader, CompiledShaderWithReflection, FieldLayout, ParameterBlockLayout, ResourceKind,
-    ShaderReflection, ShaderTarget, SlangCompiler,
+    layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout,
+    LayoutCheck, OwnedLayoutCheck, ParameterBlockLayout, ResourceKind, ShaderReflection,
+    ShaderTarget, SlangCompiler, StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;

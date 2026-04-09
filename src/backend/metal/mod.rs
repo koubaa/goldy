@@ -175,6 +175,25 @@ impl GpuBackend for MetalBackend {
         defines: &[(&str, &str)],
         optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle> {
+        self.create_shader_with_checks(
+            device,
+            slang_source,
+            search_paths,
+            defines,
+            optimization_level,
+            vec![],
+        )
+    }
+
+    fn create_shader_with_checks(
+        &mut self,
+        device: DeviceHandle,
+        slang_source: &str,
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
+        layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
             &mut self.state.shaders,
@@ -184,6 +203,7 @@ impl GpuBackend for MetalBackend {
             search_paths,
             defines,
             optimization_level,
+            layout_checks,
         )
     }
 
