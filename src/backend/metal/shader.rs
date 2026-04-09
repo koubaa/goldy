@@ -2,7 +2,7 @@
 
 use super::super::{DeviceHandle, ShaderHandle};
 use super::types::ShaderState;
-use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+use crate::slang::{OwnedLayoutCheck, ShaderTarget, SlangCompiler, SlangStage};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{Device as MTLDevice, Library};
@@ -36,6 +36,7 @@ fn compile_stage_with_reflection(
     entry_point: &str,
     stage: SlangStage,
     extra_defines: &[(&str, &str)],
+    layout_checks: &[OwnedLayoutCheck],
     optimization_level: crate::types::OptimizationLevel,
 ) -> Result<(Library, Option<crate::slang::ShaderReflection>)> {
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
@@ -47,6 +48,7 @@ fn compile_stage_with_reflection(
             &[(entry_point, stage)],
             &search_path_refs,
             extra_defines,
+            layout_checks,
             optimization_level,
         )
         .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
@@ -145,6 +147,7 @@ pub(super) fn ensure_stage_compiled(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
+    let layout_checks_snapshot = shader.layout_checks.clone();
 
     let logical_device = devices
         .get(&device_handle)
@@ -158,6 +161,7 @@ pub(super) fn ensure_stage_compiled(
         entry_point,
         stage,
         &extra_defines,
+        &layout_checks_snapshot,
         optimization_level,
     )?;
 
@@ -170,6 +174,10 @@ pub(super) fn ensure_stage_compiled(
     }
     if shader.reflection.is_none() {
         shader.reflection = reflection;
+    }
+
+    if !layout_checks_snapshot.is_empty() {
+        shader.layout_checks.clear();
     }
 
     Ok(())
@@ -186,6 +194,7 @@ pub(super) fn create(
     search_paths: &[&str],
     defines: &[(&str, &str)],
     optimization_level: crate::types::OptimizationLevel,
+    layout_checks: Vec<OwnedLayoutCheck>,
 ) -> Result<ShaderHandle> {
     devices
         .get(&device_handle)
@@ -209,6 +218,7 @@ pub(super) fn create(
             fragment_library: None,
             compute_library: None,
             reflection: None,
+            layout_checks,
         },
     );
 

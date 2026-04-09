@@ -156,6 +156,7 @@ mod tests {
             &[],
             &[&shader_path_str],
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -173,6 +174,7 @@ mod tests {
                 &[],
                 &[&shader_path_str],
                 &[],
+                &[],
                 OptimizationLevel::Default,
             );
             assert!(
@@ -189,6 +191,7 @@ mod tests {
                 ShaderTarget::Metal,
                 &[],
                 &[&shader_path_str],
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -223,6 +226,7 @@ mod tests {
             &[],
             &[&shader_path_str],
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -239,6 +243,7 @@ mod tests {
                 &[],
                 &[&shader_path_str],
                 &[],
+                &[],
                 OptimizationLevel::Default,
             );
             assert!(
@@ -253,6 +258,7 @@ mod tests {
             ShaderTarget::Metal,
             &[],
             &[&shader_path_str],
+            &[],
             &[],
             OptimizationLevel::Default,
         );
@@ -289,6 +295,7 @@ mod tests {
             &[],
             &[shader_path_str],
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -305,6 +312,7 @@ mod tests {
                 &[],
                 &[shader_path_str],
                 &[],
+                &[],
                 OptimizationLevel::Default,
             );
             assert!(
@@ -319,6 +327,7 @@ mod tests {
             ShaderTarget::Metal,
             &[],
             &[shader_path_str],
+            &[],
             &[],
             OptimizationLevel::Default,
         );
@@ -354,6 +363,7 @@ mod tests {
             entry,
             &[&shader_path_str],
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -369,6 +379,7 @@ mod tests {
                 ShaderTarget::Dxil,
                 entry,
                 &[&shader_path_str],
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -386,6 +397,7 @@ mod tests {
                 ShaderTarget::Metal,
                 entry,
                 &[&shader_path_str],
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -421,6 +433,7 @@ mod tests {
             entry,
             &[&shader_path_str],
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -436,6 +449,7 @@ mod tests {
                 ShaderTarget::Dxil,
                 entry,
                 &[&shader_path_str],
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -453,6 +467,7 @@ mod tests {
                 ShaderTarget::Metal,
                 entry,
                 &[&shader_path_str],
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -488,6 +503,7 @@ mod tests {
             entry,
             search_paths,
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -503,6 +519,7 @@ mod tests {
                 ShaderTarget::Dxil,
                 entry,
                 search_paths,
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -520,6 +537,7 @@ mod tests {
                 ShaderTarget::Metal,
                 entry,
                 search_paths,
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -555,6 +573,7 @@ mod tests {
             entry,
             search_paths,
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -570,6 +589,7 @@ mod tests {
                 ShaderTarget::Dxil,
                 entry,
                 search_paths,
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -587,6 +607,7 @@ mod tests {
                 ShaderTarget::Metal,
                 entry,
                 search_paths,
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );
@@ -619,6 +640,7 @@ mod tests {
             entry,
             &[shader_path_str],
             &[],
+            &[],
             OptimizationLevel::Default,
         );
         assert!(
@@ -634,6 +656,7 @@ mod tests {
                 ShaderTarget::Dxil,
                 entry,
                 &[shader_path_str],
+                &[],
                 &[],
                 OptimizationLevel::Default,
             );

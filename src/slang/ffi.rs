@@ -472,6 +472,27 @@ pub type FnSlangCreateGlobalSession2 = unsafe extern "C" fn(
 pub type FnSpGetReflection =
     unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *mut SlangReflection;
 
+/// Layout rules for [`FnSpReflectionGetTypeLayout`] (matches `SlangLayoutRules` in slang.h).
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlangLayoutRules {
+    Default = 0,
+    MetalArgumentBufferTier2 = 1,
+}
+
+/// Find a named type in the compiled program's reflection.
+pub type FnSpReflectionFindTypeByName = unsafe extern "C" fn(
+    reflection: *mut SlangReflection,
+    name: *const c_char,
+) -> *mut SlangReflectionType;
+
+/// Get the memory layout of a type under the given rules.
+pub type FnSpReflectionGetTypeLayout = unsafe extern "C" fn(
+    reflection: *mut SlangReflection,
+    reflection_type: *mut SlangReflectionType,
+    rules: SlangLayoutRules,
+) -> *mut SlangReflectionTypeLayout;
+
 /// Get the number of parameters in the program
 pub type FnSpReflectionGetParameterCount =
     unsafe extern "C" fn(reflection: *mut SlangReflection) -> c_int;

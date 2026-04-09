@@ -3,11 +3,13 @@
 //! Demonstrates procedural texturing in fragment shader using Surface API.
 //! Uses vertex-less fullscreen triangle (Goldy-native pattern).
 //!
-//! Run with: cargo run --example checkerboard
+//! Run with: `cargo run --example checkerboard`
+//!
+//! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example checkerboard`
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
+    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, LayoutCheckable,
+    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,10 +21,10 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// Uniform buffer data (must match shader cbuffer layout)
+/// Uniform buffer data — name and fields must match `struct TimeUniforms` in `shaders/checkerboard.slang`.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, LayoutCheckable)]
+struct TimeUniforms {
     time: f32,
 }
 
@@ -54,7 +56,14 @@ impl App {
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
         let surface = Surface::new(&device, window.as_ref())?;
-        let shader = ShaderModule::from_slang(&device, shaders::CHECKERBOARD)?;
+        let shader = ShaderModule::from_slang_with_options(
+            &device,
+            shaders::CHECKERBOARD,
+            &[],
+            &[],
+            Default::default(),
+            &[TimeUniforms::LAYOUT_CHECK],
+        )?;
 
         // Create pipeline - no vertex buffer needed, shader uses SV_VertexID
         let pipeline = RenderPipeline::new(
@@ -71,7 +80,7 @@ impl App {
         // Create uniform buffer for time
         let uniform_buffer = Buffer::new(
             device.as_ref(),
-            std::mem::size_of::<Uniforms>() as u64,
+            std::mem::size_of::<TimeUniforms>() as u64,
             DataAccess::Broadcast,
         )?;
 
@@ -96,7 +105,7 @@ impl App {
 
         // Update uniform buffer with current time
         let time = self.start_time.elapsed().as_secs_f32();
-        let uniforms = Uniforms { time };
+        let uniforms = TimeUniforms { time };
         uniform_buffer.write_data(0, &[uniforms])?;
 
         let frame = surface.acquire()?;

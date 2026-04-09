@@ -6,12 +6,23 @@ use anyhow::{Context, Result};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::ffi::*;
 use super::loader::SlangLibrary;
 use crate::types::OptimizationLevel;
 use crate::{goldy_event, goldy_span};
+
+/// Returns `true` when `GOLDY_VALIDATE_LAYOUTS=1` (or any truthy value).
+/// Checked once per process and cached.
+pub fn layout_validation_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GOLDY_VALIDATE_LAYOUTS")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}
 
 // ============================================================================
 // Reflection data structures
@@ -75,6 +86,128 @@ pub struct ParameterBlockLayout {
 pub struct ShaderReflection {
     /// All parameter blocks found in the shader
     pub parameter_blocks: Vec<ParameterBlockLayout>,
+}
+
+/// Byte layout of a Slang `struct` under uniform / constant-buffer rules (`SlangLayoutRules::Default`).
+///
+/// Used with [`StructLayout::validate`] to compare against a Rust `#[repr(C)]` type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructLayout {
+    /// Reflected type name (as requested, e.g. `SceneUniforms`).
+    pub name: String,
+    /// Total size in bytes.
+    pub size: usize,
+    /// Alignment in bytes (Slang-reported for the uniform category).
+    pub alignment: usize,
+    pub fields: Vec<StructFieldLayout>,
+}
+
+/// One field in a [`StructLayout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructFieldLayout {
+    pub name: String,
+    /// Byte offset from the start of the struct.
+    pub offset: usize,
+    /// Size in bytes.
+    pub size: usize,
+    /// Slang type name (e.g. `float4x4`, `float2`).
+    pub type_name: String,
+}
+
+impl StructLayout {
+    /// Compare this Slang layout against Rust `size_of` / `offset_of!` / per-field `size_of`.
+    ///
+    /// `rust_fields` must be in declaration order and use the same field names as Slang.
+    pub fn validate(&self, rust_size: usize, rust_fields: &[(&str, usize, usize)]) -> Result<()> {
+        let mut errors: Vec<String> = Vec::new();
+
+        if self.size != rust_size {
+            errors.push(format!(
+                "struct size: Slang {} bytes vs Rust {} bytes",
+                self.size, rust_size
+            ));
+        }
+        if self.fields.len() != rust_fields.len() {
+            errors.push(format!(
+                "field count: Slang {} vs Rust {}",
+                self.fields.len(),
+                rust_fields.len()
+            ));
+        }
+
+        for (i, &(name, rust_offset, rust_size_field)) in rust_fields.iter().enumerate() {
+            match self.fields.get(i) {
+                Some(sf) => {
+                    if sf.name != name {
+                        errors.push(format!(
+                            "field[{i}]: expected name `{name}`, Slang has `{}`",
+                            sf.name
+                        ));
+                    }
+                    if sf.offset != rust_offset {
+                        errors.push(format!(
+                            "field `{name}`: offset Slang {} vs Rust {}",
+                            sf.offset, rust_offset
+                        ));
+                    }
+                    if sf.size != rust_size_field {
+                        errors.push(format!(
+                            "field `{name}`: size Slang {} vs Rust {}",
+                            sf.size, rust_size_field
+                        ));
+                    }
+                }
+                None => {
+                    errors.push(format!(
+                        "field[{i}] (`{name}`): missing in Slang reflection"
+                    ));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Struct layout mismatch for `{}`:\n{}",
+                self.name,
+                errors.join("\n")
+            );
+        }
+    }
+}
+
+/// Opt-in Rust vs Slang struct layout checks run during the same compile as GPU codegen.
+///
+/// Pass a slice to [`ShaderModule::from_slang_with_options`](crate::ShaderModule::from_slang_with_options).
+/// Checks only run when `GOLDY_VALIDATE_LAYOUTS=1` is set.
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutCheck<'a> {
+    pub type_name: &'a str,
+    pub rust_size: usize,
+    pub rust_fields: &'a [(&'a str, usize, usize)],
+}
+
+/// Stored on backend [`ShaderState`](crate::backend) for deferred per-stage compilation.
+#[derive(Debug, Clone)]
+pub struct OwnedLayoutCheck {
+    pub type_name: String,
+    pub rust_size: usize,
+    pub rust_fields: Vec<(String, usize, usize)>,
+}
+
+impl OwnedLayoutCheck {
+    pub fn from_layout_check(c: &LayoutCheck<'_>) -> Self {
+        Self {
+            type_name: c.type_name.to_string(),
+            rust_size: c.rust_size,
+            rust_fields: c
+                .rust_fields
+                .iter()
+                .map(|(n, o, s)| ((*n).to_string(), *o, *s))
+                .collect(),
+        }
+    }
 }
 
 /// Compiled shader output with optional reflection data.
@@ -216,6 +349,7 @@ impl SlangCompiler {
             entry_points,
             search_paths,
             &[],
+            &[],
             OptimizationLevel::Default,
         )
     }
@@ -224,6 +358,7 @@ impl SlangCompiler {
     ///
     /// Extra defines are merged with target-specific defines (e.g. `__SPIRV__`, `__DX12__`).
     /// Use for shader variants like `msaa`, `msaa8`, `msaa16`.
+    #[allow(clippy::too_many_arguments)] // layout_checks + defines + paths are all required at call sites
     pub fn compile_bindless_with_reflection_and_defines(
         &self,
         source: &str,
@@ -231,6 +366,7 @@ impl SlangCompiler {
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
         extra_defines: &[(&str, &str)],
+        layout_checks: &[OwnedLayoutCheck],
         optimization_level: OptimizationLevel,
     ) -> Result<CompiledShaderWithReflection> {
         let mut defines = Self::bindless_defines_for_target(target);
@@ -241,6 +377,7 @@ impl SlangCompiler {
             entry_points,
             search_paths,
             &defines,
+            layout_checks,
             optimization_level,
         )
     }
@@ -254,11 +391,9 @@ impl SlangCompiler {
         }
     }
 
-    /// Compile with reflection data.
-    ///
-    /// This performs compilation and extracts reflection information about
-    /// all parameters, especially ParameterBlocks for bindless rendering.
-    pub fn compile_with_reflection(
+    /// Shared session + compile path; invokes `f` with the live compile request after `spCompile` succeeds.
+    #[allow(clippy::too_many_arguments)] // mirrors public compile entry points
+    fn with_compiled_request<R>(
         &self,
         source: &str,
         target: ShaderTarget,
@@ -266,13 +401,9 @@ impl SlangCompiler {
         search_paths: &[&str],
         defines: &[(&str, &str)],
         optimization_level: OptimizationLevel,
-    ) -> Result<CompiledShaderWithReflection> {
+        f: impl FnOnce(&Self, *mut SlangCompileRequest, i32) -> Result<R>,
+    ) -> Result<R> {
         // Create session with session-level preprocessor macros.
-        // This is the correct way to make defines visible to imported modules.
-        // The old approach of prepending defines or using addPreprocessorDefine only
-        // affects the main translation unit, not imported modules.
-
-        // Convert defines to PreprocessorMacroDesc array
         let define_names: Vec<CString> = defines
             .iter()
             .map(|(k, _)| CString::new(*k).unwrap())
@@ -290,7 +421,6 @@ impl SlangCompiler {
             })
             .collect();
 
-        // Convert search paths to C strings
         let search_path_cstrings: Vec<CString> = search_paths
             .iter()
             .map(|p| CString::new(*p).unwrap())
@@ -298,7 +428,6 @@ impl SlangCompiler {
         let search_path_ptrs: Vec<*const c_char> =
             search_path_cstrings.iter().map(|s| s.as_ptr()).collect();
 
-        // Create session description with preprocessor macros
         let mut session_desc = SessionDesc::default();
         if !search_path_ptrs.is_empty() {
             session_desc.search_paths = search_path_ptrs.as_ptr();
@@ -309,7 +438,6 @@ impl SlangCompiler {
             session_desc.preprocessor_macro_count = macro_descs.len() as i64;
         }
 
-        // Create a session with the defines
         tracing::debug!(
             "Creating session with {} macros, SessionDesc size: {}",
             macro_descs.len(),
@@ -328,12 +456,10 @@ impl SlangCompiler {
         }
         tracing::debug!("Session with defines created: {:?}", session);
 
-        // Ensure session cleanup
         let _session_guard = scopeguard::guard(session, |s| {
             unsafe { session_release(s) };
         });
 
-        // Create compile request from the ISession (using proper COM interface call)
         let mut request: *mut SlangCompileRequest = ptr::null_mut();
         let result = unsafe { session_create_compile_request(session, &mut request) };
         if !slang_succeeded(result) || request.is_null() {
@@ -345,23 +471,19 @@ impl SlangCompiler {
         }
         tracing::debug!("Compile request created: {:?}", request);
 
-        // Ensure request cleanup on all paths
         let library = self.library.clone();
         let _guard = scopeguard::guard(request, |req| {
             unsafe { (library.destroy_compile_request)(req) };
         });
 
-        // Add target
         let target_index =
             unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
         if target_index < 0 {
             anyhow::bail!("Failed to add code generation target");
         }
 
-        // Set profile for DXIL target (SM 6.6 for bindless support)
         if target == ShaderTarget::Dxil {
             let profile_name = CString::new("sm_6_6").unwrap();
-            // Use the global session for finding profile (works with COM API)
             let profile_id =
                 unsafe { global_session_find_profile(self.global_session, profile_name.as_ptr()) };
             if profile_id > 0 {
@@ -381,7 +503,6 @@ impl SlangCompiler {
             }
         }
 
-        // Add translation unit (the source file)
         let unit_name = CString::new("shader").unwrap();
         let translation_unit = unsafe {
             (self.library.add_translation_unit)(
@@ -394,7 +515,6 @@ impl SlangCompiler {
             anyhow::bail!("Failed to add translation unit");
         }
 
-        // Add source code
         let source_path = CString::new("shader.slang").unwrap();
         let source_cstr = CString::new(source).context("Source contains null bytes")?;
         unsafe {
@@ -406,7 +526,6 @@ impl SlangCompiler {
             );
         }
 
-        // Add explicit entry points if provided
         for (name, stage) in entry_points {
             let name_cstr = CString::new(*name).context("Entry point name contains null bytes")?;
             let entry_index = unsafe {
@@ -422,7 +541,6 @@ impl SlangCompiler {
             }
         }
 
-        // Set optimization level (skip for Default — that's Slang's built-in default)
         if optimization_level != OptimizationLevel::Default {
             let ffi_level = match optimization_level {
                 OptimizationLevel::None => SLANG_OPTIMIZATION_LEVEL_NONE,
@@ -434,10 +552,8 @@ impl SlangCompiler {
             tracing::info!("Slang optimization level set to {:?}", optimization_level);
         }
 
-        // Compile
         let result = unsafe { (self.library.compile)(request) };
         if !slang_succeeded(result) {
-            // Get diagnostic output
             let diag_ptr = unsafe { (self.library.get_diagnostic_output)(request) };
             let diagnostic = if !diag_ptr.is_null() {
                 unsafe { CStr::from_ptr(diag_ptr) }
@@ -449,29 +565,205 @@ impl SlangCompiler {
             anyhow::bail!("Slang compilation failed:\n{}", diagnostic);
         }
 
-        // Get compiled code
-        let mut blob: *mut ISlangBlob = ptr::null_mut();
-        let result = unsafe {
-            (self.library.get_entry_point_code_blob)(request, 0, target_index, &mut blob)
-        };
+        f(self, request, target_index)
+    }
 
-        if !slang_succeeded(result) || blob.is_null() {
-            anyhow::bail!("Failed to get compiled shader code");
+    /// Compile with reflection data.
+    ///
+    /// This performs compilation and extracts reflection information about
+    /// all parameters, especially ParameterBlocks for bindless rendering.
+    ///
+    /// When `layout_checks` is non-empty, each struct is reflected from the same compile request
+    /// and validated before returning (see [`OwnedLayoutCheck`]).
+    #[allow(clippy::too_many_arguments)] // Slang compile inputs are naturally wide
+    pub fn compile_with_reflection(
+        &self,
+        source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        layout_checks: &[OwnedLayoutCheck],
+        optimization_level: OptimizationLevel,
+    ) -> Result<CompiledShaderWithReflection> {
+        self.with_compiled_request(
+            source,
+            target,
+            entry_points,
+            search_paths,
+            defines,
+            optimization_level,
+            |slf, request, target_index| {
+                let mut blob: *mut ISlangBlob = ptr::null_mut();
+                let result = unsafe {
+                    (slf.library.get_entry_point_code_blob)(request, 0, target_index, &mut blob)
+                };
+
+                if !slang_succeeded(result) || blob.is_null() {
+                    anyhow::bail!("Failed to get compiled shader code");
+                }
+
+                let (data_ptr, data_size) = unsafe { blob_get_data(blob) };
+                let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
+                unsafe { blob_release(blob) };
+
+                let reflection = slf.extract_reflection(request)?;
+
+                if !layout_checks.is_empty() {
+                    slf.validate_owned_layout_checks(request, layout_checks)?;
+                }
+
+                Ok(CompiledShaderWithReflection {
+                    shader: CompiledShader { data, target },
+                    reflection,
+                })
+            },
+        )
+    }
+
+    fn validate_owned_layout_checks(
+        &self,
+        request: *mut SlangCompileRequest,
+        checks: &[OwnedLayoutCheck],
+    ) -> Result<()> {
+        for owned in checks {
+            let layout = self.reflect_named_struct_from_request(request, &owned.type_name)?;
+            let field_refs: Vec<(&str, usize, usize)> = owned
+                .rust_fields
+                .iter()
+                .map(|(n, o, s)| (n.as_str(), *o, *s))
+                .collect();
+            layout.validate(owned.rust_size, &field_refs)?;
+        }
+        Ok(())
+    }
+
+    /// Compile `shader_source` with bindless target defines and return the uniform layout of struct `type_name`.
+    ///
+    /// `shader_source` must declare a vertex entry point named **`vs_main`** (same convention as typical goldy shaders).
+    pub fn reflect_struct_layout(
+        &self,
+        shader_source: &str,
+        target: ShaderTarget,
+        search_paths: &[&str],
+        type_name: &str,
+    ) -> Result<StructLayout> {
+        let defines = Self::bindless_defines_for_target(target);
+        let entry_points = &[("vs_main", SlangStage::Vertex)];
+        self.with_compiled_request(
+            shader_source,
+            target,
+            entry_points,
+            search_paths,
+            &defines,
+            OptimizationLevel::Default,
+            |slf, request, _target_index| slf.reflect_named_struct_from_request(request, type_name),
+        )
+    }
+
+    fn reflect_named_struct_from_request(
+        &self,
+        request: *mut SlangCompileRequest,
+        type_name: &str,
+    ) -> Result<StructLayout> {
+        let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
+        if reflection_ptr.is_null() {
+            anyhow::bail!("No Slang reflection available after compile");
         }
 
-        // Copy data from blob
-        let (data_ptr, data_size) = unsafe { blob_get_data(blob) };
-        let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
+        let name_cstr = CString::new(type_name).context("type_name contains null bytes")?;
+        let ty = unsafe {
+            (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr())
+        };
+        if ty.is_null() {
+            anyhow::bail!("Slang reflection: type `{type_name}` not found");
+        }
 
-        // Release blob
-        unsafe { blob_release(blob) };
+        let layout_ptr = unsafe {
+            (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default)
+        };
+        if layout_ptr.is_null() {
+            anyhow::bail!("Slang reflection: failed to get layout for `{type_name}`");
+        }
 
-        // Extract reflection data
-        let reflection = self.extract_reflection(request)?;
+        self.extract_struct_layout_uniform(layout_ptr, type_name)
+    }
 
-        Ok(CompiledShaderWithReflection {
-            shader: CompiledShader { data, target },
-            reflection,
+    fn extract_struct_layout_uniform(
+        &self,
+        type_layout: *mut SlangReflectionTypeLayout,
+        struct_name: &str,
+    ) -> Result<StructLayout> {
+        let cat = SlangParameterCategory::Uniform as i32;
+        let size = unsafe { (self.library.reflection_type_layout_get_size)(type_layout, cat) };
+        let alignment =
+            unsafe { (self.library.reflection_type_layout_get_alignment)(type_layout, cat) };
+
+        let field_count =
+            unsafe { (self.library.reflection_type_layout_get_field_count)(type_layout) };
+
+        let mut fields = Vec::new();
+        for i in 0..field_count {
+            let field_var =
+                unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
+            if field_var.is_null() {
+                continue;
+            }
+
+            let variable =
+                unsafe { (self.library.reflection_variable_layout_get_variable)(field_var) };
+            let name = if !variable.is_null() {
+                let name_ptr = unsafe { (self.library.reflection_variable_get_name)(variable) };
+                if !name_ptr.is_null() {
+                    unsafe { CStr::from_ptr(name_ptr) }
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    format!("field_{i}")
+                }
+            } else {
+                format!("field_{i}")
+            };
+
+            let field_type_layout =
+                unsafe { (self.library.reflection_variable_layout_get_type_layout)(field_var) };
+            if field_type_layout.is_null() {
+                continue;
+            }
+
+            let offset =
+                unsafe { (self.library.reflection_variable_layout_get_offset)(field_var, cat) };
+            let fsize =
+                unsafe { (self.library.reflection_type_layout_get_size)(field_type_layout, cat) };
+
+            let field_type =
+                unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
+            let type_name = if !field_type.is_null() {
+                let type_name_ptr = unsafe { (self.library.reflection_type_get_name)(field_type) };
+                if !type_name_ptr.is_null() {
+                    unsafe { CStr::from_ptr(type_name_ptr) }
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            fields.push(StructFieldLayout {
+                name,
+                offset,
+                size: fsize,
+                type_name,
+            });
+        }
+
+        Ok(StructLayout {
+            name: struct_name.to_string(),
+            size,
+            alignment,
+            fields,
         })
     }
 
@@ -790,6 +1082,219 @@ impl SlangCompiler {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod struct_layout_validate_tests {
+    use super::{StructFieldLayout, StructLayout};
+    use crate as goldy;
+
+    fn two_float_layout() -> StructLayout {
+        StructLayout {
+            name: "S".into(),
+            size: 8,
+            alignment: 4,
+            fields: vec![
+                StructFieldLayout {
+                    name: "a".into(),
+                    offset: 0,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+                StructFieldLayout {
+                    name: "b".into(),
+                    offset: 4,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn validate_ok_when_matching() {
+        two_float_layout()
+            .validate(8, &[("a", 0, 4), ("b", 4, 4)])
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_err_on_struct_size_mismatch() {
+        let mut layout = two_float_layout();
+        layout.size = 16;
+        let err = layout
+            .validate(8, &[("a", 0, 4), ("b", 4, 4)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("size"), "expected size mismatch: {err}");
+        assert!(err.contains("16"), "expected Slang size 16: {err}");
+        assert!(err.contains("8"), "expected Rust size 8: {err}");
+    }
+
+    #[test]
+    fn validate_err_on_field_offset_mismatch() {
+        let err = two_float_layout()
+            .validate(8, &[("a", 0, 4), ("b", 0, 4)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("offset"), "expected offset mismatch: {err}");
+        assert!(err.contains("`b`"), "expected field name b: {err}");
+    }
+
+    #[test]
+    fn validate_err_on_field_size_mismatch() {
+        let err = two_float_layout()
+            .validate(8, &[("a", 0, 8), ("b", 4, 4)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("size") && err.contains("`a`"),
+            "expected field size mismatch for a: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_err_on_field_name_mismatch() {
+        let err = two_float_layout()
+            .validate(8, &[("x", 0, 4), ("b", 4, 4)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`x`"), "expected name x in message: {err}");
+        assert!(err.contains("`a`"), "expected name a in message: {err}");
+    }
+
+    #[test]
+    fn validate_err_on_field_count_mismatch() {
+        let err = two_float_layout()
+            .validate(8, &[("a", 0, 4)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("field count"),
+            "expected field count mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_err_on_extra_rust_fields() {
+        let err = two_float_layout()
+            .validate(8, &[("a", 0, 4), ("b", 4, 4), ("c", 8, 4)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("field count") || err.contains("missing"),
+            "expected field count or missing field error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_reports_multiple_errors() {
+        let mut layout = two_float_layout();
+        layout.size = 16;
+        let err = layout
+            .validate(8, &[("x", 0, 4), ("b", 0, 4)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("size"), "expected size error: {err}");
+        assert!(err.contains("`x`"), "expected name error: {err}");
+        assert!(err.contains("offset"), "expected offset error: {err}");
+    }
+
+    #[test]
+    fn layout_checkable_derive_generates_correct_const() {
+        #[derive(goldy_derive::LayoutCheckable)]
+        #[repr(C)]
+        struct TestStruct {
+            pos: [f32; 2],
+            color: [f32; 4],
+        }
+
+        let check = TestStruct::LAYOUT_CHECK;
+        assert_eq!(check.type_name, "TestStruct");
+        assert_eq!(check.rust_size, std::mem::size_of::<TestStruct>());
+        assert_eq!(check.rust_fields.len(), 2);
+
+        let (name, offset, size) = check.rust_fields[0];
+        assert_eq!(name, "pos");
+        assert_eq!(offset, 0);
+        assert_eq!(size, std::mem::size_of::<[f32; 2]>());
+
+        let (name, offset, size) = check.rust_fields[1];
+        assert_eq!(name, "color");
+        assert_eq!(offset, std::mem::size_of::<[f32; 2]>());
+        assert_eq!(size, std::mem::size_of::<[f32; 4]>());
+    }
+
+    #[test]
+    fn layout_check_validates_against_matching_slang_layout() {
+        #[derive(goldy_derive::LayoutCheckable)]
+        #[repr(C)]
+        struct Uniforms {
+            x: f32,
+            y: f32,
+        }
+
+        let slang = StructLayout {
+            name: "Uniforms".into(),
+            size: 8,
+            alignment: 4,
+            fields: vec![
+                StructFieldLayout {
+                    name: "x".into(),
+                    offset: 0,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+                StructFieldLayout {
+                    name: "y".into(),
+                    offset: 4,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+            ],
+        };
+
+        let check = Uniforms::LAYOUT_CHECK;
+        slang.validate(check.rust_size, check.rust_fields).unwrap();
+    }
+
+    #[test]
+    fn layout_check_detects_mismatch_against_slang_layout() {
+        #[derive(goldy_derive::LayoutCheckable)]
+        #[repr(C)]
+        struct Uniforms {
+            x: f32,
+            y: f32,
+        }
+
+        let slang_with_wrong_offset = StructLayout {
+            name: "Uniforms".into(),
+            size: 8,
+            alignment: 4,
+            fields: vec![
+                StructFieldLayout {
+                    name: "x".into(),
+                    offset: 0,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+                StructFieldLayout {
+                    name: "y".into(),
+                    offset: 8,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+            ],
+        };
+
+        let check = Uniforms::LAYOUT_CHECK;
+        let err = slang_with_wrong_offset
+            .validate(check.rust_size, check.rust_fields)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("offset"), "expected offset mismatch: {err}");
+        assert!(err.contains("`y`"), "expected field y: {err}");
     }
 }
 

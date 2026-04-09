@@ -47,16 +47,24 @@ Follow the sections below for each package manager.
 
 ### Publish
 
+Publish **`goldy_derive` first** (proc-macro crate), then **`goldy`**. Keep their `version` fields in sync in `derive/Cargo.toml` and the root `Cargo.toml`.
+
 ```bash
-# Publish core library
+# 1. Proc-macro crate (no separate GitHub release needed)
+cargo publish -p goldy_derive
+
+# 2. Core library (depends on goldy_derive on crates.io)
 cargo publish -p goldy
 
-# Publish FFI library (if needed)
+# 3. FFI library (if needed)
 cargo publish -p goldy-ffi
 ```
 
+The root `Cargo.toml` lists `goldy_derive` with both `path` and `version` so local builds use the workspace crate and `cargo publish` resolves the dependency from the registry.
+
 ### Version Files
-- `Cargo.toml` - Update `version = "X.Y.Z"`
+- `Cargo.toml` (goldy) - Update `version = "X.Y.Z"` and bump `goldy_derive` dependency version to match
+- `derive/Cargo.toml` - Same `version = "X.Y.Z"` as goldy for releases
 
 ---
 

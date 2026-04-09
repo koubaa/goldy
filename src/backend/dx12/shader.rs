@@ -4,14 +4,14 @@ use super::types::{Dx12State, ShaderState};
 use super::{DeviceHandle, ShaderHandle};
 use anyhow::{Context, Result};
 
-/// Create a shader from Slang source code with custom search paths.
-pub(super) fn create_with_paths(
+pub(super) fn create_with_checks(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     slang_source: &str,
     search_paths: &[&str],
     defines: &[(&str, &str)],
     optimization_level: crate::types::OptimizationLevel,
+    layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
 ) -> Result<ShaderHandle> {
     let _ = state
         .devices
@@ -39,6 +39,7 @@ pub(super) fn create_with_paths(
             fragment_bytecode: None,
             compute_bytecode: None,
             reflection: None,
+            layout_checks,
         },
     );
 
@@ -88,6 +89,7 @@ pub(super) fn ensure_stage_compiled(
     let search_paths = shader.search_paths.clone();
     let optimization_level = shader.optimization_level;
     let extra_defines: Vec<(String, String)> = shader.defines.clone();
+    let layout_checks_snapshot = shader.layout_checks.clone();
 
     // Convert search_paths to &str references
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
@@ -105,6 +107,7 @@ pub(super) fn ensure_stage_compiled(
         &[(entry_point_name, stage)],
         &search_path_refs,
         &defines,
+        &layout_checks_snapshot,
         optimization_level,
     );
 
@@ -145,6 +148,10 @@ pub(super) fn ensure_stage_compiled(
         crate::slang::SlangStage::Fragment => shader.fragment_bytecode = Some(bytecode.clone()),
         crate::slang::SlangStage::Compute => shader.compute_bytecode = Some(bytecode.clone()),
         _ => {} // Already validated above
+    }
+
+    if !layout_checks_snapshot.is_empty() {
+        shader.layout_checks.clear();
     }
 
     // Store reflection data (merge with existing if any)

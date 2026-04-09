@@ -64,6 +64,39 @@ Dump the SPIR-V using `GOLDY_DUMP_SHADERS` (see [Inspecting Compiled Shader Asse
 
 See [shaders/README.md](shaders/README.md#preprocessor-defines) for Slang-specific preprocessor behavior that can cause cross-platform issues.
 
+## Rust vs Slang struct layout validation
+
+Wrong `#[repr(C)]` layouts for uniforms or structured-buffer types often show up as subtle bugs (garbage values, misaligned reads). Goldy can compare your Rust layout to Slang’s reflection on the **same** shader compile that emits SPIR-V / DXIL / MSL—no second compile.
+
+### Enabling validation
+
+Set **`GOLDY_VALIDATE_LAYOUTS`** to a truthy value before creating the device or compiling shaders:
+
+| Value   | Effect        |
+|---------|---------------|
+| (unset) | No validation |
+| `1`     | Validate      |
+| `true`  | Validate      |
+| `yes`   | Validate      |
+
+```bash
+GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient --release
+```
+
+If a layout check fails, compilation returns an error describing size / field offset / name mismatches.
+
+### In application code
+
+1. Match the Rust struct name to the Slang `struct` name you want checked (reflection uses `FindTypeByName`).
+2. Add **`#[derive(LayoutCheckable)]`** (re-exported from the `goldy` crate).
+3. Pass **`&[YourStruct::LAYOUT_CHECK]`** as the last argument to **`ShaderModule::from_slang_with_options`** (other `from_slang*` helpers pass empty checks).
+
+When the env var is off, those checks are skipped and `from_slang_with_options` behaves like a normal compile path.
+
+The **`gradient`** and **`checkerboard`** examples demonstrate this with `TimeUniforms` vs `struct TimeUniforms` in the shader sources.
+
+Standalone reflection without shader creation remains available via **`Device::reflect_struct`** and **`SlangCompiler::reflect_struct_layout`**.
+
 ## Inspecting Compiled Shader Assembly
 
 When a shader produces unexpected results, inspecting the compiled bytecode can reveal codegen issues that aren't visible in the source. This is useful when:

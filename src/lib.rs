@@ -40,12 +40,14 @@ pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transf
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
+pub use goldy_derive::LayoutCheckable;
 pub use gpu_future::GpuFuture;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use render_target::RenderTarget;
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
+pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Surface, SurfaceFrame};
 pub use texture::Texture;
 pub use types::*;

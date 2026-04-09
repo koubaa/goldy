@@ -225,6 +225,8 @@ pub(crate) struct ShaderState {
     pub compute_module: Option<vk::ShaderModule>,
     /// Reflection data for bindless rendering (ParameterBlock layouts)
     pub reflection: Option<crate::slang::ShaderReflection>,
+    /// Pending struct layout validation on first stage compile; cleared after success.
+    pub layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
 }
 
 /// Graphics pipeline state.
