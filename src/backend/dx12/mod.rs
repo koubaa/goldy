@@ -36,7 +36,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use windows::core::Interface;
-use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug};
+use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug, ID3D12Debug1};
 use windows::Win32::Graphics::Dxgi::*;
 
 /// Adapter ID for the WARP device from [`IDXGIFactory4::EnumWarpAdapter`].
@@ -103,6 +103,22 @@ impl Dx12Backend {
                     if let Some(d) = debug_interface {
                         unsafe { d.EnableDebugLayer() };
                         tracing::info!("D3D12 debug layer enabled");
+
+                        // GPU-Based Validation: catches UAV/SRV descriptor mismatches,
+                        // resource state errors, and out-of-bounds access on the GPU timeline.
+                        // Very slow — enable with GOLDY_DX12_GBV=1.
+                        let enable_gbv = std::env::var("GOLDY_DX12_GBV")
+                            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                        if enable_gbv {
+                            if let Ok(debug1) = d.cast::<ID3D12Debug1>() {
+                                unsafe { debug1.SetEnableGPUBasedValidation(true) };
+                                tracing::info!("D3D12 GPU-Based Validation (GBV) enabled");
+                            } else {
+                                tracing::warn!(
+                                    "ID3D12Debug1 not available — GPU-Based Validation unavailable"
+                                );
+                            }
+                        }
                     }
                 }
             }
