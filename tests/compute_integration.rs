@@ -1311,142 +1311,178 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     );
 }
 
-/// Mirrors Ekrano's buffer pool pattern: allocate multiple views from a single
-/// backing buffer, write to each via UAV, then read back via SRV. Each view
-/// has a distinct `FirstElement` offset and is filled with a unique base value
-/// so the SRV read can be verified.
+/// Reproduces Ekrano's rendering pipeline pattern that triggers a WARP bug:
+/// many pool-allocated structured buffers with varying strides, filled via UAV
+/// across multiple pipeline switches, then read via SRV. The bug manifests as
+/// SRV descriptors ignoring FirstElement on pool views, reading from element 0
+/// of the backing buffer instead.
 ///
-/// On WARP, SRV descriptors with `FirstElement != 0` on structured buffer pool
-/// views have been observed to read from element 0 of the backing buffer instead
-/// of the view's offset. This test catches that: if the SRV reads from offset 0
-/// it gets view 0's fill values instead of the target view's values.
+/// Mirrors the draw_leaf → clip_reduce → clip_leaf dispatch chain where
+/// clip_inp_buf (stride 8, pool view) is written via UAV then read via SRV.
 #[test]
-fn test_srv_pool_views_uav_fill_then_srv_read() {
-    const FILL_SHADER: &str = r#"
+fn test_warp_srv_pool_ekrano_pipeline() {
+    // "draw_leaf"-like: reads SRV slots 0-3, writes UAV slots 4-6
+    const WRITE_SHADER: &str = r#"
 import goldy_exp;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(0);
-    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
-    uint base = params[0];
-    dst[id.x] = base + id.x;
+    ReadOnlyBuffer<uint> src0 = goldy_dyn_buf_ro<uint>(0);
+    ReadOnlyBuffer<uint> src1 = goldy_dyn_buf_ro<uint>(1);
+    ReadOnlyBuffer<uint> src2 = goldy_dyn_buf_ro<uint>(2);
+    ReadOnlyBuffer<uint> src3 = goldy_dyn_buf_ro<uint>(3);
+    StorageBuffer<uint> dst0 = goldy_dyn_scattered<uint>(4);
+    StorageBuffer<uint> dst1 = goldy_dyn_scattered<uint>(5);
+    StorageBuffer<uint> dst2 = goldy_dyn_scattered<uint>(6);
+    uint v = src0[id.x] + src1[id.x] + src2[id.x] + src3[id.x];
+    dst0[id.x] = v;
+    dst1[id.x] = v + 100;
+    dst2[id.x] = v + 200;
 }
 "#;
 
-    const SRV_COPY_SHADER: &str = r#"
+    // "clip_reduce"-like: reads SRV slots 0-1, writes UAV slots 2-3
+    const READ_SHADER: &str = r#"
 import goldy_exp;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
-    ReadOnlyBuffer<uint> input = goldy_dyn_buf_ro<uint>(0);
-    StorageBuffer<uint> output = goldy_dyn_scattered<uint>(1);
-    output[id.x] = input[id.x];
+    ReadOnlyBuffer<uint> src0 = goldy_dyn_buf_ro<uint>(0);
+    ReadOnlyBuffer<uint> src1 = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<uint> dst0 = goldy_dyn_scattered<uint>(2);
+    StorageBuffer<uint> dst1 = goldy_dyn_scattered<uint>(3);
+    dst0[id.x] = src0[id.x];
+    dst1[id.x] = src1[id.x];
 }
 "#;
 
     let device = make_device();
-    let fill_shader = ShaderModule::from_slang(&device, FILL_SHADER).expect("compile fill");
-    let fill_pipeline = ComputePipeline::new(&device, &fill_shader).expect("fill pipeline");
-    let copy_shader = ShaderModule::from_slang(&device, SRV_COPY_SHADER).expect("compile copy");
-    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("compile write");
+    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
+    let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
 
     const N: usize = 256;
-    const NUM_VIEWS: usize = 8;
 
-    // Single pool buffer large enough for all views
-    let total_elems = N * NUM_VIEWS;
-    let pool = Buffer::with_data(&device, &vec![0u32; total_elems], DataAccess::Scattered)
-        .expect("create pool");
+    // Ekrano pool: many buffers of varying sizes from a single backing buffer.
+    // All stride 4 (uint) for shader compatibility. The sizes mirror Ekrano's
+    // buffer layout to push clip_inp to a realistic pool offset.
+    let alloc_sizes: &[usize] = &[
+        N * 96, // "config"-like
+        N * 4,  // "scene"-like
+        N * 20, // "tagmonoid"-like
+        N * 24, // "path_bbox"-like
+        N * 16, // "draw_monoid"-like
+        N * 4,  // "info_bin_data"-like
+        N * 8,  // "clip_inp"-like -- THE TARGET (index 6)
+        N * 8,  // "clip_bic"-like
+        N * 32, // "clip_el"-like
+        N * 16, // "clip_bbox"-like
+        N * 16, // "draw_bbox"-like
+        N * 32, // "bump"-like
+        N * 8,  // "bin_header"-like
+        N * 32, // "path"-like
+        N * 8,  // "tile"-like
+        N * 8,  // "seg_counts"-like
+        N * 24, // "segments"-like
+        N * 4,  // "ptcl"-like
+        N * 24, // "lines"-like
+    ];
+    let pool_size = BufferPool::padded_size(
+        &alloc_sizes
+            .iter()
+            .map(|&sz| (sz / 4, 4))
+            .collect::<Vec<_>>(),
+    );
+    let mut pool = BufferPool::new(&device, pool_size).expect("create pool");
+    pool.backing_buffer()
+        .clear(&device, 0, pool_size)
+        .expect("clear pool");
 
-    // Create views at successive offsets into the pool
     let mut views = Vec::new();
-    for v in 0..NUM_VIEWS {
-        let offset = (v * N * 4) as u64;
-        let size = (N * 4) as u64;
-        let view = pool
-            .create_view(offset, size, Some(4))
-            .expect("create view");
+    for &size in alloc_sizes {
+        let view = pool.alloc_bytes(size as u64, Some(4)).expect("alloc view");
         views.push(view);
     }
 
-    // Per-view base values (param buffers for the fill shader)
-    let param_bufs: Vec<_> = (0..NUM_VIEWS)
-        .map(|v| {
-            let base = ((v + 1) * 1000) as u32;
-            Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param buf")
-        })
-        .collect();
+    let clip_inp_idx = 6;
+    let clip_n = alloc_sizes[clip_inp_idx] / 4;
 
-    // Output buffer for SRV readback (one at a time)
+    // Upload known data to clip_inp via CPU (no UAV ambiguity)
+    let clip_data: Vec<u32> = (0..clip_n).map(|i| 50000 + i as u32).collect();
+    views[clip_inp_idx]
+        .write_data(&clip_data)
+        .expect("upload clip_inp");
+
+    // Output buffer (not pooled) for verification
     let output =
-        Buffer::with_data(&device, &vec![0u32; N], DataAccess::Scattered).expect("output buf");
+        Buffer::with_data(&device, &vec![0u32; clip_n], DataAccess::Scattered).expect("output");
 
-    // Phase 1: fill every view via UAV with distinct values
-    // view[v][i] = (v+1)*1000 + i
+    // --- Dispatch chain: many UAV writes to other pool views, then SRV read of clip_inp ---
+    let mut encoder = ComputeEncoder::new();
     {
-        let mut encoder = ComputeEncoder::new();
-        {
-            let mut pass = encoder.begin_compute_pass();
-            pass.set_pipeline(&fill_pipeline);
-            for v in 0..NUM_VIEWS {
-                pass.set_push_constants_raw(&[
-                    views[v].bindless_index().unwrap(),
-                    param_bufs[v].bindless_srv_index().unwrap(),
-                ]);
-                pass.dispatch(N as u32 / 64, 1, 1);
-            }
+        let mut pass = encoder.begin_compute_pass();
+
+        // Churn: write to non-clip_inp pool views via UAV (write_pipeline: 4 SRV + 3 UAV).
+        // Read clip_inp via SRV during churn to exercise the SRV descriptor.
+        pass.set_pipeline(&write_pipeline);
+        let churn_targets: &[&[usize]] = &[&[7, 8, 9], &[10, 11, 12], &[13, 14, 15], &[16, 17, 18]];
+        for targets in churn_targets {
+            pass.set_push_constants_raw(&[
+                views[clip_inp_idx].bindless_srv_index().unwrap(),
+                views[clip_inp_idx].bindless_srv_index().unwrap(),
+                views[clip_inp_idx].bindless_srv_index().unwrap(),
+                views[clip_inp_idx].bindless_srv_index().unwrap(),
+                views[targets[0]].bindless_index().unwrap(),
+                views[targets[1]].bindless_index().unwrap(),
+                views[targets[2]].bindless_index().unwrap(),
+            ]);
+            pass.dispatch(clip_n as u32 / 64, 1, 1);
         }
-        encoder.dispatch(&device).expect("fill dispatch");
+
+        // Final: read clip_inp via SRV, copy to output
+        pass.set_pipeline(&read_pipeline);
+        pass.set_push_constants_raw(&[
+            views[clip_inp_idx].bindless_srv_index().unwrap(),
+            views[clip_inp_idx].bindless_srv_index().unwrap(),
+            output.bindless_index().unwrap(),
+            views[9].bindless_index().unwrap(),
+        ]);
+        pass.dispatch(clip_n as u32 / 64, 1, 1);
     }
+    encoder.dispatch(&device).expect("pipeline dispatch");
 
-    // Phase 2: read each view back via SRV and verify
-    let mut total_mismatches = 0;
-    for target_view in 1..NUM_VIEWS {
-        {
-            let mut encoder = ComputeEncoder::new();
-            {
-                let mut pass = encoder.begin_compute_pass();
-                pass.set_pipeline(&copy_pipeline);
-                pass.set_push_constants_raw(&[
-                    views[target_view].bindless_srv_index().unwrap(),
-                    output.bindless_index().unwrap(),
-                ]);
-                pass.dispatch(N as u32 / 64, 1, 1);
+    // Verify: output should match CPU-uploaded clip_inp data (50000 + i)
+    let mut out_bytes = vec![0u8; clip_n * 4];
+    output
+        .read_to_cpu(&device, &mut out_bytes)
+        .expect("read output");
+    let result: &[u32] = bytemuck::cast_slice(&out_bytes);
+
+    let mut mismatches = 0;
+    for i in 0..clip_n {
+        let expected = 50000 + i as u32;
+        if result[i] != expected {
+            if mismatches < 10 {
+                eprintln!(
+                    "clip_inp SRV [{}]: got {} expected {} (FirstElement={}, offset={})",
+                    i,
+                    result[i],
+                    expected,
+                    views[clip_inp_idx].offset() / 4,
+                    views[clip_inp_idx].offset(),
+                );
             }
-            encoder.dispatch(&device).expect("copy dispatch");
-        }
-
-        let mut out_bytes = vec![0u8; N * 4];
-        output.read_to_cpu(&device, &mut out_bytes).expect("read");
-        let result: &[u32] = bytemuck::cast_slice(&out_bytes);
-
-        let expected_base = ((target_view + 1) * 1000) as u32;
-        for (i, &val) in result.iter().enumerate() {
-            let expected = expected_base + i as u32;
-            if val != expected {
-                if total_mismatches < 10 {
-                    eprintln!(
-                        "view {} [{}]: got {} expected {} (FirstElement={})",
-                        target_view,
-                        i,
-                        val,
-                        expected,
-                        target_view * N
-                    );
-                }
-                total_mismatches += 1;
-            }
+            mismatches += 1;
         }
     }
 
     assert_eq!(
-        total_mismatches, 0,
-        "SRV reads from pool views returned wrong data ({} mismatches). \
-         If values match view 0 instead of the target view, WARP is ignoring \
-         FirstElement in the SRV descriptor.",
-        total_mismatches
+        mismatches, 0,
+        "SRV read of pool-allocated clip_inp returned wrong data ({}/{} wrong). \
+         WARP may be ignoring FirstElement on the SRV descriptor.",
+        mismatches, clip_n
     );
 }
