@@ -1231,3 +1231,82 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     assert_eq!(output[2], 0, "B channel should be 0");
     assert_eq!(output[3], 255, "A channel should be 255");
 }
+
+// ─── SRV view with FirstElement != 0 (WARP bug target) ───────────────────────
+
+/// Read from a buffer view via SRV (goldy_dyn_buf_ro) where the view has a
+/// non-zero offset (FirstElement != 0 in the descriptor). On WARP this has been
+/// observed to read from element 0 instead of FirstElement.
+#[test]
+fn test_srv_view_with_first_element_offset() {
+    const SRV_COPY_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<uint> input = goldy_dyn_buf_ro<uint>(0);
+    StorageBuffer<uint> output = goldy_dyn_scattered<uint>(1);
+    output[id.x] = input[id.x];
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SRV_COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 256;
+    let mut data = vec![0u32; N * 2];
+    for (i, slot) in data.iter_mut().enumerate() {
+        *slot = (i + 1) as u32;
+    }
+
+    let pool_buf =
+        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool buffer");
+
+    // View B starts at offset N (FirstElement = N in the SRV descriptor)
+    let view_b = pool_buf
+        .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
+        .expect("create view B");
+
+    let output_buf =
+        Buffer::with_data(&device, &vec![0u32; N], DataAccess::Scattered).expect("output buffer");
+
+    let srv_idx = view_b.bindless_srv_index().expect("view B SRV index");
+    let uav_idx = output_buf.bindless_index().expect("output UAV index");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants_raw(&[srv_idx, uav_idx]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut output = vec![0u8; N * 4];
+    output_buf
+        .read_to_cpu(&device, &mut output)
+        .expect("read_to_cpu");
+
+    let result: &[u32] = bytemuck::cast_slice(&output);
+    let mut mismatches = 0;
+    for (i, &val) in result.iter().enumerate() {
+        let expected = (N + i + 1) as u32;
+        if val != expected {
+            if mismatches < 5 {
+                eprintln!(
+                    "MISMATCH output[{}]: got {} expected {} (FirstElement={})",
+                    i, val, expected, N
+                );
+            }
+            mismatches += 1;
+        }
+    }
+    assert_eq!(
+        mismatches, 0,
+        "SRV view read returned wrong data ({} of {} elements wrong). \
+         This indicates the WARP SRV FirstElement bug.",
+        mismatches, N
+    );
+}
