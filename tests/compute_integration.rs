@@ -1360,26 +1360,26 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         for (i, slot) in data.iter_mut().enumerate() {
             *slot = (p * total_elems + i + 1) as u32;
         }
-        let pool = Buffer::with_data(&device, &data, DataAccess::Scattered)
-            .expect("create pool");
+        let pool = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool");
 
         let mut pool_views = Vec::new();
         for v in 0..NUM_VIEWS {
             let offset = ((v + 1) * N * 4) as u64;
             let size = (N * 4) as u64;
-            let view = pool.create_view(offset, size, Some(4)).expect("create view");
+            let view = pool
+                .create_view(offset, size, Some(4))
+                .expect("create view");
             pool_views.push(view);
         }
         pools.push(pool);
         views.push(pool_views);
 
-        let out = Buffer::with_data(&device, &vec![0u32; N], DataAccess::Scattered)
-            .expect("output buf");
+        let out =
+            Buffer::with_data(&device, &vec![0u32; N], DataAccess::Scattered).expect("output buf");
         outputs.push(out);
     }
 
-    let base_buf = Buffer::with_data(&device, &[42u32], DataAccess::Scattered)
-        .expect("base buf");
+    let base_buf = Buffer::with_data(&device, &[42u32], DataAccess::Scattered).expect("base buf");
 
     let mut total_mismatches = 0;
 
@@ -1417,7 +1417,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         // Verify SRV reads
         for p in 0..NUM_POOLS {
             let mut out_bytes = vec![0u8; N * 4];
-            outputs[p].read_to_cpu(&device, &mut out_bytes).expect("read");
+            outputs[p]
+                .read_to_cpu(&device, &mut out_bytes)
+                .expect("read");
             let result: &[u32] = bytemuck::cast_slice(&out_bytes);
 
             let view_offset = NUM_VIEWS * N;
