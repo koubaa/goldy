@@ -1310,3 +1310,138 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         mismatches, N
     );
 }
+
+/// Stress test: many dispatches with multiple pool buffers and views to churn
+/// GPU state before the final SRV read. The WARP SRV FirstElement bug appears
+/// to be state-dependent, requiring many prior dispatches to manifest.
+#[test]
+fn test_srv_view_after_many_dispatches() {
+    const FILL_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> buf = goldy_dyn_scattered<uint>(0);
+    ReadOnlyBuffer<uint> base = goldy_dyn_buf_ro<uint>(1);
+    buf[id.x] = base[0] + id.x;
+}
+"#;
+
+    const SRV_COPY_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<uint> input = goldy_dyn_buf_ro<uint>(0);
+    StorageBuffer<uint> output = goldy_dyn_scattered<uint>(1);
+    output[id.x] = input[id.x];
+}
+"#;
+
+    let device = make_device();
+    let fill_shader = ShaderModule::from_slang(&device, FILL_SHADER).expect("compile fill");
+    let fill_pipeline = ComputePipeline::new(&device, &fill_shader).expect("fill pipeline");
+    let copy_shader = ShaderModule::from_slang(&device, SRV_COPY_SHADER).expect("compile copy");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
+
+    const N: usize = 256;
+    const NUM_POOLS: usize = 8;
+    const NUM_VIEWS: usize = 4;
+
+    let mut pools = Vec::new();
+    let mut views = Vec::new();
+    let mut outputs = Vec::new();
+
+    for p in 0..NUM_POOLS {
+        let total_elems = N * (NUM_VIEWS + 1);
+        let mut data = vec![0u32; total_elems];
+        for (i, slot) in data.iter_mut().enumerate() {
+            *slot = (p * total_elems + i + 1) as u32;
+        }
+        let pool = Buffer::with_data(&device, &data, DataAccess::Scattered)
+            .expect("create pool");
+
+        let mut pool_views = Vec::new();
+        for v in 0..NUM_VIEWS {
+            let offset = ((v + 1) * N * 4) as u64;
+            let size = (N * 4) as u64;
+            let view = pool.create_view(offset, size, Some(4)).expect("create view");
+            pool_views.push(view);
+        }
+        pools.push(pool);
+        views.push(pool_views);
+
+        let out = Buffer::with_data(&device, &vec![0u32; N], DataAccess::Scattered)
+            .expect("output buf");
+        outputs.push(out);
+    }
+
+    let base_buf = Buffer::with_data(&device, &[42u32], DataAccess::Scattered)
+        .expect("base buf");
+
+    let mut total_mismatches = 0;
+
+    for iteration in 0..10 {
+        let mut encoder = ComputeEncoder::new();
+        {
+            let mut pass = encoder.begin_compute_pass();
+
+            // Phase 1: many fill dispatches across all pools to churn GPU state
+            pass.set_pipeline(&fill_pipeline);
+            for p in 0..NUM_POOLS {
+                for v in 0..NUM_VIEWS {
+                    let view = &views[p][v];
+                    pass.set_push_constants_raw(&[
+                        view.bindless_index().unwrap(),
+                        base_buf.bindless_srv_index().unwrap(),
+                    ]);
+                    pass.dispatch(N as u32 / 64, 1, 1);
+                }
+            }
+
+            // Phase 2: SRV reads from views with FirstElement != 0
+            pass.set_pipeline(&copy_pipeline);
+            for p in 0..NUM_POOLS {
+                let view = &views[p][NUM_VIEWS - 1]; // last view (highest offset)
+                pass.set_push_constants_raw(&[
+                    view.bindless_srv_index().unwrap(),
+                    outputs[p].bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N as u32 / 64, 1, 1);
+            }
+        }
+        encoder.dispatch(&device).expect("dispatch");
+
+        // Verify SRV reads
+        for p in 0..NUM_POOLS {
+            let mut out_bytes = vec![0u8; N * 4];
+            outputs[p].read_to_cpu(&device, &mut out_bytes).expect("read");
+            let result: &[u32] = bytemuck::cast_slice(&out_bytes);
+
+            let view_offset = NUM_VIEWS * N;
+            let base_val = (p * N * (NUM_VIEWS + 1) + view_offset + 1) as u32;
+
+            for (i, &val) in result.iter().enumerate() {
+                let expected = base_val + i as u32;
+                if val != expected {
+                    if total_mismatches < 10 {
+                        eprintln!(
+                            "iter {} pool {} [{}]: got {} expected {} (FE={})",
+                            iteration, p, i, val, expected, view_offset
+                        );
+                    }
+                    total_mismatches += 1;
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        total_mismatches, 0,
+        "SRV view reads returned wrong data ({} total mismatches across 10 iterations). \
+         This indicates the WARP SRV FirstElement bug.",
+        total_mismatches
+    );
+}
