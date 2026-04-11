@@ -1311,20 +1311,23 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     );
 }
 
-/// Stress test: many dispatches with multiple pool buffers and views to churn
-/// GPU state before the final SRV read. The WARP SRV FirstElement bug appears
-/// to be state-dependent, requiring many prior dispatches to manifest.
+/// Stress test: many dispatches writing to independent churn buffers before
+/// reading from pool views via SRV. The pool data is uploaded once and never
+/// modified by dispatches; only the SRV read uses FirstElement != 0 views.
+///
+/// On WARP, SRV descriptors with FirstElement != 0 on structured buffers have
+/// been observed to read from element 0 instead, but only after sufficient
+/// GPU state churn (the simple single-dispatch test above passes).
 #[test]
 fn test_srv_view_after_many_dispatches() {
-    const FILL_SHADER: &str = r#"
+    const CHURN_SHADER: &str = r#"
 import goldy_exp;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
     StorageBuffer<uint> buf = goldy_dyn_scattered<uint>(0);
-    ReadOnlyBuffer<uint> base = goldy_dyn_buf_ro<uint>(1);
-    buf[id.x] = base[0] + id.x;
+    buf[id.x] = id.x * 3 + 7;
 }
 "#;
 
@@ -1341,15 +1344,17 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 "#;
 
     let device = make_device();
-    let fill_shader = ShaderModule::from_slang(&device, FILL_SHADER).expect("compile fill");
-    let fill_pipeline = ComputePipeline::new(&device, &fill_shader).expect("fill pipeline");
+    let churn_shader = ShaderModule::from_slang(&device, CHURN_SHADER).expect("compile churn");
+    let churn_pipeline = ComputePipeline::new(&device, &churn_shader).expect("churn pipeline");
     let copy_shader = ShaderModule::from_slang(&device, SRV_COPY_SHADER).expect("compile copy");
     let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
 
     const N: usize = 256;
-    const NUM_POOLS: usize = 8;
+    const NUM_POOLS: usize = 4;
     const NUM_VIEWS: usize = 4;
+    const NUM_CHURN_BUFS: usize = 32;
 
+    // Pool buffers with known initial data (never modified by dispatches)
     let mut pools = Vec::new();
     let mut views = Vec::new();
     let mut outputs = Vec::new();
@@ -1379,7 +1384,12 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         outputs.push(out);
     }
 
-    let base_buf = Buffer::with_data(&device, &[42u32], DataAccess::Scattered).expect("base buf");
+    // Independent churn buffers (dispatches write here, never touch pools)
+    let churn_bufs: Vec<_> = (0..NUM_CHURN_BUFS)
+        .map(|_| {
+            Buffer::with_data(&device, &vec![0u32; N], DataAccess::Scattered).expect("churn buf")
+        })
+        .collect();
 
     let mut total_mismatches = 0;
 
@@ -1388,23 +1398,17 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         {
             let mut pass = encoder.begin_compute_pass();
 
-            // Phase 1: many fill dispatches across all pools to churn GPU state
-            pass.set_pipeline(&fill_pipeline);
-            for p in 0..NUM_POOLS {
-                for v in 0..NUM_VIEWS {
-                    let view = &views[p][v];
-                    pass.set_push_constants_raw(&[
-                        view.bindless_index().unwrap(),
-                        base_buf.bindless_srv_index().unwrap(),
-                    ]);
-                    pass.dispatch(N as u32 / 64, 1, 1);
-                }
+            // Phase 1: many dispatches to churn GPU state (independent of pool data)
+            pass.set_pipeline(&churn_pipeline);
+            for churn in &churn_bufs {
+                pass.set_push_constants_raw(&[churn.bindless_index().unwrap()]);
+                pass.dispatch(N as u32 / 64, 1, 1);
             }
 
-            // Phase 2: SRV reads from views with FirstElement != 0
+            // Phase 2: SRV reads from pool views with FirstElement != 0
             pass.set_pipeline(&copy_pipeline);
             for p in 0..NUM_POOLS {
-                let view = &views[p][NUM_VIEWS - 1]; // last view (highest offset)
+                let view = &views[p][NUM_VIEWS - 1];
                 pass.set_push_constants_raw(&[
                     view.bindless_srv_index().unwrap(),
                     outputs[p].bindless_index().unwrap(),
@@ -1414,7 +1418,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         }
         encoder.dispatch(&device).expect("dispatch");
 
-        // Verify SRV reads
         for p in 0..NUM_POOLS {
             let mut out_bytes = vec![0u8; N * 4];
             outputs[p]
