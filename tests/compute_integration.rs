@@ -1311,16 +1311,73 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     );
 }
 
-/// Reproduces Ekrano's rendering pipeline pattern that triggers a WARP bug:
-/// many pool-allocated structured buffers with varying strides, filled via UAV
-/// across multiple pipeline switches and INDIRECT dispatches, then read via SRV.
-///
-/// Mirrors Ekrano's pipeline_setup → indirect dispatch → draw_leaf → clip_reduce
-/// pattern with dispatch_indirect driven by GPU-written workgroup counts.
+/// Kitchen-sink WARP SRV reproducer combining ALL factors from Ekrano:
+/// - Varying strides (4, 8, 16, 20, 24, 32, 96) matching Ekrano's buffer layout
+/// - Large buffers (N=4096 elements per view)
+/// - GPU-written indirect dispatch args (pipeline_setup computes workgroup counts)
+/// - All dispatches use dispatch_indirect
+/// - Multiple pipeline switches (6 different shader pipelines)
+/// - UAV fill → SRV read pattern on clip_inp (stride 8)
+/// - Many churn dispatches with mixed SRV/UAV bindings
 #[test]
-fn test_warp_srv_pool_ekrano_pipeline() {
-    // Fill shader: writes base_value + id.x via UAV
-    const FILL_SHADER: &str = r#"
+fn test_warp_srv_pool_combined() {
+    // pipeline_setup: GPU writes indirect dispatch args
+    const SETUP_SHADER: &str = r#"
+import goldy_exp;
+
+struct IndirectArgs { uint x; uint y; uint z; uint pad; };
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 tid : SV_DispatchThreadID) {
+    StorageBuffer<IndirectArgs> indirect = goldy_dyn_scattered<IndirectArgs>(0);
+    ReadOnlyBuffer<uint> wg_counts = goldy_dyn_buf_ro<uint>(1);
+    uint slot = tid.x;
+    IndirectArgs args;
+    args.x = wg_counts[slot];
+    args.y = 1;
+    args.z = 1;
+    args.pad = 0;
+    indirect[slot] = args;
+}
+"#;
+
+    // Fill stride-8 views (Pair = {uint, uint})
+    const FILL_U2_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p;
+    p.a = base + id.x * 2;
+    p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+
+    // Copy stride-8 via SRV → UAV
+    const COPY_U2_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+
+    // Fill stride-4 views (uint)
+    const FILL_U1_SHADER: &str = r#"
 import goldy_exp;
 
 [shader("compute")]
@@ -1328,12 +1385,11 @@ import goldy_exp;
 void cs_main(uint3 id : SV_DispatchThreadID) {
     StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(0);
     ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
-    uint base = params[0];
-    dst[id.x] = base + id.x;
+    dst[id.x] = params[0] + id.x;
 }
 "#;
 
-    // Churn shader: reads 4 SRVs, writes 3 UAVs
+    // Churn: 4 SRV reads + 3 UAV writes (like draw_leaf, binning)
     const CHURN_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1354,245 +1410,8 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // Copy shader: SRV → UAV
-    const COPY_SHADER: &str = r#"
-import goldy_exp;
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    ReadOnlyBuffer<uint> src = goldy_dyn_buf_ro<uint>(0);
-    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(1);
-    dst[id.x] = src[id.x];
-}
-"#;
-
-    let device = make_device();
-    let fill_shader = ShaderModule::from_slang(&device, FILL_SHADER).expect("compile fill");
-    let fill_pipeline = ComputePipeline::new(&device, &fill_shader).expect("fill pipeline");
-    let churn_shader = ShaderModule::from_slang(&device, CHURN_SHADER).expect("compile churn");
-    let churn_pipeline = ComputePipeline::new(&device, &churn_shader).expect("churn pipeline");
-    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy");
-    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
-
-    const N: usize = 256;
-
-    let alloc_sizes: &[usize] = &[
-        N * 96, // "config"-like
-        N * 4,  // "scene"-like
-        N * 20, // "tagmonoid"-like
-        N * 24, // "path_bbox"-like
-        N * 16, // "draw_monoid"-like
-        N * 4,  // "info_bin_data"-like
-        N * 8,  // "clip_inp"-like -- THE TARGET (index 6)
-        N * 8,  // "clip_bic"-like
-        N * 32, // "clip_el"-like
-        N * 16, // "clip_bbox"-like
-        N * 16, // "draw_bbox"-like
-        N * 32, // "bump"-like
-        N * 8,  // "bin_header"-like
-        N * 32, // "path"-like
-        N * 8,  // "tile"-like
-        N * 8,  // "seg_counts"-like
-        N * 24, // "segments"-like
-        N * 4,  // "ptcl"-like
-        N * 24, // "lines"-like
-    ];
-    let pool_size = BufferPool::padded_size(
-        &alloc_sizes
-            .iter()
-            .map(|&sz| (sz / 4, 4))
-            .collect::<Vec<_>>(),
-    );
-    let mut pool = BufferPool::new(&device, pool_size).expect("create pool");
-    pool.backing_buffer()
-        .clear(&device, 0, pool_size)
-        .expect("clear pool");
-
-    let mut views = Vec::new();
-    for &size in alloc_sizes {
-        let view = pool.alloc_bytes(size as u64, Some(4)).expect("alloc view");
-        views.push(view);
-    }
-
-    let clip_inp_idx = 6;
-    let clip_n = alloc_sizes[clip_inp_idx] / 4;
-    let wg = clip_n as u32 / 64;
-
-    let make_param = |base: u32| -> Buffer {
-        Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param buf")
-    };
-    let clip_param = make_param(50000);
-
-    // Indirect dispatch buffer (like Ekrano's vello.indirect_dispatch)
-    // 20 slots × 3 uints (x, y, z), pre-filled with correct workgroup counts
-    let num_indirect_slots = 20;
-    let mut indirect_data = vec![0u32; num_indirect_slots * 3];
-    for slot in 0..num_indirect_slots {
-        let slot_wg = if slot < alloc_sizes.len() {
-            let n = alloc_sizes[slot] / 4;
-            (n as u32).max(64) / 64
-        } else {
-            wg
-        };
-        indirect_data[slot * 3] = slot_wg;
-        indirect_data[slot * 3 + 1] = 1;
-        indirect_data[slot * 3 + 2] = 1;
-    }
-    let indirect_buf =
-        Buffer::with_data(&device, &indirect_data, DataAccess::Scattered).expect("indirect buf");
-
-    // Output buffer (not pooled)
-    let output =
-        Buffer::with_data(&device, &vec![0u32; clip_n], DataAccess::Scattered).expect("output");
-
-    // --- Ekrano-like dispatch chain with indirect dispatch ---
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-
-        // Phase 1: fill all non-clip_inp views via indirect dispatch
-        pass.set_pipeline(&fill_pipeline);
-        let fill_indices: Vec<usize> = (0..clip_inp_idx)
-            .chain(clip_inp_idx + 1..alloc_sizes.len())
-            .collect();
-        let fill_params: Vec<Buffer> = fill_indices
-            .iter()
-            .map(|&v| make_param((v as u32 + 1) * 10000))
-            .collect();
-        for (idx, &v) in fill_indices.iter().enumerate() {
-            pass.set_push_constants_raw(&[
-                views[v].bindless_index().unwrap(),
-                fill_params[idx].bindless_srv_index().unwrap(),
-            ]);
-            pass.dispatch_indirect(&indirect_buf, (v * 12) as u64);
-        }
-
-        // Phase 2: fill clip_inp via indirect dispatch (like draw_leaf)
-        pass.set_push_constants_raw(&[
-            views[clip_inp_idx].bindless_index().unwrap(),
-            clip_param.bindless_srv_index().unwrap(),
-        ]);
-        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
-
-        // Phase 3: churn via indirect dispatch
-        pass.set_pipeline(&churn_pipeline);
-        pass.set_push_constants_raw(&[
-            views[0].bindless_srv_index().unwrap(),
-            views[1].bindless_srv_index().unwrap(),
-            views[2].bindless_srv_index().unwrap(),
-            views[3].bindless_srv_index().unwrap(),
-            views[10].bindless_index().unwrap(),
-            views[11].bindless_index().unwrap(),
-            views[12].bindless_index().unwrap(),
-        ]);
-        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
-
-        pass.set_push_constants_raw(&[
-            views[4].bindless_srv_index().unwrap(),
-            views[5].bindless_srv_index().unwrap(),
-            views[7].bindless_srv_index().unwrap(),
-            views[8].bindless_srv_index().unwrap(),
-            views[13].bindless_index().unwrap(),
-            views[14].bindless_index().unwrap(),
-            views[15].bindless_index().unwrap(),
-        ]);
-        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
-
-        // Phase 4: read clip_inp via SRV → output via indirect dispatch
-        pass.set_pipeline(&copy_pipeline);
-        pass.set_push_constants_raw(&[
-            views[clip_inp_idx].bindless_srv_index().unwrap(),
-            output.bindless_index().unwrap(),
-        ]);
-        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
-    }
-    encoder.dispatch(&device).expect("pipeline dispatch");
-
-    // Verify
-    let mut out_bytes = vec![0u8; clip_n * 4];
-    output
-        .read_to_cpu(&device, &mut out_bytes)
-        .expect("read output");
-    let result: &[u32] = bytemuck::cast_slice(&out_bytes);
-
-    let mut mismatches = 0;
-    for i in 0..clip_n {
-        let expected = 50000 + i as u32;
-        if result[i] != expected {
-            if mismatches < 10 {
-                eprintln!(
-                    "clip_inp SRV [{}]: got {} expected {} (FirstElement={}, offset={})",
-                    i,
-                    result[i],
-                    expected,
-                    views[clip_inp_idx].offset() / 4,
-                    views[clip_inp_idx].offset(),
-                );
-            }
-            mismatches += 1;
-        }
-    }
-
-    assert_eq!(
-        mismatches, 0,
-        "SRV read of pool-allocated clip_inp returned wrong data ({}/{} wrong). \
-         WARP may be ignoring FirstElement on the SRV descriptor.",
-        mismatches, clip_n
-    );
-}
-
-/// Same as above but with Ekrano's actual varying strides in the pool descriptors.
-/// clip_inp uses stride 8 (like Ekrano's 2×uint ClipInput struct).
-/// Other buffers use their real strides (4, 16, 20, 24, 32, 96).
-/// This exercises WARP's descriptor handling with mixed StructureByteStride values.
-#[test]
-fn test_warp_srv_pool_varying_strides() {
-    const FILL_U2_SHADER: &str = r#"
-import goldy_exp;
-
-struct Pair { uint a; uint b; };
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
-    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
-    uint base = params[0];
-    Pair p;
-    p.a = base + id.x * 2;
-    p.b = base + id.x * 2 + 1;
-    dst[id.x] = p;
-}
-"#;
-
-    const COPY_U2_SHADER: &str = r#"
-import goldy_exp;
-
-struct Pair { uint a; uint b; };
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
-    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
-    dst[id.x] = src[id.x];
-}
-"#;
-
-    const FILL_U1_SHADER: &str = r#"
-import goldy_exp;
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(0);
-    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
-    dst[id.x] = params[0] + id.x;
-}
-"#;
-
-    const CHURN_SHADER: &str = r#"
+    // 2-SRV churn (like clip_reduce reading clip_inp)
+    const CHURN2_SHADER: &str = r#"
 import goldy_exp;
 
 [shader("compute")]
@@ -1609,37 +1428,54 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     let device = make_device();
 
-    let fill_u2_shader = ShaderModule::from_slang(&device, FILL_U2_SHADER).expect("fill u2");
-    let fill_u2_pipe = ComputePipeline::new(&device, &fill_u2_shader).expect("fill u2 pipe");
-    let copy_u2_shader = ShaderModule::from_slang(&device, COPY_U2_SHADER).expect("copy u2");
-    let copy_u2_pipe = ComputePipeline::new(&device, &copy_u2_shader).expect("copy u2 pipe");
-    let fill_u1_shader = ShaderModule::from_slang(&device, FILL_U1_SHADER).expect("fill u1");
-    let fill_u1_pipe = ComputePipeline::new(&device, &fill_u1_shader).expect("fill u1 pipe");
-    let churn_shader = ShaderModule::from_slang(&device, CHURN_SHADER).expect("churn");
-    let churn_pipe = ComputePipeline::new(&device, &churn_shader).expect("churn pipe");
+    let setup_pipe = {
+        let s = ShaderModule::from_slang(&device, SETUP_SHADER).expect("setup");
+        ComputePipeline::new(&device, &s).expect("setup pipe")
+    };
+    let fill_u2_pipe = {
+        let s = ShaderModule::from_slang(&device, FILL_U2_SHADER).expect("fill u2");
+        ComputePipeline::new(&device, &s).expect("fill u2 pipe")
+    };
+    let copy_u2_pipe = {
+        let s = ShaderModule::from_slang(&device, COPY_U2_SHADER).expect("copy u2");
+        ComputePipeline::new(&device, &s).expect("copy u2 pipe")
+    };
+    let fill_u1_pipe = {
+        let s = ShaderModule::from_slang(&device, FILL_U1_SHADER).expect("fill u1");
+        ComputePipeline::new(&device, &s).expect("fill u1 pipe")
+    };
+    let churn_pipe = {
+        let s = ShaderModule::from_slang(&device, CHURN_SHADER).expect("churn");
+        ComputePipeline::new(&device, &s).expect("churn pipe")
+    };
+    let churn2_pipe = {
+        let s = ShaderModule::from_slang(&device, CHURN2_SHADER).expect("churn2");
+        ComputePipeline::new(&device, &s).expect("churn2 pipe")
+    };
 
-    // Pool with Ekrano's actual strides
-    // (num_elements, stride) for each allocation
+    const N: usize = 4096;
+
+    // (num_elements, stride) -- Ekrano's actual strides and large element counts
     let allocs: &[(usize, usize)] = &[
-        (256, 96), // "config"
-        (256, 4),  // "scene"
-        (256, 20), // "tagmonoid"
-        (256, 24), // "path_bbox"
-        (256, 16), // "draw_monoid"
-        (256, 4),  // "info_bin_data"
-        (256, 8),  // "clip_inp" (THE TARGET) -- stride 8
-        (256, 8),  // "clip_bic"
-        (256, 32), // "clip_el"
-        (256, 16), // "clip_bbox"
-        (256, 16), // "draw_bbox"
-        (256, 32), // "bump"
-        (256, 8),  // "bin_header"
-        (256, 32), // "path"
-        (256, 8),  // "tile"
-        (256, 8),  // "seg_counts"
-        (256, 24), // "segments"
-        (256, 4),  // "ptcl"
-        (256, 24), // "lines"
+        (N, 96), // "config"
+        (N, 4),  // "scene"
+        (N, 20), // "tagmonoid"
+        (N, 24), // "path_bbox"
+        (N, 16), // "draw_monoid"
+        (N, 4),  // "info_bin_data"
+        (N, 8),  // "clip_inp" (THE TARGET, index 6) -- stride 8
+        (N, 8),  // "clip_bic"
+        (N, 32), // "clip_el"
+        (N, 16), // "clip_bbox"
+        (N, 16), // "draw_bbox"
+        (N, 32), // "bump"
+        (N, 8),  // "bin_header"
+        (N, 32), // "path"
+        (N, 8),  // "tile"
+        (N, 8),  // "seg_counts"
+        (N, 24), // "segments"
+        (N, 4),  // "ptcl"
+        (N, 24), // "lines"
     ];
 
     let pool_size = BufferPool::padded_size(allocs);
@@ -1650,87 +1486,144 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     let mut views = Vec::new();
     for &(count, stride) in allocs {
-        let size = (count * stride) as u64;
-        let view = pool.alloc_bytes(size, Some(stride as u32)).expect("alloc");
+        let view = pool
+            .alloc_bytes((count * stride) as u64, Some(stride as u32))
+            .expect("alloc");
         views.push(view);
     }
 
     let clip_inp_idx = 6;
-    let clip_n = allocs[clip_inp_idx].0; // 256 Pair elements (512 uints)
-    let wg = clip_n as u32 / 64;
+    let clip_n = N; // number of Pair elements in clip_inp
+    let clip_wg = clip_n as u32 / 64;
 
-    // Param buffers
-    let clip_param =
-        Buffer::with_data(&device, &[50000u32], DataAccess::Scattered).expect("clip param");
+    // --- Indirect dispatch buffer (stride 16: IndirectArgs{x,y,z,pad}) ---
+    // 20 slots, one per pipeline stage. GPU-written by setup shader.
+    let num_slots = 20;
+    let indirect_buf =
+        Buffer::with_data(&device, &vec![0u32; num_slots * 4], DataAccess::Scattered)
+            .expect("indirect buf");
 
-    // Output buffer with stride 8 (not pooled)
-    let output_data = vec![0u32; clip_n * 2]; // Pair = 2 uints
-    let output = Buffer::with_data(&device, &output_data, DataAccess::Scattered).expect("output");
+    // Workgroup counts buffer (SRV) -- the setup shader reads from here
+    let mut wg_data = vec![0u32; num_slots];
+    for (i, slot) in wg_data.iter_mut().enumerate() {
+        *slot = if i < allocs.len() {
+            allocs[i].0 as u32 / 64
+        } else {
+            clip_wg
+        };
+    }
+    let wg_counts_buf =
+        Buffer::with_data(&device, &wg_data, DataAccess::Scattered).expect("wg counts");
 
-    // Fill some non-clip views with stride-4 data, and churn
-    let fill_params: Vec<Buffer> = (0..6)
-        .map(|v| {
-            Buffer::with_data(&device, &[((v + 1) * 10000) as u32], DataAccess::Scattered)
-                .expect("fp")
-        })
-        .collect();
+    let make_param = |base: u32| -> Buffer {
+        Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param")
+    };
 
+    // Output (not pooled, stride 8 for Pair)
+    let output =
+        Buffer::with_data(&device, &vec![0u32; clip_n * 2], DataAccess::Scattered).expect("out");
+
+    // --- Dispatch chain ---
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
 
-        // Fill stride-4 views (scene, info_bin_data, ptcl) via uint shader
+        // Phase 0: pipeline_setup -- GPU writes all indirect dispatch args
+        pass.set_pipeline(&setup_pipe);
+        pass.set_push_constants_raw(&[
+            indirect_buf.bindless_index().unwrap(),
+            wg_counts_buf.bindless_srv_index().unwrap(),
+        ]);
+        pass.dispatch(num_slots as u32, 1, 1);
+
+        // Phase 1: fill stride-4 views via indirect dispatch
         pass.set_pipeline(&fill_u1_pipe);
         for &v in &[1usize, 5, 17] {
-            let n = allocs[v].0;
-            pass.set_push_constants_raw(&[
-                views[v].bindless_index().unwrap(),
-                fill_params[v.min(5)].bindless_srv_index().unwrap(),
-            ]);
-            pass.dispatch(n as u32 / 64, 1, 1);
-        }
-
-        // Fill clip_inp (stride 8) via Pair shader
-        pass.set_pipeline(&fill_u2_pipe);
-        pass.set_push_constants_raw(&[
-            views[clip_inp_idx].bindless_index().unwrap(),
-            clip_param.bindless_srv_index().unwrap(),
-        ]);
-        pass.dispatch(wg, 1, 1);
-
-        // Fill other stride-8 views (clip_bic, bin_header, tile, seg_counts)
-        for &v in &[7usize, 12, 14, 15] {
-            let fp = Buffer::with_data(&device, &[((v + 1) * 10000) as u32], DataAccess::Scattered)
-                .expect("fp");
+            let fp = make_param((v as u32 + 1) * 10000);
             pass.set_push_constants_raw(&[
                 views[v].bindless_index().unwrap(),
                 fp.bindless_srv_index().unwrap(),
             ]);
-            pass.dispatch(allocs[v].0 as u32 / 64, 1, 1);
+            pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
         }
 
-        // Churn: read stride-4 views via SRV, write stride-4 views via UAV
+        // Phase 2: fill all stride-8 views via indirect dispatch
+        pass.set_pipeline(&fill_u2_pipe);
+        for &v in &[6usize, 7, 12, 14, 15] {
+            let fp = make_param(if v == clip_inp_idx {
+                50000
+            } else {
+                (v as u32 + 1) * 10000
+            });
+            pass.set_push_constants_raw(&[
+                views[v].bindless_index().unwrap(),
+                fp.bindless_srv_index().unwrap(),
+            ]);
+            pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
+        }
+
+        // Phase 3: churn -- 4-SRV + 3-UAV dispatches via indirect (like draw_leaf, binning)
         pass.set_pipeline(&churn_pipe);
         pass.set_push_constants_raw(&[
             views[1].bindless_srv_index().unwrap(),
             views[5].bindless_srv_index().unwrap(),
-            views[17].bindless_index().unwrap(),
-            views[1].bindless_index().unwrap(),
+            views[17].bindless_srv_index().unwrap(),
+            views[1].bindless_srv_index().unwrap(),
+            views[10].bindless_index().unwrap(),
+            views[11].bindless_index().unwrap(),
+            views[9].bindless_index().unwrap(),
         ]);
-        pass.dispatch(wg, 1, 1);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
 
-        // Read clip_inp via SRV (stride 8 Pair), copy to output
+        pass.set_push_constants_raw(&[
+            views[1].bindless_srv_index().unwrap(),
+            views[5].bindless_srv_index().unwrap(),
+            views[17].bindless_srv_index().unwrap(),
+            views[5].bindless_srv_index().unwrap(),
+            views[3].bindless_index().unwrap(),
+            views[4].bindless_index().unwrap(),
+            views[2].bindless_index().unwrap(),
+        ]);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
+
+        // Phase 4: 2-SRV churn reading clip_inp via SRV (like clip_reduce)
+        pass.set_pipeline(&churn2_pipe);
+        pass.set_push_constants_raw(&[
+            views[clip_inp_idx].bindless_srv_index().unwrap(),
+            views[1].bindless_srv_index().unwrap(),
+            views[8].bindless_index().unwrap(),
+            views[13].bindless_index().unwrap(),
+        ]);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
+
+        // More churn (like tile_alloc, path_count, coarse, ...)
+        pass.set_pipeline(&churn_pipe);
+        for stage in 0..4 {
+            let base = 7 + stage * 3;
+            pass.set_push_constants_raw(&[
+                views[1].bindless_srv_index().unwrap(),
+                views[5].bindless_srv_index().unwrap(),
+                views[17].bindless_srv_index().unwrap(),
+                views[base % allocs.len()].bindless_srv_index().unwrap(),
+                views[(base + 1) % allocs.len()].bindless_index().unwrap(),
+                views[(base + 2) % allocs.len()].bindless_index().unwrap(),
+                views[(base + 3) % allocs.len()].bindless_index().unwrap(),
+            ]);
+            pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
+        }
+
+        // Phase 5: final SRV read of clip_inp → output (like clip_leaf / fine)
         pass.set_pipeline(&copy_u2_pipe);
         pass.set_push_constants_raw(&[
             views[clip_inp_idx].bindless_srv_index().unwrap(),
             output.bindless_index().unwrap(),
         ]);
-        pass.dispatch(wg, 1, 1);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&device).expect("pipeline dispatch");
 
     // Verify: output Pair[i] = { 50000 + i*2, 50000 + i*2 + 1 }
-    let mut out_bytes = vec![0u8; clip_n * 8]; // 256 pairs × 8 bytes
+    let mut out_bytes = vec![0u8; clip_n * 8];
     output
         .read_to_cpu(&device, &mut out_bytes)
         .expect("read output");
@@ -1762,7 +1655,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     assert_eq!(
         mismatches, 0,
         "SRV read of stride-8 pool view returned wrong data ({}/{} wrong). \
-         WARP may be ignoring FirstElement with mixed StructureByteStride.",
+         WARP may be ignoring FirstElement on the SRV descriptor.",
         mismatches, clip_n
     );
 }
