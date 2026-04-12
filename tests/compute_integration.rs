@@ -1321,8 +1321,22 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 /// clip_inp_buf (stride 8, pool view) is written via UAV then read via SRV.
 #[test]
 fn test_warp_srv_pool_ekrano_pipeline() {
-    // "draw_leaf"-like: reads SRV slots 0-3, writes UAV slots 4-6
-    const WRITE_SHADER: &str = r#"
+    // Fill shader: writes base_value + id.x via UAV, base_value read from params SRV
+    const FILL_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    dst[id.x] = base + id.x;
+}
+"#;
+
+    // Churn shader: reads 4 SRVs, writes 3 UAVs (like draw_leaf, binning, etc.)
+    const CHURN_SHADER: &str = r#"
 import goldy_exp;
 
 [shader("compute")]
@@ -1342,27 +1356,26 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // "clip_reduce"-like: reads SRV slots 0-1, writes UAV slots 2-3
-    const READ_SHADER: &str = r#"
+    // Copy shader: reads SRV → writes UAV (for verification readback)
+    const COPY_SHADER: &str = r#"
 import goldy_exp;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
-    ReadOnlyBuffer<uint> src0 = goldy_dyn_buf_ro<uint>(0);
-    ReadOnlyBuffer<uint> src1 = goldy_dyn_buf_ro<uint>(1);
-    StorageBuffer<uint> dst0 = goldy_dyn_scattered<uint>(2);
-    StorageBuffer<uint> dst1 = goldy_dyn_scattered<uint>(3);
-    dst0[id.x] = src0[id.x];
-    dst1[id.x] = src1[id.x];
+    ReadOnlyBuffer<uint> src = goldy_dyn_buf_ro<uint>(0);
+    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(1);
+    dst[id.x] = src[id.x];
 }
 "#;
 
     let device = make_device();
-    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("compile write");
-    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
-    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
-    let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
+    let fill_shader = ShaderModule::from_slang(&device, FILL_SHADER).expect("compile fill");
+    let fill_pipeline = ComputePipeline::new(&device, &fill_shader).expect("fill pipeline");
+    let churn_shader = ShaderModule::from_slang(&device, CHURN_SHADER).expect("compile churn");
+    let churn_pipeline = ComputePipeline::new(&device, &churn_shader).expect("churn pipeline");
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
 
     const N: usize = 256;
 
@@ -1409,52 +1422,88 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     let clip_inp_idx = 6;
     let clip_n = alloc_sizes[clip_inp_idx] / 4;
+    let wg = clip_n as u32 / 64;
 
-    // Upload known data to clip_inp via CPU (no UAV ambiguity)
-    let clip_data: Vec<u32> = (0..clip_n).map(|i| 50000 + i as u32).collect();
-    views[clip_inp_idx]
-        .write_data(&clip_data)
-        .expect("upload clip_inp");
+    // Small param buffers for fill base values
+    let make_param = |base: u32| -> Buffer {
+        Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param buf")
+    };
+    let clip_param = make_param(50000);
 
     // Output buffer (not pooled) for verification
     let output =
         Buffer::with_data(&device, &vec![0u32; clip_n], DataAccess::Scattered).expect("output");
 
-    // --- Dispatch chain: many UAV writes to other pool views, then SRV read of clip_inp ---
+    // --- Ekrano-like dispatch chain ---
+    // Phase 1: fill views 0-5 and 7-18 via UAV (like pathtag, flatten, etc.)
+    // Phase 2: fill clip_inp via UAV (like draw_leaf)
+    // Phase 3: churn dispatches reading pool views via SRV, writing others via UAV
+    // Phase 4: read clip_inp via SRV → copy to output (like clip_reduce)
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
 
-        // Churn: write to non-clip_inp pool views via UAV (write_pipeline: 4 SRV + 3 UAV).
-        // Read clip_inp via SRV during churn to exercise the SRV descriptor.
-        pass.set_pipeline(&write_pipeline);
-        let churn_targets: &[&[usize]] = &[&[7, 8, 9], &[10, 11, 12], &[13, 14, 15], &[16, 17, 18]];
-        for targets in churn_targets {
+        // Phase 1: fill all non-clip_inp views via UAV
+        pass.set_pipeline(&fill_pipeline);
+        let fill_indices: Vec<usize> = (0..clip_inp_idx)
+            .chain(clip_inp_idx + 1..alloc_sizes.len())
+            .collect();
+        let fill_params: Vec<Buffer> = fill_indices
+            .iter()
+            .map(|&v| make_param((v as u32 + 1) * 10000))
+            .collect();
+        for (idx, &v) in fill_indices.iter().enumerate() {
+            let n_elems = alloc_sizes[v] / 4;
+            let n_wg = (n_elems as u32).max(64) / 64;
             pass.set_push_constants_raw(&[
-                views[clip_inp_idx].bindless_srv_index().unwrap(),
-                views[clip_inp_idx].bindless_srv_index().unwrap(),
-                views[clip_inp_idx].bindless_srv_index().unwrap(),
-                views[clip_inp_idx].bindless_srv_index().unwrap(),
-                views[targets[0]].bindless_index().unwrap(),
-                views[targets[1]].bindless_index().unwrap(),
-                views[targets[2]].bindless_index().unwrap(),
+                views[v].bindless_index().unwrap(),
+                fill_params[idx].bindless_srv_index().unwrap(),
             ]);
-            pass.dispatch(clip_n as u32 / 64, 1, 1);
+            pass.dispatch(n_wg, 1, 1);
         }
 
-        // Final: read clip_inp via SRV, copy to output
-        pass.set_pipeline(&read_pipeline);
+        // Phase 2: fill clip_inp via UAV (like draw_leaf writing clip_inp)
+        pass.set_push_constants_raw(&[
+            views[clip_inp_idx].bindless_index().unwrap(),
+            clip_param.bindless_srv_index().unwrap(),
+        ]);
+        pass.dispatch(wg, 1, 1);
+
+        // Phase 3: churn -- reads pool views via SRV, writes others via UAV
+        pass.set_pipeline(&churn_pipeline);
+        pass.set_push_constants_raw(&[
+            views[0].bindless_srv_index().unwrap(),
+            views[1].bindless_srv_index().unwrap(),
+            views[2].bindless_srv_index().unwrap(),
+            views[3].bindless_srv_index().unwrap(),
+            views[10].bindless_index().unwrap(),
+            views[11].bindless_index().unwrap(),
+            views[12].bindless_index().unwrap(),
+        ]);
+        pass.dispatch(wg, 1, 1);
+
+        pass.set_push_constants_raw(&[
+            views[4].bindless_srv_index().unwrap(),
+            views[5].bindless_srv_index().unwrap(),
+            views[7].bindless_srv_index().unwrap(),
+            views[8].bindless_srv_index().unwrap(),
+            views[13].bindless_index().unwrap(),
+            views[14].bindless_index().unwrap(),
+            views[15].bindless_index().unwrap(),
+        ]);
+        pass.dispatch(wg, 1, 1);
+
+        // Phase 4: read clip_inp via SRV → output (like clip_reduce reading clip_inp)
+        pass.set_pipeline(&copy_pipeline);
         pass.set_push_constants_raw(&[
             views[clip_inp_idx].bindless_srv_index().unwrap(),
-            views[clip_inp_idx].bindless_srv_index().unwrap(),
             output.bindless_index().unwrap(),
-            views[9].bindless_index().unwrap(),
         ]);
-        pass.dispatch(clip_n as u32 / 64, 1, 1);
+        pass.dispatch(wg, 1, 1);
     }
     encoder.dispatch(&device).expect("pipeline dispatch");
 
-    // Verify: output should match CPU-uploaded clip_inp data (50000 + i)
+    // Verify: output[i] should be 50000 + i (what the fill shader wrote to clip_inp)
     let mut out_bytes = vec![0u8; clip_n * 4];
     output
         .read_to_cpu(&device, &mut out_bytes)
