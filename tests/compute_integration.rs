@@ -1535,3 +1535,228 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         mismatches, clip_n
     );
 }
+
+/// Same as above but with Ekrano's actual varying strides in the pool descriptors.
+/// clip_inp uses stride 8 (like Ekrano's 2×uint ClipInput struct).
+/// Other buffers use their real strides (4, 16, 20, 24, 32, 96).
+/// This exercises WARP's descriptor handling with mixed StructureByteStride values.
+#[test]
+fn test_warp_srv_pool_varying_strides() {
+    const FILL_U2_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p;
+    p.a = base + id.x * 2;
+    p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+
+    const COPY_U2_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+
+    const FILL_U1_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    dst[id.x] = params[0] + id.x;
+}
+"#;
+
+    const CHURN_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<uint> src0 = goldy_dyn_buf_ro<uint>(0);
+    ReadOnlyBuffer<uint> src1 = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<uint> dst0 = goldy_dyn_scattered<uint>(2);
+    StorageBuffer<uint> dst1 = goldy_dyn_scattered<uint>(3);
+    dst0[id.x] = src0[id.x] + src1[id.x];
+    dst1[id.x] = src0[id.x] * 2;
+}
+"#;
+
+    let device = make_device();
+
+    let fill_u2_shader = ShaderModule::from_slang(&device, FILL_U2_SHADER).expect("fill u2");
+    let fill_u2_pipe = ComputePipeline::new(&device, &fill_u2_shader).expect("fill u2 pipe");
+    let copy_u2_shader = ShaderModule::from_slang(&device, COPY_U2_SHADER).expect("copy u2");
+    let copy_u2_pipe = ComputePipeline::new(&device, &copy_u2_shader).expect("copy u2 pipe");
+    let fill_u1_shader = ShaderModule::from_slang(&device, FILL_U1_SHADER).expect("fill u1");
+    let fill_u1_pipe = ComputePipeline::new(&device, &fill_u1_shader).expect("fill u1 pipe");
+    let churn_shader = ShaderModule::from_slang(&device, CHURN_SHADER).expect("churn");
+    let churn_pipe = ComputePipeline::new(&device, &churn_shader).expect("churn pipe");
+
+    // Pool with Ekrano's actual strides
+    // (num_elements, stride) for each allocation
+    let allocs: &[(usize, usize)] = &[
+        (256, 96), // "config"
+        (256, 4),  // "scene"
+        (256, 20), // "tagmonoid"
+        (256, 24), // "path_bbox"
+        (256, 16), // "draw_monoid"
+        (256, 4),  // "info_bin_data"
+        (256, 8),  // "clip_inp" (THE TARGET) -- stride 8
+        (256, 8),  // "clip_bic"
+        (256, 32), // "clip_el"
+        (256, 16), // "clip_bbox"
+        (256, 16), // "draw_bbox"
+        (256, 32), // "bump"
+        (256, 8),  // "bin_header"
+        (256, 32), // "path"
+        (256, 8),  // "tile"
+        (256, 8),  // "seg_counts"
+        (256, 24), // "segments"
+        (256, 4),  // "ptcl"
+        (256, 24), // "lines"
+    ];
+
+    let pool_size = BufferPool::padded_size(allocs);
+    let mut pool = BufferPool::new(&device, pool_size).expect("pool");
+    pool.backing_buffer()
+        .clear(&device, 0, pool_size)
+        .expect("clear");
+
+    let mut views = Vec::new();
+    for &(count, stride) in allocs {
+        let size = (count * stride) as u64;
+        let view = pool.alloc_bytes(size, Some(stride as u32)).expect("alloc");
+        views.push(view);
+    }
+
+    let clip_inp_idx = 6;
+    let clip_n = allocs[clip_inp_idx].0; // 256 Pair elements (512 uints)
+    let wg = clip_n as u32 / 64;
+
+    // Param buffers
+    let clip_param =
+        Buffer::with_data(&device, &[50000u32], DataAccess::Scattered).expect("clip param");
+
+    // Output buffer with stride 8 (not pooled)
+    let output_data = vec![0u32; clip_n * 2]; // Pair = 2 uints
+    let output = Buffer::with_data(&device, &output_data, DataAccess::Scattered).expect("output");
+
+    // Fill some non-clip views with stride-4 data, and churn
+    let fill_params: Vec<Buffer> = (0..6)
+        .map(|v| {
+            Buffer::with_data(&device, &[((v + 1) * 10000) as u32], DataAccess::Scattered)
+                .expect("fp")
+        })
+        .collect();
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+
+        // Fill stride-4 views (scene, info_bin_data, ptcl) via uint shader
+        pass.set_pipeline(&fill_u1_pipe);
+        for &v in &[1usize, 5, 17] {
+            let n = allocs[v].0;
+            pass.set_push_constants_raw(&[
+                views[v].bindless_index().unwrap(),
+                fill_params[v.min(5)].bindless_srv_index().unwrap(),
+            ]);
+            pass.dispatch(n as u32 / 64, 1, 1);
+        }
+
+        // Fill clip_inp (stride 8) via Pair shader
+        pass.set_pipeline(&fill_u2_pipe);
+        pass.set_push_constants_raw(&[
+            views[clip_inp_idx].bindless_index().unwrap(),
+            clip_param.bindless_srv_index().unwrap(),
+        ]);
+        pass.dispatch(wg, 1, 1);
+
+        // Fill other stride-8 views (clip_bic, bin_header, tile, seg_counts)
+        for &v in &[7usize, 12, 14, 15] {
+            let fp = Buffer::with_data(&device, &[((v + 1) * 10000) as u32], DataAccess::Scattered)
+                .expect("fp");
+            pass.set_push_constants_raw(&[
+                views[v].bindless_index().unwrap(),
+                fp.bindless_srv_index().unwrap(),
+            ]);
+            pass.dispatch(allocs[v].0 as u32 / 64, 1, 1);
+        }
+
+        // Churn: read stride-4 views via SRV, write stride-4 views via UAV
+        pass.set_pipeline(&churn_pipe);
+        pass.set_push_constants_raw(&[
+            views[1].bindless_srv_index().unwrap(),
+            views[5].bindless_srv_index().unwrap(),
+            views[17].bindless_index().unwrap(),
+            views[1].bindless_index().unwrap(),
+        ]);
+        pass.dispatch(wg, 1, 1);
+
+        // Read clip_inp via SRV (stride 8 Pair), copy to output
+        pass.set_pipeline(&copy_u2_pipe);
+        pass.set_push_constants_raw(&[
+            views[clip_inp_idx].bindless_srv_index().unwrap(),
+            output.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(wg, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    // Verify: output Pair[i] = { 50000 + i*2, 50000 + i*2 + 1 }
+    let mut out_bytes = vec![0u8; clip_n * 8]; // 256 pairs × 8 bytes
+    output
+        .read_to_cpu(&device, &mut out_bytes)
+        .expect("read output");
+    let result: &[u32] = bytemuck::cast_slice(&out_bytes);
+
+    let mut mismatches = 0;
+    for i in 0..clip_n {
+        let exp_a = 50000 + (i as u32) * 2;
+        let exp_b = exp_a + 1;
+        let got_a = result[i * 2];
+        let got_b = result[i * 2 + 1];
+        if got_a != exp_a || got_b != exp_b {
+            if mismatches < 10 {
+                eprintln!(
+                    "Pair[{}]: got ({}, {}) expected ({}, {}) (FirstElement={}, offset={})",
+                    i,
+                    got_a,
+                    got_b,
+                    exp_a,
+                    exp_b,
+                    views[clip_inp_idx].offset() / 8,
+                    views[clip_inp_idx].offset(),
+                );
+            }
+            mismatches += 1;
+        }
+    }
+
+    assert_eq!(
+        mismatches, 0,
+        "SRV read of stride-8 pool view returned wrong data ({}/{} wrong). \
+         WARP may be ignoring FirstElement with mixed StructureByteStride.",
+        mismatches, clip_n
+    );
+}
