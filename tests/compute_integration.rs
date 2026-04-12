@@ -1456,26 +1456,38 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     const N: usize = 4096;
 
     // (num_elements, stride) -- Ekrano's actual strides and large element counts
+    // Additional stride-4 scratch views (19-28) for churn dispatches to write to
+    // without stride mismatch (churn shaders use uint = stride 4).
     let allocs: &[(usize, usize)] = &[
-        (N, 96), // "config"
-        (N, 4),  // "scene"
-        (N, 20), // "tagmonoid"
-        (N, 24), // "path_bbox"
-        (N, 16), // "draw_monoid"
-        (N, 4),  // "info_bin_data"
-        (N, 8),  // "clip_inp" (THE TARGET, index 6) -- stride 8
-        (N, 8),  // "clip_bic"
-        (N, 32), // "clip_el"
-        (N, 16), // "clip_bbox"
-        (N, 16), // "draw_bbox"
-        (N, 32), // "bump"
-        (N, 8),  // "bin_header"
-        (N, 32), // "path"
-        (N, 8),  // "tile"
-        (N, 8),  // "seg_counts"
-        (N, 24), // "segments"
-        (N, 4),  // "ptcl"
-        (N, 24), // "lines"
+        (N, 96), // 0  "config"
+        (N, 4),  // 1  "scene"
+        (N, 20), // 2  "tagmonoid"
+        (N, 24), // 3  "path_bbox"
+        (N, 16), // 4  "draw_monoid"
+        (N, 4),  // 5  "info_bin_data"
+        (N, 8),  // 6  "clip_inp" (THE TARGET) -- stride 8
+        (N, 8),  // 7  "clip_bic"
+        (N, 32), // 8  "clip_el"
+        (N, 16), // 9  "clip_bbox"
+        (N, 16), // 10 "draw_bbox"
+        (N, 32), // 11 "bump"
+        (N, 8),  // 12 "bin_header"
+        (N, 32), // 13 "path"
+        (N, 8),  // 14 "tile"
+        (N, 8),  // 15 "seg_counts"
+        (N, 24), // 16 "segments"
+        (N, 4),  // 17 "ptcl"
+        (N, 24), // 18 "lines"
+        (N, 4),  // 19 scratch_u32_0
+        (N, 4),  // 20 scratch_u32_1
+        (N, 4),  // 21 scratch_u32_2
+        (N, 4),  // 22 scratch_u32_3
+        (N, 4),  // 23 scratch_u32_4
+        (N, 4),  // 24 scratch_u32_5
+        (N, 4),  // 25 scratch_u32_6
+        (N, 4),  // 26 scratch_u32_7
+        (N, 4),  // 27 scratch_u32_8
+        (N, 4),  // 28 scratch_u32_9
     ];
 
     let pool_size = BufferPool::padded_size(allocs);
@@ -1516,7 +1528,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     .expect("output texture");
 
     // --- Indirect dispatch buffer (stride 16: IndirectArgs{x,y,z,pad}) ---
-    let num_slots = 20;
+    let num_slots = 30;
     let indirect_buf =
         Buffer::with_data(&device, &vec![0u32; num_slots * 4], DataAccess::Scattered)
             .expect("indirect buf");
@@ -1607,55 +1619,44 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
                 pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
             }
 
-            // Phases 3-14: many churn dispatches (~20 stages like Ekrano's full pipeline)
-            // Ekrano has: pathtag_reduce, pathtag_scan, bbox_clear, flatten,
-            //   draw_reduce, draw_leaf, clip_reduce, clip_leaf, binning,
-            //   tile_alloc, path_count_setup, path_count, backdrop, coarse, fine...
-            // Alternate between churn (7-binding) and churn2 (4-binding) pipelines
-            // to maximize pipeline switches and descriptor rebinds.
-            let n_views = allocs.len();
-            let safe_uav = |i: usize| -> usize {
-                let v = i % n_views;
-                if v == clip_inp_idx {
-                    (v + 1) % n_views
-                } else {
-                    v
-                }
-            };
+            // Phases 3+: ~20 churn dispatches with alternating pipelines.
+            // Churn shaders use uint (stride 4), so only bind stride-4 views to
+            // avoid UB from stride mismatch on Metal.
+            let u4: &[usize] = &[1, 5, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28];
+            let nu4 = u4.len();
             for stage in 0..20 {
-                let base = stage * 3;
                 if stage % 3 == 2 {
                     pass.set_pipeline(&churn2_pipe);
                     pass.set_push_constants_raw(&[
-                        views[base % n_views].bindless_srv_index().unwrap(),
-                        views[(base + 1) % n_views].bindless_srv_index().unwrap(),
-                        views[safe_uav(base + 2)].bindless_index().unwrap(),
-                        views[safe_uav(base + 3)].bindless_index().unwrap(),
+                        views[u4[stage % nu4]].bindless_srv_index().unwrap(),
+                        views[u4[(stage + 1) % nu4]].bindless_srv_index().unwrap(),
+                        views[u4[(stage + 2) % nu4]].bindless_index().unwrap(),
+                        views[u4[(stage + 3) % nu4]].bindless_index().unwrap(),
                     ]);
                 } else {
                     pass.set_pipeline(&churn_pipe);
                     pass.set_push_constants_raw(&[
-                        views[base % n_views].bindless_srv_index().unwrap(),
-                        views[(base + 1) % n_views].bindless_srv_index().unwrap(),
-                        views[(base + 2) % n_views].bindless_srv_index().unwrap(),
-                        views[(base + 3) % n_views].bindless_srv_index().unwrap(),
-                        views[safe_uav(base + 4)].bindless_index().unwrap(),
-                        views[safe_uav(base + 5)].bindless_index().unwrap(),
-                        views[safe_uav(base + 6)].bindless_index().unwrap(),
+                        views[u4[stage % nu4]].bindless_srv_index().unwrap(),
+                        views[u4[(stage + 1) % nu4]].bindless_srv_index().unwrap(),
+                        views[u4[(stage + 2) % nu4]].bindless_srv_index().unwrap(),
+                        views[u4[(stage + 3) % nu4]].bindless_srv_index().unwrap(),
+                        views[u4[(stage + 4) % nu4]].bindless_index().unwrap(),
+                        views[u4[(stage + 5) % nu4]].bindless_index().unwrap(),
+                        views[u4[(stage + 6) % nu4]].bindless_index().unwrap(),
                     ]);
                 }
-                pass.dispatch_indirect(&indirect_buf, ((safe_uav(base) % n_views) * 16) as u64);
+                pass.dispatch_indirect(&indirect_buf, (u4[stage % nu4] * 16) as u64);
             }
 
-            // Extra: read clip_inp via SRV mid-pipeline (like clip_reduce)
+            // Extra churn: more stride-4 dispatches with different binding patterns
             pass.set_pipeline(&churn2_pipe);
             pass.set_push_constants_raw(&[
-                views[clip_inp_idx].bindless_srv_index().unwrap(),
-                views[1].bindless_srv_index().unwrap(),
-                views[8].bindless_index().unwrap(),
-                views[13].bindless_index().unwrap(),
+                views[u4[0]].bindless_srv_index().unwrap(),
+                views[u4[5]].bindless_srv_index().unwrap(),
+                views[u4[8]].bindless_index().unwrap(),
+                views[u4[10]].bindless_index().unwrap(),
             ]);
-            pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
+            pass.dispatch_indirect(&indirect_buf, (u4[0] * 16) as u64);
 
             // Phase 5: final SRV read of clip_inp → output
             pass.set_pipeline(&copy_u2_pipe);
