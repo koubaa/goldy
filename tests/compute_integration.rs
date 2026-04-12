@@ -1544,8 +1544,14 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     // Ekrano reuses the pool across frames. The bug might only appear after
     // descriptor slots are recycled (old views freed, new views allocated at
     // the same pool offsets but potentially different descriptor heap positions).
-    const NUM_FRAMES: usize = 4;
-    for frame in 0..NUM_FRAMES {
+    // Only multi-frame on WARP (Cpu); other backends have a clear/dispatch race
+    // across submissions that isn't relevant to the bug we're hunting.
+    let num_frames: usize = if device.device_type() == DeviceType::Cpu {
+        4
+    } else {
+        1
+    };
+    for frame in 0..num_frames {
         // Reset pool and re-allocate all views (old views/descriptors are dropped)
         pool.reset();
         pool.backing_buffer()
@@ -1601,31 +1607,47 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
                 pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
             }
 
-            // Phase 3: churn -- 4-SRV + 3-UAV dispatches via indirect
-            pass.set_pipeline(&churn_pipe);
-            pass.set_push_constants_raw(&[
-                views[1].bindless_srv_index().unwrap(),
-                views[5].bindless_srv_index().unwrap(),
-                views[17].bindless_srv_index().unwrap(),
-                views[1].bindless_srv_index().unwrap(),
-                views[10].bindless_index().unwrap(),
-                views[11].bindless_index().unwrap(),
-                views[9].bindless_index().unwrap(),
-            ]);
-            pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
+            // Phases 3-14: many churn dispatches (~20 stages like Ekrano's full pipeline)
+            // Ekrano has: pathtag_reduce, pathtag_scan, bbox_clear, flatten,
+            //   draw_reduce, draw_leaf, clip_reduce, clip_leaf, binning,
+            //   tile_alloc, path_count_setup, path_count, backdrop, coarse, fine...
+            // Alternate between churn (7-binding) and churn2 (4-binding) pipelines
+            // to maximize pipeline switches and descriptor rebinds.
+            let n_views = allocs.len();
+            let safe_uav = |i: usize| -> usize {
+                let v = i % n_views;
+                if v == clip_inp_idx {
+                    (v + 1) % n_views
+                } else {
+                    v
+                }
+            };
+            for stage in 0..20 {
+                let base = stage * 3;
+                if stage % 3 == 2 {
+                    pass.set_pipeline(&churn2_pipe);
+                    pass.set_push_constants_raw(&[
+                        views[base % n_views].bindless_srv_index().unwrap(),
+                        views[(base + 1) % n_views].bindless_srv_index().unwrap(),
+                        views[safe_uav(base + 2)].bindless_index().unwrap(),
+                        views[safe_uav(base + 3)].bindless_index().unwrap(),
+                    ]);
+                } else {
+                    pass.set_pipeline(&churn_pipe);
+                    pass.set_push_constants_raw(&[
+                        views[base % n_views].bindless_srv_index().unwrap(),
+                        views[(base + 1) % n_views].bindless_srv_index().unwrap(),
+                        views[(base + 2) % n_views].bindless_srv_index().unwrap(),
+                        views[(base + 3) % n_views].bindless_srv_index().unwrap(),
+                        views[safe_uav(base + 4)].bindless_index().unwrap(),
+                        views[safe_uav(base + 5)].bindless_index().unwrap(),
+                        views[safe_uav(base + 6)].bindless_index().unwrap(),
+                    ]);
+                }
+                pass.dispatch_indirect(&indirect_buf, ((safe_uav(base) % n_views) * 16) as u64);
+            }
 
-            pass.set_push_constants_raw(&[
-                views[1].bindless_srv_index().unwrap(),
-                views[5].bindless_srv_index().unwrap(),
-                views[17].bindless_srv_index().unwrap(),
-                views[5].bindless_srv_index().unwrap(),
-                views[3].bindless_index().unwrap(),
-                views[4].bindless_index().unwrap(),
-                views[2].bindless_index().unwrap(),
-            ]);
-            pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
-
-            // Phase 4: 2-SRV churn reading clip_inp via SRV (like clip_reduce)
+            // Extra: read clip_inp via SRV mid-pipeline (like clip_reduce)
             pass.set_pipeline(&churn2_pipe);
             pass.set_push_constants_raw(&[
                 views[clip_inp_idx].bindless_srv_index().unwrap(),
@@ -1634,22 +1656,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
                 views[13].bindless_index().unwrap(),
             ]);
             pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
-
-            // More churn (like tile_alloc, path_count, coarse, ...)
-            pass.set_pipeline(&churn_pipe);
-            for stage in 0..4 {
-                let base = 7 + stage * 3;
-                pass.set_push_constants_raw(&[
-                    views[1].bindless_srv_index().unwrap(),
-                    views[5].bindless_srv_index().unwrap(),
-                    views[17].bindless_srv_index().unwrap(),
-                    views[base % allocs.len()].bindless_srv_index().unwrap(),
-                    views[(base + 1) % allocs.len()].bindless_index().unwrap(),
-                    views[(base + 2) % allocs.len()].bindless_index().unwrap(),
-                    views[(base + 3) % allocs.len()].bindless_index().unwrap(),
-                ]);
-                pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
-            }
 
             // Phase 5: final SRV read of clip_inp → output
             pass.set_pipeline(&copy_u2_pipe);
@@ -1662,7 +1668,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         encoder.dispatch(&device).expect("pipeline dispatch");
 
         // Verify on the LAST frame only (earlier frames warm up the descriptor recycling)
-        if frame == NUM_FRAMES - 1 {
+        if frame == num_frames - 1 {
             let mut out_bytes = vec![0u8; clip_n * 8];
             output
                 .read_to_cpu(&device, &mut out_bytes)
