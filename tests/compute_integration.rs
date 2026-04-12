@@ -1313,15 +1313,13 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 /// Reproduces Ekrano's rendering pipeline pattern that triggers a WARP bug:
 /// many pool-allocated structured buffers with varying strides, filled via UAV
-/// across multiple pipeline switches, then read via SRV. The bug manifests as
-/// SRV descriptors ignoring FirstElement on pool views, reading from element 0
-/// of the backing buffer instead.
+/// across multiple pipeline switches and INDIRECT dispatches, then read via SRV.
 ///
-/// Mirrors the draw_leaf → clip_reduce → clip_leaf dispatch chain where
-/// clip_inp_buf (stride 8, pool view) is written via UAV then read via SRV.
+/// Mirrors Ekrano's pipeline_setup → indirect dispatch → draw_leaf → clip_reduce
+/// pattern with dispatch_indirect driven by GPU-written workgroup counts.
 #[test]
 fn test_warp_srv_pool_ekrano_pipeline() {
-    // Fill shader: writes base_value + id.x via UAV, base_value read from params SRV
+    // Fill shader: writes base_value + id.x via UAV
     const FILL_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1335,7 +1333,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // Churn shader: reads 4 SRVs, writes 3 UAVs (like draw_leaf, binning, etc.)
+    // Churn shader: reads 4 SRVs, writes 3 UAVs
     const CHURN_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1356,7 +1354,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // Copy shader: reads SRV → writes UAV (for verification readback)
+    // Copy shader: SRV → UAV
     const COPY_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1379,9 +1377,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     const N: usize = 256;
 
-    // Ekrano pool: many buffers of varying sizes from a single backing buffer.
-    // All stride 4 (uint) for shader compatibility. The sizes mirror Ekrano's
-    // buffer layout to push clip_inp to a realistic pool offset.
     let alloc_sizes: &[usize] = &[
         N * 96, // "config"-like
         N * 4,  // "scene"-like
@@ -1424,26 +1419,39 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let clip_n = alloc_sizes[clip_inp_idx] / 4;
     let wg = clip_n as u32 / 64;
 
-    // Small param buffers for fill base values
     let make_param = |base: u32| -> Buffer {
         Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param buf")
     };
     let clip_param = make_param(50000);
 
-    // Output buffer (not pooled) for verification
+    // Indirect dispatch buffer (like Ekrano's vello.indirect_dispatch)
+    // 20 slots × 3 uints (x, y, z), pre-filled with correct workgroup counts
+    let num_indirect_slots = 20;
+    let mut indirect_data = vec![0u32; num_indirect_slots * 3];
+    for slot in 0..num_indirect_slots {
+        let slot_wg = if slot < alloc_sizes.len() {
+            let n = alloc_sizes[slot] / 4;
+            (n as u32).max(64) / 64
+        } else {
+            wg
+        };
+        indirect_data[slot * 3] = slot_wg;
+        indirect_data[slot * 3 + 1] = 1;
+        indirect_data[slot * 3 + 2] = 1;
+    }
+    let indirect_buf =
+        Buffer::with_data(&device, &indirect_data, DataAccess::Scattered).expect("indirect buf");
+
+    // Output buffer (not pooled)
     let output =
         Buffer::with_data(&device, &vec![0u32; clip_n], DataAccess::Scattered).expect("output");
 
-    // --- Ekrano-like dispatch chain ---
-    // Phase 1: fill views 0-5 and 7-18 via UAV (like pathtag, flatten, etc.)
-    // Phase 2: fill clip_inp via UAV (like draw_leaf)
-    // Phase 3: churn dispatches reading pool views via SRV, writing others via UAV
-    // Phase 4: read clip_inp via SRV → copy to output (like clip_reduce)
+    // --- Ekrano-like dispatch chain with indirect dispatch ---
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
 
-        // Phase 1: fill all non-clip_inp views via UAV
+        // Phase 1: fill all non-clip_inp views via indirect dispatch
         pass.set_pipeline(&fill_pipeline);
         let fill_indices: Vec<usize> = (0..clip_inp_idx)
             .chain(clip_inp_idx + 1..alloc_sizes.len())
@@ -1453,23 +1461,21 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             .map(|&v| make_param((v as u32 + 1) * 10000))
             .collect();
         for (idx, &v) in fill_indices.iter().enumerate() {
-            let n_elems = alloc_sizes[v] / 4;
-            let n_wg = (n_elems as u32).max(64) / 64;
             pass.set_push_constants_raw(&[
                 views[v].bindless_index().unwrap(),
                 fill_params[idx].bindless_srv_index().unwrap(),
             ]);
-            pass.dispatch(n_wg, 1, 1);
+            pass.dispatch_indirect(&indirect_buf, (v * 12) as u64);
         }
 
-        // Phase 2: fill clip_inp via UAV (like draw_leaf writing clip_inp)
+        // Phase 2: fill clip_inp via indirect dispatch (like draw_leaf)
         pass.set_push_constants_raw(&[
             views[clip_inp_idx].bindless_index().unwrap(),
             clip_param.bindless_srv_index().unwrap(),
         ]);
-        pass.dispatch(wg, 1, 1);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
 
-        // Phase 3: churn -- reads pool views via SRV, writes others via UAV
+        // Phase 3: churn via indirect dispatch
         pass.set_pipeline(&churn_pipeline);
         pass.set_push_constants_raw(&[
             views[0].bindless_srv_index().unwrap(),
@@ -1480,7 +1486,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             views[11].bindless_index().unwrap(),
             views[12].bindless_index().unwrap(),
         ]);
-        pass.dispatch(wg, 1, 1);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
 
         pass.set_push_constants_raw(&[
             views[4].bindless_srv_index().unwrap(),
@@ -1491,19 +1497,19 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             views[14].bindless_index().unwrap(),
             views[15].bindless_index().unwrap(),
         ]);
-        pass.dispatch(wg, 1, 1);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
 
-        // Phase 4: read clip_inp via SRV → output (like clip_reduce reading clip_inp)
+        // Phase 4: read clip_inp via SRV → output via indirect dispatch
         pass.set_pipeline(&copy_pipeline);
         pass.set_push_constants_raw(&[
             views[clip_inp_idx].bindless_srv_index().unwrap(),
             output.bindless_index().unwrap(),
         ]);
-        pass.dispatch(wg, 1, 1);
+        pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 12) as u64);
     }
     encoder.dispatch(&device).expect("pipeline dispatch");
 
-    // Verify: output[i] should be 50000 + i (what the fill shader wrote to clip_inp)
+    // Verify
     let mut out_bytes = vec![0u8; clip_n * 4];
     output
         .read_to_cpu(&device, &mut out_bytes)
