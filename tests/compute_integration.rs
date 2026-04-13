@@ -1311,19 +1311,529 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     );
 }
 
-/// Kitchen-sink WARP SRV reproducer combining ALL factors from Ekrano:
-/// - Varying strides (4, 8, 16, 20, 24, 32, 96) matching Ekrano's buffer layout
-/// - Large buffers (N=4096 elements per view)
-/// - GPU-written indirect dispatch args (pipeline_setup computes workgroup counts)
-/// - All dispatches use dispatch_indirect
-/// - Multiple pipeline switches (6 different shader pipelines)
-/// - UAV fill → SRV read pattern on clip_inp (stride 8)
-/// - Many churn dispatches with mixed SRV/UAV bindings
-/// Standalone-buffer SRV test: matches Ekrano's no-pool path where SRV still
-/// fails on WARP. Creates many standalone (non-pooled) buffers with various
-/// strides, fills via UAV, reads back via SRV through a heavy dispatch chain.
-/// Also adds massive descriptor heap pressure via dummy resources and
-/// interleaved texture/buffer creation.
+// ─── WARP SRV bug minimal reproducers ────────────────────────────────────────
+//
+// Descriptor heap pollution: creating and dropping buffers advances the
+// global `next_cbv_srv_uav_offset` (monotonic, no freelist). Subsequent
+// "real" buffers get descriptor offsets in the hundreds. This alone triggers
+// a crash on WARP with complex-enough shaders.
+//
+// The variants below are ordered by shader complexity. Run all on CI to find
+// the MINIMUM complexity that still crashes.
+
+/// Helper: pollute the descriptor heap by creating and dropping buffers.
+/// Each buffer registers UAV + SRV descriptors (2 slots each). All slots
+/// are permanently abandoned, pushing the offset counter higher.
+fn pollute_descriptor_heap(device: &goldy::Device, rounds: usize) {
+    for _ in 0..rounds {
+        let _ = Buffer::new_with_stride(device, 65536, DataAccess::Scattered, Some(4));
+        let _ = Buffer::new_with_stride(device, 32768, DataAccess::Scattered, Some(8));
+        let _ = Buffer::new_with_stride(device, 16384, DataAccess::Scattered, Some(16));
+        let _ = Buffer::new_with_stride(device, 8200, DataAccess::Scattered, Some(20));
+        let _ = Buffer::new_with_stride(device, 4096, DataAccess::Scattered, Some(32));
+        let _ = Buffer::new_with_stride(device, 2016, DataAccess::Scattered, Some(96));
+    }
+}
+
+fn pollution_rounds() -> usize {
+    std::env::var("WARP_POLLUTION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50)
+}
+
+/// Level 1: Simplest possible SRV read after descriptor heap pollution.
+/// One fill shader (UAV write), one copy shader (SRV read), readback + verify.
+/// numthreads(64), no groupshared, no barriers.
+#[test]
+fn test_warp_repro_level1_simple_copy() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+
+    const FILL: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p;
+    p.a = base + id.x * 2;
+    p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+
+    const COPY: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+
+    let device = make_device();
+    pollute_descriptor_heap(&device, pollution_rounds());
+
+    let fill_pipe = {
+        let s = ShaderModule::from_slang(&device, FILL).expect("compile fill");
+        ComputePipeline::new(&device, &s).expect("fill pipe")
+    };
+    let copy_pipe = {
+        let s = ShaderModule::from_slang(&device, COPY).expect("compile copy");
+        ComputePipeline::new(&device, &s).expect("copy pipe")
+    };
+
+    const N: usize = 4096;
+    let src = Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
+        .expect("src");
+    let dst = Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
+        .expect("dst");
+    let param = Buffer::with_data(&device, &[42u32], DataAccess::Scattered).expect("param");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+
+        pass.set_pipeline(&fill_pipe);
+        pass.set_push_constants_raw(&[
+            src.bindless_index().unwrap(),
+            param.bindless_srv_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+
+        pass.set_pipeline(&copy_pipe);
+        pass.set_push_constants_raw(&[
+            src.bindless_srv_index().unwrap(),
+            dst.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut out = vec![0u8; N * 8];
+    dst.read_to_cpu(&device, &mut out).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for i in 0..N {
+        assert_eq!(result[i * 2], 42 + (i as u32) * 2, "Pair[{}].a wrong", i);
+        assert_eq!(
+            result[i * 2 + 1],
+            42 + (i as u32) * 2 + 1,
+            "Pair[{}].b wrong",
+            i
+        );
+    }
+    eprintln!("Level 1 (simple copy) passed.");
+}
+
+/// Level 2: numthreads(256) + groupshared memory + barriers + SRV read.
+/// Uses a single clip_reduce-like shader with the same groupshared/barrier
+/// pattern that Ekrano's real shaders use.
+#[test]
+fn test_warp_repro_level2_groupshared() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+
+    const REDUCE: &str = r#"
+import goldy_exp;
+
+struct ClipInp { uint ix; int path_ix; };
+struct Bic { uint a; uint b; };
+
+static const uint WG = 256;
+static const uint LG_WG = 8;
+
+groupshared Bic sh_bic[256];
+groupshared uint sh_stack[256];
+
+Bic combine(Bic x, Bic y) {
+    uint m = min(x.b, y.a);
+    Bic r; r.a = x.a + y.a - m; r.b = x.b + y.b - m;
+    return r;
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, uint3 wg : SV_GroupID) {
+    ReadOnlyBuffer<ClipInp> inp = goldy_dyn_buf_ro<ClipInp>(0);
+    StorageBuffer<Bic> reduced = goldy_dyn_scattered<Bic>(1);
+
+    ClipInp ci = inp[gid.x];
+    bool push = ci.path_ix >= 0;
+    Bic b; b.a = push ? 0 : 1; b.b = push ? 1 : 0;
+
+    sh_bic[lid.x] = b;
+    for (uint i = 0; i < LG_WG; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (lid.x + (1u << i) < WG)
+            b = combine(b, sh_bic[lid.x + (1u << i)]);
+        GroupMemoryBarrierWithGroupSync();
+        sh_bic[lid.x] = b;
+    }
+    if (lid.x == 0) reduced[wg.x] = b;
+}
+"#;
+
+    const COPY: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+
+    const FILL: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p; p.a = base + id.x * 2; p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+
+    let device = make_device();
+    pollute_descriptor_heap(&device, pollution_rounds());
+
+    let reduce_pipe = {
+        let s = ShaderModule::from_slang(&device, REDUCE).expect("compile reduce");
+        ComputePipeline::new(&device, &s).expect("reduce pipe")
+    };
+    let fill_pipe = {
+        let s = ShaderModule::from_slang(&device, FILL).expect("compile fill");
+        ComputePipeline::new(&device, &s).expect("fill pipe")
+    };
+    let copy_pipe = {
+        let s = ShaderModule::from_slang(&device, COPY).expect("compile copy");
+        ComputePipeline::new(&device, &s).expect("copy pipe")
+    };
+
+    const N: usize = 4096;
+    let clip_inp = Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
+        .expect("clip_inp");
+    let reduced = Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
+        .expect("reduced");
+    let output = Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
+        .expect("output");
+    let param = Buffer::with_data(&device, &[100u32], DataAccess::Scattered).expect("param");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+
+        pass.set_pipeline(&fill_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_index().unwrap(),
+            param.bindless_srv_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+
+        pass.set_pipeline(&reduce_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_srv_index().unwrap(),
+            reduced.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 256, 1, 1);
+
+        pass.set_pipeline(&copy_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_srv_index().unwrap(),
+            output.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut out = vec![0u8; N * 8];
+    output.read_to_cpu(&device, &mut out).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for i in 0..N {
+        assert_eq!(result[i * 2], 100 + (i as u32) * 2, "Pair[{}].a wrong", i);
+        assert_eq!(
+            result[i * 2 + 1],
+            100 + (i as u32) * 2 + 1,
+            "Pair[{}].b wrong",
+            i
+        );
+    }
+    eprintln!("Level 2 (groupshared) passed.");
+}
+
+/// Level 3: One REAL Ekrano shader (pathtag_reduce) after pollution.
+/// pathtag_reduce uses numthreads(256), groupshared TagMonoid[256],
+/// barriers, and reads from config + scene SRVs.
+#[test]
+fn test_warp_repro_level3_one_ekrano_shader() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+
+    let shader_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/shaders");
+    let device = make_device();
+    pollute_descriptor_heap(&device, pollution_rounds());
+
+    let pathtag_pipe = {
+        let src = include_str!("shaders/pathtag_reduce.slang");
+        let s = ShaderModule::from_slang_with_paths(&device, src, &[shader_dir]).expect("compile");
+        ComputePipeline::new(&device, &s).expect("pathtag pipe")
+    };
+
+    const COPY: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+    const FILL: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p; p.a = base + id.x * 2; p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+
+    let fill_pipe = {
+        let s = ShaderModule::from_slang(&device, FILL).expect("compile fill");
+        ComputePipeline::new(&device, &s).expect("fill pipe")
+    };
+    let copy_pipe = {
+        let s = ShaderModule::from_slang(&device, COPY).expect("compile copy");
+        ComputePipeline::new(&device, &s).expect("copy pipe")
+    };
+
+    const N: usize = 4096;
+    const BIG: u64 = (N * 256) as u64;
+
+    let config_buf =
+        Buffer::new_with_stride(&device, (N * 96) as u64, DataAccess::Scattered, Some(96))
+            .expect("config");
+    let mut cfg = vec![0u32; 24];
+    cfg[5] = N as u32;
+    cfg[6] = N as u32;
+    cfg[7] = N as u32;
+    config_buf.write_data(0, &cfg).expect("write config");
+
+    let scene_buf =
+        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("scene");
+    let tagmonoid_buf = Buffer::new_with_stride(&device, BIG * 20, DataAccess::Scattered, Some(20))
+        .expect("tagmonoid");
+    let clip_inp = Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
+        .expect("clip_inp");
+    let output = Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
+        .expect("output");
+    let param = Buffer::with_data(&device, &[200u32], DataAccess::Scattered).expect("param");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+
+        pass.set_pipeline(&pathtag_pipe);
+        pass.set_push_constants_raw(&[
+            config_buf.bindless_srv_index().unwrap(),
+            scene_buf.bindless_srv_index().unwrap(),
+            tagmonoid_buf.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 256, 1, 1);
+
+        pass.set_pipeline(&fill_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_index().unwrap(),
+            param.bindless_srv_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+
+        pass.set_pipeline(&copy_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_srv_index().unwrap(),
+            output.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut out = vec![0u8; N * 8];
+    output.read_to_cpu(&device, &mut out).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for i in 0..N {
+        assert_eq!(result[i * 2], 200 + (i as u32) * 2, "Pair[{}].a wrong", i);
+        assert_eq!(
+            result[i * 2 + 1],
+            200 + (i as u32) * 2 + 1,
+            "Pair[{}].b wrong",
+            i
+        );
+    }
+    eprintln!("Level 3 (one Ekrano shader) passed.");
+}
+
+/// Level 4: Three real Ekrano shaders (pathtag_reduce, draw_reduce, clip_reduce)
+/// after pollution. Multiple strides, multiple SRV reads per dispatch.
+#[test]
+fn test_warp_repro_level4_three_ekrano_shaders() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+
+    let shader_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/shaders");
+    let device = make_device();
+    pollute_descriptor_heap(&device, pollution_rounds());
+
+    let compile = |src: &str| -> ComputePipeline {
+        let s = ShaderModule::from_slang_with_paths(&device, src, &[shader_dir]).expect("compile");
+        ComputePipeline::new(&device, &s).expect("pipeline")
+    };
+
+    let pathtag_pipe = compile(include_str!("shaders/pathtag_reduce.slang"));
+    let draw_reduce_pipe = compile(include_str!("shaders/draw_reduce.slang"));
+    let clip_reduce_pipe = compile(include_str!("shaders/clip_reduce.slang"));
+
+    const FILL: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p; p.a = base + id.x * 2; p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+    const COPY: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+    let fill_pipe = compile(FILL);
+    let copy_pipe = compile(COPY);
+
+    const N: usize = 4096;
+    const BIG: u64 = (N * 256) as u64;
+
+    let config_buf =
+        Buffer::new_with_stride(&device, (N * 96) as u64, DataAccess::Scattered, Some(96))
+            .expect("config");
+    let mut cfg = vec![0u32; 24];
+    cfg[5] = N as u32;
+    cfg[6] = N as u32;
+    cfg[7] = N as u32;
+    config_buf.write_data(0, &cfg).expect("write config");
+
+    let scene_buf =
+        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("scene");
+    let tagmonoid_buf = Buffer::new_with_stride(&device, BIG * 20, DataAccess::Scattered, Some(20))
+        .expect("tagmonoid");
+    let draw_monoid_buf =
+        Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
+            .expect("draw_monoid");
+    let path_bbox_buf =
+        Buffer::new_with_stride(&device, (N as u64) * 24, DataAccess::Scattered, Some(24))
+            .expect("path_bbox");
+    let clip_inp = Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
+        .expect("clip_inp");
+    let clip_bic = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+        .expect("clip_bic");
+    let clip_el = Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32))
+        .expect("clip_el");
+    let output = Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
+        .expect("output");
+    let param = Buffer::with_data(&device, &[300u32], DataAccess::Scattered).expect("param");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+
+        pass.set_pipeline(&pathtag_pipe);
+        pass.set_push_constants_raw(&[
+            config_buf.bindless_srv_index().unwrap(),
+            scene_buf.bindless_srv_index().unwrap(),
+            tagmonoid_buf.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 256, 1, 1);
+
+        pass.set_pipeline(&draw_reduce_pipe);
+        pass.set_push_constants_raw(&[
+            config_buf.bindless_srv_index().unwrap(),
+            scene_buf.bindless_index().unwrap(),
+            draw_monoid_buf.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 256, 1, 1);
+
+        pass.set_pipeline(&fill_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_index().unwrap(),
+            param.bindless_srv_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+
+        pass.set_pipeline(&clip_reduce_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_srv_index().unwrap(),
+            path_bbox_buf.bindless_srv_index().unwrap(),
+            clip_bic.bindless_index().unwrap(),
+            clip_el.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 256, 1, 1);
+
+        pass.set_pipeline(&copy_pipe);
+        pass.set_push_constants_raw(&[
+            clip_inp.bindless_srv_index().unwrap(),
+            output.bindless_index().unwrap(),
+        ]);
+        pass.dispatch(N as u32 / 64, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut out = vec![0u8; N * 8];
+    output.read_to_cpu(&device, &mut out).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for i in 0..N {
+        assert_eq!(result[i * 2], 300 + (i as u32) * 2, "Pair[{}].a wrong", i);
+        assert_eq!(
+            result[i * 2 + 1],
+            300 + (i as u32) * 2 + 1,
+            "Pair[{}].b wrong",
+            i
+        );
+    }
+    eprintln!("Level 4 (three Ekrano shaders) passed.");
+}
+
+/// Kitchen-sink WARP SRV reproducer combining ALL factors from Ekrano.
 #[test]
 fn test_warp_srv_standalone_heavy() {
     if cfg!(target_os = "macos") {
@@ -2273,9 +2783,9 @@ fn test_warp_srv_full_pipeline() {
         let _ = Buffer::new_with_stride(&device, 65536, DataAccess::Scattered, Some(4));
         let _ = Buffer::new_with_stride(&device, 32768, DataAccess::Scattered, Some(8));
         let _ = Buffer::new_with_stride(&device, 16384, DataAccess::Scattered, Some(16));
-        let _ = Buffer::new_with_stride(&device, 8192, DataAccess::Scattered, Some(20));
+        let _ = Buffer::new_with_stride(&device, 8200, DataAccess::Scattered, Some(20));
         let _ = Buffer::new_with_stride(&device, 4096, DataAccess::Scattered, Some(32));
-        let _ = Buffer::new_with_stride(&device, 2048, DataAccess::Scattered, Some(96));
+        let _ = Buffer::new_with_stride(&device, 2016, DataAccess::Scattered, Some(96));
     }
 
     let compile = |src: &str| -> ComputePipeline {
@@ -2650,9 +3160,9 @@ fn test_warp_srv_full_pipeline_pooled() {
         let _ = Buffer::new_with_stride(&device, 65536, DataAccess::Scattered, Some(4));
         let _ = Buffer::new_with_stride(&device, 32768, DataAccess::Scattered, Some(8));
         let _ = Buffer::new_with_stride(&device, 16384, DataAccess::Scattered, Some(16));
-        let _ = Buffer::new_with_stride(&device, 8192, DataAccess::Scattered, Some(20));
+        let _ = Buffer::new_with_stride(&device, 8200, DataAccess::Scattered, Some(20));
         let _ = Buffer::new_with_stride(&device, 4096, DataAccess::Scattered, Some(32));
-        let _ = Buffer::new_with_stride(&device, 2048, DataAccess::Scattered, Some(96));
+        let _ = Buffer::new_with_stride(&device, 2016, DataAccess::Scattered, Some(96));
         let _ = Texture::new(
             &device,
             256,

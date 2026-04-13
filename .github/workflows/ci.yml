@@ -313,12 +313,50 @@ jobs:
             Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
           }
 
-      - name: Run tests (DX12 + WARP)
+      - name: "Repro Level 1: simple copy"
         env:
           GOLDY_BACKEND: dx12
           GOLDY_DX12_ALLOW_WARP: "1"
           GOLDY_DX12_NO_DEBUG: "1"
-        run: cargo test --features dx12 --test compute_integration -- test_warp_srv
+          WARP_POLLUTION: "50"
+        run: cargo test --features dx12 --test compute_integration -- test_warp_repro_level1_simple_copy --exact --nocapture
+        continue-on-error: true
+
+      - name: "Repro Level 2: groupshared"
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+          WARP_POLLUTION: "50"
+        run: cargo test --features dx12 --test compute_integration -- test_warp_repro_level2_groupshared --exact --nocapture
+        continue-on-error: true
+
+      - name: "Repro Level 3: one Ekrano shader"
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+          WARP_POLLUTION: "50"
+        run: cargo test --features dx12 --test compute_integration -- test_warp_repro_level3_one_ekrano_shader --exact --nocapture
+        continue-on-error: true
+
+      - name: "Repro Level 4: three Ekrano shaders"
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+          WARP_POLLUTION: "50"
+        run: cargo test --features dx12 --test compute_integration -- test_warp_repro_level4_three_ekrano_shaders --exact --nocapture
+        continue-on-error: true
+
+      - name: "Full pipeline (known reproducer)"
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+          WARP_POLLUTION: "50"
+        run: cargo test --features dx12 --test compute_integration -- test_warp_srv_full_pipeline --exact --nocapture
+        continue-on-error: true
 
   # Python bindings build and test (Linux with lavapipe)
   python-linux:
