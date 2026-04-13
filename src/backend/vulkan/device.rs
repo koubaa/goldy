@@ -67,15 +67,24 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .map(|(idx, _)| idx as u32)
         .context("No graphics queue family found")?;
 
-    // Enable Vulkan 1.4 features (dynamic rendering)
-    let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
-        .dynamic_rendering(true)
-        .synchronization2(true);
+    // Verify this physical device supports Vulkan 1.4
+    let dev_api = physical_device.properties.api_version;
+    let dev_major = vk::api_version_major(dev_api);
+    let dev_minor = vk::api_version_minor(dev_api);
+    if dev_major < 1 || (dev_major == 1 && dev_minor < 4) {
+        let name = unsafe { CStr::from_ptr(physical_device.properties.device_name.as_ptr()) };
+        anyhow::bail!(
+            "Adapter {} reports Vulkan {}.{}, but Goldy requires 1.4+",
+            name.to_string_lossy(),
+            dev_major,
+            dev_minor
+        );
+    }
 
-    // Enable Vulkan 1.2 descriptor indexing features.
-    // Goldy requires these features - they've been core since Vulkan 1.2 (2020)
-    // and are supported by all modern GPUs and software implementations (lavapipe).
-    let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
+    // Vulkan 1.2 features: descriptor indexing for the global bindless set.
+    // dynamicRendering and synchronization2 are mandatory in 1.3+ (guaranteed by 1.4).
+    // Descriptor indexing sub-features are still optional; we request them here.
+    let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
         .descriptor_binding_partially_bound(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
         .descriptor_binding_storage_buffer_update_after_bind(true)
@@ -85,9 +94,19 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .shader_sampled_image_array_non_uniform_indexing(true)
         .shader_uniform_buffer_array_non_uniform_indexing(true);
 
+    // Vulkan 1.3 features: mandatory in 1.4, but must still be enabled.
+    let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
+        .dynamic_rendering(true)
+        .synchronization2(true);
+
+    // Pipeline robustness (core in Vulkan 1.4): enables per-pipeline OOB safety for bindless.
+    let mut pipeline_robustness_features =
+        vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default().pipeline_robustness(true);
+
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut vulkan_13_features)
-        .push_next(&mut descriptor_indexing_features);
+        .push_next(&mut vulkan_12_features)
+        .push_next(&mut pipeline_robustness_features);
 
     // Create logical device with swapchain extension
     let queue_priorities = [1.0f32];
@@ -95,8 +114,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .queue_family_index(queue_family_index)
         .queue_priorities(&queue_priorities);
 
-    // Enable swapchain extension for surface presentation
-    let device_extensions = [khr::swapchain::NAME.as_ptr()];
+    // Extensions: swapchain for presentation, plus 1.4-promoted extensions whose KHR
+    // aliases ash 0.38 needs (it predates core 1.4 headers, so it loads KHR names).
+    let device_extensions = [
+        khr::swapchain::NAME.as_ptr(),
+        khr::map_memory2::NAME.as_ptr(),
+    ];
 
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_create_info))
@@ -111,6 +134,10 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     .context("Failed to create logical device")?;
 
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+    // Load Vulkan 1.4 core APIs via KHR extension loaders (ash 0.38 predates 1.4 headers).
+    // On a 1.4 device these functions are core — the KHR entry points are aliases.
+    let map_memory2_loader = ash::khr::map_memory2::Device::new(&state.instance, &device);
 
     // Create command pool
     let pool_info = vk::CommandPoolCreateInfo::default()
@@ -274,6 +301,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             queue,
             queue_family: queue_family_index,
             command_pool,
+            map_memory2: map_memory2_loader,
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,
             bindless_descriptor_set,

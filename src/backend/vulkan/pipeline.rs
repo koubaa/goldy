@@ -109,12 +109,17 @@ pub(super) fn create(
         .context("Bindless pipeline layout required")?;
     let owns_layout = false;
 
-    // Dynamic rendering info (Vulkan 1.4)
+    // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)
     let color_format = format_to_vk(target_format);
     let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
         .color_attachment_formats(std::slice::from_ref(&color_format));
 
-    // Create pipeline
+    // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero
+    let mut robustness = vk::PipelineRobustnessCreateInfoEXT::default()
+        .storage_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .uniform_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .images(vk::PipelineRobustnessImageBehaviorEXT::ROBUST_IMAGE_ACCESS_2);
+
     let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&shader_stages)
         .vertex_input_state(&vertex_input)
@@ -125,7 +130,8 @@ pub(super) fn create(
         .color_blend_state(&color_blending)
         .dynamic_state(&dynamic_state)
         .layout(layout)
-        .push_next(&mut rendering_info);
+        .push_next(&mut rendering_info)
+        .push_next(&mut robustness);
 
     let vk_pipelines = unsafe {
         logical_device.device.create_graphics_pipelines(
@@ -289,7 +295,7 @@ pub(super) fn create_with_depth(
     .context("Failed to create bindless pipeline layout")?;
     let owns_layout = true;
 
-    // Dynamic rendering info (Vulkan 1.4)
+    // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)
     let color_format = format_to_vk(target_format);
     let depth_format_vk = depth_stencil
         .map(|ds| depth_format_to_vk(ds.format))
@@ -299,7 +305,12 @@ pub(super) fn create_with_depth(
         .color_attachment_formats(std::slice::from_ref(&color_format))
         .depth_attachment_format(depth_format_vk);
 
-    // Create pipeline with depth stencil state
+    // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero
+    let mut robustness = vk::PipelineRobustnessCreateInfoEXT::default()
+        .storage_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .uniform_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .images(vk::PipelineRobustnessImageBehaviorEXT::ROBUST_IMAGE_ACCESS_2);
+
     let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&shader_stages)
         .vertex_input_state(&vertex_input)
@@ -311,7 +322,8 @@ pub(super) fn create_with_depth(
         .color_blend_state(&color_blending)
         .dynamic_state(&dynamic_state)
         .layout(layout)
-        .push_next(&mut rendering_info);
+        .push_next(&mut rendering_info)
+        .push_next(&mut robustness);
 
     let vk_pipelines = unsafe {
         logical_device.device.create_graphics_pipelines(

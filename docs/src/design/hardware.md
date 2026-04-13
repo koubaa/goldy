@@ -10,7 +10,7 @@ Goldy targets **modern GPUs only**. This is a deliberate choice that enables sig
 | **AMD** | RDNA 1 (RX 5000) | 2019 | Vulkan 1.4, modern cache |
 | **Intel** | Xe / Alchemist | 2022 | Vulkan 1.4, DX12 |
 | **Apple** | M1 / A14 | 2020 | Metal 2+, unified memory |
-| **Qualcomm** | Adreno 650+ | 2019 | Vulkan 1.2+ with extensions |
+| **Qualcomm** | Adreno 650+ | 2019 | Vulkan 1.4 (driver dependent) |
 
 ## What "Modern" Means
 
@@ -57,7 +57,7 @@ Goldy does **not** support:
 
 | Excluded | Reason |
 |----------|--------|
-| GTX 900 series | No Vulkan 1.2 bindless |
+| GTX 900 series | No Vulkan 1.4 support |
 | AMD GCN (RX 400/500) | Driver support ended 2021 |
 | Intel Gen9 (HD 500/600) | Limited Vulkan support |
 | iPhone 11 / A13 | No Metal 4.0 |
