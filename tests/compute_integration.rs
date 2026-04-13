@@ -2247,10 +2247,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     }
 }
 
-/// Full Ekrano pipeline replica with 10x iteration loop.
-/// Chains ~10 compute stages matching Ekrano's exact binding signatures
-/// (strides, SRV/UAV split, groupshared, numthreads 256). Runs 10 iterations
-/// to probe non-deterministic WARP bugs.
+/// Full Ekrano pipeline with REAL Ekrano shaders (copied from ekrano_shaders/slang/).
+/// Uses the actual clip_reduce, clip_leaf, draw_leaf, draw_reduce, pathtag_reduce,
+/// and binning shaders compiled against ekrano_shared.slang. 10x iteration loop.
 #[test]
 fn test_warp_srv_full_pipeline() {
     if cfg!(target_os = "macos") {
@@ -2258,341 +2257,29 @@ fn test_warp_srv_full_pipeline() {
         return;
     }
 
-    // Stage 1: pathtag_reduce — 3 bindings (2 SRV + 1 UAV)
-    // SRV: config (stride 96), scene (stride 4)
-    // UAV: tagmonoid (stride 20)
-    const PATHTAG_REDUCE: &str = r#"
-import goldy_exp;
+    // Real Ekrano shaders loaded from tests/shaders/
+    let shader_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/shaders");
 
-struct TagMonoid { uint trans_ix; uint path_ix; uint pathseg_ix; uint pathseg_offset; uint style_ix; };
+    let device = make_device();
 
-static const uint WG = 256;
-groupshared TagMonoid sh[256];
+    let compile = |src: &str| -> ComputePipeline {
+        let s = ShaderModule::from_slang_with_paths(&device, src, &[shader_dir]).expect("compile");
+        ComputePipeline::new(&device, &s).expect("pipeline")
+    };
 
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID) {
-    ReadOnlyBuffer<uint> config = goldy_dyn_buf_ro<uint>(0);
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    StorageBuffer<TagMonoid> reduced = goldy_dyn_scattered<TagMonoid>(2);
-    uint tag = scene[gid.x];
-    TagMonoid m;
-    m.trans_ix = tag & 0xf;
-    m.path_ix = (tag >> 4) & 1;
-    m.pathseg_ix = (tag >> 5) & 1;
-    m.pathseg_offset = tag & 0xff;
-    m.style_ix = (tag >> 8) & 0xf;
-    sh[lid.x] = m;
-    for (uint i = 0; i < 8; i++) {
-        GroupMemoryBarrierWithGroupSync();
-        if (lid.x + (1u << i) < WG) {
-            TagMonoid o = sh[lid.x + (1u << i)];
-            m.trans_ix += o.trans_ix;
-            m.path_ix += o.path_ix;
-            m.pathseg_ix += o.pathseg_ix;
-            m.pathseg_offset += o.pathseg_offset;
-            m.style_ix += o.style_ix;
-        }
-        GroupMemoryBarrierWithGroupSync();
-        sh[lid.x] = m;
-    }
-    if (lid.x == 0) reduced[gid.x >> 8] = m;
-}
-"#;
+    let pathtag_pipe = compile(include_str!("shaders/pathtag_reduce.slang"));
+    let draw_reduce_pipe = compile(include_str!("shaders/draw_reduce.slang"));
+    let draw_leaf_pipe = compile(include_str!("shaders/draw_leaf.slang"));
+    let clip_reduce_pipe = compile(include_str!("shaders/clip_reduce.slang"));
+    let clip_leaf_pipe = compile(include_str!("shaders/clip_leaf.slang"));
+    let binning_pipe = compile(include_str!("shaders/binning.slang"));
+    let tile_alloc_pipe = compile(include_str!("shaders/tile_alloc.slang"));
+    let coarse_pipe = compile(include_str!("shaders/coarse.slang"));
 
-    // Stage 2: draw_reduce — 3 bindings (2 SRV + 1 UAV)
-    // SRV: config (stride 96), scene (stride 4)
-    // UAV: draw_monoid (stride 16)
-    const DRAW_REDUCE: &str = r#"
-import goldy_exp;
-
-struct DrawMonoid { uint path_ix; uint clip_ix; uint scene_offset; uint info_offset; };
-
-static const uint WG = 256;
-groupshared DrawMonoid sh[256];
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID) {
-    ReadOnlyBuffer<uint> config = goldy_dyn_buf_ro<uint>(0);
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    StorageBuffer<DrawMonoid> reduced = goldy_dyn_scattered<DrawMonoid>(2);
-    uint tag = scene[gid.x];
-    DrawMonoid m;
-    m.path_ix = (tag >> 0) & 1;
-    m.clip_ix = (tag >> 1) & 1;
-    m.scene_offset = tag & 0xf;
-    m.info_offset = (tag >> 4) & 0xf;
-    sh[lid.x] = m;
-    for (uint i = 0; i < 8; i++) {
-        GroupMemoryBarrierWithGroupSync();
-        if (lid.x + (1u << i) < WG) {
-            DrawMonoid o = sh[lid.x + (1u << i)];
-            m.path_ix += o.path_ix;
-            m.clip_ix += o.clip_ix;
-            m.scene_offset += o.scene_offset;
-            m.info_offset += o.info_offset;
-        }
-        GroupMemoryBarrierWithGroupSync();
-        sh[lid.x] = m;
-    }
-    if (lid.x == 0) reduced[gid.x >> 8] = m;
-}
-"#;
-
-    // Stage 3: draw_leaf — 7 bindings (4 SRV + 3 UAV)
-    // SRV: config (stride 96), scene (stride 4), reduced (stride 16), path_bbox (stride 20)
-    // UAV: draw_monoid (stride 16), info (stride 4), clip_inp (stride 8)
-    const DRAW_LEAF: &str = r#"
-import goldy_exp;
-
-struct DrawMonoid { uint path_ix; uint clip_ix; uint scene_offset; uint info_offset; };
-struct PathBbox { int x0; int y0; int x1; int y1; uint draw_flags; };
-struct ClipInp { uint ix; int path_ix; };
-
-static const uint WG = 256;
-groupshared DrawMonoid sh[256];
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, uint3 wg : SV_GroupID) {
-    ReadOnlyBuffer<uint> config = goldy_dyn_buf_ro<uint>(0);
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<DrawMonoid> reduced = goldy_dyn_buf_ro<DrawMonoid>(2);
-    ReadOnlyBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(3);
-    StorageBuffer<DrawMonoid> draw_monoid = goldy_dyn_scattered<DrawMonoid>(4);
-    StorageBuffer<uint> info = goldy_dyn_scattered<uint>(5);
-    StorageBuffer<ClipInp> clip_inp = goldy_dyn_scattered<ClipInp>(6);
-
-    DrawMonoid agg;
-    agg.path_ix = 0; agg.clip_ix = 0; agg.scene_offset = 0; agg.info_offset = 0;
-    if (lid.x < wg.x) {
-        agg = reduced[lid.x];
-    }
-    sh[lid.x] = agg;
-    for (uint i = 0; i < 8; i++) {
-        GroupMemoryBarrierWithGroupSync();
-        if (lid.x + (1u << i) < WG) {
-            DrawMonoid o = sh[lid.x + (1u << i)];
-            agg.path_ix += o.path_ix;
-            agg.clip_ix += o.clip_ix;
-            agg.scene_offset += o.scene_offset;
-            agg.info_offset += o.info_offset;
-        }
-        GroupMemoryBarrierWithGroupSync();
-        sh[lid.x] = agg;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    DrawMonoid prefix = sh[0];
-    uint tag = scene[gid.x];
-    DrawMonoid m;
-    m.path_ix = prefix.path_ix + ((tag >> 0) & 1);
-    m.clip_ix = prefix.clip_ix + ((tag >> 1) & 1);
-    m.scene_offset = prefix.scene_offset + (tag & 0xf);
-    m.info_offset = prefix.info_offset + ((tag >> 4) & 0xf);
-    draw_monoid[gid.x] = m;
-    PathBbox bbox = path_bbox[m.path_ix % 4096];
-    info[gid.x] = uint(bbox.x0 + bbox.y0);
-    ClipInp ci;
-    ci.ix = gid.x;
-    ci.path_ix = int(m.path_ix);
-    clip_inp[m.clip_ix % 4096] = ci;
-}
-"#;
-
-    // Stage 4: clip_reduce — 4 bindings (2 SRV + 2 UAV)
-    // SRV: clip_inp (stride 8), path_bbox (stride 20)
-    // UAV: bic (stride 8), clip_el (stride 32)
-    const CLIP_REDUCE: &str = r#"
-import goldy_exp;
-
-struct ClipInp { uint ix; int path_ix; };
-struct PathBbox { int x0; int y0; int x1; int y1; uint draw_flags; };
-struct Bic { uint a; uint b; };
-struct ClipEl { uint parent_ix; uint _pad0; uint _pad1; uint _pad2; float4 bbox; };
-
-static const uint WG = 256;
-groupshared Bic sh_bic[256];
-groupshared uint sh_parent[256];
-groupshared uint sh_path_ix[256];
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, uint3 wg : SV_GroupID) {
-    ReadOnlyBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(0);
-    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(1);
-    StorageBuffer<Bic> reduced = goldy_dyn_scattered<Bic>(2);
-    StorageBuffer<ClipEl> clip_out = goldy_dyn_scattered<ClipEl>(3);
-    int inp = clip_inp[gid.x].path_ix;
-    bool is_push = inp >= 0;
-    Bic bic; bic.a = is_push ? 0 : 1; bic.b = is_push ? 1 : 0;
-    sh_bic[lid.x] = bic;
-    for (uint i = 0; i < 8; i++) {
-        GroupMemoryBarrierWithGroupSync();
-        if (lid.x + (1u << i) < WG) {
-            Bic o = sh_bic[lid.x + (1u << i)];
-            uint m = min(bic.b, o.a);
-            bic.a = bic.a + o.a - m;
-            bic.b = bic.b + o.b - m;
-        }
-        GroupMemoryBarrierWithGroupSync();
-        sh_bic[lid.x] = bic;
-    }
-    if (lid.x == 0) reduced[wg.x] = bic;
-    GroupMemoryBarrierWithGroupSync();
-    uint size = sh_bic[0].b;
-    Bic bic2; bic2.a = 0; bic2.b = 0;
-    if (lid.x + 1 < WG) bic2 = sh_bic[lid.x + 1];
-    if (is_push && bic2.a == 0) {
-        uint local_ix = size - bic2.b - 1;
-        sh_parent[local_ix] = lid.x;
-        sh_path_ix[local_ix] = uint(inp);
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (lid.x < size) {
-        uint path_ix = sh_path_ix[lid.x];
-        PathBbox pb = path_bboxes[path_ix % 4096];
-        ClipEl el;
-        el.parent_ix = sh_parent[lid.x] + wg.x * WG;
-        el._pad0 = 0; el._pad1 = 0; el._pad2 = 0;
-        el.bbox = float4(float(pb.x0), float(pb.y0), float(pb.x1), float(pb.y1));
-        clip_out[gid.x] = el;
-    }
-}
-"#;
-
-    // Stage 5: binning — 8 bindings (4 SRV + 4 UAV)
-    // SRV: config (stride 96), draw_monoids (stride 16), path_bbox (stride 20), clip_bbox (stride 16)
-    // UAV: intersected_bbox (stride 16), bump (stride 32), bin_data (stride 4), bin_header (stride 8)
-    const BINNING: &str = r#"
-import goldy_exp;
-
-struct DrawMonoid { uint path_ix; uint clip_ix; uint scene_offset; uint info_offset; };
-struct PathBbox { int x0; int y0; int x1; int y1; uint draw_flags; };
-struct BinHeader { uint element_count; uint chunk_offset; };
-
-groupshared uint sh_bitmaps[8][16];
-groupshared uint sh_count[4][16];
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID) {
-    ReadOnlyBuffer<uint> config = goldy_dyn_buf_ro<uint>(0);
-    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(1);
-    ReadOnlyBuffer<PathBbox> path_bbox_buf = goldy_dyn_buf_ro<PathBbox>(2);
-    ReadOnlyBuffer<float4> clip_bbox_buf = goldy_dyn_buf_ro<float4>(3);
-    StorageBuffer<float4> intersected_bbox = goldy_dyn_scattered<float4>(4);
-    StorageBuffer<uint> bump = goldy_dyn_scattered<uint>(5);
-    StorageBuffer<uint> bin_data = goldy_dyn_scattered<uint>(6);
-    StorageBuffer<BinHeader> bin_header = goldy_dyn_scattered<BinHeader>(7);
-    if (lid.x < 16) {
-        for (uint i = 0; i < 8; i++) sh_bitmaps[i][lid.x] = 0;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    DrawMonoid dm = draw_monoids[gid.x % 4096];
-    PathBbox pb = path_bbox_buf[dm.path_ix % 4096];
-    float4 cb = clip_bbox_buf[dm.clip_ix % 4096];
-    float4 bbox = float4(float(pb.x0), float(pb.y0), float(pb.x1), float(pb.y1));
-    bbox = float4(max(bbox.x, cb.x), max(bbox.y, cb.y), min(bbox.z, cb.z), min(bbox.w, cb.w));
-    intersected_bbox[gid.x % 4096] = bbox;
-    uint my_slice = lid.x / 32;
-    uint my_mask = 1u << (lid.x & 31);
-    uint bin_ix = (lid.x * 7) % 16;
-    InterlockedOr(sh_bitmaps[my_slice][bin_ix], my_mask);
-    GroupMemoryBarrierWithGroupSync();
-    uint elem_count = 0;
-    if (lid.x < 16) {
-        for (uint i = 0; i < 8; i++) elem_count += countbits(sh_bitmaps[i][lid.x]);
-        sh_count[0][lid.x] = elem_count;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    bin_data[gid.x % 4096] = elem_count;
-    BinHeader hdr; hdr.element_count = elem_count; hdr.chunk_offset = gid.x;
-    bin_header[gid.x % 4096] = hdr;
-}
-"#;
-
-    // Stage 6: tile_alloc-like — 6 bindings (3 SRV + 3 UAV)
-    // SRV: config (stride 96), path_bbox (stride 20), draw_bbox (stride 16)
-    // UAV: bump (stride 32), tile (stride 8), path (stride 32)
-    const TILE_ALLOC: &str = r#"
-import goldy_exp;
-
-struct PathBbox { int x0; int y0; int x1; int y1; uint draw_flags; };
-struct Tile { uint backdrop; uint segments; };
-struct Path { float4 bbox; uint tiles; uint _pad0; uint _pad1; uint _pad2; };
-
-groupshared uint sh_tile_count[256];
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID) {
-    ReadOnlyBuffer<uint> config = goldy_dyn_buf_ro<uint>(0);
-    ReadOnlyBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(1);
-    ReadOnlyBuffer<float4> draw_bbox = goldy_dyn_buf_ro<float4>(2);
-    StorageBuffer<uint> bump = goldy_dyn_scattered<uint>(3);
-    StorageBuffer<Tile> tile = goldy_dyn_scattered<Tile>(4);
-    StorageBuffer<Path> path = goldy_dyn_scattered<Path>(5);
-    PathBbox pb = path_bbox[gid.x % 4096];
-    float4 db = draw_bbox[gid.x % 4096];
-    uint tile_count = uint(abs(pb.x1 - pb.x0)) * uint(abs(pb.y1 - pb.y0));
-    tile_count = min(tile_count, 64);
-    sh_tile_count[lid.x] = tile_count;
-    GroupMemoryBarrierWithGroupSync();
-    uint total = 0;
-    for (uint i = 0; i < 256; i++) total += sh_tile_count[i];
-    Tile t; t.backdrop = 0; t.segments = gid.x;
-    tile[gid.x % 4096] = t;
-    Path p;
-    p.bbox = float4(float(pb.x0), float(pb.y0), float(pb.x1), float(pb.y1));
-    p.tiles = total; p._pad0 = 0; p._pad1 = 0; p._pad2 = 0;
-    path[gid.x % 4096] = p;
-    if (gid.x == 0) bump[0] = total;
-}
-"#;
-
-    // Stage 7: coarse-like — 7 bindings (5 SRV + 2 UAV)
-    // SRV: config (stride 96), scene (stride 4), draw_monoid (stride 16),
-    //      bin_header (stride 8), path (stride 32)
-    // UAV: ptcl (stride 4), info (stride 4)
-    const COARSE: &str = r#"
-import goldy_exp;
-
-struct DrawMonoid { uint path_ix; uint clip_ix; uint scene_offset; uint info_offset; };
-struct BinHeader { uint element_count; uint chunk_offset; };
-struct Path { float4 bbox; uint tiles; uint _pad0; uint _pad1; uint _pad2; };
-
-groupshared uint sh_elements[256];
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID) {
-    ReadOnlyBuffer<uint> config = goldy_dyn_buf_ro<uint>(0);
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
-    ReadOnlyBuffer<BinHeader> bin_headers = goldy_dyn_buf_ro<BinHeader>(3);
-    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(4);
-    StorageBuffer<uint> ptcl = goldy_dyn_scattered<uint>(5);
-    StorageBuffer<uint> info = goldy_dyn_scattered<uint>(6);
-    BinHeader hdr = bin_headers[gid.x % 4096];
-    sh_elements[lid.x] = hdr.element_count;
-    GroupMemoryBarrierWithGroupSync();
-    uint total = 0;
-    for (uint i = 0; i < 256; i += 64) total += sh_elements[(lid.x + i) % 256];
-    DrawMonoid dm = draw_monoids[gid.x % 4096];
-    Path p = paths[dm.path_ix % 4096];
-    uint s = scene[gid.x % 4096];
-    ptcl[gid.x % 4096] = total + s;
-    info[gid.x % 4096] = uint(p.bbox.x + p.bbox.y) + dm.info_offset;
-}
-"#;
-
-    // Final copy: SRV read of clip_inp (stride 8) → output
+    // Copy/fill helpers (small inline shaders)
     const COPY_U2: &str = r#"
 import goldy_exp;
-
 struct Pair { uint a; uint b; };
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
@@ -2601,13 +2288,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     dst[id.x] = src[id.x];
 }
 "#;
-
-    // Fill stride-8 (Pair)
     const FILL_U2: &str = r#"
 import goldy_exp;
-
 struct Pair { uint a; uint b; };
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
@@ -2620,104 +2303,137 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     dst[id.x] = p;
 }
 "#;
+    let copy_pipe = compile(COPY_U2);
+    let fill_pipe = compile(FILL_U2);
 
-    let device = make_device();
-
-    let pathtag_pipe = {
-        let s = ShaderModule::from_slang(&device, PATHTAG_REDUCE).expect("pathtag");
-        ComputePipeline::new(&device, &s).expect("pathtag pipe")
-    };
-    let draw_reduce_pipe = {
-        let s = ShaderModule::from_slang(&device, DRAW_REDUCE).expect("draw_reduce");
-        ComputePipeline::new(&device, &s).expect("draw_reduce pipe")
-    };
-    let draw_leaf_pipe = {
-        let s = ShaderModule::from_slang(&device, DRAW_LEAF).expect("draw_leaf");
-        ComputePipeline::new(&device, &s).expect("draw_leaf pipe")
-    };
-    let clip_reduce_pipe = {
-        let s = ShaderModule::from_slang(&device, CLIP_REDUCE).expect("clip_reduce");
-        ComputePipeline::new(&device, &s).expect("clip_reduce pipe")
-    };
-    let binning_pipe = {
-        let s = ShaderModule::from_slang(&device, BINNING).expect("binning");
-        ComputePipeline::new(&device, &s).expect("binning pipe")
-    };
-    let tile_alloc_pipe = {
-        let s = ShaderModule::from_slang(&device, TILE_ALLOC).expect("tile_alloc");
-        ComputePipeline::new(&device, &s).expect("tile_alloc pipe")
-    };
-    let coarse_pipe = {
-        let s = ShaderModule::from_slang(&device, COARSE).expect("coarse");
-        ComputePipeline::new(&device, &s).expect("coarse pipe")
-    };
-    let copy_pipe = {
-        let s = ShaderModule::from_slang(&device, COPY_U2).expect("copy");
-        ComputePipeline::new(&device, &s).expect("copy pipe")
-    };
-    let fill_pipe = {
-        let s = ShaderModule::from_slang(&device, FILL_U2).expect("fill");
-        ComputePipeline::new(&device, &s).expect("fill pipe")
-    };
-
+    // Buffer sizes — generous to avoid OOB in real shader logic
     const N: usize = 4096;
     const N_WG_256: u32 = N as u32 / 256;
     const N_WG_64: u32 = N as u32 / 64;
+    const BIG: u64 = (N * 256) as u64;
 
-    // Ekrano-matching buffer strides, all standalone (non-pooled)
+    // Config buffer: stride 96 (24 u32 fields). Fill with plausible Ekrano config.
     let config_buf =
         Buffer::new_with_stride(&device, (N * 96) as u64, DataAccess::Scattered, Some(96))
             .expect("config");
+    {
+        let mut cfg = vec![0u32; 24];
+        cfg[0] = 4; // width_in_tiles
+        cfg[1] = 4; // height_in_tiles
+        cfg[2] = 64; // target_width
+        cfg[3] = 64; // target_height
+        cfg[4] = 0xFF000000; // base_color
+        cfg[5] = N as u32; // n_drawobj
+        cfg[6] = N as u32; // n_path
+        cfg[7] = N as u32; // n_clip
+        cfg[8] = 0; // bin_data_start
+        cfg[9] = 0; // pathtag_base
+        cfg[10] = 0; // pathdata_base
+        cfg[11] = 0; // drawtag_base
+        cfg[12] = 0; // drawdata_base
+        cfg[13] = 0; // transform_base
+        cfg[14] = 0; // style_base
+        cfg[15] = BIG as u32; // lines_size
+        cfg[16] = BIG as u32; // binning_size
+        cfg[17] = BIG as u32; // tiles_size
+        cfg[18] = BIG as u32; // seg_counts_size
+        cfg[19] = BIG as u32; // segments_size
+        cfg[20] = BIG as u32; // blend_size
+        cfg[21] = BIG as u32; // ptcl_size
+        config_buf.write_data(0, &cfg).expect("write config");
+    }
+
+    // Scene buffer: stride 4, large enough for all shader reads
     let scene_buf =
-        Buffer::new_with_stride(&device, (N * 4) as u64, DataAccess::Scattered, Some(4))
-            .expect("scene");
-    let tagmonoid_buf =
-        Buffer::new_with_stride(&device, (N * 20) as u64, DataAccess::Scattered, Some(20))
-            .expect("tagmonoid");
+        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("scene");
+    let scene_data: Vec<u32> = (0..BIG as u32)
+        .map(|i| i.wrapping_mul(2654435761))
+        .collect();
+    scene_buf.write_data(0, &scene_data).expect("write scene");
+
+    // TagMonoid: stride 20 (5 x u32)
+    let tagmonoid_buf = Buffer::new_with_stride(&device, BIG * 20, DataAccess::Scattered, Some(20))
+        .expect("tagmonoid");
+
+    // PathBbox: stride 24 (6 x u32: x0,y0,x1,y1,draw_flags,trans_ix)
     let path_bbox_buf =
-        Buffer::new_with_stride(&device, (N * 20) as u64, DataAccess::Scattered, Some(20))
+        Buffer::new_with_stride(&device, (N as u64) * 24, DataAccess::Scattered, Some(24))
             .expect("path_bbox");
+    {
+        let bbox_data: Vec<u32> = (0..N * 6)
+            .map(|i| match i % 6 {
+                0 => (i as u32 / 6) % 4,     // x0 (tile coords)
+                1 => (i as u32 / 6) % 4,     // y0
+                2 => (i as u32 / 6) % 4 + 1, // x1
+                3 => (i as u32 / 6) % 4 + 1, // y1
+                4 => 0,                      // draw_flags
+                _ => 0,                      // trans_ix
+            })
+            .collect();
+        path_bbox_buf
+            .write_data(0, &bbox_data)
+            .expect("write path_bbox");
+    }
+
+    // DrawMonoid: stride 16 (4 x u32)
     let draw_monoid_buf =
-        Buffer::new_with_stride(&device, (N * 16) as u64, DataAccess::Scattered, Some(16))
+        Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
             .expect("draw_monoid");
-    let info_buf = Buffer::new_with_stride(&device, (N * 4) as u64, DataAccess::Scattered, Some(4))
-        .expect("info");
-    let clip_inp_buf =
-        Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
-            .expect("clip_inp");
-    let clip_bic_buf =
-        Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
-            .expect("clip_bic");
-    let clip_el_buf =
-        Buffer::new_with_stride(&device, (N * 32) as u64, DataAccess::Scattered, Some(32))
-            .expect("clip_el");
-    let clip_bbox_buf =
-        Buffer::new_with_stride(&device, (N * 16) as u64, DataAccess::Scattered, Some(16))
-            .expect("clip_bbox");
-    let draw_bbox_buf =
-        Buffer::new_with_stride(&device, (N * 16) as u64, DataAccess::Scattered, Some(16))
-            .expect("draw_bbox");
+
+    // Info: stride 4
+    let info_buf =
+        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("info");
+
+    // ClipInp: stride 8 (2 x u32)
+    let clip_inp_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+        .expect("clip_inp");
+
+    // Bic: stride 8
+    let clip_bic_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+        .expect("clip_bic");
+
+    // ClipEl: stride 32 (4 u32 + float4)
+    let clip_el_buf = Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32))
+        .expect("clip_el");
+
+    // Clip bboxes: stride 16 (float4)
+    let clip_bbox_buf = Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
+        .expect("clip_bbox");
+
+    // Draw bboxes (intersected): stride 16 (float4)
+    let draw_bbox_buf = Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
+        .expect("draw_bbox");
+
+    // BumpAllocators: stride 32 (8 x u32)
     let bump_buf =
-        Buffer::new_with_stride(&device, (N * 32) as u64, DataAccess::Scattered, Some(32))
-            .expect("bump");
-    let bin_header_buf =
-        Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
-            .expect("bin_header");
+        Buffer::new_with_stride(&device, 32, DataAccess::Scattered, Some(32)).expect("bump");
+
+    // BinHeader: stride 8
+    let bin_header_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+        .expect("bin_header");
+
+    // Path: stride 32 (uint4 bbox + uint tiles + 3 pad)
     let path_buf =
-        Buffer::new_with_stride(&device, (N * 32) as u64, DataAccess::Scattered, Some(32))
-            .expect("path");
-    let tile_buf = Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
-        .expect("tile");
-    let ptcl_buf = Buffer::new_with_stride(&device, (N * 4) as u64, DataAccess::Scattered, Some(4))
-        .expect("ptcl");
-    let bin_data_buf =
-        Buffer::new_with_stride(&device, (N * 4) as u64, DataAccess::Scattered, Some(4))
-            .expect("bin_data");
+        Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32)).expect("path");
+
+    // Tile: stride 8
+    let tile_buf =
+        Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8)).expect("tile");
+
+    // PTCL: stride 4
+    let ptcl_buf =
+        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("ptcl");
+
+    // BinData: stride 4
+    let bin_data_buf = Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4))
+        .expect("bin_data");
+
+    // Output: stride 8 (ClipInp / Pair)
     let output_buf =
-        Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
+        Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
             .expect("output");
 
-    // Textures interleaved (like Ekrano's gradient_image, atlas, output)
+    // Textures interleaved (descriptor heap pressure)
     let _tex1 = Texture::new(
         &device,
         512,
@@ -2750,33 +2466,18 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param")
     };
 
-    // Fill scene_buf with pseudo-random tag data
-    let scene_data: Vec<u32> = (0..N as u32).map(|i| i.wrapping_mul(2654435761)).collect();
-    scene_buf.write_data(0, &scene_data).expect("write scene");
-
-    // Fill path_bbox with valid-looking data
-    let bbox_data: Vec<i32> = (0..N * 5)
-        .map(|i| match i % 5 {
-            0 => i as i32 % 100,        // x0
-            1 => (i as i32 % 100) + 10, // y0
-            2 => (i as i32 % 100) + 50, // x1
-            3 => (i as i32 % 100) + 60, // y1
-            _ => 0,                     // draw_flags
-        })
-        .collect();
-    path_bbox_buf
-        .write_data(0, bytemuck::cast_slice::<i32, u32>(&bbox_data))
-        .expect("write path_bbox");
-
-    // 10 iterations — probes non-deterministic WARP bugs
+    // 10 iterations
     for iteration in 0..10 {
         let base_val = 50000 + (iteration as u32) * 100000;
+
+        // Zero bump allocators each frame
+        bump_buf.write_data(0, &[0u32; 8]).expect("zero bump");
 
         let mut encoder = ComputeEncoder::new();
         {
             let mut pass = encoder.begin_compute_pass();
 
-            // Stage 1: pathtag_reduce
+            // pathtag_reduce: slots 0=config(SRV), 1=scene(SRV), 2=reduced(UAV)
             pass.set_pipeline(&pathtag_pipe);
             pass.set_push_constants_raw(&[
                 config_buf.bindless_srv_index().unwrap(),
@@ -2785,16 +2486,17 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             ]);
             pass.dispatch(N_WG_256, 1, 1);
 
-            // Stage 2: draw_reduce
+            // draw_reduce: slots 0=config(SRV), 1=scene(UAV!), 2=reduced(UAV)
             pass.set_pipeline(&draw_reduce_pipe);
             pass.set_push_constants_raw(&[
                 config_buf.bindless_srv_index().unwrap(),
-                scene_buf.bindless_srv_index().unwrap(),
+                scene_buf.bindless_index().unwrap(),
                 draw_monoid_buf.bindless_index().unwrap(),
             ]);
             pass.dispatch(N_WG_256, 1, 1);
 
-            // Stage 3: draw_leaf (7 bindings!)
+            // draw_leaf: slots 0=config(SRV), 1=scene(SRV), 2=reduced(SRV),
+            //            3=path_bbox(SRV), 4=draw_monoid(UAV), 5=info(UAV), 6=clip_inp(UAV)
             pass.set_pipeline(&draw_leaf_pipe);
             pass.set_push_constants_raw(&[
                 config_buf.bindless_srv_index().unwrap(),
@@ -2807,7 +2509,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             ]);
             pass.dispatch(N_WG_256, 1, 1);
 
-            // Stage 3.5: fill clip_inp with known data for verification
+            // Fill clip_inp with known data for verification
             pass.set_pipeline(&fill_pipe);
             let fp = make_param(base_val);
             pass.set_push_constants_raw(&[
@@ -2816,7 +2518,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             ]);
             pass.dispatch(N_WG_64, 1, 1);
 
-            // Stage 4: clip_reduce
+            // clip_reduce: slots 0=clip_inp(SRV), 1=path_bbox(SRV), 2=bic(UAV), 3=clip_el(UAV)
             pass.set_pipeline(&clip_reduce_pipe);
             pass.set_push_constants_raw(&[
                 clip_inp_buf.bindless_srv_index().unwrap(),
@@ -2826,7 +2528,23 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             ]);
             pass.dispatch(N_WG_256, 1, 1);
 
-            // Stage 5: binning (8 bindings!)
+            // clip_leaf: slots 0=config(SRV), 1=clip_inp(SRV), 2=path_bbox(SRV),
+            //            3=bic(SRV), 4=clip_el(SRV), 5=draw_monoid(UAV), 6=clip_bbox(UAV)
+            pass.set_pipeline(&clip_leaf_pipe);
+            pass.set_push_constants_raw(&[
+                config_buf.bindless_srv_index().unwrap(),
+                clip_inp_buf.bindless_srv_index().unwrap(),
+                path_bbox_buf.bindless_srv_index().unwrap(),
+                clip_bic_buf.bindless_srv_index().unwrap(),
+                clip_el_buf.bindless_srv_index().unwrap(),
+                draw_monoid_buf.bindless_index().unwrap(),
+                clip_bbox_buf.bindless_index().unwrap(),
+            ]);
+            pass.dispatch(N_WG_256, 1, 1);
+
+            // binning: slots 0=config(SRV), 1=draw_monoid(SRV), 2=path_bbox(SRV),
+            //          3=clip_bbox(SRV), 4=intersected_bbox(UAV), 5=bump(UAV),
+            //          6=bin_data(UAV), 7=bin_header(UAV)
             pass.set_pipeline(&binning_pipe);
             pass.set_push_constants_raw(&[
                 config_buf.bindless_srv_index().unwrap(),
@@ -2840,30 +2558,35 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             ]);
             pass.dispatch(N_WG_256, 1, 1);
 
-            // Stage 6: tile_alloc
+            // tile_alloc: slots 0=config(SRV), 1=scene(SRV), 2=draw_bbox(SRV),
+            //             3=bump(UAV), 4=path(UAV), 5=tile(UAV)
             pass.set_pipeline(&tile_alloc_pipe);
             pass.set_push_constants_raw(&[
                 config_buf.bindless_srv_index().unwrap(),
-                path_bbox_buf.bindless_srv_index().unwrap(),
+                scene_buf.bindless_srv_index().unwrap(),
                 draw_bbox_buf.bindless_srv_index().unwrap(),
                 bump_buf.bindless_index().unwrap(),
-                tile_buf.bindless_index().unwrap(),
                 path_buf.bindless_index().unwrap(),
+                tile_buf.bindless_index().unwrap(),
             ]);
             pass.dispatch(N_WG_256, 1, 1);
 
-            // Stage 7: coarse (7 bindings)
+            // coarse: slots 0=config(SRV), 1=scene(SRV), 2=draw_monoid(SRV),
+            //         3=bin_header(SRV), 4=info_bin_data(SRV), 5=path(SRV),
+            //         6=tile(UAV), 7=bump(UAV), 8=ptcl(UAV)
             pass.set_pipeline(&coarse_pipe);
             pass.set_push_constants_raw(&[
                 config_buf.bindless_srv_index().unwrap(),
                 scene_buf.bindless_srv_index().unwrap(),
                 draw_monoid_buf.bindless_srv_index().unwrap(),
                 bin_header_buf.bindless_srv_index().unwrap(),
+                info_buf.bindless_srv_index().unwrap(),
                 path_buf.bindless_srv_index().unwrap(),
+                tile_buf.bindless_index().unwrap(),
+                bump_buf.bindless_index().unwrap(),
                 ptcl_buf.bindless_index().unwrap(),
-                info_buf.bindless_index().unwrap(),
             ]);
-            pass.dispatch(N_WG_256, 1, 1);
+            pass.dispatch(1, 1, 1);
 
             // Final: SRV read of clip_inp → output
             pass.set_pipeline(&copy_pipe);
@@ -2875,7 +2598,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         }
         encoder.dispatch(&device).expect("dispatch");
 
-        // Verify every iteration
         let mut out_bytes = vec![0u8; N * 8];
         output_buf
             .read_to_cpu(&device, &mut out_bytes)
@@ -2902,10 +2624,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         assert_eq!(
             mismatches, 0,
             "iteration {}: SRV read of clip_inp returned wrong data ({}/{} wrong). \
-             Full Ekrano-like pipeline with {} stages.",
-            iteration, mismatches, N, 8
+             Real Ekrano pipeline with 9 stages.",
+            iteration, mismatches, N
         );
     }
 
-    eprintln!("All 10 iterations passed.");
+    eprintln!("All 10 iterations passed with real Ekrano shaders.");
 }
