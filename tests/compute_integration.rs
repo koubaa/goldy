@@ -2614,3 +2614,352 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     eprintln!("All 10 iterations passed with real Ekrano shaders + frame lifecycle.");
 }
+
+/// Real Ekrano shaders with BufferPool (EKRANO_FORCE_POOL=1 mode).
+/// Intermediate buffers are pool views with FirstElement != 0.
+/// This matches the configuration that reproduces the bug in Ekrano.
+#[test]
+fn test_warp_srv_full_pipeline_pooled() {
+    if cfg!(target_os = "macos") {
+        eprintln!("Skipping test_warp_srv_full_pipeline_pooled on macOS");
+        return;
+    }
+
+    let shader_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/shaders");
+
+    let device = make_device();
+
+    let compile = |src: &str| -> ComputePipeline {
+        let s = ShaderModule::from_slang_with_paths(&device, src, &[shader_dir]).expect("compile");
+        ComputePipeline::new(&device, &s).expect("pipeline")
+    };
+
+    let pathtag_pipe = compile(include_str!("shaders/pathtag_reduce.slang"));
+    let draw_reduce_pipe = compile(include_str!("shaders/draw_reduce.slang"));
+    let draw_leaf_pipe = compile(include_str!("shaders/draw_leaf.slang"));
+    let clip_reduce_pipe = compile(include_str!("shaders/clip_reduce.slang"));
+    let clip_leaf_pipe = compile(include_str!("shaders/clip_leaf.slang"));
+    let binning_pipe = compile(include_str!("shaders/binning.slang"));
+    let tile_alloc_pipe = compile(include_str!("shaders/tile_alloc.slang"));
+    let coarse_pipe = compile(include_str!("shaders/coarse.slang"));
+
+    const COPY_U2: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+    const FILL_U2: &str = r#"
+import goldy_exp;
+struct Pair { uint a; uint b; };
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p;
+    p.a = base + id.x * 2;
+    p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+    let copy_pipe = compile(COPY_U2);
+    let fill_pipe = compile(FILL_U2);
+
+    const N: usize = 4096;
+    const N_WG_256: u32 = N as u32 / 256;
+    const N_WG_64: u32 = N as u32 / 64;
+    const BIG: u64 = (N * 256) as u64;
+
+    let make_config = || -> Vec<u32> {
+        let mut cfg = vec![0u32; 24];
+        cfg[0] = 4;
+        cfg[1] = 4;
+        cfg[2] = 64;
+        cfg[3] = 64;
+        cfg[4] = 0xFF000000;
+        cfg[5] = N as u32;
+        cfg[6] = N as u32;
+        cfg[7] = N as u32;
+        cfg[15] = BIG as u32;
+        cfg[16] = BIG as u32;
+        cfg[17] = BIG as u32;
+        cfg[18] = BIG as u32;
+        cfg[19] = BIG as u32;
+        cfg[20] = BIG as u32;
+        cfg[21] = BIG as u32;
+        cfg
+    };
+
+    let scene_data: Vec<u32> = (0..BIG as u32)
+        .map(|i| i.wrapping_mul(2654435761))
+        .collect();
+
+    let bbox_data: Vec<u32> = (0..N * 6)
+        .map(|i| match i % 6 {
+            0 => (i as u32 / 6) % 4,
+            1 => (i as u32 / 6) % 4,
+            2 => (i as u32 / 6) % 4 + 1,
+            3 => (i as u32 / 6) % 4 + 1,
+            _ => 0,
+        })
+        .collect();
+
+    let _tex1 = Texture::new(
+        &device,
+        512,
+        512,
+        TextureFormat::Rgba8Unorm,
+        SpatialAccess::Interpolated,
+        TextureFlags::COPY_DST,
+    )
+    .expect("tex1");
+    let _tex2 = Texture::new(
+        &device,
+        1024,
+        1024,
+        TextureFormat::Rgba8Unorm,
+        SpatialAccess::Interpolated,
+        TextureFlags::COPY_DST,
+    )
+    .expect("tex2");
+
+    // Pool sizes matching Ekrano's pool_allocs() — all intermediate buffers in one pool
+    // Strides: tagmonoid=20, path_bbox=24, draw_monoid=16, info=4, clip_inp=8,
+    //          clip_bic=8, clip_el=32, clip_bbox=16, draw_bbox=16, bin_header=8,
+    //          bin_data=4, ptcl=4
+    let pool_buf_sizes: &[(u64, u32)] = &[
+        (BIG * 20, 20),        // tagmonoid
+        (BIG * 16, 16),        // draw_monoid (also used as reduced)
+        ((N as u64) * 24, 24), // path_bbox
+        (BIG * 4, 4),          // info
+        (BIG * 8, 8),          // clip_inp
+        (BIG * 8, 8),          // clip_bic
+        (BIG * 32, 32),        // clip_el
+        (BIG * 16, 16),        // clip_bbox
+        (BIG * 16, 16),        // draw_bbox
+        (BIG * 8, 8),          // bin_header
+        (BIG * 4, 4),          // bin_data
+        (BIG * 4, 4),          // ptcl
+    ];
+    let total_pool_size: u64 = pool_buf_sizes
+        .iter()
+        .map(|(size, stride)| {
+            let s = *stride as u64;
+            let aligned = size.div_ceil(s) * s;
+            aligned + s // padding between allocations
+        })
+        .sum::<u64>()
+        + 262144; // Ekrano's extra slack
+
+    for iteration in 0..10 {
+        let base_val = 50000 + (iteration as u32) * 100000;
+
+        // Fresh uploads each frame (standalone, like Ekrano)
+        let config_buf =
+            Buffer::new_with_stride(&device, (N * 96) as u64, DataAccess::Scattered, Some(96))
+                .expect("config");
+        config_buf
+            .write_data(0, &make_config())
+            .expect("write config");
+
+        let scene_buf = Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4))
+            .expect("scene");
+        scene_buf.write_data(0, &scene_data).expect("write scene");
+
+        // Pool-exempt standalone buffers (like Ekrano)
+        let bump_buf =
+            Buffer::new_with_stride(&device, 32, DataAccess::Scattered, Some(32)).expect("bump");
+        bump_buf.write_data(0, &[0u32; 8]).expect("zero bump");
+        let path_buf = Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32))
+            .expect("path");
+        let tile_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+            .expect("tile");
+
+        // BufferPool for intermediate buffers — like EKRANO_FORCE_POOL=1
+        let mut pool = BufferPool::new(&device, total_pool_size).expect("pool");
+
+        let tagmonoid_v = pool.alloc_bytes(BIG * 20, Some(20)).expect("tagmonoid");
+        let draw_monoid_v = pool.alloc_bytes(BIG * 16, Some(16)).expect("draw_monoid");
+        let path_bbox_v = pool
+            .alloc_bytes((N as u64) * 24, Some(24))
+            .expect("path_bbox");
+        let info_v = pool.alloc_bytes(BIG * 4, Some(4)).expect("info");
+        let clip_inp_v = pool.alloc_bytes(BIG * 8, Some(8)).expect("clip_inp");
+        let clip_bic_v = pool.alloc_bytes(BIG * 8, Some(8)).expect("clip_bic");
+        let clip_el_v = pool.alloc_bytes(BIG * 32, Some(32)).expect("clip_el");
+        let clip_bbox_v = pool.alloc_bytes(BIG * 16, Some(16)).expect("clip_bbox");
+        let draw_bbox_v = pool.alloc_bytes(BIG * 16, Some(16)).expect("draw_bbox");
+        let bin_header_v = pool.alloc_bytes(BIG * 8, Some(8)).expect("bin_header");
+        let bin_data_v = pool.alloc_bytes(BIG * 4, Some(4)).expect("bin_data");
+        let ptcl_v = pool.alloc_bytes(BIG * 4, Some(4)).expect("ptcl");
+
+        // Write path_bbox data into the pool view
+        path_bbox_v
+            .write_data(&bbox_data)
+            .expect("write path_bbox");
+
+        // Output: standalone
+        let output_buf =
+            Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
+                .expect("output");
+
+        // Submission 1: "coarse"
+        {
+            let mut encoder = ComputeEncoder::new();
+            {
+                let mut pass = encoder.begin_compute_pass();
+
+                pass.set_pipeline(&pathtag_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    tagmonoid_v.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
+
+                pass.set_pipeline(&draw_reduce_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_index().unwrap(),
+                    draw_monoid_v.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
+
+                pass.set_pipeline(&draw_leaf_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_v.bindless_srv_index().unwrap(),
+                    path_bbox_v.bindless_srv_index().unwrap(),
+                    draw_monoid_v.bindless_index().unwrap(),
+                    info_v.bindless_index().unwrap(),
+                    clip_inp_v.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
+
+                let fp =
+                    Buffer::with_data(&device, &[base_val], DataAccess::Scattered).expect("param");
+                pass.set_pipeline(&fill_pipe);
+                pass.set_push_constants_raw(&[
+                    clip_inp_v.bindless_index().unwrap(),
+                    fp.bindless_srv_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_64, 1, 1);
+
+                pass.set_pipeline(&clip_reduce_pipe);
+                pass.set_push_constants_raw(&[
+                    clip_inp_v.bindless_srv_index().unwrap(),
+                    path_bbox_v.bindless_srv_index().unwrap(),
+                    clip_bic_v.bindless_index().unwrap(),
+                    clip_el_v.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
+
+                pass.set_pipeline(&clip_leaf_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    clip_inp_v.bindless_srv_index().unwrap(),
+                    path_bbox_v.bindless_srv_index().unwrap(),
+                    clip_bic_v.bindless_srv_index().unwrap(),
+                    clip_el_v.bindless_srv_index().unwrap(),
+                    draw_monoid_v.bindless_index().unwrap(),
+                    clip_bbox_v.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
+
+                pass.set_pipeline(&binning_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_v.bindless_srv_index().unwrap(),
+                    path_bbox_v.bindless_srv_index().unwrap(),
+                    clip_bbox_v.bindless_srv_index().unwrap(),
+                    draw_bbox_v.bindless_index().unwrap(),
+                    bump_buf.bindless_index().unwrap(),
+                    bin_data_v.bindless_index().unwrap(),
+                    bin_header_v.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
+
+                pass.set_pipeline(&tile_alloc_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    draw_bbox_v.bindless_srv_index().unwrap(),
+                    bump_buf.bindless_index().unwrap(),
+                    path_buf.bindless_index().unwrap(),
+                    tile_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
+
+                pass.set_pipeline(&coarse_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_v.bindless_srv_index().unwrap(),
+                    bin_header_v.bindless_srv_index().unwrap(),
+                    info_v.bindless_srv_index().unwrap(),
+                    path_buf.bindless_srv_index().unwrap(),
+                    tile_buf.bindless_index().unwrap(),
+                    bump_buf.bindless_index().unwrap(),
+                    ptcl_v.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(1, 1, 1);
+            }
+            encoder.dispatch(&device).expect("coarse dispatch");
+        }
+
+        // Submission 2: "fine"
+        {
+            let mut encoder = ComputeEncoder::new();
+            {
+                let mut pass = encoder.begin_compute_pass();
+                pass.set_pipeline(&copy_pipe);
+                pass.set_push_constants_raw(&[
+                    clip_inp_v.bindless_srv_index().unwrap(),
+                    output_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_64, 1, 1);
+            }
+            encoder.dispatch(&device).expect("fine dispatch");
+        }
+
+        let mut out_bytes = vec![0u8; N * 8];
+        output_buf
+            .read_to_cpu(&device, &mut out_bytes)
+            .expect("read output");
+        let result: &[u32] = bytemuck::cast_slice(&out_bytes);
+
+        let mut mismatches = 0;
+        for i in 0..N {
+            let exp_a = base_val + (i as u32) * 2;
+            let exp_b = exp_a + 1;
+            let got_a = result[i * 2];
+            let got_b = result[i * 2 + 1];
+            if got_a != exp_a || got_b != exp_b {
+                if mismatches < 10 {
+                    eprintln!(
+                        "iter {} Pair[{}]: got ({}, {}) expected ({}, {})",
+                        iteration, i, got_a, got_b, exp_a, exp_b,
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+
+        assert_eq!(
+            mismatches, 0,
+            "iteration {}: SRV read of clip_inp returned wrong data ({}/{} wrong). \
+             Real Ekrano pipeline POOLED, 2 submissions.",
+            iteration, mismatches, N
+        );
+    }
+
+    eprintln!("All 10 iterations passed with real Ekrano shaders + BufferPool.");
+}
