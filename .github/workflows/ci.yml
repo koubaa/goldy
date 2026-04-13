@@ -90,57 +90,41 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Vulkan dependencies (Mesa 25.0+ for Vulkan 1.4)
+      - name: Install Vulkan dependencies
         run: |
-          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
           sudo apt-get update
-          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
           sudo apt-get install -y \
             libvulkan1 \
             libvulkan-dev \
             vulkan-tools \
-            mesa-vulkan-drivers \
             libxcb1-dev \
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
             libxkbcommon-dev
 
+      # Patched lavapipe: https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15227
+      # Remove this step and restore mesa-vulkan-drivers from apt once the upstream fix lands.
+      - name: Install patched lavapipe from mesa-fork
+        run: |
+          MESA_DIR="/opt/mesa-fork"
+          sudo mkdir -p "$MESA_DIR"
+          curl -sL https://github.com/koubaa/mesa-fork/releases/download/v1/lavapipe-fix.tar.gz \
+            | sudo tar xz -C "$MESA_DIR"
+          echo "LAVAPIPE_ICD=$MESA_DIR/lvp_icd.x86_64.json" >> $GITHUB_ENV
+          VK_ICD_FILENAMES="$MESA_DIR/lvp_icd.x86_64.json" vulkaninfo --summary || echo "vulkaninfo failed, continuing anyway"
+
       - name: Download Slang compiler
         run: |
           cd slang
           chmod +x download.sh
           ./download.sh
-          # Set environment variable for Slang library path (must be full path to .so file)
           SLANG_DIR="$(pwd)/bin/linux-x86_64"
           SLANG_LIB="$SLANG_DIR/libslang.so"
           echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
           echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
           echo "Slang libraries:"
           ls -la "$SLANG_DIR" || echo "Directory not found"
-
-      - name: Verify lavapipe installation
-        run: |
-          # Find lavapipe ICD
-          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-          if [ -z "$LAVAPIPE_ICD" ]; then
-            echo "Lavapipe ICD not found, searching..."
-            find /usr -name "*lvp*" -o -name "*lavapipe*" 2>/dev/null || true
-            # Try common locations
-            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                        /usr/share/vulkan/icd.d/lvp_icd.json; do
-              if [ -f "$path" ]; then
-                LAVAPIPE_ICD="$path"
-                break
-              fi
-            done
-          fi
-          
-          echo "Using Lavapipe ICD: $LAVAPIPE_ICD"
-          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> $GITHUB_ENV
-          
-          # Verify Vulkan works with lavapipe
-          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || echo "vulkaninfo failed, continuing anyway"
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -334,7 +318,7 @@ jobs:
           GOLDY_BACKEND: dx12
           GOLDY_DX12_ALLOW_WARP: "1"
           GOLDY_DX12_NO_DEBUG: "1"
-        run: cargo test --features dx12 --test compute_integration -- test_warp_srv
+        run: cargo test --features dx12 --test compute_integration -- test_warp_srv --nocapture
 
   # Python bindings build and test (Linux with lavapipe)
   python-linux:
@@ -352,41 +336,33 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Vulkan dependencies (Mesa 25.0+ for Vulkan 1.4)
+      - name: Install Vulkan dependencies
         run: |
-          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
           sudo apt-get update
-          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
           sudo apt-get install -y \
             libvulkan1 \
             libvulkan-dev \
             vulkan-tools \
-            mesa-vulkan-drivers \
             libxcb1-dev \
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
             libxkbcommon-dev
 
+      # Patched lavapipe: https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15227
+      - name: Install patched lavapipe from mesa-fork
+        run: |
+          MESA_DIR="/opt/mesa-fork"
+          sudo mkdir -p "$MESA_DIR"
+          curl -sL https://github.com/koubaa/mesa-fork/releases/download/v1/lavapipe-fix.tar.gz \
+            | sudo tar xz -C "$MESA_DIR"
+          echo "LAVAPIPE_ICD=$MESA_DIR/lvp_icd.x86_64.json" >> $GITHUB_ENV
+          VK_ICD_FILENAMES="$MESA_DIR/lvp_icd.x86_64.json" vulkaninfo --summary || true
+
       - name: Download and bundle Slang
         run: |
           cd slang && chmod +x download.sh && ./download.sh
           cd ../python && python build-slang.py
-
-      - name: Verify lavapipe installation
-        run: |
-          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-          if [ -z "$LAVAPIPE_ICD" ]; then
-            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                        /usr/share/vulkan/icd.d/lvp_icd.json; do
-              if [ -f "$path" ]; then
-                LAVAPIPE_ICD="$path"
-                break
-              fi
-            done
-          fi
-          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> $GITHUB_ENV
-          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || true
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -532,41 +508,33 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install build dependencies (Mesa 25.0+ for Vulkan 1.4)
+      - name: Install build dependencies
         run: |
-          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
           sudo apt-get update
-          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
           sudo apt-get install -y \
             cmake \
             ninja-build \
             libvulkan1 \
             libvulkan-dev \
             vulkan-tools \
-            mesa-vulkan-drivers \
             libxcb1-dev \
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
             libxkbcommon-dev
 
+      # Patched lavapipe: https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15227
+      - name: Install patched lavapipe from mesa-fork
+        run: |
+          MESA_DIR="/opt/mesa-fork"
+          sudo mkdir -p "$MESA_DIR"
+          curl -sL https://github.com/koubaa/mesa-fork/releases/download/v1/lavapipe-fix.tar.gz \
+            | sudo tar xz -C "$MESA_DIR"
+          echo "LAVAPIPE_ICD=$MESA_DIR/lvp_icd.x86_64.json" >> $GITHUB_ENV
+          VK_ICD_FILENAMES="$MESA_DIR/lvp_icd.x86_64.json" vulkaninfo --summary || true
+
       - name: Download Slang
         run: cd slang && chmod +x download.sh && ./download.sh
-
-      - name: Verify lavapipe installation
-        run: |
-          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-          if [ -z "$LAVAPIPE_ICD" ]; then
-            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                        /usr/share/vulkan/icd.d/lvp_icd.json; do
-              if [ -f "$path" ]; then
-                LAVAPIPE_ICD="$path"
-                break
-              fi
-            done
-          fi
-          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> $GITHUB_ENV
-          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || true
 
       - name: Cache cargo
         uses: actions/cache@v5
