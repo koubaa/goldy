@@ -334,7 +334,7 @@ jobs:
           GOLDY_BACKEND: dx12
           GOLDY_DX12_ALLOW_WARP: "1"
           GOLDY_DX12_NO_DEBUG: "1"
-        run: cargo test --features dx12 --test compute_integration -- test_warp_srv_pool
+        run: cargo test --features dx12 --test compute_integration -- test_warp_srv
 
   # Python bindings build and test (Linux with lavapipe)
   python-linux:

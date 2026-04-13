@@ -1319,38 +1319,18 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 /// - Multiple pipeline switches (6 different shader pipelines)
 /// - UAV fill → SRV read pattern on clip_inp (stride 8)
 /// - Many churn dispatches with mixed SRV/UAV bindings
+/// Standalone-buffer SRV test: matches Ekrano's no-pool path where SRV still
+/// fails on WARP. Creates many standalone (non-pooled) buffers with various
+/// strides, fills via UAV, reads back via SRV through a heavy dispatch chain.
+/// Also adds massive descriptor heap pressure via dummy resources and
+/// interleaved texture/buffer creation.
 #[test]
-fn test_warp_srv_pool_combined() {
-    // This test targets DX12/WARP SRV bugs with pool views. The heavy pipeline
-    // (29+ views, 20 churn stages) exposes an unrelated Metal argument buffer
-    // issue, so skip on macOS for now.
+fn test_warp_srv_standalone_heavy() {
     if cfg!(target_os = "macos") {
-        eprintln!("Skipping test_warp_srv_pool_combined on macOS");
+        eprintln!("Skipping test_warp_srv_standalone_heavy on macOS");
         return;
     }
 
-    // pipeline_setup: GPU writes indirect dispatch args
-    const SETUP_SHADER: &str = r#"
-import goldy_exp;
-
-struct IndirectArgs { uint x; uint y; uint z; uint pad; };
-
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void cs_main(uint3 tid : SV_DispatchThreadID) {
-    StorageBuffer<IndirectArgs> indirect = goldy_dyn_scattered<IndirectArgs>(0);
-    ReadOnlyBuffer<uint> wg_counts = goldy_dyn_buf_ro<uint>(1);
-    uint slot = tid.x;
-    IndirectArgs args;
-    args.x = wg_counts[slot];
-    args.y = 1;
-    args.z = 1;
-    args.pad = 0;
-    indirect[slot] = args;
-}
-"#;
-
-    // Fill stride-8 views (Pair = {uint, uint})
     const FILL_U2_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1369,7 +1349,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // Copy stride-8 via SRV → UAV
     const COPY_U2_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1384,7 +1363,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // Fill stride-4 views (uint)
     const FILL_U1_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1397,7 +1375,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // Churn: 4 SRV reads + 3 UAV writes (like draw_leaf, binning)
     const CHURN_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1418,7 +1395,430 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-    // 2-SRV churn (like clip_reduce reading clip_inp)
+    const CHURN2_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<uint> src0 = goldy_dyn_buf_ro<uint>(0);
+    ReadOnlyBuffer<uint> src1 = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<uint> dst0 = goldy_dyn_scattered<uint>(2);
+    StorageBuffer<uint> dst1 = goldy_dyn_scattered<uint>(3);
+    dst0[id.x] = src0[id.x] + src1[id.x];
+    dst1[id.x] = src0[id.x] * 2;
+}
+"#;
+
+    // GPU-writes indirect dispatch args
+    const SETUP_SHADER: &str = r#"
+import goldy_exp;
+
+struct IndirectArgs { uint x; uint y; uint z; uint pad; };
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 tid : SV_DispatchThreadID) {
+    StorageBuffer<IndirectArgs> indirect = goldy_dyn_scattered<IndirectArgs>(0);
+    ReadOnlyBuffer<uint> wg_counts = goldy_dyn_buf_ro<uint>(1);
+    uint slot = tid.x;
+    IndirectArgs args;
+    args.x = wg_counts[slot];
+    args.y = 1;
+    args.z = 1;
+    args.pad = 0;
+    indirect[slot] = args;
+}
+"#;
+
+    let device = make_device();
+
+    let fill_u2_pipe = {
+        let s = ShaderModule::from_slang(&device, FILL_U2_SHADER).expect("fill u2");
+        ComputePipeline::new(&device, &s).expect("fill u2 pipe")
+    };
+    let copy_u2_pipe = {
+        let s = ShaderModule::from_slang(&device, COPY_U2_SHADER).expect("copy u2");
+        ComputePipeline::new(&device, &s).expect("copy u2 pipe")
+    };
+    let fill_u1_pipe = {
+        let s = ShaderModule::from_slang(&device, FILL_U1_SHADER).expect("fill u1");
+        ComputePipeline::new(&device, &s).expect("fill u1 pipe")
+    };
+    let churn_pipe = {
+        let s = ShaderModule::from_slang(&device, CHURN_SHADER).expect("churn");
+        ComputePipeline::new(&device, &s).expect("churn pipe")
+    };
+    let churn2_pipe = {
+        let s = ShaderModule::from_slang(&device, CHURN2_SHADER).expect("churn2");
+        ComputePipeline::new(&device, &s).expect("churn2 pipe")
+    };
+    let setup_pipe = {
+        let s = ShaderModule::from_slang(&device, SETUP_SHADER).expect("setup");
+        ComputePipeline::new(&device, &s).expect("setup pipe")
+    };
+
+    const N: usize = 4096;
+    const N_WG: u32 = N as u32 / 64;
+
+    // ---------------------------------------------------------------
+    // Phase A: Create 200 dummy buffers interleaved with textures to
+    //          push descriptor heap offsets high and fragment the
+    //          heap layout (buffer SRV, texture SRV, buffer UAV, ...).
+    // ---------------------------------------------------------------
+    let mut _dummy_bufs: Vec<Buffer> = Vec::new();
+    let mut _dummy_texs: Vec<Texture> = Vec::new();
+    let strides: &[usize] = &[4, 8, 12, 16, 20, 24, 32, 96];
+    for i in 0..200 {
+        let stride = strides[i % strides.len()];
+        let buf = Buffer::new_with_stride(
+            &device,
+            (N * stride) as u64,
+            DataAccess::Scattered,
+            Some(stride as u32),
+        )
+        .expect("dummy buf");
+        _dummy_bufs.push(buf);
+
+        if i % 10 == 0 {
+            let tex = Texture::new(
+                &device,
+                64,
+                64,
+                TextureFormat::Rgba8Unorm,
+                SpatialAccess::Interpolated,
+                TextureFlags::COPY_DST,
+            )
+            .expect("dummy tex");
+            _dummy_texs.push(tex);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase B: The actual test buffers — all STANDALONE (non-pooled),
+    //          matching Ekrano's path when use_pool() returns false.
+    //          Each gets its own D3D12 resource + SRV/UAV descriptors.
+    // ---------------------------------------------------------------
+    let buf_strides: &[usize] = &[
+        96, 4, 20, 24, 16, 4, 8, 8, 32, 16, 16, 32, 8, 32, 8, 8, 24, 4, 24,
+    ];
+    let mut bufs: Vec<Buffer> = Vec::new();
+    for &stride in buf_strides {
+        let size = (N * stride) as u64;
+        let buf =
+            Buffer::new_with_stride(&device, size, DataAccess::Scattered, Some(stride as u32))
+                .expect("test buf");
+        bufs.push(buf);
+    }
+    for _ in 0..15 {
+        let buf = Buffer::new_with_stride(&device, (N * 4) as u64, DataAccess::Scattered, Some(4))
+            .expect("scratch");
+        bufs.push(buf);
+    }
+
+    // More interleaved textures after the test buffers
+    let _tex_gradient = Texture::new(
+        &device,
+        512,
+        512,
+        TextureFormat::Rgba8Unorm,
+        SpatialAccess::Interpolated,
+        TextureFlags::COPY_DST,
+    )
+    .expect("gradient tex");
+    let _tex_atlas = Texture::new(
+        &device,
+        1024,
+        1024,
+        TextureFormat::Rgba8Unorm,
+        SpatialAccess::Interpolated,
+        TextureFlags::COPY_DST,
+    )
+    .expect("atlas tex");
+    let _tex_output = Texture::new(
+        &device,
+        1920,
+        1080,
+        TextureFormat::Rgba8Unorm,
+        SpatialAccess::Direct,
+        TextureFlags::COPY_SRC,
+    )
+    .expect("output tex");
+
+    let clip_inp_idx = 6; // stride 8
+    let output = Buffer::new_with_stride(&device, (N * 8) as u64, DataAccess::Scattered, Some(8))
+        .expect("out");
+
+    // Indirect dispatch buffer with some ZERO workgroup counts mixed in
+    let num_ind_slots = 50;
+    let indirect_buf = Buffer::with_data(
+        &device,
+        &vec![0u32; num_ind_slots * 4],
+        DataAccess::Scattered,
+    )
+    .expect("indirect buf");
+
+    let mut wg_data = vec![0u32; num_ind_slots];
+    for (i, slot) in wg_data.iter_mut().enumerate() {
+        if i < bufs.len() {
+            *slot = N_WG;
+        } else {
+            // Some zero slots — WARP might mishandle zero-dispatch + SRV binding
+            *slot = 0;
+        }
+    }
+    // Sprinkle in explicit zero-dispatch slots among the real buffers
+    for &z in &[2usize, 5, 10, 15] {
+        if z < wg_data.len() {
+            wg_data[z] = 0;
+        }
+    }
+    // But ensure clip_inp and stride-4 scratch slots are non-zero
+    wg_data[clip_inp_idx] = N_WG;
+    for i in 19..bufs.len().min(num_ind_slots) {
+        wg_data[i] = N_WG;
+    }
+    let wg_counts_buf =
+        Buffer::with_data(&device, &wg_data, DataAccess::Scattered).expect("wg counts");
+
+    let make_param = |base: u32| -> Buffer {
+        Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param")
+    };
+
+    // Stride-4 buffer indices for churn dispatches
+    let u4: Vec<usize> = (0..bufs.len())
+        .filter(|&i| buf_strides.get(i).copied().unwrap_or(4) == 4)
+        .chain(19..bufs.len())
+        .collect();
+    let nu4 = u4.len();
+
+    // ---------------------------------------------------------------
+    // Phase C: Multi-frame dispatch loop (10 frames on WARP)
+    // ---------------------------------------------------------------
+    let num_frames: usize = if device.device_type() == DeviceType::Cpu {
+        10
+    } else {
+        1
+    };
+    for frame in 0..num_frames {
+        let base_val = 50000 + (frame as u32) * 100000;
+
+        let mut encoder = ComputeEncoder::new();
+        {
+            let mut pass = encoder.begin_compute_pass();
+
+            // GPU-write indirect dispatch args
+            pass.set_pipeline(&setup_pipe);
+            pass.set_push_constants_raw(&[
+                indirect_buf.bindless_index().unwrap(),
+                wg_counts_buf.bindless_srv_index().unwrap(),
+            ]);
+            pass.dispatch(num_ind_slots as u32, 1, 1);
+
+            // Fill stride-4 standalone buffers
+            pass.set_pipeline(&fill_u1_pipe);
+            for &v in &[1usize, 5, 17] {
+                let fp = make_param((v as u32 + 1) * 10000 + frame as u32);
+                pass.set_push_constants_raw(&[
+                    bufs[v].bindless_index().unwrap(),
+                    fp.bindless_srv_index().unwrap(),
+                ]);
+                pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
+            }
+            // Fill scratch buffers
+            for v in 19..bufs.len() {
+                let fp = make_param((v as u32 + 1) * 10000 + frame as u32);
+                pass.set_push_constants_raw(&[
+                    bufs[v].bindless_index().unwrap(),
+                    fp.bindless_srv_index().unwrap(),
+                ]);
+                pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
+            }
+
+            // Fill stride-8 standalone buffers (including clip_inp)
+            pass.set_pipeline(&fill_u2_pipe);
+            for &v in &[6usize, 7, 12, 14, 15] {
+                let fp = make_param(if v == clip_inp_idx {
+                    base_val
+                } else {
+                    (v as u32 + 1) * 10000 + frame as u32
+                });
+                pass.set_push_constants_raw(&[
+                    bufs[v].bindless_index().unwrap(),
+                    fp.bindless_srv_index().unwrap(),
+                ]);
+                pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
+            }
+
+            // 30 churn dispatches: alternating pipelines with stride-4 views
+            for stage in 0..30 {
+                if stage % 3 == 2 {
+                    pass.set_pipeline(&churn2_pipe);
+                    pass.set_push_constants_raw(&[
+                        bufs[u4[stage % nu4]].bindless_srv_index().unwrap(),
+                        bufs[u4[(stage + 1) % nu4]].bindless_srv_index().unwrap(),
+                        bufs[u4[(stage + 2) % nu4]].bindless_index().unwrap(),
+                        bufs[u4[(stage + 3) % nu4]].bindless_index().unwrap(),
+                    ]);
+                } else {
+                    pass.set_pipeline(&churn_pipe);
+                    pass.set_push_constants_raw(&[
+                        bufs[u4[stage % nu4]].bindless_srv_index().unwrap(),
+                        bufs[u4[(stage + 1) % nu4]].bindless_srv_index().unwrap(),
+                        bufs[u4[(stage + 2) % nu4]].bindless_srv_index().unwrap(),
+                        bufs[u4[(stage + 3) % nu4]].bindless_srv_index().unwrap(),
+                        bufs[u4[(stage + 4) % nu4]].bindless_index().unwrap(),
+                        bufs[u4[(stage + 5) % nu4]].bindless_index().unwrap(),
+                        bufs[u4[(stage + 6) % nu4]].bindless_index().unwrap(),
+                    ]);
+                }
+                // Use a zero-dispatch slot every 5th stage to probe WARP's
+                // handling of zero workgroup count + SRV binding
+                let ind_slot = if stage % 5 == 4 {
+                    2 // zero-dispatch slot
+                } else {
+                    u4[stage % nu4]
+                };
+                pass.dispatch_indirect(&indirect_buf, (ind_slot * 16) as u64);
+            }
+
+            // Final SRV read: clip_inp (stride 8) → output
+            pass.set_pipeline(&copy_u2_pipe);
+            pass.set_push_constants_raw(&[
+                bufs[clip_inp_idx].bindless_srv_index().unwrap(),
+                output.bindless_index().unwrap(),
+            ]);
+            pass.dispatch_indirect(&indirect_buf, (clip_inp_idx * 16) as u64);
+        }
+        encoder.dispatch(&device).expect("dispatch");
+
+        if frame == num_frames - 1 {
+            let mut out_bytes = vec![0u8; N * 8];
+            output
+                .read_to_cpu(&device, &mut out_bytes)
+                .expect("read output");
+            let result: &[u32] = bytemuck::cast_slice(&out_bytes);
+
+            let mut mismatches = 0;
+            for i in 0..N {
+                let exp_a = base_val + (i as u32) * 2;
+                let exp_b = exp_a + 1;
+                let got_a = result[i * 2];
+                let got_b = result[i * 2 + 1];
+                if got_a != exp_a || got_b != exp_b {
+                    if mismatches < 10 {
+                        eprintln!(
+                            "frame {} Pair[{}]: got ({}, {}) expected ({}, {})",
+                            frame, i, got_a, got_b, exp_a, exp_b,
+                        );
+                    }
+                    mismatches += 1;
+                }
+            }
+
+            assert_eq!(
+                mismatches, 0,
+                "frame {}: SRV read of standalone stride-8 buffer returned wrong data \
+                 ({}/{} wrong). WARP SRV bug on structured buffers.",
+                frame, mismatches, N
+            );
+        }
+    }
+}
+
+/// Pool-view variant: same heavy pipeline but using BufferPool views (non-zero
+/// FirstElement). Kept alongside the standalone test to cover both paths.
+#[test]
+fn test_warp_srv_pool_combined() {
+    if cfg!(target_os = "macos") {
+        eprintln!("Skipping test_warp_srv_pool_combined on macOS");
+        return;
+    }
+
+    const SETUP_SHADER: &str = r#"
+import goldy_exp;
+
+struct IndirectArgs { uint x; uint y; uint z; uint pad; };
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 tid : SV_DispatchThreadID) {
+    StorageBuffer<IndirectArgs> indirect = goldy_dyn_scattered<IndirectArgs>(0);
+    ReadOnlyBuffer<uint> wg_counts = goldy_dyn_buf_ro<uint>(1);
+    uint slot = tid.x;
+    IndirectArgs args;
+    args.x = wg_counts[slot];
+    args.y = 1;
+    args.z = 1;
+    args.pad = 0;
+    indirect[slot] = args;
+}
+"#;
+
+    const FILL_U2_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    uint base = params[0];
+    Pair p;
+    p.a = base + id.x * 2;
+    p.b = base + id.x * 2 + 1;
+    dst[id.x] = p;
+}
+"#;
+
+    const COPY_U2_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<Pair> dst = goldy_dyn_scattered<Pair>(1);
+    dst[id.x] = src[id.x];
+}
+"#;
+
+    const FILL_U1_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(0);
+    ReadOnlyBuffer<uint> params = goldy_dyn_buf_ro<uint>(1);
+    dst[id.x] = params[0] + id.x;
+}
+"#;
+
+    const CHURN_SHADER: &str = r#"
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<uint> src0 = goldy_dyn_buf_ro<uint>(0);
+    ReadOnlyBuffer<uint> src1 = goldy_dyn_buf_ro<uint>(1);
+    ReadOnlyBuffer<uint> src2 = goldy_dyn_buf_ro<uint>(2);
+    ReadOnlyBuffer<uint> src3 = goldy_dyn_buf_ro<uint>(3);
+    StorageBuffer<uint> dst0 = goldy_dyn_scattered<uint>(4);
+    StorageBuffer<uint> dst1 = goldy_dyn_scattered<uint>(5);
+    StorageBuffer<uint> dst2 = goldy_dyn_scattered<uint>(6);
+    uint v = src0[id.x] + src1[id.x] + src2[id.x] + src3[id.x];
+    dst0[id.x] = v;
+    dst1[id.x] = v + 100;
+    dst2[id.x] = v + 200;
+}
+"#;
+
     const CHURN2_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1463,9 +1863,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     const N: usize = 4096;
 
-    // (num_elements, stride) -- Ekrano's actual strides and large element counts
-    // Additional stride-4 scratch views (19-28) for churn dispatches to write to
-    // without stride mismatch (churn shaders use uint = stride 4).
     let allocs: &[(usize, usize)] = &[
         (N, 96), // 0  "config"
         (N, 4),  // 1  "scene"
@@ -1473,7 +1870,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         (N, 24), // 3  "path_bbox"
         (N, 16), // 4  "draw_monoid"
         (N, 4),  // 5  "info_bin_data"
-        (N, 8),  // 6  "clip_inp" (THE TARGET) -- stride 8
+        (N, 8),  // 6  "clip_inp" (THE TARGET)
         (N, 8),  // 7  "clip_bic"
         (N, 32), // 8  "clip_el"
         (N, 16), // 9  "clip_bbox"
@@ -1498,6 +1895,19 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         (N, 4),  // 28 scratch_u32_9
     ];
 
+    // Descriptor heap pressure: 100 dummy buffers created BEFORE the pool
+    let mut _dummies: Vec<Buffer> = Vec::new();
+    for i in 0..100 {
+        let stride = [4, 8, 16, 32][i % 4];
+        let buf = Buffer::with_data(
+            &device,
+            &vec![0u32; 1024 * stride / 4],
+            DataAccess::Scattered,
+        )
+        .expect("dummy");
+        _dummies.push(buf);
+    }
+
     let pool_size = BufferPool::padded_size(allocs);
     let mut pool = BufferPool::new(&device, pool_size).expect("pool");
 
@@ -1505,8 +1915,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let clip_n = N;
     let clip_wg = clip_n as u32 / 64;
 
-    // --- Textures in the descriptor heap (like Ekrano's gradient_image, image_atlas, output) ---
-    // These occupy SRV/UAV slots in the same heap as the buffers.
     let _gradient_tex = Texture::new(
         &device,
         512,
@@ -1535,7 +1943,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     )
     .expect("output texture");
 
-    // --- Indirect dispatch buffer (stride 16: IndirectArgs{x,y,z,pad}) ---
     let num_slots = 30;
     let indirect_buf =
         Buffer::with_data(&device, &vec![0u32; num_slots * 4], DataAccess::Scattered)
@@ -1556,23 +1963,15 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param")
     };
 
-    // Output (not pooled, stride 8 for Pair)
     let output =
         Buffer::with_data(&device, &vec![0u32; clip_n * 2], DataAccess::Scattered).expect("out");
 
-    // --- Multi-frame loop: reset pool and re-allocate views each frame ---
-    // Ekrano reuses the pool across frames. The bug might only appear after
-    // descriptor slots are recycled (old views freed, new views allocated at
-    // the same pool offsets but potentially different descriptor heap positions).
-    // Only multi-frame on WARP (Cpu); other backends have a clear/dispatch race
-    // across submissions that isn't relevant to the bug we're hunting.
     let num_frames: usize = if device.device_type() == DeviceType::Cpu {
-        4
+        10
     } else {
         1
     };
     for frame in 0..num_frames {
-        // Reset pool and re-allocate all views (old views/descriptors are dropped)
         pool.reset();
         pool.backing_buffer()
             .clear(&device, 0, pool_size)
@@ -1588,12 +1987,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
         let base_val = 50000 + (frame as u32) * 100000;
 
-        // --- Dispatch chain (same as before but with fresh views each frame) ---
         let mut encoder = ComputeEncoder::new();
         {
             let mut pass = encoder.begin_compute_pass();
 
-            // Phase 0: pipeline_setup -- GPU writes all indirect dispatch args
             pass.set_pipeline(&setup_pipe);
             pass.set_push_constants_raw(&[
                 indirect_buf.bindless_index().unwrap(),
@@ -1601,7 +1998,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             ]);
             pass.dispatch(num_slots as u32, 1, 1);
 
-            // Phase 1: fill stride-4 views via indirect dispatch
             pass.set_pipeline(&fill_u1_pipe);
             for &v in &[1usize, 5, 17] {
                 let fp = make_param((v as u32 + 1) * 10000 + frame as u32);
@@ -1612,7 +2008,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
                 pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
             }
 
-            // Phase 2: fill all stride-8 views via indirect dispatch
             pass.set_pipeline(&fill_u2_pipe);
             for &v in &[6usize, 7, 12, 14, 15] {
                 let fp = make_param(if v == clip_inp_idx {
@@ -1627,9 +2022,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
                 pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
             }
 
-            // Phases 3+: ~20 churn dispatches with alternating pipelines.
-            // Churn shaders use uint (stride 4), so only bind stride-4 views to
-            // avoid UB from stride mismatch on Metal.
             let u4: &[usize] = &[1, 5, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28];
             let nu4 = u4.len();
             for stage in 0..20 {
@@ -1656,7 +2048,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
                 pass.dispatch_indirect(&indirect_buf, (u4[stage % nu4] * 16) as u64);
             }
 
-            // Extra churn: more stride-4 dispatches with different binding patterns
             pass.set_pipeline(&churn2_pipe);
             pass.set_push_constants_raw(&[
                 views[u4[0]].bindless_srv_index().unwrap(),
@@ -1666,7 +2057,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
             ]);
             pass.dispatch_indirect(&indirect_buf, (u4[0] * 16) as u64);
 
-            // Phase 5: final SRV read of clip_inp → output
             pass.set_pipeline(&copy_u2_pipe);
             pass.set_push_constants_raw(&[
                 views[clip_inp_idx].bindless_srv_index().unwrap(),
@@ -1676,7 +2066,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         }
         encoder.dispatch(&device).expect("pipeline dispatch");
 
-        // Verify on the LAST frame only (earlier frames warm up the descriptor recycling)
         if frame == num_frames - 1 {
             let mut out_bytes = vec![0u8; clip_n * 8];
             output
