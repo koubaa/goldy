@@ -1431,6 +1431,24 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
 }
 "#;
 
+    // Mixed-stride: reads Pair (stride 8) SRV, writes uint (stride 4) UAV.
+    // Ekrano does this routinely (e.g., clip shaders read stride-8 clip_inp
+    // via SRV while writing stride-4 or stride-16 buffers via UAV).
+    const MIXED_STRIDE_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> src = goldy_dyn_buf_ro<Pair>(0);
+    StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(1);
+    Pair p = src[id.x];
+    dst[id.x] = p.a + p.b;
+}
+"#;
+
     let device = make_device();
 
     let fill_u2_pipe = {
@@ -1456,6 +1474,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     let setup_pipe = {
         let s = ShaderModule::from_slang(&device, SETUP_SHADER).expect("setup");
         ComputePipeline::new(&device, &s).expect("setup pipe")
+    };
+    let mixed_pipe = {
+        let s = ShaderModule::from_slang(&device, MIXED_STRIDE_SHADER).expect("mixed");
+        ComputePipeline::new(&device, &s).expect("mixed pipe")
     };
 
     const N: usize = 4096;
@@ -1650,9 +1672,24 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
                 pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
             }
 
-            // 30 churn dispatches: alternating pipelines with stride-4 views
+            // stride-8 buffer indices for mixed-stride dispatches
+            let u8_bufs: Vec<usize> = (0..buf_strides.len())
+                .filter(|&i| buf_strides[i] == 8 && i != clip_inp_idx)
+                .collect();
+
+            // 30 churn dispatches: alternating pipelines with stride-4 views,
+            // interleaved with mixed-stride dispatches (stride-8 SRV + stride-4 UAV)
             for stage in 0..30 {
-                if stage % 3 == 2 {
+                if stage % 5 == 4 && !u8_bufs.is_empty() {
+                    // Mixed stride: read stride-8 SRV, write stride-4 UAV
+                    pass.set_pipeline(&mixed_pipe);
+                    let s8 = u8_bufs[stage % u8_bufs.len()];
+                    pass.set_push_constants_raw(&[
+                        bufs[s8].bindless_srv_index().unwrap(),
+                        bufs[u4[stage % nu4]].bindless_index().unwrap(),
+                    ]);
+                    pass.dispatch_indirect(&indirect_buf, (s8 * 16) as u64);
+                } else if stage % 3 == 2 {
                     pass.set_pipeline(&churn2_pipe);
                     pass.set_push_constants_raw(&[
                         bufs[u4[stage % nu4]].bindless_srv_index().unwrap(),
@@ -1660,6 +1697,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
                         bufs[u4[(stage + 2) % nu4]].bindless_index().unwrap(),
                         bufs[u4[(stage + 3) % nu4]].bindless_index().unwrap(),
                     ]);
+                    let ind_slot = if stage % 7 == 0 { 2 } else { u4[stage % nu4] };
+                    pass.dispatch_indirect(&indirect_buf, (ind_slot * 16) as u64);
                 } else {
                     pass.set_pipeline(&churn_pipe);
                     pass.set_push_constants_raw(&[
@@ -1671,16 +1710,19 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
                         bufs[u4[(stage + 5) % nu4]].bindless_index().unwrap(),
                         bufs[u4[(stage + 6) % nu4]].bindless_index().unwrap(),
                     ]);
+                    let ind_slot = if stage % 7 == 0 { 2 } else { u4[stage % nu4] };
+                    pass.dispatch_indirect(&indirect_buf, (ind_slot * 16) as u64);
                 }
-                // Use a zero-dispatch slot every 5th stage to probe WARP's
-                // handling of zero workgroup count + SRV binding
-                let ind_slot = if stage % 5 == 4 {
-                    2 // zero-dispatch slot
-                } else {
-                    u4[stage % nu4]
-                };
-                pass.dispatch_indirect(&indirect_buf, (ind_slot * 16) as u64);
             }
+
+            // Read clip_inp (stride 8) via SRV through mixed-stride pipeline
+            // before the final copy — forces a stride-8 SRV read mid-chain
+            pass.set_pipeline(&mixed_pipe);
+            pass.set_push_constants_raw(&[
+                bufs[clip_inp_idx].bindless_srv_index().unwrap(),
+                bufs[u4[0]].bindless_index().unwrap(),
+            ]);
+            pass.dispatch(N_WG, 1, 1);
 
             // Final SRV read: clip_inp (stride 8) → output
             pass.set_pipeline(&copy_u2_pipe);
