@@ -2306,17 +2306,12 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let copy_pipe = compile(COPY_U2);
     let fill_pipe = compile(FILL_U2);
 
-    // Buffer sizes — generous to avoid OOB in real shader logic
     const N: usize = 4096;
     const N_WG_256: u32 = N as u32 / 256;
     const N_WG_64: u32 = N as u32 / 64;
     const BIG: u64 = (N * 256) as u64;
 
-    // Config buffer: stride 96 (24 u32 fields). Fill with plausible Ekrano config.
-    let config_buf =
-        Buffer::new_with_stride(&device, (N * 96) as u64, DataAccess::Scattered, Some(96))
-            .expect("config");
-    {
+    let make_config = || -> Vec<u32> {
         let mut cfg = vec![0u32; 24];
         cfg[0] = 4; // width_in_tiles
         cfg[1] = 4; // height_in_tiles
@@ -2327,12 +2322,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         cfg[6] = N as u32; // n_path
         cfg[7] = N as u32; // n_clip
         cfg[8] = 0; // bin_data_start
-        cfg[9] = 0; // pathtag_base
-        cfg[10] = 0; // pathdata_base
-        cfg[11] = 0; // drawtag_base
-        cfg[12] = 0; // drawdata_base
-        cfg[13] = 0; // transform_base
-        cfg[14] = 0; // style_base
         cfg[15] = BIG as u32; // lines_size
         cfg[16] = BIG as u32; // binning_size
         cfg[17] = BIG as u32; // tiles_size
@@ -2340,100 +2329,24 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         cfg[19] = BIG as u32; // segments_size
         cfg[20] = BIG as u32; // blend_size
         cfg[21] = BIG as u32; // ptcl_size
-        config_buf.write_data(0, &cfg).expect("write config");
-    }
+        cfg
+    };
 
-    // Scene buffer: stride 4, large enough for all shader reads
-    let scene_buf =
-        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("scene");
     let scene_data: Vec<u32> = (0..BIG as u32)
         .map(|i| i.wrapping_mul(2654435761))
         .collect();
-    scene_buf.write_data(0, &scene_data).expect("write scene");
 
-    // TagMonoid: stride 20 (5 x u32)
-    let tagmonoid_buf = Buffer::new_with_stride(&device, BIG * 20, DataAccess::Scattered, Some(20))
-        .expect("tagmonoid");
+    let bbox_data: Vec<u32> = (0..N * 6)
+        .map(|i| match i % 6 {
+            0 => (i as u32 / 6) % 4,
+            1 => (i as u32 / 6) % 4,
+            2 => (i as u32 / 6) % 4 + 1,
+            3 => (i as u32 / 6) % 4 + 1,
+            _ => 0,
+        })
+        .collect();
 
-    // PathBbox: stride 24 (6 x u32: x0,y0,x1,y1,draw_flags,trans_ix)
-    let path_bbox_buf =
-        Buffer::new_with_stride(&device, (N as u64) * 24, DataAccess::Scattered, Some(24))
-            .expect("path_bbox");
-    {
-        let bbox_data: Vec<u32> = (0..N * 6)
-            .map(|i| match i % 6 {
-                0 => (i as u32 / 6) % 4,     // x0 (tile coords)
-                1 => (i as u32 / 6) % 4,     // y0
-                2 => (i as u32 / 6) % 4 + 1, // x1
-                3 => (i as u32 / 6) % 4 + 1, // y1
-                4 => 0,                      // draw_flags
-                _ => 0,                      // trans_ix
-            })
-            .collect();
-        path_bbox_buf
-            .write_data(0, &bbox_data)
-            .expect("write path_bbox");
-    }
-
-    // DrawMonoid: stride 16 (4 x u32)
-    let draw_monoid_buf =
-        Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
-            .expect("draw_monoid");
-
-    // Info: stride 4
-    let info_buf =
-        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("info");
-
-    // ClipInp: stride 8 (2 x u32)
-    let clip_inp_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
-        .expect("clip_inp");
-
-    // Bic: stride 8
-    let clip_bic_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
-        .expect("clip_bic");
-
-    // ClipEl: stride 32 (4 u32 + float4)
-    let clip_el_buf = Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32))
-        .expect("clip_el");
-
-    // Clip bboxes: stride 16 (float4)
-    let clip_bbox_buf = Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
-        .expect("clip_bbox");
-
-    // Draw bboxes (intersected): stride 16 (float4)
-    let draw_bbox_buf = Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
-        .expect("draw_bbox");
-
-    // BumpAllocators: stride 32 (8 x u32)
-    let bump_buf =
-        Buffer::new_with_stride(&device, 32, DataAccess::Scattered, Some(32)).expect("bump");
-
-    // BinHeader: stride 8
-    let bin_header_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
-        .expect("bin_header");
-
-    // Path: stride 32 (uint4 bbox + uint tiles + 3 pad)
-    let path_buf =
-        Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32)).expect("path");
-
-    // Tile: stride 8
-    let tile_buf =
-        Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8)).expect("tile");
-
-    // PTCL: stride 4
-    let ptcl_buf =
-        Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4)).expect("ptcl");
-
-    // BinData: stride 4
-    let bin_data_buf = Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4))
-        .expect("bin_data");
-
-    // Output: stride 8 (ClipInp / Pair)
-    let output_buf =
-        Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
-            .expect("output");
-
-    // Textures interleaved (descriptor heap pressure)
+    // Textures interleaved (descriptor heap pressure, like Ekrano's atlas/gradient/output)
     let _tex1 = Texture::new(
         &device,
         512,
@@ -2462,142 +2375,210 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     )
     .expect("tex3");
 
-    let make_param = |base: u32| -> Buffer {
-        Buffer::with_data(&device, &[base], DataAccess::Scattered).expect("param")
-    };
-
-    // 10 iterations
+    // Mimic Ekrano's frame lifecycle: recreate buffers each frame (like ResourcePool
+    // returning buffers, then re-obtaining them — on first frame this creates new buffers,
+    // on subsequent frames it churns descriptor heap offsets when sizes differ).
+    // Bump/tile/path/segments are "pool-exempt" standalone buffers in Ekrano.
+    // Config/scene are "upload" buffers recreated every frame.
     for iteration in 0..10 {
         let base_val = 50000 + (iteration as u32) * 100000;
 
-        // Zero bump allocators each frame
+        // --- Ekrano "Upload" phase: fresh config + scene each frame ---
+        let config_buf =
+            Buffer::new_with_stride(&device, (N * 96) as u64, DataAccess::Scattered, Some(96))
+                .expect("config");
+        config_buf
+            .write_data(0, &make_config())
+            .expect("write config");
+
+        let scene_buf = Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4))
+            .expect("scene");
+        scene_buf.write_data(0, &scene_data).expect("write scene");
+
+        // --- Ekrano "ResourcePool" phase: all intermediate buffers ---
+        // In Ekrano on WARP, these are standalone buffers obtained from ResourcePool.
+        // Each frame they may be reused (same size) or freshly allocated.
+        // We recreate them to churn descriptor heap offsets.
+        let tagmonoid_buf =
+            Buffer::new_with_stride(&device, BIG * 20, DataAccess::Scattered, Some(20))
+                .expect("tagmonoid");
+        let path_bbox_buf =
+            Buffer::new_with_stride(&device, (N as u64) * 24, DataAccess::Scattered, Some(24))
+                .expect("path_bbox");
+        path_bbox_buf
+            .write_data(0, &bbox_data)
+            .expect("write path_bbox");
+        let draw_monoid_buf =
+            Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
+                .expect("draw_monoid");
+        let info_buf = Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4))
+            .expect("info");
+        let clip_inp_buf =
+            Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+                .expect("clip_inp");
+        let clip_bic_buf =
+            Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+                .expect("clip_bic");
+        let clip_el_buf =
+            Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32))
+                .expect("clip_el");
+        let clip_bbox_buf =
+            Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
+                .expect("clip_bbox");
+        let draw_bbox_buf =
+            Buffer::new_with_stride(&device, BIG * 16, DataAccess::Scattered, Some(16))
+                .expect("draw_bbox");
+        let bump_buf =
+            Buffer::new_with_stride(&device, 32, DataAccess::Scattered, Some(32)).expect("bump");
         bump_buf.write_data(0, &[0u32; 8]).expect("zero bump");
+        let bin_header_buf =
+            Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+                .expect("bin_header");
+        let path_buf = Buffer::new_with_stride(&device, BIG * 32, DataAccess::Scattered, Some(32))
+            .expect("path");
+        let tile_buf = Buffer::new_with_stride(&device, BIG * 8, DataAccess::Scattered, Some(8))
+            .expect("tile");
+        let ptcl_buf = Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4))
+            .expect("ptcl");
+        let bin_data_buf =
+            Buffer::new_with_stride(&device, BIG * 4, DataAccess::Scattered, Some(4))
+                .expect("bin_data");
+        let output_buf =
+            Buffer::new_with_stride(&device, (N as u64) * 8, DataAccess::Scattered, Some(8))
+                .expect("output");
 
-        let mut encoder = ComputeEncoder::new();
+        // --- Submission 1: "coarse" recording (like Ekrano's submit_recording) ---
         {
-            let mut pass = encoder.begin_compute_pass();
+            let mut encoder = ComputeEncoder::new();
+            {
+                let mut pass = encoder.begin_compute_pass();
 
-            // pathtag_reduce: slots 0=config(SRV), 1=scene(SRV), 2=reduced(UAV)
-            pass.set_pipeline(&pathtag_pipe);
-            pass.set_push_constants_raw(&[
-                config_buf.bindless_srv_index().unwrap(),
-                scene_buf.bindless_srv_index().unwrap(),
-                tagmonoid_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_256, 1, 1);
+                // pathtag_reduce
+                pass.set_pipeline(&pathtag_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    tagmonoid_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
 
-            // draw_reduce: slots 0=config(SRV), 1=scene(UAV!), 2=reduced(UAV)
-            pass.set_pipeline(&draw_reduce_pipe);
-            pass.set_push_constants_raw(&[
-                config_buf.bindless_srv_index().unwrap(),
-                scene_buf.bindless_index().unwrap(),
-                draw_monoid_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_256, 1, 1);
+                // draw_reduce (scene bound as UAV in the real shader)
+                pass.set_pipeline(&draw_reduce_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_index().unwrap(),
+                    draw_monoid_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
 
-            // draw_leaf: slots 0=config(SRV), 1=scene(SRV), 2=reduced(SRV),
-            //            3=path_bbox(SRV), 4=draw_monoid(UAV), 5=info(UAV), 6=clip_inp(UAV)
-            pass.set_pipeline(&draw_leaf_pipe);
-            pass.set_push_constants_raw(&[
-                config_buf.bindless_srv_index().unwrap(),
-                scene_buf.bindless_srv_index().unwrap(),
-                draw_monoid_buf.bindless_srv_index().unwrap(),
-                path_bbox_buf.bindless_srv_index().unwrap(),
-                draw_monoid_buf.bindless_index().unwrap(),
-                info_buf.bindless_index().unwrap(),
-                clip_inp_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_256, 1, 1);
+                // draw_leaf
+                pass.set_pipeline(&draw_leaf_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_buf.bindless_srv_index().unwrap(),
+                    path_bbox_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_buf.bindless_index().unwrap(),
+                    info_buf.bindless_index().unwrap(),
+                    clip_inp_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
 
-            // Fill clip_inp with known data for verification
-            pass.set_pipeline(&fill_pipe);
-            let fp = make_param(base_val);
-            pass.set_push_constants_raw(&[
-                clip_inp_buf.bindless_index().unwrap(),
-                fp.bindless_srv_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_64, 1, 1);
+                // Fill clip_inp with known data for verification
+                let fp =
+                    Buffer::with_data(&device, &[base_val], DataAccess::Scattered).expect("param");
+                pass.set_pipeline(&fill_pipe);
+                pass.set_push_constants_raw(&[
+                    clip_inp_buf.bindless_index().unwrap(),
+                    fp.bindless_srv_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_64, 1, 1);
 
-            // clip_reduce: slots 0=clip_inp(SRV), 1=path_bbox(SRV), 2=bic(UAV), 3=clip_el(UAV)
-            pass.set_pipeline(&clip_reduce_pipe);
-            pass.set_push_constants_raw(&[
-                clip_inp_buf.bindless_srv_index().unwrap(),
-                path_bbox_buf.bindless_srv_index().unwrap(),
-                clip_bic_buf.bindless_index().unwrap(),
-                clip_el_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_256, 1, 1);
+                // clip_reduce
+                pass.set_pipeline(&clip_reduce_pipe);
+                pass.set_push_constants_raw(&[
+                    clip_inp_buf.bindless_srv_index().unwrap(),
+                    path_bbox_buf.bindless_srv_index().unwrap(),
+                    clip_bic_buf.bindless_index().unwrap(),
+                    clip_el_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
 
-            // clip_leaf: slots 0=config(SRV), 1=clip_inp(SRV), 2=path_bbox(SRV),
-            //            3=bic(SRV), 4=clip_el(SRV), 5=draw_monoid(UAV), 6=clip_bbox(UAV)
-            pass.set_pipeline(&clip_leaf_pipe);
-            pass.set_push_constants_raw(&[
-                config_buf.bindless_srv_index().unwrap(),
-                clip_inp_buf.bindless_srv_index().unwrap(),
-                path_bbox_buf.bindless_srv_index().unwrap(),
-                clip_bic_buf.bindless_srv_index().unwrap(),
-                clip_el_buf.bindless_srv_index().unwrap(),
-                draw_monoid_buf.bindless_index().unwrap(),
-                clip_bbox_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_256, 1, 1);
+                // clip_leaf
+                pass.set_pipeline(&clip_leaf_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    clip_inp_buf.bindless_srv_index().unwrap(),
+                    path_bbox_buf.bindless_srv_index().unwrap(),
+                    clip_bic_buf.bindless_srv_index().unwrap(),
+                    clip_el_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_buf.bindless_index().unwrap(),
+                    clip_bbox_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
 
-            // binning: slots 0=config(SRV), 1=draw_monoid(SRV), 2=path_bbox(SRV),
-            //          3=clip_bbox(SRV), 4=intersected_bbox(UAV), 5=bump(UAV),
-            //          6=bin_data(UAV), 7=bin_header(UAV)
-            pass.set_pipeline(&binning_pipe);
-            pass.set_push_constants_raw(&[
-                config_buf.bindless_srv_index().unwrap(),
-                draw_monoid_buf.bindless_srv_index().unwrap(),
-                path_bbox_buf.bindless_srv_index().unwrap(),
-                clip_bbox_buf.bindless_srv_index().unwrap(),
-                draw_bbox_buf.bindless_index().unwrap(),
-                bump_buf.bindless_index().unwrap(),
-                bin_data_buf.bindless_index().unwrap(),
-                bin_header_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_256, 1, 1);
+                // binning
+                pass.set_pipeline(&binning_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_buf.bindless_srv_index().unwrap(),
+                    path_bbox_buf.bindless_srv_index().unwrap(),
+                    clip_bbox_buf.bindless_srv_index().unwrap(),
+                    draw_bbox_buf.bindless_index().unwrap(),
+                    bump_buf.bindless_index().unwrap(),
+                    bin_data_buf.bindless_index().unwrap(),
+                    bin_header_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
 
-            // tile_alloc: slots 0=config(SRV), 1=scene(SRV), 2=draw_bbox(SRV),
-            //             3=bump(UAV), 4=path(UAV), 5=tile(UAV)
-            pass.set_pipeline(&tile_alloc_pipe);
-            pass.set_push_constants_raw(&[
-                config_buf.bindless_srv_index().unwrap(),
-                scene_buf.bindless_srv_index().unwrap(),
-                draw_bbox_buf.bindless_srv_index().unwrap(),
-                bump_buf.bindless_index().unwrap(),
-                path_buf.bindless_index().unwrap(),
-                tile_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_256, 1, 1);
+                // tile_alloc
+                pass.set_pipeline(&tile_alloc_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    draw_bbox_buf.bindless_srv_index().unwrap(),
+                    bump_buf.bindless_index().unwrap(),
+                    path_buf.bindless_index().unwrap(),
+                    tile_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_256, 1, 1);
 
-            // coarse: slots 0=config(SRV), 1=scene(SRV), 2=draw_monoid(SRV),
-            //         3=bin_header(SRV), 4=info_bin_data(SRV), 5=path(SRV),
-            //         6=tile(UAV), 7=bump(UAV), 8=ptcl(UAV)
-            pass.set_pipeline(&coarse_pipe);
-            pass.set_push_constants_raw(&[
-                config_buf.bindless_srv_index().unwrap(),
-                scene_buf.bindless_srv_index().unwrap(),
-                draw_monoid_buf.bindless_srv_index().unwrap(),
-                bin_header_buf.bindless_srv_index().unwrap(),
-                info_buf.bindless_srv_index().unwrap(),
-                path_buf.bindless_srv_index().unwrap(),
-                tile_buf.bindless_index().unwrap(),
-                bump_buf.bindless_index().unwrap(),
-                ptcl_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(1, 1, 1);
-
-            // Final: SRV read of clip_inp → output
-            pass.set_pipeline(&copy_pipe);
-            pass.set_push_constants_raw(&[
-                clip_inp_buf.bindless_srv_index().unwrap(),
-                output_buf.bindless_index().unwrap(),
-            ]);
-            pass.dispatch(N_WG_64, 1, 1);
+                // coarse
+                pass.set_pipeline(&coarse_pipe);
+                pass.set_push_constants_raw(&[
+                    config_buf.bindless_srv_index().unwrap(),
+                    scene_buf.bindless_srv_index().unwrap(),
+                    draw_monoid_buf.bindless_srv_index().unwrap(),
+                    bin_header_buf.bindless_srv_index().unwrap(),
+                    info_buf.bindless_srv_index().unwrap(),
+                    path_buf.bindless_srv_index().unwrap(),
+                    tile_buf.bindless_index().unwrap(),
+                    bump_buf.bindless_index().unwrap(),
+                    ptcl_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(1, 1, 1);
+            }
+            encoder.dispatch(&device).expect("coarse dispatch");
         }
-        encoder.dispatch(&device).expect("dispatch");
 
+        // --- Submission 2: "fine" recording (separate command list, like Ekrano) ---
+        {
+            let mut encoder = ComputeEncoder::new();
+            {
+                let mut pass = encoder.begin_compute_pass();
+
+                // SRV read of clip_inp → output
+                pass.set_pipeline(&copy_pipe);
+                pass.set_push_constants_raw(&[
+                    clip_inp_buf.bindless_srv_index().unwrap(),
+                    output_buf.bindless_index().unwrap(),
+                ]);
+                pass.dispatch(N_WG_64, 1, 1);
+            }
+            encoder.dispatch(&device).expect("fine dispatch");
+        }
+
+        // --- Readback and verify ---
         let mut out_bytes = vec![0u8; N * 8];
         output_buf
             .read_to_cpu(&device, &mut out_bytes)
@@ -2624,10 +2605,12 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         assert_eq!(
             mismatches, 0,
             "iteration {}: SRV read of clip_inp returned wrong data ({}/{} wrong). \
-             Real Ekrano pipeline with 9 stages.",
+             Real Ekrano pipeline with 9 stages, 2 submissions, descriptor churn.",
             iteration, mismatches, N
         );
+
+        // All buffers drop here, churning descriptor heap offsets for next iteration
     }
 
-    eprintln!("All 10 iterations passed with real Ekrano shaders.");
+    eprintln!("All 10 iterations passed with real Ekrano shaders + frame lifecycle.");
 }
