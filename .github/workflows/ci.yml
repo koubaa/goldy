@@ -358,6 +358,33 @@ jobs:
         run: cargo test --features dx12 --test compute_integration -- test_warp_srv_full_pipeline --exact --nocapture
         continue-on-error: true
 
+      - name: "All WARP tests together (cumulative descriptor state)"
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+          WARP_POLLUTION: "0"
+        run: cargo test --features dx12 --test compute_integration -- test_warp_srv --nocapture
+        continue-on-error: true
+
+      - name: "All repro levels together (cumulative)"
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+          WARP_POLLUTION: "0"
+        run: cargo test --features dx12 --test compute_integration -- test_warp_repro --nocapture
+        continue-on-error: true
+
+      - name: "All WARP + repro tests together (max cumulative)"
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+          WARP_POLLUTION: "0"
+        run: cargo test --features dx12 --test compute_integration -- "test_warp_(srv|repro)" --nocapture
+        continue-on-error: true
+
   # Python bindings build and test (Linux with lavapipe)
   python-linux:
     name: Python Bindings (Linux)
