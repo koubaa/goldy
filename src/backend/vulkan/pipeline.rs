@@ -109,7 +109,7 @@ pub(super) fn create(
         .context("Bindless pipeline layout required")?;
     let owns_layout = false;
 
-    // Dynamic rendering info (Vulkan 1.4)
+    // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)
     let color_format = format_to_vk(target_format);
     let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
         .color_attachment_formats(std::slice::from_ref(&color_format));
@@ -289,7 +289,7 @@ pub(super) fn create_with_depth(
     .context("Failed to create bindless pipeline layout")?;
     let owns_layout = true;
 
-    // Dynamic rendering info (Vulkan 1.4)
+    // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)
     let color_format = format_to_vk(target_format);
     let depth_format_vk = depth_stencil
         .map(|ds| depth_format_to_vk(ds.format))

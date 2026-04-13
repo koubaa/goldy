@@ -103,54 +103,58 @@ impl VulkanBackend {
         let physical_devices_raw = unsafe { instance.enumerate_physical_devices() }
             .context("Failed to enumerate physical devices")?;
 
+        // Only keep devices that report Vulkan 1.4+
+        let mut adapter_id = 0u32;
+        let mut rejected: Vec<String> = Vec::new();
         let physical_devices: Vec<PhysicalDeviceInfo> = physical_devices_raw
             .into_iter()
-            .enumerate()
-            .map(|(idx, handle)| {
+            .filter_map(|handle| {
                 let properties = unsafe { instance.get_physical_device_properties(handle) };
-                PhysicalDeviceInfo {
-                    handle,
-                    properties,
-                    adapter_id: idx as u32,
+                let major = vk::api_version_major(properties.api_version);
+                let minor = vk::api_version_minor(properties.api_version);
+                let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
+
+                if major > 1 || (major == 1 && minor >= 4) {
+                    let id = adapter_id;
+                    adapter_id += 1;
+                    tracing::info!(
+                        "  [{}] {} ({:?}) - Vulkan {}.{}",
+                        id,
+                        name.to_string_lossy(),
+                        properties.device_type,
+                        major,
+                        minor
+                    );
+                    Some(PhysicalDeviceInfo {
+                        handle,
+                        properties,
+                        adapter_id: id,
+                    })
+                } else {
+                    rejected.push(format!(
+                        "{}: {}.{}",
+                        name.to_string_lossy(),
+                        major,
+                        minor
+                    ));
+                    None
                 }
             })
             .collect();
 
-        tracing::info!("Found {} Vulkan physical devices", physical_devices.len());
-        for dev in &physical_devices {
-            let name = unsafe { CStr::from_ptr(dev.properties.device_name.as_ptr()) };
-            let dev_major = vk::api_version_major(dev.properties.api_version);
-            let dev_minor = vk::api_version_minor(dev.properties.api_version);
-            tracing::info!(
-                "  [{}] {} ({:?}) - Vulkan {}.{}",
-                dev.adapter_id,
-                name.to_string_lossy(),
-                dev.properties.device_type,
-                dev_major,
-                dev_minor
-            );
+        if !rejected.is_empty() {
+            tracing::info!("Skipped sub-1.4 devices: [{}]", rejected.join(", "));
         }
 
-        // Check that at least one device supports Vulkan 1.4+
-        let has_vulkan_14 = physical_devices.iter().any(|dev| {
-            let major = vk::api_version_major(dev.properties.api_version);
-            let minor = vk::api_version_minor(dev.properties.api_version);
-            major > 1 || (major == 1 && minor >= 4)
-        });
+        tracing::info!(
+            "Found {} Vulkan 1.4+ physical devices",
+            physical_devices.len()
+        );
 
-        if !has_vulkan_14 {
-            let versions: Vec<String> = physical_devices
-                .iter()
-                .map(|dev| {
-                    let name = unsafe { CStr::from_ptr(dev.properties.device_name.as_ptr()) };
-                    let major = vk::api_version_major(dev.properties.api_version);
-                    let minor = vk::api_version_minor(dev.properties.api_version);
-                    format!("{}: {}.{}", name.to_string_lossy(), major, minor)
-                })
-                .collect();
+        if physical_devices.is_empty() {
             anyhow::bail!(
-                "Goldy requires Vulkan 1.4+, but no compatible devices found. Available: [{}]",
-                versions.join(", ")
+                "Goldy requires Vulkan 1.4+, but no compatible devices found. Rejected: [{}]",
+                rejected.join(", ")
             );
         }
 

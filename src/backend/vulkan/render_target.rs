@@ -536,9 +536,7 @@ where
             .cmd_begin_rendering(cmd, &rendering_info)
     };
 
-    // Set viewport and scissor
-    // Use negative height to flip Y axis - makes Vulkan coordinate system match DX12
-    // This requires VK_KHR_maintenance1 (core in Vulkan 1.1+)
+    // Negative viewport height flips Y to match DX12 (core since Vulkan 1.1)
     let viewport = vk::Viewport {
         x: 0.0,
         y: height as f32, // Start from bottom

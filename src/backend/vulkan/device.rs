@@ -67,15 +67,24 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .map(|(idx, _)| idx as u32)
         .context("No graphics queue family found")?;
 
-    // Enable Vulkan 1.4 features (dynamic rendering)
-    let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
-        .dynamic_rendering(true)
-        .synchronization2(true);
+    // Verify this physical device supports Vulkan 1.4
+    let dev_api = physical_device.properties.api_version;
+    let dev_major = vk::api_version_major(dev_api);
+    let dev_minor = vk::api_version_minor(dev_api);
+    if dev_major < 1 || (dev_major == 1 && dev_minor < 4) {
+        let name = unsafe { CStr::from_ptr(physical_device.properties.device_name.as_ptr()) };
+        anyhow::bail!(
+            "Adapter {} reports Vulkan {}.{}, but Goldy requires 1.4+",
+            name.to_string_lossy(),
+            dev_major,
+            dev_minor
+        );
+    }
 
-    // Enable Vulkan 1.2 descriptor indexing features.
-    // Goldy requires these features - they've been core since Vulkan 1.2 (2020)
-    // and are supported by all modern GPUs and software implementations (lavapipe).
-    let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
+    // Vulkan 1.2 features: descriptor indexing for the global bindless set.
+    // dynamicRendering and synchronization2 are mandatory in 1.3+ (guaranteed by 1.4).
+    // Descriptor indexing sub-features are still optional; we request them here.
+    let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
         .descriptor_binding_partially_bound(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
         .descriptor_binding_storage_buffer_update_after_bind(true)
@@ -85,9 +94,14 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .shader_sampled_image_array_non_uniform_indexing(true)
         .shader_uniform_buffer_array_non_uniform_indexing(true);
 
+    // Vulkan 1.3 features: mandatory in 1.4, but must still be enabled.
+    let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
+        .dynamic_rendering(true)
+        .synchronization2(true);
+
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut vulkan_13_features)
-        .push_next(&mut descriptor_indexing_features);
+        .push_next(&mut vulkan_12_features);
 
     // Create logical device with swapchain extension
     let queue_priorities = [1.0f32];

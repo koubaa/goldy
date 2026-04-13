@@ -4,7 +4,7 @@
 //!
 //! ## Bindless Architecture
 //!
-//! The Vulkan backend uses descriptor indexing (Vulkan 1.2+) for bindless resource access:
+//! The Vulkan backend uses descriptor indexing for bindless resource access (requires Vulkan 1.4):
 //! - A global descriptor set contains arrays of all resource types
 //! - Resources are registered at creation time and assigned indices
 //! - Shaders access resources by index using nonuniformEXT qualifier
