@@ -2262,6 +2262,22 @@ fn test_warp_srv_full_pipeline() {
 
     let device = make_device();
 
+    // Pre-pollute descriptor heap: create and drop many buffers+textures to push
+    // descriptor offsets high, simulating accumulated state from prior frames.
+    // Each Buffer registers UAV+SRV descriptors that are never freed (no freelist).
+    let n_pollution_rounds: usize = std::env::var("WARP_POLLUTION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    for _ in 0..n_pollution_rounds {
+        let _ = Buffer::new_with_stride(&device, 65536, DataAccess::Scattered, Some(4));
+        let _ = Buffer::new_with_stride(&device, 32768, DataAccess::Scattered, Some(8));
+        let _ = Buffer::new_with_stride(&device, 16384, DataAccess::Scattered, Some(16));
+        let _ = Buffer::new_with_stride(&device, 8192, DataAccess::Scattered, Some(20));
+        let _ = Buffer::new_with_stride(&device, 4096, DataAccess::Scattered, Some(32));
+        let _ = Buffer::new_with_stride(&device, 2048, DataAccess::Scattered, Some(96));
+    }
+
     let compile = |src: &str| -> ComputePipeline {
         let s = ShaderModule::from_slang_with_paths(&device, src, &[shader_dir]).expect("compile");
         ComputePipeline::new(&device, &s).expect("pipeline")
@@ -2629,6 +2645,24 @@ fn test_warp_srv_full_pipeline_pooled() {
 
     let device = make_device();
 
+    // Pre-pollute descriptor heap
+    for _ in 0..50 {
+        let _ = Buffer::new_with_stride(&device, 65536, DataAccess::Scattered, Some(4));
+        let _ = Buffer::new_with_stride(&device, 32768, DataAccess::Scattered, Some(8));
+        let _ = Buffer::new_with_stride(&device, 16384, DataAccess::Scattered, Some(16));
+        let _ = Buffer::new_with_stride(&device, 8192, DataAccess::Scattered, Some(20));
+        let _ = Buffer::new_with_stride(&device, 4096, DataAccess::Scattered, Some(32));
+        let _ = Buffer::new_with_stride(&device, 2048, DataAccess::Scattered, Some(96));
+        let _ = Texture::new(
+            &device,
+            256,
+            256,
+            TextureFormat::Rgba8Unorm,
+            SpatialAccess::Interpolated,
+            TextureFlags::COPY_DST,
+        );
+    }
+
     let compile = |src: &str| -> ComputePipeline {
         let s = ShaderModule::from_slang_with_paths(&device, src, &[shader_dir]).expect("compile");
         ComputePipeline::new(&device, &s).expect("pipeline")
@@ -2801,9 +2835,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         let ptcl_v = pool.alloc_bytes(BIG * 4, Some(4)).expect("ptcl");
 
         // Write path_bbox data into the pool view
-        path_bbox_v
-            .write_data(&bbox_data)
-            .expect("write path_bbox");
+        path_bbox_v.write_data(&bbox_data).expect("write path_bbox");
 
         // Output: standalone
         let output_buf =
