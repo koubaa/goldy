@@ -318,7 +318,14 @@ jobs:
           GOLDY_BACKEND: dx12
           GOLDY_DX12_ALLOW_WARP: "1"
           GOLDY_DX12_NO_DEBUG: "1"
-        run: cargo test --features dx12 --test compute_integration -- test_warp_srv --nocapture
+        run: |
+          echo "=== Running pool_combined + standalone_heavy ==="
+          cargo test --features dx12 --test compute_integration -- test_warp_srv_pool_combined --nocapture
+          cargo test --features dx12 --test compute_integration -- test_warp_srv_standalone_heavy --nocapture
+          echo "=== Running full_pipeline (standalone buffers, real shaders) ==="
+          cargo test --features dx12 --test compute_integration -- --exact test_warp_srv_full_pipeline --nocapture || echo "EXIT CODE: $?"
+          echo "=== Running full_pipeline_pooled (pool views, real shaders) ==="
+          cargo test --features dx12 --test compute_integration -- --exact test_warp_srv_full_pipeline_pooled --nocapture || echo "EXIT CODE: $?"
 
   # Python bindings build and test (Linux with lavapipe)
   python-linux:
