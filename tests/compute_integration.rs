@@ -1432,8 +1432,6 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
 "#;
 
     // Mixed-stride: reads Pair (stride 8) SRV, writes uint (stride 4) UAV.
-    // Ekrano does this routinely (e.g., clip shaders read stride-8 clip_inp
-    // via SRV while writing stride-4 or stride-16 buffers via UAV).
     const MIXED_STRIDE_SHADER: &str = r#"
 import goldy_exp;
 
@@ -1446,6 +1444,87 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     StorageBuffer<uint> dst = goldy_dyn_scattered<uint>(1);
     Pair p = src[id.x];
     dst[id.x] = p.a + p.b;
+}
+"#;
+
+    // Mimics Ekrano's clip_reduce: numthreads(256), groupshared memory with
+    // barriers, 2 SRV reads (stride 8 + stride 20), 2 UAV writes (stride 8 +
+    // stride 32). This matches the exact binding pattern and complexity level
+    // of the shader that triggers the WARP SRV bug in Ekrano.
+    const CLIP_REDUCE_LIKE: &str = r#"
+import goldy_exp;
+
+struct ClipInp { uint ix; int path_ix; };        // stride 8
+struct PathBbox { int x0; int y0; int x1; int y1; uint draw_flags; }; // stride 20
+struct Bic { uint a; uint b; };                    // stride 8
+struct ClipEl { uint parent_ix; uint _pad0; uint _pad1; uint _pad2; float4 bbox; }; // stride 32
+
+static const uint WG_SIZE = 256;
+static const uint LG_WG_SIZE = 8;
+
+groupshared Bic sh_bic[256];
+groupshared uint sh_parent[256];
+groupshared uint sh_path_ix[256];
+
+Bic combine_bic(Bic a, Bic b) {
+    uint m = min(a.b, b.a);
+    Bic r;
+    r.a = a.a + b.a - m;
+    r.b = a.b + b.b - m;
+    return r;
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
+    ReadOnlyBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(0);
+    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(1);
+    StorageBuffer<Bic> reduced = goldy_dyn_scattered<Bic>(2);
+    StorageBuffer<ClipEl> clip_out = goldy_dyn_scattered<ClipEl>(3);
+
+    int inp = clip_inp[global_id.x].path_ix;
+    bool is_push = inp >= 0;
+    Bic bic;
+    bic.a = is_push ? 0 : 1;
+    bic.b = is_push ? 1 : 0;
+
+    sh_bic[local_id.x] = bic;
+    for (uint i = 0; i < LG_WG_SIZE; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (local_id.x + (1u << i) < WG_SIZE)
+            bic = combine_bic(bic, sh_bic[local_id.x + (1u << i)]);
+        GroupMemoryBarrierWithGroupSync();
+        sh_bic[local_id.x] = bic;
+    }
+    if (local_id.x == 0) {
+        reduced[wg_id.x] = bic;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint size = sh_bic[0].b;
+    bic.a = 0;
+    bic.b = 0;
+    if (local_id.x + 1 < WG_SIZE) {
+        bic = sh_bic[local_id.x + 1];
+    }
+    if (is_push && bic.a == 0) {
+        uint local_ix = size - bic.b - 1;
+        sh_parent[local_ix] = local_id.x;
+        sh_path_ix[local_ix] = uint(inp);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (local_id.x < size) {
+        uint path_ix = sh_path_ix[local_id.x];
+        PathBbox path_bbox = path_bboxes[path_ix];
+        uint parent_ix = sh_parent[local_id.x] + wg_id.x * WG_SIZE;
+        float4 bbox = float4(float(path_bbox.x0), float(path_bbox.y0), float(path_bbox.x1), float(path_bbox.y1));
+        ClipEl el;
+        el.parent_ix = parent_ix;
+        el._pad0 = 0;
+        el._pad1 = 0;
+        el._pad2 = 0;
+        el.bbox = bbox;
+        clip_out[global_id.x] = el;
+    }
 }
 "#;
 
@@ -1479,9 +1558,14 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         let s = ShaderModule::from_slang(&device, MIXED_STRIDE_SHADER).expect("mixed");
         ComputePipeline::new(&device, &s).expect("mixed pipe")
     };
+    let clip_reduce_pipe = {
+        let s = ShaderModule::from_slang(&device, CLIP_REDUCE_LIKE).expect("clip_reduce");
+        ComputePipeline::new(&device, &s).expect("clip_reduce pipe")
+    };
 
     const N: usize = 4096;
     const N_WG: u32 = N as u32 / 64;
+    const N_WG_256: u32 = N as u32 / 256;
 
     // ---------------------------------------------------------------
     // Phase A: Create 200 dummy buffers interleaved with textures to
@@ -1671,6 +1755,19 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
                 ]);
                 pass.dispatch_indirect(&indirect_buf, (v * 16) as u64);
             }
+
+            // Ekrano-like clip_reduce dispatch: reads ClipInp (stride 8, idx 6)
+            // and PathBbox (stride 20, idx 2) via SRV, writes Bic (stride 8,
+            // idx 7) and ClipEl (stride 32, idx 8) via UAV. Uses
+            // numthreads(256), groupshared memory, barriers.
+            pass.set_pipeline(&clip_reduce_pipe);
+            pass.set_push_constants_raw(&[
+                bufs[6].bindless_srv_index().unwrap(), // ClipInp SRV
+                bufs[2].bindless_srv_index().unwrap(), // PathBbox SRV (stride 20)
+                bufs[7].bindless_index().unwrap(),     // Bic UAV (stride 8)
+                bufs[8].bindless_index().unwrap(),     // ClipEl UAV (stride 32)
+            ]);
+            pass.dispatch(N_WG_256, 1, 1);
 
             // stride-8 buffer indices for mixed-stride dispatches
             let u8_bufs: Vec<usize> = (0..buf_strides.len())
