@@ -428,16 +428,12 @@ pub(super) fn write(
         // DEVICE_LOCAL path: write to staging, then GPU copy
         unsafe {
             let ptr = device
-                .device
-                .map_memory(
-                    stg_mem,
-                    offset,
-                    data.len() as u64,
-                    vk::MemoryMapFlags::empty(),
-                )
+                .map_memory2(stg_mem, offset, data.len() as u64)
                 .context("Failed to map staging buffer")?;
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-            device.device.unmap_memory(stg_mem);
+            device
+                .unmap_memory2(stg_mem)
+                .context("Failed to unmap staging buffer")?;
         }
 
         submit_copy(
@@ -452,16 +448,12 @@ pub(super) fn write(
         // HOST_VISIBLE path: direct map
         unsafe {
             let ptr = device
-                .device
-                .map_memory(
-                    buffer.memory,
-                    offset,
-                    data.len() as u64,
-                    vk::MemoryMapFlags::empty(),
-                )
+                .map_memory2(buffer.memory, offset, data.len() as u64)
                 .context("Failed to map buffer memory")?;
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-            device.device.unmap_memory(buffer.memory);
+            device
+                .unmap_memory2(buffer.memory)
+                .context("Failed to unmap buffer memory")?;
         }
     }
 
@@ -522,21 +514,23 @@ pub(super) fn read_to_cpu(
 
         unsafe {
             let ptr = device
-                .device
-                .map_memory(stg_mem, 0, len, vk::MemoryMapFlags::empty())
+                .map_memory2(stg_mem, 0, len)
                 .context("Failed to map staging buffer for readback")?;
             std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), output.len());
-            device.device.unmap_memory(stg_mem);
+            device
+                .unmap_memory2(stg_mem)
+                .context("Failed to unmap staging buffer")?;
         }
     } else {
         // HOST_VISIBLE path: direct map
         unsafe {
             let ptr = device
-                .device
-                .map_memory(buffer.memory, 0, len, vk::MemoryMapFlags::empty())
+                .map_memory2(buffer.memory, 0, len)
                 .context("Failed to map buffer memory")?;
             std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), output.len());
-            device.device.unmap_memory(buffer.memory);
+            device
+                .unmap_memory2(buffer.memory)
+                .context("Failed to unmap buffer memory")?;
         }
     }
 

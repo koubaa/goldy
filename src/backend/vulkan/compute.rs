@@ -31,9 +31,16 @@ pub(super) fn create(
         .module(cs_module)
         .name(c"main");
 
+    // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero
+    let mut robustness = vk::PipelineRobustnessCreateInfoEXT::default()
+        .storage_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .uniform_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .images(vk::PipelineRobustnessImageBehaviorEXT::ROBUST_IMAGE_ACCESS_2);
+
     let pipeline_info = vk::ComputePipelineCreateInfo::default()
         .stage(cs_stage)
-        .layout(pipeline_layout);
+        .layout(pipeline_layout)
+        .push_next(&mut robustness);
 
     let pipelines = unsafe {
         logical_device.device.create_compute_pipelines(

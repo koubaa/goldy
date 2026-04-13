@@ -131,12 +131,7 @@ impl VulkanBackend {
                         adapter_id: id,
                     })
                 } else {
-                    rejected.push(format!(
-                        "{}: {}.{}",
-                        name.to_string_lossy(),
-                        major,
-                        minor
-                    ));
+                    rejected.push(format!("{}: {}.{}", name.to_string_lossy(), major, minor));
                     None
                 }
             })

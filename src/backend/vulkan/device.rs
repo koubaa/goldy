@@ -99,9 +99,14 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .dynamic_rendering(true)
         .synchronization2(true);
 
+    // Pipeline robustness (core in Vulkan 1.4): enables per-pipeline OOB safety for bindless.
+    let mut pipeline_robustness_features =
+        vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default().pipeline_robustness(true);
+
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut vulkan_13_features)
-        .push_next(&mut vulkan_12_features);
+        .push_next(&mut vulkan_12_features)
+        .push_next(&mut pipeline_robustness_features);
 
     // Create logical device with swapchain extension
     let queue_priorities = [1.0f32];
@@ -109,8 +114,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .queue_family_index(queue_family_index)
         .queue_priorities(&queue_priorities);
 
-    // Enable swapchain extension for surface presentation
-    let device_extensions = [khr::swapchain::NAME.as_ptr()];
+    // Extensions: swapchain for presentation, plus 1.4-promoted extensions whose KHR
+    // aliases ash 0.38 needs (it predates core 1.4 headers, so it loads KHR names).
+    let device_extensions = [
+        khr::swapchain::NAME.as_ptr(),
+        khr::map_memory2::NAME.as_ptr(),
+    ];
 
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_create_info))
@@ -125,6 +134,10 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     .context("Failed to create logical device")?;
 
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+    // Load Vulkan 1.4 core APIs via KHR extension loaders (ash 0.38 predates 1.4 headers).
+    // On a 1.4 device these functions are core — the KHR entry points are aliases.
+    let map_memory2_loader = ash::khr::map_memory2::Device::new(&state.instance, &device);
 
     // Create command pool
     let pool_info = vk::CommandPoolCreateInfo::default()
@@ -288,6 +301,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             queue,
             queue_family: queue_family_index,
             command_pool,
+            map_memory2: map_memory2_loader,
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,
             bindless_descriptor_set,

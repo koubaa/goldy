@@ -174,6 +174,9 @@ pub(crate) struct LogicalDevice {
     pub queue_family: u32,
     pub command_pool: vk::CommandPool,
 
+    // Vulkan 1.4 core via KHR extension loaders (ash 0.38 doesn't have core 1.4 wrappers yet)
+    pub map_memory2: ash::khr::map_memory2::Device,
+
     // Bindless infrastructure
     /// Global descriptor pool for bindless resources
     pub bindless_descriptor_pool: Option<vk::DescriptorPool>,
@@ -187,6 +190,30 @@ pub(crate) struct LogicalDevice {
     pub resource_registry: ResourceRegistry,
     /// Deferred deletion queue for resources that are still in-flight
     pub deletion_queue: DeletionQueue,
+}
+
+impl LogicalDevice {
+    /// `vkMapMemory2KHR` — core in Vulkan 1.4. Struct-based API that replaces `vkMapMemory`.
+    pub unsafe fn map_memory2(
+        &self,
+        memory: vk::DeviceMemory,
+        offset: vk::DeviceSize,
+        size: vk::DeviceSize,
+    ) -> ash::prelude::VkResult<*mut core::ffi::c_void> {
+        let info = vk::MemoryMapInfoKHR::default()
+            .memory(memory)
+            .offset(offset)
+            .size(size);
+        let mut ptr = core::ptr::null_mut();
+        (self.map_memory2.fp().map_memory2_khr)(self.device.handle(), &info, &mut ptr)
+            .result_with_success(ptr)
+    }
+
+    /// `vkUnmapMemory2KHR` — core in Vulkan 1.4. Returns `VkResult` (unlike legacy `vkUnmapMemory`).
+    pub unsafe fn unmap_memory2(&self, memory: vk::DeviceMemory) -> ash::prelude::VkResult<()> {
+        let info = vk::MemoryUnmapInfoKHR::default().memory(memory);
+        (self.map_memory2.fp().unmap_memory2_khr)(self.device.handle(), &info).result()
+    }
 }
 
 /// GPU buffer state.

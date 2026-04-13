@@ -787,18 +787,14 @@ pub(super) fn read_to_cpu(
     // Read from staging buffer
     unsafe {
         let ptr = logical_device
-            .device
-            .map_memory(
-                staging_memory,
-                0,
-                expected_size as u64,
-                vk::MemoryMapFlags::empty(),
-            )
+            .map_memory2(staging_memory, 0, expected_size as u64)
             .context("Failed to map staging buffer")?;
 
         std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), expected_size);
 
-        logical_device.device.unmap_memory(staging_memory);
+        logical_device
+            .unmap_memory2(staging_memory)
+            .context("Failed to unmap staging buffer")?;
     }
 
     Ok(())
