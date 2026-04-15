@@ -8,6 +8,7 @@ use crate::slang::SlangStage;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLCommandBufferStatus, MTLSize};
+use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
 
 /// Create a compute pipeline.
@@ -236,6 +237,45 @@ fn record_commands_to_buffer(
                     *offset,
                     threads_per_group,
                 );
+            }
+            ComputeCommand::Barrier => {
+                if let Some(enc) = encoder {
+                    // memoryBarrierWithScope: ensures all prior writes within
+                    // this encoder are visible before subsequent dispatches.
+                    // MTLBarrierScope: Buffers = 1, Textures = 2
+                    let scope: mtl::NSUInteger = 1 | 2;
+                    let () = unsafe { msg_send![enc, memoryBarrierWithScope: scope] };
+                }
+            }
+            ComputeCommand::ResourceBarrier {
+                buffers: buf_handles,
+                textures: tex_handles,
+            } => {
+                if let Some(enc) = encoder {
+                    let mut resources: Vec<&mtl::ResourceRef> = Vec::new();
+                    for handle in buf_handles {
+                        if let Some(buf_state) = state.buffers.get(handle) {
+                            let buf_ref: &mtl::BufferRef = &buf_state.buffer;
+                            resources.push(unsafe {
+                                std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref)
+                            });
+                        }
+                    }
+                    for handle in tex_handles {
+                        if let Some(tex_state) = state.textures.get(handle) {
+                            let tex_ref: &mtl::TextureRef = &tex_state.texture;
+                            resources.push(unsafe {
+                                std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref)
+                            });
+                        }
+                    }
+                    if !resources.is_empty() {
+                        let count: mtl::NSUInteger = resources.len() as mtl::NSUInteger;
+                        let ptr = resources.as_ptr();
+                        let () =
+                            unsafe { msg_send![enc, memoryBarrierWithResources: ptr count: count] };
+                    }
+                }
             }
             ComputeCommand::ClearBuffer {
                 buffer,

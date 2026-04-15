@@ -230,6 +230,14 @@ impl<'a> ComputePass<'a> {
             });
     }
 
+    /// Insert a memory barrier between compute dispatches.
+    ///
+    /// Ensures all prior shader writes complete and are visible before
+    /// any subsequent shader reads or writes execute.
+    pub fn barrier(&mut self) {
+        self.encoder.commands.push(ComputeCommand::Barrier);
+    }
+
     /// Fill a buffer region with zeros, batched into the compute command stream.
     ///
     /// Unlike `Buffer::clear()` which submits immediately, this records the clear

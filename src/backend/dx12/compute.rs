@@ -285,6 +285,14 @@ pub(super) fn submit(
                 );
                 unsafe { barriers::barrier_buffers(&command_list7, &[to_uav]) };
             }
+            ComputeCommand::Barrier => {
+                // No-op: DX12 already emits global UAV barriers before each dispatch.
+            }
+            ComputeCommand::ResourceBarrier { .. } => {
+                // Falls back to global barrier behavior. DX12 already inserts a
+                // global UAV barrier before each dispatch, so this is a no-op.
+                // Per-resource D3D12_RESOURCE_BARRIER is a future optimization.
+            }
             ComputeCommand::ClearBuffer {
                 buffer,
                 offset,
