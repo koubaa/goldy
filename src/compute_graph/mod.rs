@@ -105,7 +105,7 @@ mod ir;
 mod program;
 
 pub use graph::{ComputeGraph, NodeBuilder};
-pub use ir::NodeAccess;
+pub use ir::{DispatchKind, NodeAccess};
 pub use program::{ComputeProgram, DimSlotId, Execution, ProgramBuilder, SlotId, StepBuilder};
 
 use crate::backend::{BufferHandle, TextureHandle};

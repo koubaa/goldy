@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 
-use super::ir::{BarrierSet, CompiledSchedule, GraphIR, NodeAccess, Wave};
+use super::ir::{BarrierSet, CompiledSchedule, DispatchKind, GraphIR, NodeAccess, Wave};
 use super::ResourceId;
 use crate::backend::ComputeCommand;
 
@@ -181,12 +181,21 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
                     indices: node.push_constants.clone(),
                 });
             }
-            let (x, y, z) = node.workgroups;
-            commands.push(ComputeCommand::Dispatch {
-                workgroups_x: x,
-                workgroups_y: y,
-                workgroups_z: z,
-            });
+            match &node.dispatch {
+                DispatchKind::Direct { x, y, z } => {
+                    commands.push(ComputeCommand::Dispatch {
+                        workgroups_x: *x,
+                        workgroups_y: *y,
+                        workgroups_z: *z,
+                    });
+                }
+                DispatchKind::Indirect { buffer, offset } => {
+                    commands.push(ComputeCommand::DispatchIndirect {
+                        buffer: *buffer,
+                        offset: *offset,
+                    });
+                }
+            }
         }
     }
 
@@ -196,7 +205,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compute_graph::ir::{GraphNode, ResourceBinding};
+    use crate::compute_graph::ir::{DispatchKind, GraphNode, ResourceBinding};
 
     fn buf(id: u64) -> ResourceId {
         ResourceId::Buffer(id)
@@ -216,7 +225,7 @@ mod tests {
                 .map(|(resource, access)| ResourceBinding { resource, access })
                 .collect(),
             push_constants: Vec::new(),
-            workgroups: (wg, 1, 1),
+            dispatch: DispatchKind::Direct { x: wg, y: 1, z: 1 },
         }
     }
 
@@ -458,7 +467,7 @@ mod tests {
                     access: NodeAccess::Write,
                 }],
                 push_constants: vec![42, 7],
-                workgroups: (1, 1, 1),
+                dispatch: DispatchKind::Direct { x: 1, y: 1, z: 1 },
             }],
         };
         let edges = build_edges(&ir);

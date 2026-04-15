@@ -38,6 +38,15 @@ pub struct ResourceBinding {
     pub access: NodeAccess,
 }
 
+/// How a graph node's dispatch dimensions are specified.
+#[derive(Debug, Clone)]
+pub enum DispatchKind {
+    /// Fixed workgroup counts known at graph construction time.
+    Direct { x: u32, y: u32, z: u32 },
+    /// Workgroup counts read from a buffer at runtime (3× `u32` at `offset`).
+    Indirect { buffer: BufferHandle, offset: u64 },
+}
+
 /// A dispatch node in the graph.
 #[derive(Debug, Clone)]
 pub struct GraphNode {
@@ -46,7 +55,7 @@ pub struct GraphNode {
     pub pipeline: ComputePipelineHandle,
     pub bindings: Vec<ResourceBinding>,
     pub push_constants: Vec<u32>,
-    pub workgroups: (u32, u32, u32),
+    pub dispatch: DispatchKind,
 }
 
 /// The full graph before scheduling.

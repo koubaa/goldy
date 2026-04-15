@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::analysis;
-use super::ir::{CompiledSchedule, GraphIR, GraphNode, NodeAccess, ResourceBinding};
+use super::ir::{CompiledSchedule, DispatchKind, GraphIR, GraphNode, NodeAccess, ResourceBinding};
 use super::ResourceId;
 use crate::backend::{BufferHandle, ComputeCommand, ComputePipelineHandle, TextureHandle};
 use crate::buffer::Buffer;
@@ -198,7 +198,7 @@ impl ProgramBuilder {
                 pipeline: step.pipeline,
                 bindings,
                 push_constants: Vec::new(),
-                workgroups: (0, 0, 0),
+                dispatch: DispatchKind::Direct { x: 0, y: 0, z: 0 },
             });
         }
 
