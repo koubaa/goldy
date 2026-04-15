@@ -2,6 +2,13 @@
 //!
 //! This crate provides Python bindings for the Goldy GPU library using PyO3.
 
+// PyO3 0.28+: automatic `FromPyObject` for `#[pyclass]` + `Clone` is deprecated pending
+// explicit `from_py_object` / `skip_from_py_object`; allow until bindings are migrated.
+#![allow(deprecated)]
+// Enum variant names mirror Python / Goldy public API (e.g. SCATTERED, VULKAN).
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::wrong_self_convention)]
+
 mod buffer;
 mod compute;
 mod device;

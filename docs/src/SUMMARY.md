@@ -18,6 +18,7 @@
 - [Pipelines](./concepts/pipelines.md)
 - [Command Encoding](./concepts/commands.md)
 - [Compute](./concepts/compute.md)
+- [Compute Graph](./concepts/compute-graph.md)
 - [Frame Output](./concepts/frames.md)
 - [GpuFuture](./concepts/gpu-future.md)
 

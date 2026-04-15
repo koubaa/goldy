@@ -141,6 +141,15 @@ pub enum ComputeCommand {
         offset: u64,
         size: u64,
     },
+    /// Memory barrier between compute dispatches.
+    /// Ensures all prior shader writes are visible to subsequent reads.
+    Barrier,
+    /// Per-resource memory barrier. Only the listed resources are synchronized.
+    /// Emitted by the compute graph scheduler at dependency edges.
+    ResourceBarrier {
+        buffers: Vec<BufferHandle>,
+        textures: Vec<TextureHandle>,
+    },
 }
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.

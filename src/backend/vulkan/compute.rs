@@ -275,6 +275,14 @@ pub(super) fn submit(
                         .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
                 }
             }
+            ComputeCommand::Barrier => {
+                // No-op: Vulkan already emits pipeline barriers before each dispatch.
+            }
+            ComputeCommand::ResourceBarrier { .. } => {
+                // Falls back to global barrier behavior. Vulkan already inserts a
+                // compute→compute pipeline barrier before each dispatch, so this
+                // is a no-op. Per-resource VkBufferMemoryBarrier is a future optimization.
+            }
             ComputeCommand::ClearBuffer {
                 buffer,
                 offset,

@@ -138,6 +138,10 @@ let tex_idx = texture.bindless_index().unwrap();
 pass.set_push_constants_raw(&[buf_idx, tex_idx]);
 ```
 
+## Compute Graph
+
+For multi-dispatch pipelines with data dependencies between shaders, see the [Compute Graph](./compute-graph.md) API. It analyzes declared resource access patterns and inserts optimal barriers automatically, enabling SWMR parallelism across all backends.
+
 ## Examples
 
 See [`compute_particles`](../examples/overview.md) and [`game_of_life`](../examples/overview.md) for full working examples.

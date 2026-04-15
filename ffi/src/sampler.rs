@@ -7,6 +7,8 @@ use std::ptr;
 
 /// Opaque handle to a Goldy Sampler.
 pub struct GoldySampler {
+    /// Held for ownership / future accessors; C API currently only creates and destroys.
+    #[allow(dead_code)]
     pub(crate) inner: goldy::Sampler,
 }
 

@@ -3,6 +3,7 @@
 //! Note: Surface creation requires platform-specific window handles.
 //! This module provides a minimal FFI for surface operations.
 
+#[cfg(windows)]
 use crate::device::GoldyDevice;
 use crate::encoder::GoldyCommandEncoder;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
