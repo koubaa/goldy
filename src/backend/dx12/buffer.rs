@@ -680,6 +680,7 @@ pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle)
 ///
 /// For DEFAULT heap buffers (storage), creates a readback buffer and copies.
 /// For UPLOAD heap buffers (uniform), reads directly via Map.
+
 pub(super) fn read_to_cpu(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
@@ -763,24 +764,30 @@ pub(super) fn read_to_cpu(
         let copy_list7: ID3D12GraphicsCommandList7 =
             copy_list.cast().context("ID3D12GraphicsCommandList7")?;
 
-        let b_to_src = barriers::buffer_barrier_full(
-            &main_resource,
-            D3D12_BARRIER_SYNC_ALL,
-            D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-            D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        );
-        let b_to_uav = barriers::buffer_barrier_full(
-            &main_resource,
-            D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_SYNC_ALL,
-            D3D12_BARRIER_ACCESS_COPY_SOURCE,
-            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-        );
+        // Use global barriers instead of per-buffer barriers. D3D12_BARRIER_TYPE_BUFFER
+        // enhanced barriers cause WARP on Windows Server to silently remove the device
+        // during ExecuteCommandLists, making the subsequent Signal() call AV.
+        // Global barriers (D3D12_BARRIER_TYPE_GLOBAL) are proven to work on all targets.
+        let pre_copy = D3D12_GLOBAL_BARRIER {
+            SyncBefore: D3D12_BARRIER_SYNC_ALL,
+            SyncAfter: D3D12_BARRIER_SYNC_COPY,
+            AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        };
+        let post_copy = D3D12_GLOBAL_BARRIER {
+            SyncBefore: D3D12_BARRIER_SYNC_COPY,
+            SyncAfter: D3D12_BARRIER_SYNC_ALL,
+            AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+            AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        };
         unsafe {
-            barriers::barrier_buffers(&copy_list7, &[b_to_src]);
+            barriers::barrier_globals(&copy_list7, &[pre_copy]);
+        }
+        unsafe {
             copy_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
-            barriers::barrier_buffers(&copy_list7, &[b_to_uav]);
+        }
+        unsafe {
+            barriers::barrier_globals(&copy_list7, &[post_copy]);
         }
         unsafe { copy_list.Close() }.context("Failed to close copy command list")?;
 
