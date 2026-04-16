@@ -196,7 +196,7 @@ impl App {
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
+        frame.present()?;
 
         self.frame_count += 1;
         Ok(())

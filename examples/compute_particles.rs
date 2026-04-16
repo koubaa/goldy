@@ -174,7 +174,7 @@ impl RenderState {
         }
 
         frame.render(encoder)?;
-        self.surface.present(frame)?;
+        frame.present()?;
 
         // Request redraw for continuous animation
         self.window.request_redraw();

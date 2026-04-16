@@ -21,6 +21,9 @@ pub struct Texture {
     width: u32,
     height: u32,
     format: TextureFormat,
+    /// Whether this texture owns the underlying GPU resource.
+    /// Borrowed textures (e.g. surface frame drawables) skip destroy on drop.
+    owned: bool,
 }
 
 impl Texture {
@@ -69,6 +72,7 @@ impl Texture {
             width,
             height,
             format,
+            owned: true,
         })
     }
 
@@ -246,10 +250,35 @@ impl Texture {
         let backend = self.backend.lock().unwrap();
         backend.texture_bindless_index(self.handle)
     }
+
+    /// Create a borrowed texture wrapping an externally-owned GPU resource.
+    ///
+    /// The returned `Texture` provides the same read/query API but does **not**
+    /// destroy the underlying resource when dropped. Used for transient resources
+    /// like surface frame drawables whose lifetime is managed elsewhere.
+    pub(crate) fn borrowed(
+        backend: Arc<Mutex<Box<dyn GpuBackend>>>,
+        handle: TextureHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Self {
+        Self {
+            backend,
+            handle,
+            width,
+            height,
+            format,
+            owned: false,
+        }
+    }
 }
 
 impl Drop for Texture {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         tracing::trace!(
             width = self.width,
             height = self.height,

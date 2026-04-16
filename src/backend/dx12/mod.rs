@@ -537,6 +537,10 @@ impl GpuBackend for Dx12Backend {
         surface::acquire(&mut self.state, surface_handle)
     }
 
+    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
+        surface::frame_texture(&self.state, surface)
+    }
+
     fn surface_render(
         &mut self,
         surface_handle: SurfaceHandle,

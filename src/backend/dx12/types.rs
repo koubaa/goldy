@@ -347,6 +347,10 @@ pub(crate) struct SurfaceState {
     pub current_image_index: Option<u32>,
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
+    /// Transient texture handle for the currently acquired back buffer,
+    /// registered in the bindless descriptor heap as a UAV so compute shaders
+    /// can write directly to the swapchain image.
+    pub current_texture_handle: Option<super::TextureHandle>,
 }
 
 /// Consolidated DX12 backend state.

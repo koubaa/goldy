@@ -548,6 +548,12 @@ pub(crate) struct SurfaceState {
     pub current_frame: usize,
     /// The CAMetalLayer (stored as raw pointer for objc interop)
     pub layer: *mut std::ffi::c_void,
+    /// The currently acquired CAMetalDrawable (set during acquire, cleared on present)
+    pub current_drawable: Option<*mut std::ffi::c_void>,
+    /// Texture handle for the current drawable's texture (registered for bindless access)
+    pub current_texture_handle: Option<TextureHandle>,
+    /// Current present mode
+    pub present_mode: crate::types::PresentMode,
 }
 
 // Safety: Metal objects are thread-safe when properly synchronized

@@ -35,7 +35,8 @@ pub mod metal;
 
 use crate::types::{
     BackendType, Color, DataAccess, DepthFormat, DepthStencilState, DeviceType, IndexFormat,
-    PrimitiveTopology, SamplerDesc, SpatialAccess, TextureFlags, TextureFormat, VertexBufferLayout,
+    PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess, TextureFlags, TextureFormat,
+    VertexBufferLayout,
 };
 use anyhow::Result;
 
@@ -365,7 +366,17 @@ pub trait GpuBackend: Send + Sync {
     fn destroy_surface(&mut self, surface: SurfaceHandle);
 
     /// Acquire the next swapchain image to render to.
+    ///
+    /// After acquire, the frame's texture is available via [`GpuBackend::surface_frame_texture`].
     fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle>;
+
+    /// Get the texture handle for the currently acquired surface frame.
+    ///
+    /// Returns `None` if no frame is currently acquired (i.e. `surface_acquire`
+    /// has not been called or `surface_present` has already been called).
+    /// The returned texture is registered in the bindless descriptor set and
+    /// can be used with compute or render passes.
+    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle>;
 
     /// Render commands to a swapchain image.
     fn surface_render(
@@ -391,6 +402,21 @@ pub trait GpuBackend: Send + Sync {
     /// Get the texture format used by a surface's swapchain.
     /// Use this to ensure your render pipeline matches the surface format.
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat;
+
+    /// Set the present mode for a surface.
+    /// Returns an error if the mode is not supported by the backend.
+    fn surface_set_present_mode(
+        &mut self,
+        _surface: SurfaceHandle,
+        _mode: PresentMode,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Get the current present mode for a surface.
+    fn surface_present_mode(&self, _surface: SurfaceHandle) -> PresentMode {
+        PresentMode::Auto
+    }
 
     // Compute pipeline management
     /// Create a compute pipeline from a compute shader.

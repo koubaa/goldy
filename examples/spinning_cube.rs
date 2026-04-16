@@ -173,7 +173,7 @@ impl App {
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
+        frame.present()?;
         self.vertex_buffers.push(vertex_buffer);
         Ok(())
     }

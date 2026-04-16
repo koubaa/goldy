@@ -143,6 +143,32 @@ pub enum DataAccess {
     Broadcast,
 }
 
+/// Presentation mode controlling how frames are displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PresentMode {
+    /// Vsync: wait for display refresh. No tearing, capped at display Hz.
+    /// Maps to Metal `displaySyncEnabled=YES`, Vulkan `FIFO`, DX12 `Present(1)`.
+    Fifo,
+    /// Triple-buffered: latest frame queued, older frames dropped. Low latency + no tearing.
+    /// Maps to Vulkan `MAILBOX`. Falls back to Fifo on Metal and some DX12 configurations.
+    Mailbox,
+    /// No sync: present immediately. May tear. Maximum throughput for benchmarks.
+    /// Maps to Metal `displaySyncEnabled=NO`, Vulkan `IMMEDIATE`, DX12 `Present(0)`.
+    Immediate,
+    /// Let Goldy choose (Mailbox if available, then Fifo).
+    #[default]
+    Auto,
+}
+
+/// Configuration for surface creation.
+#[derive(Debug, Clone, Default)]
+pub struct SurfaceConfig {
+    /// Presentation mode (vsync strategy).
+    pub present_mode: PresentMode,
+    /// Optional depth buffer for 3D rendering.
+    pub depth_format: Option<DepthFormat>,
+}
+
 /// Spatial access pattern for textures/images.
 ///
 /// This describes how the texture will be accessed:

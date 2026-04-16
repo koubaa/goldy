@@ -495,8 +495,9 @@ impl GpuBackend for VulkanBackend {
         surface::destroy(
             &self.state.entry,
             &self.state.instance,
-            &self.state.devices,
+            &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
             surface_handle,
         );
     }
@@ -506,8 +507,14 @@ impl GpuBackend for VulkanBackend {
             &self.state.instance,
             &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
+            &mut self.state.next_texture_handle,
             surface_handle,
         )
+    }
+
+    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
+        surface::frame_texture(&self.state.surfaces, surface)
     }
 
     fn surface_render(
@@ -544,6 +551,7 @@ impl GpuBackend for VulkanBackend {
             &self.state.instance,
             &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
             surface_handle,
             _image,
         )

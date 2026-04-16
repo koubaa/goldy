@@ -363,6 +363,10 @@ pub(crate) struct SurfaceState {
     pub current_image_index: Option<u32>,
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
+    /// Transient texture handle for the currently acquired swapchain image,
+    /// registered in the bindless descriptor set as a storage image so compute
+    /// shaders can write directly to the swapchain image.
+    pub current_texture_handle: Option<super::TextureHandle>,
 }
 
 /// Pending buffer operations for command recording.

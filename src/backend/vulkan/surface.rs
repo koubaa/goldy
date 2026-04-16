@@ -1,8 +1,10 @@
 //! Surface and swapchain management for window presentation.
 
-use super::types::{self, FrameSync, LogicalDevice, SurfaceState, MAX_FRAMES_IN_FLIGHT};
+use super::types::{
+    self, FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
+};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, find_memory_type};
-use super::{DeviceHandle, PipelineHandle, SurfaceHandle, SwapchainImageHandle};
+use super::{DeviceHandle, PipelineHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
@@ -166,7 +168,7 @@ pub(super) fn create(
         .image_color_space(format.color_space)
         .image_extent(extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -328,6 +330,7 @@ pub(super) fn create(
             depth_image,
             depth_memory,
             depth_view,
+            current_texture_handle: None,
         },
     );
 
@@ -344,10 +347,19 @@ pub(super) fn create(
 pub(super) fn destroy(
     entry: &Entry,
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
 ) {
+    // Clean up any outstanding surface texture
+    if let Some(tex_handle) = surfaces
+        .get(&surface_handle)
+        .and_then(|s| s.current_texture_handle)
+    {
+        unregister_surface_texture(devices, textures, tex_handle);
+    }
+
     if let Some(surface_state) = surfaces.remove(&surface_handle) {
         if let Some(logical_device) = devices.get(&surface_state.device_handle) {
             unsafe {
@@ -392,12 +404,26 @@ pub(super) fn destroy(
 }
 
 /// Acquire the next swapchain image for rendering.
+///
+/// After acquiring, the swapchain image is registered in the bindless descriptor
+/// set as a storage image. The resulting `TextureHandle` is available via
+/// `frame_texture()` until `present()` is called.
 pub(super) fn acquire(
     instance: &Instance,
     devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    next_texture_handle: &mut TextureHandle,
     surface_handle: SurfaceHandle,
 ) -> Result<SwapchainImageHandle> {
+    // Clean up any previously acquired surface texture that wasn't presented
+    if let Some(surface_state) = surfaces.get(&surface_handle) {
+        if let Some(tex_handle) = surface_state.current_texture_handle {
+            tracing::warn!("Previous surface texture was not presented; cleaning up");
+            unregister_surface_texture(devices, textures, tex_handle);
+        }
+    }
+
     // Get surface state and current frame index
     let (device_handle, _current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
         let surface_state = surfaces
@@ -468,10 +494,35 @@ pub(super) fn acquire(
             // Update surface state
             let surface_state = surfaces.get_mut(&surface_handle).unwrap();
             surface_state.current_image_index = Some(image_index);
+
+            // Register the swapchain image as a storage texture for compute access.
+            // The image view is created for GENERAL layout so compute shaders can write
+            // via RWTexture2D in bindless.
+            let image = surface_state.swapchain_images[image_index as usize];
+            let width = surface_state.width;
+            let height = surface_state.height;
+            let vk_format = surface_state.format;
+            let goldy_format =
+                super::utils::vk_to_format(vk_format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
+
+            let tex_handle = register_surface_texture(
+                devices,
+                textures,
+                next_texture_handle,
+                device_handle,
+                image,
+                vk_format,
+                goldy_format,
+                width,
+                height,
+            )?;
+
+            let surface_state = surfaces.get_mut(&surface_handle).unwrap();
+            surface_state.current_texture_handle = Some(tex_handle);
+
             Ok(image_index as SwapchainImageHandle)
         }
         Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-            // Swapchain is out of date - caller should resize and retry
             tracing::info!("Swapchain out of date - resize required");
             anyhow::bail!("Surface out of date - call resize() and retry")
         }
@@ -483,6 +534,16 @@ pub(super) fn acquire(
             anyhow::bail!("Failed to acquire swapchain image: {:?}", e)
         }
     }
+}
+
+/// Get the texture handle for the currently acquired surface frame.
+pub(super) fn frame_texture(
+    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
+    surface_handle: SurfaceHandle,
+) -> Option<TextureHandle> {
+    surfaces
+        .get(&surface_handle)
+        .and_then(|s| s.current_texture_handle)
 }
 
 /// Render commands to the surface's current swapchain image.
@@ -723,16 +784,30 @@ where
 }
 
 /// Present the rendered image to the screen.
+///
+/// Unregisters the transient surface texture from the bindless descriptor set,
+/// then queues the swapchain image for presentation.
 pub(super) fn present(
     instance: &Instance,
     devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
 ) -> Result<()> {
+    // Unregister the transient surface texture before presenting
+    if let Some(tex_handle) = surfaces
+        .get(&surface_handle)
+        .and_then(|s| s.current_texture_handle)
+    {
+        unregister_surface_texture(devices, textures, tex_handle);
+    }
+
     let surface_state = surfaces
         .get_mut(&surface_handle)
         .context("Invalid surface handle")?;
+
+    surface_state.current_texture_handle = None;
 
     let image_index = surface_state
         .current_image_index
@@ -772,10 +847,7 @@ pub(super) fn present(
     // Handle suboptimal or out of date
     match result {
         Ok(_) => Ok(()),
-        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
-            // TODO: Signal that resize is needed
-            Ok(())
-        }
+        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => Ok(()),
         Err(e) => Err(anyhow::anyhow!("Failed to present: {:?}", e)),
     }
 }
@@ -865,7 +937,7 @@ pub(super) fn resize(
         .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
         .image_extent(extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -977,6 +1049,7 @@ pub(super) fn resize(
         surface_state.height = extent.height;
         surface_state.current_frame = 0;
         surface_state.current_image_index = None;
+        surface_state.current_texture_handle = None;
         surface_state.depth_image = new_depth_image;
         surface_state.depth_memory = new_depth_memory;
         surface_state.depth_view = new_depth_view;
@@ -1006,4 +1079,137 @@ pub(super) fn format(
         .get(&surface_handle)
         .and_then(|s| super::utils::vk_to_format(s.format))
         .unwrap_or(TextureFormat::Bgra8UnormSrgb) // Safe fallback
+}
+
+// ---------------------------------------------------------------------------
+// Transient surface texture registration
+// ---------------------------------------------------------------------------
+// These functions register/unregister swapchain images in the global bindless
+// descriptor set so that compute shaders can write to them via RWTexture2D.
+// The image view and descriptor are created on acquire and torn down on present.
+// The underlying VkImage is owned by the swapchain — we must NOT destroy it.
+
+/// Register a swapchain image as a transient storage texture.
+///
+/// Creates a VkImageView with GENERAL layout intent and writes a storage-image
+/// descriptor into the bindless set. Returns a TextureHandle that the caller
+/// stores in `SurfaceState::current_texture_handle`.
+#[allow(clippy::too_many_arguments)]
+fn register_surface_texture(
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    next_texture_handle: &mut TextureHandle,
+    device_handle: DeviceHandle,
+    image: vk::Image,
+    vk_format: vk::Format,
+    goldy_format: TextureFormat,
+    width: u32,
+    height: u32,
+) -> Result<TextureHandle> {
+    let handle = *next_texture_handle;
+    *next_texture_handle += 1;
+
+    let logical_device = devices
+        .get_mut(&device_handle)
+        .context("Device no longer valid")?;
+
+    // Create an image view for compute storage access
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(vk_format)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+
+    let view = unsafe { logical_device.device.create_image_view(&view_info, None) }
+        .context("Failed to create surface texture image view")?;
+
+    // Register as a storage image in the bindless descriptor set
+    let is_storage_image = true;
+    let bindless_index = logical_device
+        .resource_registry
+        .register_texture(handle, is_storage_image);
+
+    // Write the storage-image descriptor
+    if let Some(descriptor_set) = logical_device.bindless_descriptor_set {
+        let image_info = vk::DescriptorImageInfo::default()
+            .image_view(view)
+            .image_layout(vk::ImageLayout::GENERAL);
+
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(types::bindless_bindings::STORAGE_IMAGES)
+            .dst_array_element(bindless_index)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .image_info(std::slice::from_ref(&image_info));
+
+        unsafe {
+            logical_device
+                .device
+                .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+        }
+
+        tracing::trace!(
+            "Registered surface texture {} at storage image bindless index {}",
+            handle,
+            bindless_index,
+        );
+    }
+
+    textures.insert(
+        handle,
+        TextureState {
+            device_handle,
+            width,
+            height,
+            format: goldy_format,
+            image,
+            // Swapchain images don't have separately allocated memory — null sentinel
+            memory: vk::DeviceMemory::null(),
+            view,
+            staging_buffer: None,
+            staging_memory: None,
+            bindless_index: Some(bindless_index),
+            current_layout: vk::ImageLayout::GENERAL,
+        },
+    );
+
+    tracing::debug!(
+        "Registered surface texture {} ({}x{}, bindless={})",
+        handle,
+        width,
+        height,
+        bindless_index,
+    );
+
+    Ok(handle)
+}
+
+/// Unregister a transient surface texture.
+///
+/// Removes the TextureState, destroys the image view, and unregisters from
+/// the bindless resource registry. Does NOT destroy the VkImage (owned by the
+/// swapchain).
+fn unregister_surface_texture(
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    tex_handle: TextureHandle,
+) {
+    if let Some(tex_state) = textures.remove(&tex_handle) {
+        if let Some(device) = devices.get_mut(&tex_state.device_handle) {
+            device.resource_registry.unregister_texture(tex_handle);
+
+            // Destroy the image view we created in register_surface_texture.
+            // The VkImage itself belongs to the swapchain — do NOT destroy it.
+            unsafe {
+                device.device.destroy_image_view(tex_state.view, None);
+            }
+        }
+        tracing::debug!("Unregistered surface texture {}", tex_handle);
+    }
 }

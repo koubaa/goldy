@@ -372,7 +372,7 @@ impl WindowState {
         }
 
         frame.render(encoder)?;
-        self.surface.present(frame)?;
+        frame.present()?;
 
         self.vertex_buffers.push(vertex_buffer);
         Ok(())
