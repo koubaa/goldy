@@ -83,7 +83,7 @@ fn make_device() -> goldy::Device {
     // When running on headless CI with WARP enabled, prefer the explicit WARP adapter
     // over the Microsoft Basic Render Driver (MSBR). MSBR lacks DXGI_ADAPTER_FLAG_SOFTWARE
     // on some CI runners so it's misclassified as DiscreteGpu, but its D3D12 compute
-    // implementation faults silently, causing Signal() to AV after readback.
+    // implementation faults silently (e.g. Signal AV after GPU work).
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     if std::env::var("GOLDY_DX12_ALLOW_WARP")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
