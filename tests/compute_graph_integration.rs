@@ -79,6 +79,20 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 fn make_device() -> goldy::Device {
     let instance = goldy::Instance::new().expect("Failed to create instance");
+
+    // When running on headless CI with WARP enabled, prefer the explicit WARP adapter
+    // over the Microsoft Basic Render Driver (MSBR). MSBR lacks DXGI_ADAPTER_FLAG_SOFTWARE
+    // on some CI runners so it's misclassified as DiscreteGpu, but its D3D12 compute
+    // implementation faults silently (e.g. Signal AV after GPU work).
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    if std::env::var("GOLDY_DX12_ALLOW_WARP")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        if let Ok(dev) = instance.create_device_for_adapter(goldy::WARP_ADAPTER_ID) {
+            return dev;
+        }
+    }
+
     instance
         .create_device(goldy::DeviceType::DiscreteGpu)
         .or_else(|_| instance.create_device(goldy::DeviceType::IntegratedGpu))

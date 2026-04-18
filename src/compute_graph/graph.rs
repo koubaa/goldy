@@ -1,9 +1,9 @@
 //! `ComputeGraph` — Tier 1: interpreted, dynamic compute graph.
 
 use super::analysis;
-use super::ir::{GraphIR, GraphNode, NodeAccess, ResourceBinding};
+use super::ir::{DispatchKind, GraphIR, GraphNode, NodeAccess, ResourceBinding};
 use super::ResourceId;
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
 use crate::gpu_future::GpuFuture;
@@ -55,7 +55,7 @@ impl ComputeGraph {
                 pipeline: pipeline.handle,
                 bindings: Vec::new(),
                 push_constants: Vec::new(),
-                workgroups: (0, 0, 0),
+                dispatch: DispatchKind::Direct { x: 0, y: 0, z: 0 },
             },
         }
     }
@@ -120,6 +120,18 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
+    /// Declare that this node accesses a buffer view with the given logical access.
+    ///
+    /// Uses the view's parent buffer handle for dependency tracking, since
+    /// multiple views of the same pool share one backing allocation.
+    pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
+        self.node.bindings.push(ResourceBinding {
+            resource: ResourceId::Buffer(view.parent_handle()),
+            access,
+        });
+        self
+    }
+
     /// Declare that this node accesses a texture with the given logical access.
     pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
         self.node.bindings.push(ResourceBinding {
@@ -135,9 +147,18 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    /// Finalize the node with the given workgroup dimensions.
+    /// Finalize the node with fixed workgroup dimensions.
     pub fn dispatch(mut self, x: u32, y: u32, z: u32) {
-        self.node.workgroups = (x, y, z);
+        self.node.dispatch = DispatchKind::Direct { x, y, z };
+        self.graph.ir.nodes.push(self.node);
+    }
+
+    /// Finalize the node with indirect dispatch (dimensions read from `buf` at `offset`).
+    pub fn dispatch_indirect(mut self, buf: &Buffer, offset: u64) {
+        self.node.dispatch = DispatchKind::Indirect {
+            buffer: buf.handle,
+            offset,
+        };
         self.graph.ir.nodes.push(self.node);
     }
 }

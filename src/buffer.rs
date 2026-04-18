@@ -273,6 +273,11 @@ impl BufferView {
         backend.buffer_bindless_srv_index(self.handle)
     }
 
+    /// Get the handle of the backing buffer that owns this view's memory.
+    pub fn parent_handle(&self) -> BufferHandle {
+        self.parent_handle
+    }
+
     /// Get the view's offset within the parent buffer in bytes.
     pub fn offset(&self) -> u64 {
         self.offset
