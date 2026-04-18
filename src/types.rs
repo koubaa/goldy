@@ -143,6 +143,133 @@ pub enum DataAccess {
     Broadcast,
 }
 
+/// Category of a bindless descriptor slot.
+///
+/// Goldy's bindless argument buffers / descriptor heaps are organized into
+/// separate pools per access pattern. A resource's bindless index is only
+/// meaningful relative to its category — e.g. a `Scattered` slot #3 and a
+/// `Broadcast` slot #3 refer to different physical entries on Metal
+/// (`storageBuffers[3]` vs `uniformBuffers[3]`) even though the `u32`
+/// indices are identical.
+///
+/// Capturing the category alongside the index lets the CPU API and the
+/// shader-side `goldy_exp` access functions be type-checked against each
+/// other — see [`BindlessHandle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BindlessCategory {
+    /// Storage-buffer slot. Consumed by `goldy_dyn_scattered<T>` / `goldy_dyn_buf_ro<T>`
+    /// (both shader functions index the same pool).
+    Scattered,
+    /// Uniform / constant-buffer slot. Consumed by `goldy_dyn_broadcast<T>`.
+    Broadcast,
+    /// Storage-image (writable texture) slot. Consumed by `goldy_dyn_direct_spatial<T>`.
+    StorageImage,
+    /// Sampled-texture slot. Consumed by `goldy_dyn_interpolated<T>`.
+    Texture,
+    /// Sampler slot. Consumed by `goldy_dyn_filter`.
+    Sampler,
+}
+
+impl BindlessCategory {
+    /// Short human-readable name for diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            BindlessCategory::Scattered => "scattered",
+            BindlessCategory::Broadcast => "broadcast",
+            BindlessCategory::StorageImage => "storage_image",
+            BindlessCategory::Texture => "texture",
+            BindlessCategory::Sampler => "sampler",
+        }
+    }
+
+    /// True if this handle can satisfy a shader slot declared as `expected`.
+    ///
+    /// `Scattered` and `Broadcast` are strictly distinct (different pools on Metal,
+    /// different descriptor types on Vulkan/DX12). `StorageImage`, `Texture`, and
+    /// `Sampler` are likewise non-interchangeable.
+    pub fn is_compatible_with(self, expected: BindlessCategory) -> bool {
+        self == expected
+    }
+}
+
+impl From<DataAccess> for BindlessCategory {
+    fn from(access: DataAccess) -> Self {
+        match access {
+            DataAccess::Scattered => BindlessCategory::Scattered,
+            DataAccess::Broadcast => BindlessCategory::Broadcast,
+        }
+    }
+}
+
+impl From<SpatialAccess> for BindlessCategory {
+    fn from(access: SpatialAccess) -> Self {
+        match access {
+            SpatialAccess::Interpolated => BindlessCategory::Texture,
+            SpatialAccess::Direct => BindlessCategory::StorageImage,
+        }
+    }
+}
+
+/// A typed bindless descriptor handle: `(category, index)`.
+///
+/// Goldy's resources (`Buffer`, `Texture`, `Sampler`) expose `bindless_handle()`
+/// which returns one of these. Push-constant setters that accept `BindlessHandle`
+/// can be validated against the shader's reflection: a
+/// [`BindlessCategory::Broadcast`] handle bound to a slot the shader reads
+/// through `goldy_dyn_buf_ro` (`Scattered`) is a type error caught at dispatch
+/// time rather than silently producing a garbage read.
+///
+/// The raw u32 index is recoverable via [`BindlessHandle::index`] — the typed
+/// wrapper is zero-cost at runtime when validation is disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BindlessHandle {
+    pub category: BindlessCategory,
+    pub index: u32,
+}
+
+impl BindlessHandle {
+    /// Build a handle from a category and raw index.
+    pub const fn new(category: BindlessCategory, index: u32) -> Self {
+        Self { category, index }
+    }
+
+    /// Raw descriptor index for this handle.
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Category this handle was tagged with at creation.
+    pub const fn category(self) -> BindlessCategory {
+        self.category
+    }
+}
+
+/// Presentation mode controlling how frames are displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PresentMode {
+    /// Vsync: wait for display refresh. No tearing, capped at display Hz.
+    /// Maps to Metal `displaySyncEnabled=YES`, Vulkan `FIFO`, DX12 `Present(1)`.
+    Fifo,
+    /// Triple-buffered: latest frame queued, older frames dropped. Low latency + no tearing.
+    /// Maps to Vulkan `MAILBOX`. Falls back to Fifo on Metal and some DX12 configurations.
+    Mailbox,
+    /// No sync: present immediately. May tear. Maximum throughput for benchmarks.
+    /// Maps to Metal `displaySyncEnabled=NO`, Vulkan `IMMEDIATE`, DX12 `Present(0)`.
+    Immediate,
+    /// Let Goldy choose (Mailbox if available, then Fifo).
+    #[default]
+    Auto,
+}
+
+/// Configuration for surface creation.
+#[derive(Debug, Clone, Default)]
+pub struct SurfaceConfig {
+    /// Presentation mode (vsync strategy).
+    pub present_mode: PresentMode,
+    /// Optional depth buffer for 3D rendering.
+    pub depth_format: Option<DepthFormat>,
+}
+
 /// Spatial access pattern for textures/images.
 ///
 /// This describes how the texture will be accessed:

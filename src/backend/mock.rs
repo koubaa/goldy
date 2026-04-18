@@ -122,6 +122,7 @@ struct MockSurface {
     height: u32,
     format: TextureFormat,
     next_image: SwapchainImageHandle,
+    current_texture_handle: Option<TextureHandle>,
 }
 
 impl MockBackend {
@@ -601,6 +602,7 @@ impl GpuBackend for MockBackend {
                 height: 600,
                 format: self.default_surface_format, // Use configured format
                 next_image: 1,
+                current_texture_handle: None,
             },
         );
 
@@ -619,7 +621,37 @@ impl GpuBackend for MockBackend {
 
         let image = surf.next_image;
         surf.next_image += 1;
+
+        // Create a mock texture for the surface frame
+        let tex_handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
+        let bindless_index = self.next_bindless_index;
+        self.next_bindless_index += 1;
+        let width = surf.width;
+        let height = surf.height;
+        let format = surf.format;
+        let device_handle = surf.device_handle;
+        surf.current_texture_handle = Some(tex_handle);
+
+        self.textures.insert(
+            tex_handle,
+            MockTexture {
+                device_handle,
+                width,
+                height,
+                format,
+                data: vec![0; (width * height * format.bytes_per_pixel()) as usize],
+                bindless_index,
+            },
+        );
+
         Ok(image)
+    }
+
+    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
+        self.surfaces
+            .get(&surface)
+            .and_then(|s| s.current_texture_handle)
     }
 
     fn surface_render(
@@ -641,8 +673,14 @@ impl GpuBackend for MockBackend {
         surface: SurfaceHandle,
         _image: SwapchainImageHandle,
     ) -> Result<()> {
-        if !self.surfaces.contains_key(&surface) {
-            anyhow::bail!("Invalid surface handle");
+        let surf = self
+            .surfaces
+            .get_mut(&surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
+
+        // Clean up the transient surface texture
+        if let Some(tex_handle) = surf.current_texture_handle.take() {
+            self.textures.remove(&tex_handle);
         }
 
         self.surface_present_count += 1;

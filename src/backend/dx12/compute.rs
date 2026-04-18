@@ -19,6 +19,14 @@ pub(super) fn create(
     let cs_bytecode =
         shader::ensure_stage_compiled(state, compute_shader, crate::slang::SlangStage::Compute)?;
 
+    let push_constant_categories = state
+        .shaders
+        .get(&compute_shader)
+        .and_then(|s| s.reflection.as_ref())
+        .map(|r| r.push_constant_categories.clone())
+        .unwrap_or_default();
+    let shader_debug_name = format!("compute_shader#{compute_shader}");
+
     let logical_device = state
         .devices
         .get(&device_handle)
@@ -59,6 +67,8 @@ pub(super) fn create(
             pipeline_state,
             root_signature,
             parameter_block_layouts: Vec::new(),
+            push_constant_categories,
+            shader_debug_name,
         },
     );
 
@@ -144,8 +154,7 @@ pub(super) fn submit(
         ]);
     }
 
-    // Track current pipeline (reserved for future use)
-    let mut _current_pipeline_handle: Option<ComputePipelineHandle> = None;
+    let mut current_pipeline_handle: Option<ComputePipelineHandle> = None;
 
     // Process commands
     for command in commands {
@@ -156,7 +165,7 @@ pub(super) fn submit(
                         command_list.SetComputeRootSignature(&pipeline_state.root_signature);
                         command_list.SetPipelineState(&pipeline_state.pipeline_state);
                     }
-                    _current_pipeline_handle = Some(*handle);
+                    current_pipeline_handle = Some(*handle);
                 }
             }
             ComputeCommand::SetPushConstants { buffers } => {
@@ -205,6 +214,34 @@ pub(super) fn submit(
                         break;
                     }
                     indices.indices[i] = idx;
+                }
+                unsafe {
+                    command_list.SetComputeRoot32BitConstants(
+                        0,
+                        types::MAX_ROOT_CONSTANT_INDICES as u32,
+                        indices.indices.as_ptr() as *const std::ffi::c_void,
+                        0,
+                    );
+                }
+            }
+            ComputeCommand::SetPushConstantsTyped {
+                handles: typed_handles,
+            } => {
+                if let Some(pipeline) =
+                    current_pipeline_handle.and_then(|h| state.compute_pipelines.get(&h))
+                {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
+                let mut indices = types::BindlessIndices::default();
+                for (i, handle) in typed_handles.iter().enumerate() {
+                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                        break;
+                    }
+                    indices.indices[i] = handle.index();
                 }
                 unsafe {
                     command_list.SetComputeRoot32BitConstants(

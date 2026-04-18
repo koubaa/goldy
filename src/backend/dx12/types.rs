@@ -254,6 +254,11 @@ pub(crate) struct PipelineState {
     pub topology: crate::types::PrimitiveTopology,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
+    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
+    /// calls in the bound shader(s). Empty disables validation.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
@@ -264,6 +269,11 @@ pub(crate) struct ComputePipelineState {
     pub root_signature: Direct3D12::ID3D12RootSignature,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
+    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
+    /// calls in the bound compute shader. Empty disables validation.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    pub shader_debug_name: String,
 }
 
 /// GPU render target state with optional staging for CPU readback.
@@ -347,6 +357,10 @@ pub(crate) struct SurfaceState {
     pub current_image_index: Option<u32>,
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
+    /// Transient texture handle for the currently acquired back buffer,
+    /// registered in the bindless descriptor heap as a UAV so compute shaders
+    /// can write directly to the swapchain image.
+    pub current_texture_handle: Option<super::TextureHandle>,
 }
 
 /// Consolidated DX12 backend state.

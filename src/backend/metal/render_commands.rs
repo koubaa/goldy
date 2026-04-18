@@ -9,6 +9,7 @@ use super::types::{
 use super::utils::index_format_to_mtl;
 use crate::types::IndexFormat;
 use ::metal as mtl;
+use anyhow::Result;
 use mtl::MTLPrimitiveType;
 use std::collections::HashMap;
 
@@ -18,9 +19,10 @@ pub(super) fn record(
     commands: &[RenderCommand],
     pipelines: &HashMap<PipelineHandle, PipelineState>,
     buffers: &HashMap<BufferHandle, super::types::BufferState>,
-) {
+) -> Result<()> {
     let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
     let mut current_primitive_type = MTLPrimitiveType::Triangle;
+    let mut current_pipeline: Option<&PipelineState> = None;
 
     for cmd in commands {
         match cmd {
@@ -32,6 +34,7 @@ pub(super) fn record(
                     if let Some(ds) = &pipeline.depth_stencil {
                         encoder.set_depth_stencil_state(ds);
                     }
+                    current_pipeline = Some(pipeline);
                 }
             }
             RenderCommand::SetVertexBuffer {
@@ -107,6 +110,43 @@ pub(super) fn record(
                     indices_bytes.as_ptr() as *const _,
                 );
             }
+            RenderCommand::SetPushConstantsTyped {
+                handles: typed_handles,
+            } => {
+                let (expectations, debug_name): (&[Option<crate::types::BindlessCategory>], &str) =
+                    match current_pipeline {
+                        Some(p) => (&p.push_constant_categories, p.shader_debug_name.as_str()),
+                        None => (&[], "<no pipeline bound>"),
+                    };
+                super::super::validate_typed_push_constants(
+                    typed_handles,
+                    expectations,
+                    debug_name,
+                )?;
+                let mut indices = BindlessIndices::default();
+                for (i, handle) in typed_handles.iter().enumerate() {
+                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                        break;
+                    }
+                    indices.indices[i] = handle.index();
+                }
+                let indices_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        &indices as *const _ as *const u8,
+                        std::mem::size_of::<BindlessIndices>(),
+                    )
+                };
+                encoder.set_vertex_bytes(
+                    PUSH_CONSTANTS_SLOT,
+                    indices_bytes.len() as u64,
+                    indices_bytes.as_ptr() as *const _,
+                );
+                encoder.set_fragment_bytes(
+                    PUSH_CONSTANTS_SLOT,
+                    indices_bytes.len() as u64,
+                    indices_bytes.as_ptr() as *const _,
+                );
+            }
             RenderCommand::Draw {
                 vertex_count,
                 instance_count,
@@ -150,6 +190,7 @@ pub(super) fn record(
             }
         }
     }
+    Ok(())
 }
 
 /// Create a render pass descriptor for the given texture.

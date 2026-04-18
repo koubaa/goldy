@@ -41,16 +41,17 @@ fn compile_stage_with_reflection(
 ) -> Result<(Library, Option<crate::slang::ShaderReflection>)> {
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
 
-    let result = slang_compiler
-        .compile_bindless_with_reflection_and_defines(
-            slang_source,
-            ShaderTarget::Metal,
-            &[(entry_point, stage)],
-            &search_path_refs,
-            extra_defines,
-            layout_checks,
-            optimization_level,
-        )
+    let compile_outcome = slang_compiler.compile_bindless_with_reflection_and_defines(
+        slang_source,
+        ShaderTarget::Metal,
+        &[(entry_point, stage)],
+        &search_path_refs,
+        extra_defines,
+        layout_checks,
+        optimization_level,
+    );
+
+    let result = compile_outcome
         .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
 
     if !result.reflection.parameter_blocks.is_empty() {

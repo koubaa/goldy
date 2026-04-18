@@ -191,7 +191,7 @@ impl App {
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
+        frame.present()?;
 
         // Keep this frame's buffers alive
         self.frame_buffers.push(channel_buffers);

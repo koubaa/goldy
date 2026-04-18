@@ -118,7 +118,7 @@ impl App {
         frame.render(encoder)?;
 
         // Present to screen
-        surface.present(frame)?;
+        frame.present()?;
 
         self.frame_count += 1;
         Ok(())

@@ -169,6 +169,10 @@ path = "examples/game_of_life.rs"
 name = "depth_quads"
 path = "examples/depth_quads.rs"
 
+[[example]]
+name = "compute_to_surface"
+path = "examples/compute_to_surface.rs"
+
 [[bin]]
 name = "update-screenshots"
 path = "tools/update_screenshots.rs"

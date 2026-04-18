@@ -32,6 +32,35 @@ use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 
+/// Collect per-push-constant-slot categories for a render pipeline by looking
+/// up reflection data on the bound vertex/fragment shaders. Fragment shader
+/// expectations take precedence (that's where `goldy_dyn_*` is typically used);
+/// vertex shader data is used as a fallback when fragment has none.
+fn render_push_constant_expectations(
+    shaders: &HashMap<ShaderHandle, ShaderState>,
+    vertex_shader: ShaderHandle,
+    fragment_shader: ShaderHandle,
+) -> (Vec<Option<crate::types::BindlessCategory>>, String) {
+    let fs_cats = shaders
+        .get(&fragment_shader)
+        .and_then(|s| s.reflection.as_ref())
+        .map(|r| r.push_constant_categories.clone())
+        .unwrap_or_default();
+    let cats = if !fs_cats.is_empty() {
+        fs_cats
+    } else {
+        shaders
+            .get(&vertex_shader)
+            .and_then(|s| s.reflection.as_ref())
+            .map(|r| r.push_constant_categories.clone())
+            .unwrap_or_default()
+    };
+    (
+        cats,
+        format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})"),
+    )
+}
+
 /// Vulkan backend.
 pub struct VulkanBackend {
     state: VulkanState,
@@ -392,6 +421,9 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
+        let (push_constant_categories, shader_debug_name) =
+            render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
+
         pipeline::create(
             &self.state.devices,
             &mut self.state.pipelines,
@@ -402,6 +434,8 @@ impl GpuBackend for VulkanBackend {
             vertex_layout,
             topology,
             target_format,
+            push_constant_categories,
+            shader_debug_name,
         )
     }
 
@@ -456,7 +490,7 @@ impl GpuBackend for VulkanBackend {
                     &self.state.pipelines,
                     &self.state.buffers,
                     current_pipeline,
-                );
+                )
             },
         )
     }
@@ -495,8 +529,9 @@ impl GpuBackend for VulkanBackend {
         surface::destroy(
             &self.state.entry,
             &self.state.instance,
-            &self.state.devices,
+            &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
             surface_handle,
         );
     }
@@ -506,8 +541,14 @@ impl GpuBackend for VulkanBackend {
             &self.state.instance,
             &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
+            &mut self.state.next_texture_handle,
             surface_handle,
         )
+    }
+
+    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
+        surface::frame_texture(&self.state.surfaces, surface)
     }
 
     fn surface_render(
@@ -530,7 +571,7 @@ impl GpuBackend for VulkanBackend {
                     &self.state.pipelines,
                     &self.state.buffers,
                     current_pipeline,
-                );
+                )
             },
         )
     }
@@ -544,6 +585,7 @@ impl GpuBackend for VulkanBackend {
             &self.state.instance,
             &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
             surface_handle,
             _image,
         )
@@ -590,6 +632,9 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
+        let (push_constant_categories, shader_debug_name) =
+            render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
+
         pipeline::create_with_depth(
             &self.state.devices,
             &mut self.state.pipelines,
@@ -601,6 +646,8 @@ impl GpuBackend for VulkanBackend {
             topology,
             target_format,
             depth_stencil,
+            push_constant_categories,
+            shader_debug_name,
         )
     }
 
@@ -749,12 +796,28 @@ impl GpuBackend for VulkanBackend {
         let cs_module =
             self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
+        let (push_constant_categories, shader_debug_name) = self
+            .state
+            .shaders
+            .get(&compute_shader)
+            .map(|s| {
+                let cats = s
+                    .reflection
+                    .as_ref()
+                    .map(|r| r.push_constant_categories.clone())
+                    .unwrap_or_default();
+                (cats, format!("compute_shader#{compute_shader}"))
+            })
+            .unwrap_or_default();
+
         compute::create(
             &self.state.devices,
             &mut self.state.compute_pipelines,
             &mut self.state.next_compute_pipeline_handle,
             device_handle,
             cs_module,
+            push_constant_categories,
+            shader_debug_name,
         )
     }
 

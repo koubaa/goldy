@@ -122,7 +122,7 @@ impl App {
         }
 
         frame.render(encoder)?;
-        surface.present(frame)?;
+        frame.present()?;
 
         Ok(())
     }

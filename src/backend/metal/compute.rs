@@ -48,6 +48,12 @@ pub(super) fn create(
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("Failed to create compute pipeline: {}", e))?;
 
+    let push_constant_categories = shader
+        .reflection
+        .as_ref()
+        .map(|r| r.push_constant_categories.clone())
+        .unwrap_or_default();
+
     let handle = state.next_compute_pipeline_handle;
     state.next_compute_pipeline_handle += 1;
 
@@ -57,6 +63,8 @@ pub(super) fn create(
             device_handle,
             pipeline,
             workgroup_size,
+            push_constant_categories,
+            shader_debug_name: "cs_main".to_string(),
         },
     );
 
@@ -94,6 +102,24 @@ fn begin_compute_encoder<'a>(
                 &buf_state.buffer,
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
             );
+        }
+    }
+    // Declare textures resident for indirect access through the argument buffer.
+    //
+    // Heap-allocated textures are already covered by `use_heaps_for_compute`,
+    // but swapchain drawables (CAMetalLayer-owned `MTLTexture`s registered
+    // transiently in `state.textures`) are NOT in any Goldy-owned heap, so
+    // Metal Tier-2 bindless will read them as unresident unless we explicitly
+    // call `use_resource` on them before dispatch. Calling `use_resource` on
+    // already-heap-resident textures is safe and idempotent.
+    for tex_state in state.textures.values() {
+        if tex_state.device_handle == device_handle {
+            let usage = if tex_state.is_storage_image {
+                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write
+            } else {
+                mtl::MTLResourceUsage::Read
+            };
+            encoder.use_resource(&tex_state.texture, usage);
         }
     }
     encoder.set_buffer(0, Some(&logical_device.argument_buffer), 0);
@@ -176,6 +202,34 @@ fn record_commands_to_buffer(
                         break;
                     }
                     indices.indices[i] = idx;
+                }
+                let indices_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        &indices as *const _ as *const u8,
+                        std::mem::size_of::<BindlessIndices>(),
+                    )
+                };
+                encoder.unwrap().set_bytes(
+                    PUSH_CONSTANTS_SLOT,
+                    indices_bytes.len() as u64,
+                    indices_bytes.as_ptr() as *const _,
+                );
+            }
+            ComputeCommand::SetPushConstantsTyped { handles } => {
+                ensure_compute!();
+                let pipeline = current_pipeline
+                    .context("SetPushConstantsTyped without a bound compute pipeline")?;
+                super::super::validate_typed_push_constants(
+                    handles,
+                    &pipeline.push_constant_categories,
+                    &pipeline.shader_debug_name,
+                )?;
+                let mut indices = BindlessIndices::default();
+                for (i, handle) in handles.iter().enumerate() {
+                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                        break;
+                    }
+                    indices.indices[i] = handle.index();
                 }
                 let indices_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(

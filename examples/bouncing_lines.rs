@@ -178,7 +178,7 @@ impl RenderState {
         }
 
         frame.render(encoder)?;
-        self.surface.present(frame)?;
+        frame.present()?;
 
         self.window.request_redraw();
         Ok(())

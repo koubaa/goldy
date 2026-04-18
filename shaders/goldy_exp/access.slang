@@ -157,8 +157,10 @@ GoldyDynamicSlots __goldy_get_dynamic() {
 #define GOLDY_DECLARE_DYNAMIC static const bool __goldy_dynamic_decl = true
 
 #elif defined(__METAL__)
-// Metal: Push constants for runtime slot indices
-[[vk::push_constant]] ConstantBuffer<GoldyDynamicSlots> gGoldyDynamic;
+// Metal: dynamic slot indices from `set_bytes` on buffer index 1 (see Rust PUSH_CONSTANTS_SLOT).
+// Do not use [[vk::push_constant]] here — it is invalid on the Metal target.
+[[buffer(1)]]
+ConstantBuffer<GoldyDynamicSlots> gGoldyDynamic;
 // Macro is no-op - gGoldyDynamic is already declared
 #define GOLDY_DECLARE_DYNAMIC static const bool __goldy_dynamic_decl = true
 #endif

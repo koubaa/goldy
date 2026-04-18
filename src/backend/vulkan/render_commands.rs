@@ -17,7 +17,7 @@ pub(super) fn record(
     pipelines: &std::collections::HashMap<PipelineHandle, types::PipelineState>,
     buffers: &std::collections::HashMap<BufferHandle, types::BufferState>,
     current_pipeline: &mut Option<PipelineHandle>,
-) {
+) -> anyhow::Result<()> {
     for command in commands {
         match command {
             RenderCommand::Clear(_) => {
@@ -115,6 +115,33 @@ pub(super) fn record(
                     }
                 }
             }
+            RenderCommand::SetPushConstantsTyped {
+                handles: typed_handles,
+            } => {
+                if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                    let mut indices = BindlessIndices::default();
+                    for (i, handle) in typed_handles.iter().enumerate() {
+                        if i >= MAX_PUSH_CONSTANT_INDICES {
+                            break;
+                        }
+                        indices.indices[i] = handle.index();
+                    }
+                    unsafe {
+                        logical_device.device.cmd_push_constants(
+                            cmd,
+                            pipeline.layout,
+                            vk::ShaderStageFlags::ALL,
+                            0,
+                            bytemuck::bytes_of(&indices),
+                        );
+                    }
+                }
+            }
             RenderCommand::SetIndexBuffer {
                 buffer,
                 offset,
@@ -163,4 +190,5 @@ pub(super) fn record(
             },
         }
     }
+    Ok(())
 }

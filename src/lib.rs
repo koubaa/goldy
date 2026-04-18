@@ -53,6 +53,7 @@ pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, Struc
 pub use surface::{Surface, SurfaceFrame};
 pub use texture::Texture;
 pub use types::*;
+pub use types::{PresentMode, SurfaceConfig};
 
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub use backend::dx12::WARP_ADAPTER_ID;

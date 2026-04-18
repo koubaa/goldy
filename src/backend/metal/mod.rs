@@ -391,6 +391,10 @@ impl GpuBackend for MetalBackend {
         surface::acquire(&mut self.state, surface)
     }
 
+    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
+        surface::frame_texture(&self.state, surface)
+    }
+
     fn surface_render(
         &mut self,
         surface: SurfaceHandle,
@@ -418,6 +422,18 @@ impl GpuBackend for MetalBackend {
 
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat {
         surface::format(&self.state, surface)
+    }
+
+    fn surface_set_present_mode(
+        &mut self,
+        surface: SurfaceHandle,
+        mode: crate::types::PresentMode,
+    ) -> Result<()> {
+        surface::set_present_mode(&mut self.state, surface, mode)
+    }
+
+    fn surface_present_mode(&self, surface: SurfaceHandle) -> crate::types::PresentMode {
+        surface::present_mode(&self.state, surface)
     }
 
     fn create_compute_pipeline(

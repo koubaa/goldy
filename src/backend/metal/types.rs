@@ -341,6 +341,21 @@ pub(crate) struct ResourceRegistry {
     next_texture_index: u32,
     next_storage_image_index: u32,
     next_sampler_index: u32,
+    /// Free list of previously-released storage-image LOCAL indices.
+    ///
+    /// Populated by `release_storage_image_slot()` (used when a Surface is
+    /// destroyed). `register_storage_image()` / `reserve_storage_image_slot()`
+    /// pop from this list before bumping `next_storage_image_index`, so
+    /// transient bindless slots (per-frame swapchain drawables) don't leak
+    /// across the 64-slot storage-image window.
+    free_storage_image_slots: Vec<u32>,
+    /// Symmetric free list for sampled (Interpolated / `Texture2D`) slots.
+    ///
+    /// Populated by `release_texture_slot()` when a regular texture is
+    /// destroyed; `register_texture()` consults it before bumping
+    /// `next_texture_index`. Prevents slot exhaustion when textures are
+    /// created and destroyed repeatedly at runtime.
+    free_texture_slots: Vec<u32>,
     pub buffer_indices: HashMap<BufferHandle, u32>,
     pub texture_indices: HashMap<TextureHandle, u32>,
     pub sampler_indices: HashMap<SamplerHandle, u32>,
@@ -359,6 +374,8 @@ impl ResourceRegistry {
             next_storage_image_index: 3 * MAX_RESOURCES_PER_CATEGORY,
             // Samplers at indices 256-319, bytes 2048-2559
             next_sampler_index: 4 * MAX_RESOURCES_PER_CATEGORY,
+            free_storage_image_slots: Vec::new(),
+            free_texture_slots: Vec::new(),
             buffer_indices: HashMap::new(),
             texture_indices: HashMap::new(),
             sampler_indices: HashMap::new(),
@@ -393,12 +410,25 @@ impl ResourceRegistry {
 
     /// Register a sampled texture (Interpolated / Texture2D) — returns the LOCAL index (0-63).
     /// Use `texture_global_index()` to get the argument buffer encoding offset.
+    ///
+    /// Reuses a freed slot if available (see `release_texture_slot`).
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
-        let global_index = self.next_texture_index;
-        let local_index = global_index - 2 * MAX_RESOURCES_PER_CATEGORY;
-        self.next_texture_index += 1;
+        let local_index = if let Some(free) = self.free_texture_slots.pop() {
+            free
+        } else {
+            let global_index = self.next_texture_index;
+            let local = global_index - 2 * MAX_RESOURCES_PER_CATEGORY;
+            self.next_texture_index += 1;
+            local
+        };
         self.texture_indices.insert(handle, local_index);
         local_index
+    }
+
+    /// Return a sampled-texture LOCAL index to the free list so it can be
+    /// reused by a subsequent `register_texture`.
+    pub fn release_texture_slot(&mut self, local_index: u32) {
+        self.free_texture_slots.push(local_index);
     }
 
     /// Returns the global argument buffer index for a sampled texture.
@@ -408,11 +438,45 @@ impl ResourceRegistry {
 
     /// Register a storage image (Direct / RWTexture2D) — returns the LOCAL index (0-63).
     /// Use `storage_image_global_index()` to get the argument buffer encoding offset.
+    ///
+    /// Reuses a freed slot if available (see `release_storage_image_slot`).
     pub fn register_storage_image(&mut self, handle: TextureHandle) -> u32 {
+        let local_index = self.allocate_storage_image_local();
+        self.texture_indices.insert(handle, local_index);
+        local_index
+    }
+
+    /// Reserve a storage-image LOCAL index without binding it to a TextureHandle.
+    ///
+    /// Used for transient bindless slots that outlive any single `TextureHandle`
+    /// but belong to a long-lived owner (e.g. a `Surface` that re-encodes a
+    /// fresh drawable into the same slot every frame). The owner must release
+    /// the slot via [`Self::release_storage_image_slot`] when destroyed.
+    pub fn reserve_storage_image_slot(&mut self) -> u32 {
+        self.allocate_storage_image_local()
+    }
+
+    /// Associate a TextureHandle with a previously-reserved storage-image
+    /// LOCAL index so `texture_bindless_index()` / `Texture::bindless_index()`
+    /// resolves to the right slot. Does not bump any counters.
+    pub fn bind_storage_image_slot(&mut self, handle: TextureHandle, local_index: u32) {
+        self.texture_indices.insert(handle, local_index);
+    }
+
+    /// Return a storage-image LOCAL index to the free list so it can be
+    /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
+    pub fn release_storage_image_slot(&mut self, local_index: u32) {
+        self.free_storage_image_slots.push(local_index);
+    }
+
+    /// Pop a free slot if any, otherwise bump the monotonic counter.
+    fn allocate_storage_image_local(&mut self) -> u32 {
+        if let Some(local) = self.free_storage_image_slots.pop() {
+            return local;
+        }
         let global_index = self.next_storage_image_index;
         let local_index = global_index - 3 * MAX_RESOURCES_PER_CATEGORY;
         self.next_storage_image_index += 1;
-        self.texture_indices.insert(handle, local_index);
         local_index
     }
 
@@ -487,6 +551,11 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
+    /// Per-push-constant-slot category expected by the fragment/vertex shader,
+    /// inferred from `goldy_dyn_*(N)` calls. Empty disables validation.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
@@ -495,6 +564,14 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: MTLComputePipelineState,
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
+    /// Per-push-constant-slot category expected by the compute shader, inferred
+    /// from the shader's `goldy_dyn_*(N)` calls during Slang compile. Empty or
+    /// all-`None` disables validation. See
+    /// [`crate::slang::ShaderReflection::push_constant_categories`].
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    /// Defaults to `"cs_main"` for compute pipelines.
+    pub shader_debug_name: String,
 }
 
 /// GPU render target state with optional staging for CPU readback.
@@ -518,8 +595,17 @@ pub(crate) struct TextureState {
     pub height: u32,
     pub format: TextureFormat,
     pub texture: MTLTexture,
-    /// Index in the global argument buffer (always present — heap required).
+    /// LOCAL index (0..MAX_RESOURCES_PER_CATEGORY) in the texture category this
+    /// texture was registered in (`storageImages[]` when `is_storage_image`,
+    /// otherwise `textures[]`).
     pub arg_buffer_index: u32,
+    /// Which bindless region the `arg_buffer_index` belongs to; needed at
+    /// destroy time to release the slot back to the correct free list.
+    pub is_storage_image: bool,
+    /// When true, the slot is owned by a long-lived entity (e.g. a `Surface`
+    /// that re-encodes its drawable each frame) and should NOT be released
+    /// when this `TextureState` is dropped. The owner manages slot lifetime.
+    pub slot_owned_externally: bool,
 }
 
 /// GPU sampler state.
@@ -548,6 +634,20 @@ pub(crate) struct SurfaceState {
     pub current_frame: usize,
     /// The CAMetalLayer (stored as raw pointer for objc interop)
     pub layer: *mut std::ffi::c_void,
+    /// The currently acquired CAMetalDrawable (set during acquire, cleared on present)
+    pub current_drawable: Option<*mut std::ffi::c_void>,
+    /// Texture handle for the current drawable's texture (registered for bindless access)
+    pub current_texture_handle: Option<TextureHandle>,
+    /// Persistent bindless storage-image LOCAL index reserved at surface create
+    /// and re-encoded with the current drawable's `MTLTexture` on every `acquire`.
+    ///
+    /// This avoids leaking a fresh slot per frame (the storage-image window is
+    /// only `MAX_RESOURCES_PER_CATEGORY` = 64 slots, so a per-frame allocation
+    /// would exhaust it in ~1 second at 60 fps). Released back to the device's
+    /// `ResourceRegistry` free list when the surface is destroyed.
+    pub bindless_storage_slot: u32,
+    /// Current present mode
+    pub present_mode: crate::types::PresentMode,
 }
 
 // Safety: Metal objects are thread-safe when properly synchronized

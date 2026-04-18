@@ -218,20 +218,20 @@ impl RenderState {
 
                 // Pass buffer indices via push constants.
                 // Order matters: [current_state, next_state] matching shader slots.
-                let (idx_read, idx_write) = if self.use_buffer_a {
+                let (read_handle, write_handle) = if self.use_buffer_a {
                     // A -> B: read from A, write to B
                     (
-                        self.view_a.bindless_index().unwrap(),
-                        self.view_b.bindless_index().unwrap(),
+                        self.view_a.bindless_handle().unwrap(),
+                        self.view_b.bindless_handle().unwrap(),
                     )
                 } else {
                     // B -> A: read from B, write to A
                     (
-                        self.view_b.bindless_index().unwrap(),
-                        self.view_a.bindless_index().unwrap(),
+                        self.view_b.bindless_handle().unwrap(),
+                        self.view_a.bindless_handle().unwrap(),
                     )
                 };
-                pass.set_push_constants_raw(&[idx_read, idx_write]);
+                pass.set_push_constants_typed(&[read_handle, write_handle]);
 
                 // Dispatch workgroups (8x8 threads per group)
                 let workgroups_x = GRID_WIDTH.div_ceil(8);
@@ -255,19 +255,19 @@ impl RenderState {
             pass.set_pipeline(&self.render_pipeline);
 
             // Read from the view that is now "current" (after the ping-pong swap).
-            let idx_current = if self.use_buffer_a {
-                self.view_a.bindless_index().unwrap()
+            let current_handle = if self.use_buffer_a {
+                self.view_a.bindless_handle().unwrap()
             } else {
-                self.view_b.bindless_index().unwrap()
+                self.view_b.bindless_handle().unwrap()
             };
-            pass.set_push_constants_raw(&[idx_current]);
+            pass.set_push_constants_typed(&[current_handle]);
 
             // Draw fullscreen triangle
             pass.draw(0..3, 0..1);
         }
 
         frame.render(encoder)?;
-        self.surface.present(frame)?;
+        frame.present()?;
 
         self.window.request_redraw();
 

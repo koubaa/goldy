@@ -5,7 +5,7 @@
 
 use crate::backend::{GpuBackend, SamplerHandle};
 use crate::device::Device;
-use crate::types::SamplerDesc;
+use crate::types::{BindlessCategory, BindlessHandle, SamplerDesc};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -132,9 +132,20 @@ impl Sampler {
     ///
     /// Returns `Some(index)` if this sampler is registered.
     /// Returns `None` otherwise.
+    ///
+    /// **Prefer [`Sampler::bindless_handle`]** for new code; the typed handle
+    /// lets push-constant setters validate that a slot expected to be a sampler
+    /// (via `goldy_dyn_filter`) is actually bound to a `Sampler`.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.sampler_bindless_index(self.handle)
+    }
+
+    /// Get this sampler's typed bindless handle
+    /// ([`BindlessCategory::Sampler`]).
+    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
+        self.bindless_index()
+            .map(|i| BindlessHandle::new(BindlessCategory::Sampler, i))
     }
 }
 

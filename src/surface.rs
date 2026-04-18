@@ -3,7 +3,7 @@
 //! This module provides zero-copy GPU presentation to windows.
 //! Use `Surface` to render directly to a window without CPU readback.
 //!
-//! # Example
+//! # Render-command path (graphics pipelines)
 //!
 //! ```rust,no_run
 //! use goldy::{Instance, DeviceType, Surface, TextureFormat, CommandEncoder, Color};
@@ -25,15 +25,26 @@
 //! }
 //!
 //! frame.render(encoder)?;
-//! surface.present(frame)?;
+//! frame.present()?;
 //! # Ok(())
 //! # }
+//! ```
+//!
+//! # Compute path (e.g. Ekrano)
+//!
+//! ```rust,no_run,ignore
+//! let frame = surface.acquire()?;
+//! // frame.texture() returns the swapchain image as a Texture that can be
+//! // used with compute passes, the compute graph, or render_to_texture.
+//! renderer.render_to_texture(&device, &scene, frame.texture(), &params)?;
+//! frame.present()?;
 //! ```
 
 use crate::backend::{GpuBackend, SurfaceHandle, SwapchainImageHandle};
 use crate::device::Device;
 use crate::encoder::CommandEncoder;
-use crate::types::TextureFormat;
+use crate::texture::Texture;
+use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::{Arc, Mutex};
@@ -52,41 +63,34 @@ pub struct Surface {
 
 /// A frame acquired from a surface, ready for rendering.
 ///
-/// When you're done rendering to this frame, call `Surface::present()`
-/// to display it.
+/// After acquiring a frame, you can either:
+/// - Use `render()` to execute render commands (graphics pipeline path)
+/// - Use `texture()` to get the frame's texture for compute or external rendering
+///
+/// When done, call `present()` to display the frame. Dropping without
+/// presenting will clean up resources but the frame won't be shown.
 pub struct SurfaceFrame {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     surface_handle: SurfaceHandle,
     image_handle: SwapchainImageHandle,
+    texture: Option<Texture>,
     width: u32,
     height: u32,
+    presented: bool,
 }
 
 impl Surface {
     /// Create a new surface for the given window.
     ///
-    /// # Arguments
-    ///
-    /// * `device` - The GPU device to use for rendering
-    /// * `window` - The window to present to (must implement `HasWindowHandle + HasDisplayHandle`)
-    ///
-    /// # Platform Support
-    ///
-    /// - **Windows**: Uses `VK_KHR_win32_surface`
-    /// - **Linux**: Uses `VK_KHR_wayland_surface` (X11 not supported)
-    /// - **macOS**: Uses native Metal with `CAMetalLayer`
+    /// Uses default configuration (Auto present mode, no depth buffer).
     pub fn new<W>(device: &Device, window: &W) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
-        Self::new_with_depth(device, window, None)
+        Self::new_with_config(device, window, SurfaceConfig::default())
     }
 
     /// Create a new surface with an optional depth buffer for 3D rendering.
-    ///
-    /// When `depth_format` is `Some`, a depth buffer is created and depth testing
-    /// is enabled for pipelines that specify `depth_stencil`. Use this for 3D games
-    /// (e.g. DOOM) that require correct occlusion.
     pub fn new_with_depth<W>(
         device: &Device,
         window: &W,
@@ -95,9 +99,24 @@ impl Surface {
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
+        Self::new_with_config(
+            device,
+            window,
+            SurfaceConfig {
+                depth_format,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Create a new surface with full configuration.
+    pub fn new_with_config<W>(device: &Device, window: &W, config: SurfaceConfig) -> Result<Self>
+    where
+        W: HasWindowHandle + HasDisplayHandle,
+    {
         let handle = {
             let mut backend = device.backend.lock().unwrap();
-            backend.create_surface(device.handle, window, window, depth_format)?
+            backend.create_surface(device.handle, window, window, config.depth_format)?
         };
 
         let (width, height) = {
@@ -105,7 +124,19 @@ impl Surface {
             backend.surface_size(handle)
         };
 
-        tracing::debug!(width, height, ?depth_format, "Surface created");
+        // Apply present mode if non-default
+        if config.present_mode != PresentMode::Auto {
+            let mut backend = device.backend.lock().unwrap();
+            backend.surface_set_present_mode(handle, config.present_mode)?;
+        }
+
+        tracing::debug!(
+            width,
+            height,
+            ?config.depth_format,
+            ?config.present_mode,
+            "Surface created"
+        );
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
@@ -118,29 +149,48 @@ impl Surface {
     /// Acquire the next frame to render to.
     ///
     /// This blocks until a frame is available from the swapchain.
-    /// The returned `SurfaceFrame` can be rendered to and then presented.
+    /// The returned `SurfaceFrame` exposes the frame's texture and must
+    /// be presented (or dropped) before acquiring the next frame.
     pub fn acquire(&self) -> Result<SurfaceFrame> {
-        let image_handle = {
+        let (image_handle, texture) = {
             let mut backend = self.backend.lock().unwrap();
-            backend.surface_acquire(self.handle)?
+            let image_handle = backend.surface_acquire(self.handle)?;
+
+            let (w, h) = backend.surface_size(self.handle);
+            let format = backend.surface_format(self.handle);
+
+            let texture = backend
+                .surface_frame_texture(self.handle)
+                .map(|tex_handle| {
+                    Texture::borrowed(Arc::clone(&self.backend), tex_handle, w, h, format)
+                });
+
+            (image_handle, texture)
+        };
+
+        // Update cached dimensions from the backend (may change after resize)
+        let (w, h) = {
+            let backend = self.backend.lock().unwrap();
+            backend.surface_size(self.handle)
         };
 
         Ok(SurfaceFrame {
             backend: Arc::clone(&self.backend),
             surface_handle: self.handle,
             image_handle,
-            width: self.width,
-            height: self.height,
+            texture,
+            width: w,
+            height: h,
+            presented: false,
         })
     }
 
-    /// Present a rendered frame to the screen.
+    /// Present a rendered frame to the screen (legacy API).
     ///
-    /// This submits the frame to be displayed and returns immediately.
-    /// The actual display may happen asynchronously depending on vsync settings.
-    pub fn present(&self, frame: SurfaceFrame) -> Result<()> {
-        let mut backend = self.backend.lock().unwrap();
-        backend.surface_present(frame.surface_handle, frame.image_handle)
+    /// Prefer using `frame.present()` instead, which consumes the frame
+    /// and provides better ergonomics.
+    pub fn present(&self, mut frame: SurfaceFrame) -> Result<()> {
+        frame.do_present()
     }
 
     /// Resize the surface.
@@ -179,41 +229,24 @@ impl Surface {
     }
 
     /// Get the swapchain texture format.
-    ///
-    /// Use this to set `RenderPipelineDesc::target_format` when rendering
-    /// to this surface. The format is determined by the GPU and display
-    /// during surface creation.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use goldy::{Surface, RenderPipelineDesc};
-    /// # fn example(surface: &Surface) {
-    /// let desc = RenderPipelineDesc {
-    ///     target_format: surface.format(),
-    ///     ..Default::default()
-    /// };
-    /// # }
-    /// ```
     pub fn format(&self) -> TextureFormat {
         let backend = self.backend.lock().unwrap();
         backend.surface_format(self.handle)
     }
 
+    /// Set the present mode (vsync strategy).
+    pub fn set_present_mode(&mut self, mode: PresentMode) -> Result<()> {
+        let mut backend = self.backend.lock().unwrap();
+        backend.surface_set_present_mode(self.handle, mode)
+    }
+
+    /// Get the current present mode.
+    pub fn present_mode(&self) -> PresentMode {
+        let backend = self.backend.lock().unwrap();
+        backend.surface_present_mode(self.handle)
+    }
+
     /// Validate that a pipeline is compatible with this surface.
-    ///
-    /// Returns `Ok(())` if the pipeline's target format matches the surface format,
-    /// or an error with a helpful message if they don't match.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use goldy::{Surface, RenderPipelineDesc, TextureFormat};
-    /// # fn example(surface: &Surface, desc: &RenderPipelineDesc) -> anyhow::Result<()> {
-    /// surface.validate_pipeline_format(desc.target_format)?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn validate_pipeline_format(&self, pipeline_format: TextureFormat) -> Result<()> {
         let surface_format = self.format();
         if pipeline_format != surface_format {
@@ -241,7 +274,19 @@ impl Drop for Surface {
 }
 
 impl SurfaceFrame {
-    /// Render commands to this frame.
+    /// Get the frame's texture for rendering.
+    ///
+    /// The returned texture is the swapchain image, registered for bindless
+    /// access. You can pass it to compute shaders, the compute graph, or
+    /// `render_to_texture`. Call `present()` when done.
+    ///
+    /// Returns `None` if the backend does not support exposing the frame
+    /// texture (e.g. Vulkan/DX12 — not yet implemented).
+    pub fn texture(&self) -> Option<&Texture> {
+        self.texture.as_ref()
+    }
+
+    /// Render commands to this frame (graphics pipeline path).
     ///
     /// This executes the commands recorded in the encoder to the swapchain image.
     pub fn render(&self, encoder: CommandEncoder) -> Result<()> {
@@ -249,6 +294,27 @@ impl SurfaceFrame {
 
         let mut backend = self.backend.lock().unwrap();
         backend.surface_render(self.surface_handle, self.image_handle, &commands)
+    }
+
+    /// Present this frame to the display.
+    ///
+    /// Consumes the frame — the borrow checker prevents use-after-present.
+    pub fn present(mut self) -> Result<()> {
+        self.do_present()
+    }
+
+    fn do_present(&mut self) -> Result<()> {
+        if self.presented {
+            return Ok(());
+        }
+        self.presented = true;
+
+        // Drop the borrowed texture before presenting so it isn't accessed
+        // after the drawable is returned to the layer.
+        self.texture = None;
+
+        let mut backend = self.backend.lock().unwrap();
+        backend.surface_present(self.surface_handle, self.image_handle)
     }
 
     /// Get the frame width.
@@ -259,6 +325,15 @@ impl SurfaceFrame {
     /// Get the frame height.
     pub fn height(&self) -> u32 {
         self.height
+    }
+}
+
+impl Drop for SurfaceFrame {
+    fn drop(&mut self) {
+        if !self.presented {
+            // Frame was dropped without present — clean up the acquired drawable
+            let _ = self.do_present();
+        }
     }
 }
 
@@ -340,7 +415,6 @@ mod tests {
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
 
-        // Default mock format is Bgra8UnormSrgb
         assert_eq!(surface.format(), TextureFormat::Bgra8UnormSrgb);
     }
 
@@ -350,7 +424,6 @@ mod tests {
 
         let device = create_test_device();
         let window = MockWindow::new(800, 600);
-        // Surface with depth buffer for 3D rendering (e.g. DOOM)
         let surface =
             Surface::new_with_depth(&device, &window, Some(DepthFormat::Depth24Plus)).unwrap();
 
@@ -373,7 +446,6 @@ mod tests {
         let window = MockWindow::new(800, 600);
         let mut surface = Surface::new(&device, &window).unwrap();
 
-        // Resize to new dimensions
         surface.resize(1920, 1080).unwrap();
 
         assert_eq!(surface.width(), 1920);
@@ -387,10 +459,8 @@ mod tests {
         let window = MockWindow::new(800, 600);
         let mut surface = Surface::new(&device, &window).unwrap();
 
-        // Resize to zero (minimized window) should be ignored
         surface.resize(0, 0).unwrap();
 
-        // Dimensions should remain unchanged
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
     }
@@ -403,7 +473,6 @@ mod tests {
 
         surface.resize(0, 600).unwrap();
 
-        // Dimensions should remain unchanged
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
     }
@@ -416,9 +485,69 @@ mod tests {
 
         surface.resize(800, 0).unwrap();
 
-        // Dimensions should remain unchanged
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
+    }
+
+    #[test]
+    fn test_surface_acquire_and_present_new_api() {
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new(&device, &window).unwrap();
+
+        let frame = surface.acquire().unwrap();
+
+        assert_eq!(frame.width(), 800);
+        assert_eq!(frame.height(), 600);
+
+        // Frame should have a texture (mock backend supports it)
+        assert!(frame.texture().is_some());
+
+        frame.present().unwrap();
+    }
+
+    #[test]
+    fn test_surface_acquire_and_present_legacy_api() {
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new(&device, &window).unwrap();
+
+        let frame = surface.acquire().unwrap();
+        surface.present(frame).unwrap();
+    }
+
+    #[test]
+    fn test_surface_frame_texture_has_correct_dimensions() {
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new(&device, &window).unwrap();
+
+        let frame = surface.acquire().unwrap();
+        let texture = frame.texture().unwrap();
+
+        // Mock backend creates surfaces with 800x600
+        assert_eq!(texture.width(), 800);
+        assert_eq!(texture.height(), 600);
+
+        frame.present().unwrap();
+    }
+
+    #[test]
+    fn test_surface_frame_render_and_present() {
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new(&device, &window).unwrap();
+
+        let frame = surface.acquire().unwrap();
+
+        let mut encoder = crate::encoder::CommandEncoder::new();
+        {
+            let mut pass = encoder.begin_render_pass();
+            pass.clear(crate::types::Color::RED);
+        }
+
+        frame.render(encoder).unwrap();
+        frame.present().unwrap();
     }
 
     #[test]
@@ -432,7 +561,6 @@ mod tests {
 
         let frame = surface.acquire().unwrap();
 
-        // Render with both a color clear and a depth clear
         let mut encoder = crate::encoder::CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -441,23 +569,7 @@ mod tests {
         }
 
         frame.render(encoder).unwrap();
-        surface.present(frame).unwrap();
-    }
-
-    #[test]
-    fn test_surface_acquire_and_present() {
-        let device = create_test_device();
-        let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
-
-        // Acquire a frame
-        let frame = surface.acquire().unwrap();
-
-        assert_eq!(frame.width(), 800);
-        assert_eq!(frame.height(), 600);
-
-        // Present the frame
-        surface.present(frame).unwrap();
+        frame.present().unwrap();
     }
 
     #[test]
@@ -466,30 +578,10 @@ mod tests {
         let window = MockWindow::new(640, 480);
         let surface = Surface::new(&device, &window).unwrap();
 
-        // Simulate multiple frames
         for _ in 0..5 {
             let frame = surface.acquire().unwrap();
-            surface.present(frame).unwrap();
+            frame.present().unwrap();
         }
-    }
-
-    #[test]
-    fn test_surface_frame_render() {
-        let device = create_test_device();
-        let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
-
-        let frame = surface.acquire().unwrap();
-
-        // Create a command encoder and render
-        let mut encoder = crate::encoder::CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(crate::types::Color::RED);
-        }
-
-        frame.render(encoder).unwrap();
-        surface.present(frame).unwrap();
     }
 
     #[test]
@@ -498,7 +590,6 @@ mod tests {
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
 
-        // This should succeed - format matches
         let result = surface.validate_pipeline_format(TextureFormat::Bgra8UnormSrgb);
         assert!(result.is_ok());
     }
@@ -509,11 +600,9 @@ mod tests {
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
 
-        // This should fail - format doesn't match
         let result = surface.validate_pipeline_format(TextureFormat::Rgba8Unorm);
         assert!(result.is_err());
 
-        // Error message should be helpful
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Pipeline format mismatch"));
@@ -527,14 +616,41 @@ mod tests {
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&device, &window).unwrap();
 
-        // Should succeed with matching format
         assert!(surface
             .validate_pipeline_format(TextureFormat::Rgba8Unorm)
             .is_ok());
 
-        // Should fail with non-matching format
         assert!(surface
             .validate_pipeline_format(TextureFormat::Bgra8UnormSrgb)
             .is_err());
+    }
+
+    #[test]
+    fn test_surface_with_config() {
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new_with_config(
+            &device,
+            &window,
+            SurfaceConfig {
+                present_mode: PresentMode::Immediate,
+                depth_format: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(surface.width(), 800);
+        assert_eq!(surface.height(), 600);
+    }
+
+    #[test]
+    fn test_surface_frame_drop_without_present() {
+        let device = create_test_device();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new(&device, &window).unwrap();
+
+        // Acquire and drop without presenting — should not panic
+        let _frame = surface.acquire().unwrap();
+        // frame is dropped here, triggering cleanup
     }
 }
