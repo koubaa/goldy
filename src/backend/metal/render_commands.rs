@@ -3,6 +3,7 @@
 //! Used by both render_target and surface to avoid code duplication.
 
 use super::super::{BufferHandle, PipelineHandle, RenderCommand};
+use super::buffer;
 use super::types::{
     BindlessIndices, PipelineState, MAX_PUSH_CONSTANT_INDICES, PUSH_CONSTANTS_SLOT,
 };
@@ -113,15 +114,28 @@ pub(super) fn record(
             RenderCommand::SetPushConstantsTyped {
                 handles: typed_handles,
             } => {
-                let (expectations, debug_name): (&[Option<crate::types::BindlessCategory>], &str) =
-                    match current_pipeline {
-                        Some(p) => (&p.push_constant_categories, p.shader_debug_name.as_str()),
-                        None => (&[], "<no pipeline bound>"),
-                    };
+                let (expectations, stride_expectations, debug_name): (
+                    &[Option<crate::types::BindlessCategory>],
+                    &[Option<u32>],
+                    &str,
+                ) = match current_pipeline {
+                    Some(p) => (
+                        &p.push_constant_categories,
+                        &p.push_constant_buffer_strides,
+                        p.shader_debug_name.as_str(),
+                    ),
+                    None => (&[], &[], "<no pipeline bound>"),
+                };
                 super::super::validate_typed_push_constants(
                     typed_handles,
                     expectations,
                     debug_name,
+                )?;
+                super::super::validate_typed_push_constant_buffer_strides(
+                    typed_handles,
+                    stride_expectations,
+                    debug_name,
+                    |h| buffer::element_stride_for_bindless_handle_map(buffers, h),
                 )?;
                 let mut indices = BindlessIndices::default();
                 for (i, handle) in typed_handles.iter().enumerate() {

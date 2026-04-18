@@ -1,5 +1,6 @@
 //! Compute pipeline and dispatch logic.
 
+use super::buffer;
 use super::types::{self, BindlessIndices, ComputePipelineState, LogicalDevice};
 use super::{ComputePipelineHandle, DeviceHandle};
 use crate::backend::{ComputeCommand, FenceToken};
@@ -16,6 +17,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     cs_module: vk::ShaderModule,
     push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    push_constant_buffer_strides: Vec<Option<u32>>,
     shader_debug_name: String,
 ) -> Result<ComputePipelineHandle> {
     let logical_device = devices
@@ -66,6 +68,7 @@ pub(super) fn create(
             owns_layout,
             parameter_block_layouts: Vec::new(),
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         },
     );
@@ -239,6 +242,12 @@ pub(super) fn submit(
                         typed_handles,
                         &pipeline.push_constant_categories,
                         &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_typed_push_constant_buffer_strides(
+                        typed_handles,
+                        &pipeline.push_constant_buffer_strides,
+                        &pipeline.shader_debug_name,
+                        |h| buffer::element_stride_for_bindless_handle(buffers, h),
                     )?;
                     let mut indices = BindlessIndices::default();
                     for (i, handle) in typed_handles.iter().enumerate() {

@@ -143,9 +143,9 @@ impl GpuBackend for MetalBackend {
         parent: BufferHandle,
         offset: u64,
         size: u64,
-        _element_stride: Option<u32>,
+        element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
-        buffer::create_view(&mut self.state, parent, offset, size)
+        buffer::create_view(&mut self.state, parent, offset, size, element_stride)
     }
 
     fn read_buffer_to_cpu(

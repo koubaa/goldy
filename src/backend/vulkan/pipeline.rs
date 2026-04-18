@@ -25,6 +25,7 @@ pub(super) fn create(
     topology: PrimitiveTopology,
     target_format: TextureFormat,
     push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    push_constant_buffer_strides: Vec<Option<u32>>,
     shader_debug_name: String,
 ) -> Result<PipelineHandle> {
     let logical_device = devices
@@ -156,6 +157,7 @@ pub(super) fn create(
             owns_layout,
             parameter_block_layouts: Vec::new(),
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         },
     );
@@ -178,6 +180,7 @@ pub(super) fn create_with_depth(
     target_format: TextureFormat,
     depth_stencil: Option<&DepthStencilState>,
     push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    push_constant_buffer_strides: Vec<Option<u32>>,
     shader_debug_name: String,
 ) -> Result<PipelineHandle> {
     let logical_device = devices
@@ -352,6 +355,7 @@ pub(super) fn create_with_depth(
             owns_layout,
             parameter_block_layouts: Vec::new(),
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         },
     );

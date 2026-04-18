@@ -40,23 +40,36 @@ fn render_push_constant_expectations(
     shaders: &HashMap<ShaderHandle, ShaderState>,
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
-) -> (Vec<Option<crate::types::BindlessCategory>>, String) {
-    let fs_cats = shaders
+) -> (
+    Vec<Option<crate::types::BindlessCategory>>,
+    Vec<Option<u32>>,
+    String,
+) {
+    let fs = shaders
         .get(&fragment_shader)
-        .and_then(|s| s.reflection.as_ref())
+        .and_then(|s| s.reflection.as_ref());
+    let fs_cats = fs
         .map(|r| r.push_constant_categories.clone())
         .unwrap_or_default();
-    let cats = if !fs_cats.is_empty() {
-        fs_cats
+    let fs_strides = fs
+        .map(|r| r.push_constant_buffer_strides.clone())
+        .unwrap_or_default();
+    let (cats, strides) = if !fs_cats.is_empty() {
+        (fs_cats, fs_strides)
     } else {
-        shaders
+        let vs = shaders
             .get(&vertex_shader)
-            .and_then(|s| s.reflection.as_ref())
-            .map(|r| r.push_constant_categories.clone())
-            .unwrap_or_default()
+            .and_then(|s| s.reflection.as_ref());
+        (
+            vs.map(|r| r.push_constant_categories.clone())
+                .unwrap_or_default(),
+            vs.map(|r| r.push_constant_buffer_strides.clone())
+                .unwrap_or_default(),
+        )
     };
     (
         cats,
+        strides,
         format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})"),
     )
 }
@@ -421,7 +434,7 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (push_constant_categories, shader_debug_name) =
+        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
             render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
 
         pipeline::create(
@@ -435,6 +448,7 @@ impl GpuBackend for VulkanBackend {
             topology,
             target_format,
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         )
     }
@@ -632,7 +646,7 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (push_constant_categories, shader_debug_name) =
+        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
             render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
 
         pipeline::create_with_depth(
@@ -647,6 +661,7 @@ impl GpuBackend for VulkanBackend {
             target_format,
             depth_stencil,
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         )
     }
@@ -796,17 +811,19 @@ impl GpuBackend for VulkanBackend {
         let cs_module =
             self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
-        let (push_constant_categories, shader_debug_name) = self
+        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) = self
             .state
             .shaders
             .get(&compute_shader)
             .map(|s| {
-                let cats = s
-                    .reflection
-                    .as_ref()
+                let refl = s.reflection.as_ref();
+                let cats = refl
                     .map(|r| r.push_constant_categories.clone())
                     .unwrap_or_default();
-                (cats, format!("compute_shader#{compute_shader}"))
+                let strides = refl
+                    .map(|r| r.push_constant_buffer_strides.clone())
+                    .unwrap_or_default();
+                (cats, strides, format!("compute_shader#{compute_shader}"))
             })
             .unwrap_or_default();
 
@@ -817,6 +834,7 @@ impl GpuBackend for VulkanBackend {
             device_handle,
             cs_module,
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         )
     }
