@@ -559,7 +559,7 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<()> {
         surface::render(
             &self.state.devices,
-            &self.state.surfaces,
+            &mut self.state.surfaces,
             surface_handle,
             _image,
             commands,

@@ -680,7 +680,6 @@ pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle)
 ///
 /// For DEFAULT heap buffers (storage), creates a readback buffer and copies.
 /// For UPLOAD heap buffers (uniform), reads directly via Map.
-
 pub(super) fn read_to_cpu(
     state: &mut Dx12State,
     device_handle: DeviceHandle,

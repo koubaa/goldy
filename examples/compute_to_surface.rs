@@ -45,24 +45,28 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     ReadOnlyBuffer<Uniforms> ub = goldy_dyn_buf_ro<Uniforms>(0);
     Uniforms u = ub[0];
 
+    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(1);
+
     if (tid.x >= u.width || tid.y >= u.height)
         return;
 
-    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(1);
+    float2 uv = float2(float(tid.x) / float(u.width),
+                       float(tid.y) / float(u.height));
+    float2 p = uv * 2.0 - 1.0;
+    p.x *= float(u.width) / float(u.height);
 
-    float2 uv = float2(tid.xy) / float2(u.width, u.height);
-
-    // Animated plasma effect
     float t = u.time;
     float v = 0.0;
-    v += sin(uv.x * 10.0 + t);
-    v += sin(uv.y * 10.0 + t * 0.5);
-    v += sin((uv.x + uv.y) * 10.0 + t * 0.7);
-    v += sin(sqrt(uv.x * uv.x + uv.y * uv.y) * 20.0 + t * 1.3);
-    v = v * 0.25 + 0.5;
+    v += sin(p.x * 6.0 + t);
+    v += sin(p.y * 6.0 + t * 1.3);
+    v += sin((p.x + p.y) * 4.0 + t * 0.7);
+    v += sin(length(p) * 8.0 - t * 2.0);
+    v *= 0.25;
 
-    float3 color = rainbow(v + t * 0.1);
-    output[tid.xy] = float4(color, 1.0);
+    float3 col = float3(0.5 + 0.5 * sin(v * 3.14159 + 0.0),
+                        0.5 + 0.5 * sin(v * 3.14159 + 2.094),
+                        0.5 + 0.5 * sin(v * 3.14159 + 4.188));
+    output[tid.xy] = float4(col, 1.0);
 }
 "#;
 
@@ -114,14 +118,21 @@ impl App {
         let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
         let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
+        // NOTE: pass a typed `&[Uniforms]`, NOT `bytemuck::bytes_of(&u)`.
+        // `Buffer::with_data::<T>` uses `size_of::<T>()` as the structured-buffer
+        // stride. Passing `&[u8]` gave stride=1, which on DX12 caused
+        // `rawBufferLoad` of any field past offset 0 to return 0 (out-of-bounds
+        // for a stride-1 structured buffer) — turning `u.height` into 0 and
+        // triggering the `if (tid.y >= u.height) return;` guard for every
+        // thread on the `compute_to_surface` path.
         let uniform_buffer = Buffer::with_data(
             &device,
-            bytemuck::bytes_of(&Uniforms {
+            &[Uniforms {
                 width: surface.width(),
                 height: surface.height(),
                 time: 0.0,
                 _padding: 0.0,
-            }),
+            }],
             DataAccess::Scattered,
         )?;
 
@@ -235,8 +246,18 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    let uniform_handle = state.uniform_buffer.bindless_handle().unwrap();
-    let texture_handle = texture.bindless_handle().unwrap();
+    // The shader accesses the uniform buffer via `goldy_dyn_buf_ro<Uniforms>(0)` which
+    // maps to `StructuredBuffer<Uniforms>` — an SRV on DX12. `bindless_srv_handle()`
+    // returns the SRV index on DX12 (distinct from the UAV index) and falls back to
+    // the unified storage-buffer index on Vulkan / Metal, so it's correct on every
+    // backend.
+    let uniform_handle = state
+        .uniform_buffer
+        .bindless_srv_handle()
+        .expect("Uniform buffer has no bindless SRV handle");
+    let texture_handle = texture
+        .bindless_handle()
+        .expect("Surface texture has no bindless handle");
 
     let mut encoder = ComputeEncoder::new();
     {

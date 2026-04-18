@@ -335,6 +335,8 @@ pub(crate) struct FrameSync {
     pub command_list: Direct3D12::ID3D12GraphicsCommandList7,
     pub command_allocator: Direct3D12::ID3D12CommandAllocator,
     pub fence_value: u64,
+    /// Set after `surface::render` submits. When false, `present` copies the compute scratch texture.
+    pub render_pass_submitted: bool,
 }
 
 /// Surface (swapchain) state for window presentation.
@@ -361,6 +363,9 @@ pub(crate) struct SurfaceState {
     /// registered in the bindless descriptor heap as a UAV so compute shaders
     /// can write directly to the swapchain image.
     pub current_texture_handle: Option<super::TextureHandle>,
+    /// Per swapchain buffer index: persistent UAV texture for compute; results are
+    /// copied to the real back buffer in `present` (swapchain images cannot be UAVs).
+    pub compute_scratch_textures: Vec<Option<super::TextureHandle>>,
 }
 
 /// Consolidated DX12 backend state.
