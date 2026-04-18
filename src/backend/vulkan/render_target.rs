@@ -393,7 +393,12 @@ pub(super) fn render_to<F>(
     record_commands_fn: F,
 ) -> Result<()>
 where
-    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>),
+    F: FnOnce(
+        vk::CommandBuffer,
+        &[RenderCommand],
+        &LogicalDevice,
+        &mut Option<PipelineHandle>,
+    ) -> Result<()>,
 {
     let logical_device = devices
         .get(&device_handle)
@@ -565,7 +570,7 @@ where
     let mut current_pipeline: Option<PipelineHandle> = None;
 
     // Execute render commands using provided callback
-    record_commands_fn(cmd, commands, logical_device, &mut current_pipeline);
+    record_commands_fn(cmd, commands, logical_device, &mut current_pipeline)?;
 
     // End dynamic rendering
     unsafe { logical_device.device.cmd_end_rendering(cmd) };

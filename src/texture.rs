@@ -6,7 +6,7 @@
 
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
-use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
+use crate::types::{BindlessCategory, BindlessHandle, SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +21,9 @@ pub struct Texture {
     width: u32,
     height: u32,
     format: TextureFormat,
+    /// Access pattern chosen at creation time. Determines the bindless category
+    /// (`Interpolated` → `Texture`, `Direct` → `StorageImage`).
+    access: SpatialAccess,
     /// Whether this texture owns the underlying GPU resource.
     /// Borrowed textures (e.g. surface frame drawables) skip destroy on drop.
     owned: bool,
@@ -72,6 +75,7 @@ impl Texture {
             width,
             height,
             format,
+            access,
             owned: true,
         })
     }
@@ -246,9 +250,29 @@ impl Texture {
     ///
     /// Returns `Some(index)` if this texture is registered.
     /// Returns `None` otherwise.
+    ///
+    /// **Prefer [`Texture::bindless_handle`]** for new code: the typed handle
+    /// distinguishes storage-image slots (`SpatialAccess::Direct`) from
+    /// sampled-texture slots (`SpatialAccess::Interpolated`), which on Metal
+    /// map to different argument-buffer pools.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.texture_bindless_index(self.handle)
+    }
+
+    /// Get this texture's typed bindless descriptor handle.
+    ///
+    /// The category is derived from the texture's [`SpatialAccess`]:
+    /// `Interpolated` → [`BindlessCategory::Texture`],
+    /// `Direct` → [`BindlessCategory::StorageImage`].
+    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
+        self.bindless_index()
+            .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
+    }
+
+    /// Get the access pattern this texture was created with.
+    pub fn access(&self) -> SpatialAccess {
+        self.access
     }
 
     /// Create a borrowed texture wrapping an externally-owned GPU resource.
@@ -256,6 +280,9 @@ impl Texture {
     /// The returned `Texture` provides the same read/query API but does **not**
     /// destroy the underlying resource when dropped. Used for transient resources
     /// like surface frame drawables whose lifetime is managed elsewhere.
+    ///
+    /// Swapchain drawables on surfaces with compute-to-surface support are
+    /// writable, so we tag them as `SpatialAccess::Direct` (storage image).
     pub(crate) fn borrowed(
         backend: Arc<Mutex<Box<dyn GpuBackend>>>,
         handle: TextureHandle,
@@ -269,6 +296,7 @@ impl Texture {
             width,
             height,
             format,
+            access: SpatialAccess::Direct,
             owned: false,
         }
     }

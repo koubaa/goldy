@@ -235,14 +235,14 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    let uniform_idx = state.uniform_buffer.bindless_index().unwrap();
-    let texture_idx = texture.bindless_index().unwrap();
+    let uniform_handle = state.uniform_buffer.bindless_handle().unwrap();
+    let texture_handle = texture.bindless_handle().unwrap();
 
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&state.compute_pipeline);
-        pass.set_push_constants_raw(&[uniform_idx, texture_idx]);
+        pass.set_push_constants_typed(&[uniform_handle, texture_handle]);
         pass.dispatch(wg_x, wg_y, 1);
     }
     encoder.submit(&state.device)?.wait()?;

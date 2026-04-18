@@ -15,10 +15,11 @@ pub(super) fn record(
     commands: &[RenderCommand],
     _device_handle: DeviceHandle,
     state: &Dx12State,
-) {
+) -> anyhow::Result<()> {
     // COM: same pointer as ID3D12GraphicsCommandList for method calls.
     let cmd: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let mut current_vertex_stride = 24u32; // Default stride
+    let mut current_pipeline: Option<&types::PipelineState> = None;
     for command in commands {
         match command {
             RenderCommand::Clear(_) => {
@@ -35,6 +36,7 @@ pub(super) fn record(
                         cmd.SetPipelineState(&pipeline.pipeline_state);
                         cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
                     }
+                    current_pipeline = Some(pipeline);
                 }
             }
             RenderCommand::SetVertexBuffer {
@@ -109,6 +111,32 @@ pub(super) fn record(
                     );
                 }
             }
+            RenderCommand::SetPushConstantsTyped {
+                handles: typed_handles,
+            } => {
+                if let Some(pipeline) = current_pipeline {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
+                let mut indices = types::BindlessIndices::default();
+                for (i, handle) in typed_handles.iter().enumerate() {
+                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                        break;
+                    }
+                    indices.indices[i] = handle.index();
+                }
+                unsafe {
+                    cmd.SetGraphicsRoot32BitConstants(
+                        0,
+                        types::MAX_ROOT_CONSTANT_INDICES as u32,
+                        indices.indices.as_ptr() as *const _,
+                        0,
+                    );
+                }
+            }
             RenderCommand::Draw {
                 vertex_count,
                 instance_count,
@@ -141,4 +169,5 @@ pub(super) fn record(
             },
         }
     }
+    Ok(())
 }

@@ -34,11 +34,68 @@ pub mod mock;
 pub mod metal;
 
 use crate::types::{
-    BackendType, Color, DataAccess, DepthFormat, DepthStencilState, DeviceType, IndexFormat,
-    PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess, TextureFlags, TextureFormat,
-    VertexBufferLayout,
+    BackendType, BindlessHandle, Color, DataAccess, DepthFormat, DepthStencilState, DeviceType,
+    IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess, TextureFlags,
+    TextureFormat, VertexBufferLayout,
 };
 use anyhow::Result;
+
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+use crate::types::BindlessCategory;
+
+/// Validate a typed push-constant array against per-slot category expectations
+/// reported by shader reflection.
+///
+/// `expectations[i]` is the category that slot `i` must have according to the
+/// shader's `goldy_dyn_*` call with literal slot index `i`. `None` means
+/// "reflection couldn't infer — skip validation for this slot" (e.g. the slot
+/// is only accessed via a dynamic index that regex analysis can't resolve).
+///
+/// Returns an error naming the offending slot(s) on mismatch. Designed to run
+/// on the dispatch hot path; allocates only on the error path.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_typed_push_constants(
+    handles: &[BindlessHandle],
+    expectations: &[Option<BindlessCategory>],
+    shader_name: &str,
+) -> Result<()> {
+    let mut mismatches: Vec<String> = Vec::new();
+    for (slot, handle) in handles.iter().enumerate() {
+        let Some(expected) = expectations.get(slot).copied().flatten() else {
+            continue;
+        };
+        if !handle.category().is_compatible_with(expected) {
+            mismatches.push(format!(
+                "slot {slot}: shader expects `{}` (via goldy_dyn_{}(_)) but got `{}` handle (index {})",
+                expected.name(),
+                expected.name(),
+                handle.category().name(),
+                handle.index()
+            ));
+        }
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "push-constant category mismatch in shader `{shader_name}`:\n  {}\n\
+             Hint: use `Buffer::bindless_handle()` / `Texture::bindless_handle()` \
+             rather than `.bindless_index()` so the resource's category flows \
+             through to the push-constant setter.",
+            mismatches.join("\n  ")
+        );
+    }
+}
 
 // Re-export raw_window_handle for Surface API users
 pub use raw_window_handle;
@@ -100,7 +157,14 @@ pub enum RenderCommand {
     SetPushConstants { buffers: Vec<BufferHandle> },
     /// Set push constants with raw u32 indices (fully bindless mode).
     /// Use this for textures/samplers or when you already have the indices.
+    ///
+    /// **Prefer [`RenderCommand::SetPushConstantsTyped`]** — the raw form
+    /// bypasses per-slot category validation.
     SetPushConstantsRaw { indices: Vec<u32> },
+    /// Set push constants with typed [`BindlessHandle`]s. Backends validate
+    /// each handle's [`BindlessCategory`]
+    /// against the bound shader's reflection and emit the raw indices.
+    SetPushConstantsTyped { handles: Vec<BindlessHandle> },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -127,7 +191,14 @@ pub enum ComputeCommand {
     /// Set push constants (fully bindless mode - buffer indices passed directly).
     SetPushConstants { buffers: Vec<BufferHandle> },
     /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
+    ///
+    /// **Prefer [`ComputeCommand::SetPushConstantsTyped`]** — the raw form
+    /// bypasses per-slot category validation.
     SetPushConstantsRaw { indices: Vec<u32> },
+    /// Set push constants with typed [`BindlessHandle`]s. Backends validate
+    /// each handle's [`BindlessCategory`]
+    /// against the bound shader's reflection and emit the raw indices.
+    SetPushConstantsTyped { handles: Vec<BindlessHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,
@@ -585,5 +656,82 @@ pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> 
             Ok(Box::new(metal::MetalBackend::new()?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
+    }
+}
+
+#[cfg(test)]
+mod typed_push_constant_validation_tests {
+    use super::validate_typed_push_constants;
+    use crate::types::{BindlessCategory, BindlessHandle};
+
+    #[test]
+    fn ok_when_categories_match() {
+        let handles = [
+            BindlessHandle::new(BindlessCategory::Broadcast, 3),
+            BindlessHandle::new(BindlessCategory::Scattered, 7),
+        ];
+        let expectations = [
+            Some(BindlessCategory::Broadcast),
+            Some(BindlessCategory::Scattered),
+        ];
+        validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
+    }
+
+    #[test]
+    fn ok_when_expectations_shorter_than_handles() {
+        // Shader only reflected the first slot; extra handles aren't validated.
+        let handles = [
+            BindlessHandle::new(BindlessCategory::Broadcast, 1),
+            BindlessHandle::new(BindlessCategory::Scattered, 2),
+        ];
+        let expectations = [Some(BindlessCategory::Broadcast)];
+        validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
+    }
+
+    #[test]
+    fn ok_when_slot_expectation_is_none() {
+        // `None` means reflection couldn't infer — skip validation.
+        let handles = [BindlessHandle::new(BindlessCategory::Scattered, 1)];
+        let expectations = [None];
+        validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
+    }
+
+    #[test]
+    fn err_when_category_mismatches() {
+        // The compute_to_surface bug: slot 0 is a Scattered storage buffer but
+        // the user passes a Broadcast-only uniform handle.
+        let handles = [BindlessHandle::new(BindlessCategory::Broadcast, 42)];
+        let expectations = [Some(BindlessCategory::Scattered)];
+        let err = validate_typed_push_constants(&handles, &expectations, "compute_to_surface_cs")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("compute_to_surface_cs"),
+            "shader name in err: {err}"
+        );
+        assert!(err.contains("slot 0"), "slot index in err: {err}");
+        assert!(err.contains("scattered"), "expected category in err: {err}");
+        assert!(err.contains("broadcast"), "got category in err: {err}");
+        assert!(err.contains("42"), "handle index in err: {err}");
+    }
+
+    #[test]
+    fn err_lists_all_mismatching_slots() {
+        let handles = [
+            BindlessHandle::new(BindlessCategory::Broadcast, 1),
+            BindlessHandle::new(BindlessCategory::Scattered, 2),
+            BindlessHandle::new(BindlessCategory::Sampler, 3),
+        ];
+        let expectations = [
+            Some(BindlessCategory::Broadcast), // ok
+            Some(BindlessCategory::Texture),   // mismatch
+            Some(BindlessCategory::Sampler),   // ok
+        ];
+        let err = validate_typed_push_constants(&handles, &expectations, "sh")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slot 1"), "slot 1 must appear: {err}");
+        // Exactly one mismatch reported.
+        assert_eq!(err.matches("slot ").count(), 1, "only one mismatch: {err}");
     }
 }

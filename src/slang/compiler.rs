@@ -81,11 +81,167 @@ pub struct ParameterBlockLayout {
     pub fields: Vec<FieldLayout>,
 }
 
+/// Scan Slang source for `goldy_dyn_*(N)` calls with literal integer slot
+/// arguments and build a per-slot vector of the
+/// [`crate::types::BindlessCategory`] the shader expects at
+/// each push-constant slot. Slots accessed via dynamic/computed indices (e.g.
+/// `goldy_dyn_scattered(i)`) are left as `None`.
+///
+/// Multiple categories for the same slot are treated as a conflict and collapse
+/// to `None` so the error surface is the `SetPushConstantsTyped` validator,
+/// which can produce a context-rich diagnostic rather than a shader-load
+/// failure.
+///
+/// Comments and preprocessor-disabled blocks are not stripped; this is a
+/// best-effort conservative heuristic. False positives (a category inferred
+/// for a slot the user no longer uses) only constrain what handle type the
+/// user can bind — the user's recourse is to update the shader or bind the
+/// right handle type. False negatives (slot left as `None`) silently fall back
+/// to no validation for that slot, matching pre-reflection behavior.
+pub fn analyze_push_constant_categories_from_source(
+    source: &str,
+) -> Vec<Option<crate::types::BindlessCategory>> {
+    use crate::types::BindlessCategory;
+
+    // Function name -> category it reads at the nth push-constant slot.
+    // Keep in sync with `shaders/goldy_exp/access.slang` — this list MUST
+    // match the public `goldy_dyn_*` surface exactly.
+    const DYN_FUNCS: &[(&str, BindlessCategory)] = &[
+        ("goldy_dyn_scattered", BindlessCategory::Scattered),
+        ("goldy_dyn_buf_ro", BindlessCategory::Scattered),
+        ("goldy_dyn_byte_address", BindlessCategory::Scattered),
+        ("goldy_dyn_broadcast", BindlessCategory::Broadcast),
+        ("goldy_dyn_direct_spatial", BindlessCategory::StorageImage),
+        ("goldy_dyn_interpolated", BindlessCategory::Texture),
+        ("goldy_dyn_filter", BindlessCategory::Sampler),
+    ];
+
+    // Observed category per slot; `Conflict` means ≥ 2 incompatible categories.
+    #[derive(Copy, Clone, PartialEq)]
+    enum Slot {
+        Unknown,
+        One(BindlessCategory),
+        Conflict,
+    }
+    let mut slots = [Slot::Unknown; 16];
+
+    for (fn_name, category) in DYN_FUNCS {
+        let mut search_from = 0usize;
+        while let Some(rel) = source[search_from..].find(fn_name) {
+            let abs = search_from + rel;
+            search_from = abs + fn_name.len();
+
+            // Require a word boundary before the match so `goldy_dyn_scattered`
+            // doesn't trigger on `__goldy_dyn_scattered_impl`.
+            if abs > 0 {
+                let prev = source.as_bytes()[abs - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    continue;
+                }
+            }
+
+            // Skip an optional `<...>` generic argument list.
+            let mut cursor = search_from;
+            let bytes = source.as_bytes();
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b'<' {
+                let mut depth = 1i32;
+                cursor += 1;
+                while cursor < bytes.len() && depth > 0 {
+                    match bytes[cursor] {
+                        b'<' => depth += 1,
+                        b'>' => depth -= 1,
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+            }
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+
+            // Expect `(` then a decimal literal then `)` (or `,`/whitespace
+            // before `)`). Anything else -> unresolvable, leave slot unknown.
+            if cursor >= bytes.len() || bytes[cursor] != b'(' {
+                continue;
+            }
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            let num_start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            if cursor == num_start {
+                continue;
+            }
+            // Only accept a clean `N)` or `N )` — anything else (identifiers,
+            // arithmetic, casts) leaves the slot unknown on purpose.
+            let mut end = cursor;
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if end >= bytes.len() || (bytes[end] != b')' && bytes[end] != b'u') {
+                continue;
+            }
+            // Accept `Nu` / `N u` (Slang unsigned suffix) -> must then close.
+            if bytes[end] == b'u' {
+                end += 1;
+                while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                    end += 1;
+                }
+                if end >= bytes.len() || bytes[end] != b')' {
+                    continue;
+                }
+            }
+
+            let Ok(n) = source[num_start..cursor].parse::<usize>() else {
+                continue;
+            };
+            if n >= slots.len() {
+                continue;
+            }
+            slots[n] = match slots[n] {
+                Slot::Unknown => Slot::One(*category),
+                Slot::One(prev) if prev.is_compatible_with(*category) => Slot::One(prev),
+                _ => Slot::Conflict,
+            };
+        }
+    }
+
+    // Trim trailing Unknown slots so short shaders don't carry 16-long vectors.
+    let mut last_known = 0usize;
+    for (i, s) in slots.iter().enumerate() {
+        if !matches!(s, Slot::Unknown) {
+            last_known = i + 1;
+        }
+    }
+    slots[..last_known]
+        .iter()
+        .map(|s| match s {
+            Slot::One(c) => Some(*c),
+            Slot::Unknown | Slot::Conflict => None,
+        })
+        .collect()
+}
+
 /// Complete reflection information for a compiled shader
 #[derive(Debug, Clone, Default)]
 pub struct ShaderReflection {
     /// All parameter blocks found in the shader
     pub parameter_blocks: Vec<ParameterBlockLayout>,
+    /// Per push-constant slot (index = slot number), the
+    /// [`crate::types::BindlessCategory`] the shader reads
+    /// that slot as, or `None` if reflection couldn't infer it (e.g. the slot
+    /// was only accessed via a dynamic index). Populated by source-level
+    /// analysis of `goldy_dyn_*(N)` calls in the Slang source; may be sparse
+    /// up to `MAX_PUSH_CONSTANT_INDICES`. Used by
+    /// [`crate::types::BindlessHandle`]-typed push-constant setters to catch
+    /// category mismatches at dispatch time.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
 }
 
 /// Byte layout of a Slang `struct` under uniform / constant-buffer rules (`SlangLayoutRules::Default`).
@@ -607,7 +763,9 @@ impl SlangCompiler {
                 let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
                 unsafe { blob_release(blob) };
 
-                let reflection = slf.extract_reflection(request)?;
+                let mut reflection = slf.extract_reflection(request)?;
+                reflection.push_constant_categories =
+                    analyze_push_constant_categories_from_source(source);
 
                 if !layout_checks.is_empty() {
                     slf.validate_owned_layout_checks(request, layout_checks)?;
@@ -834,7 +992,10 @@ impl SlangCompiler {
                 .sum::<usize>()
         );
 
-        Ok(ShaderReflection { parameter_blocks })
+        Ok(ShaderReflection {
+            parameter_blocks,
+            push_constant_categories: Vec::new(),
+        })
     }
 
     /// Extract layout information for a ParameterBlock.
@@ -1303,5 +1464,114 @@ impl Drop for SlangCompiler {
         if !self.global_session.is_null() {
             unsafe { global_session_release(self.global_session) };
         }
+    }
+}
+
+#[cfg(test)]
+mod push_constant_source_analysis_tests {
+    use super::analyze_push_constant_categories_from_source;
+    use crate::types::BindlessCategory;
+
+    #[test]
+    fn single_scattered_slot() {
+        let src = "StorageBuffer<uint> b = goldy_dyn_scattered<uint>(0);";
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert_eq!(cats, vec![Some(BindlessCategory::Scattered)]);
+    }
+
+    #[test]
+    fn mixed_broadcast_and_scattered() {
+        let src = r#"
+            MyUniforms u = goldy_dyn_broadcast<MyUniforms>(0);
+            StorageBuffer<int> b = goldy_dyn_scattered<int>(2);
+        "#;
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert_eq!(
+            cats,
+            vec![
+                Some(BindlessCategory::Broadcast),
+                None,
+                Some(BindlessCategory::Scattered),
+            ]
+        );
+    }
+
+    #[test]
+    fn buf_ro_maps_to_scattered() {
+        let src = "ReadOnlyBuffer<Particle> p = goldy_dyn_buf_ro<Particle>(1);";
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert_eq!(cats, vec![None, Some(BindlessCategory::Scattered)]);
+    }
+
+    #[test]
+    fn storage_image_and_texture_and_sampler() {
+        let src = r#"
+            RWTexture2D<float4> img = goldy_dyn_direct_spatial<float4>(0);
+            Texture2D<float4> tex = goldy_dyn_interpolated<float4>(1);
+            SamplerState s = goldy_dyn_filter(2);
+        "#;
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert_eq!(
+            cats,
+            vec![
+                Some(BindlessCategory::StorageImage),
+                Some(BindlessCategory::Texture),
+                Some(BindlessCategory::Sampler),
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_index_leaves_slot_unknown() {
+        // `i` is not a literal — we must not report a category.
+        let src = "StorageBuffer<uint> b = goldy_dyn_scattered<uint>(i);";
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert!(cats.is_empty());
+    }
+
+    #[test]
+    fn conflicting_uses_collapse_to_none() {
+        let src = r#"
+            MyUniforms u = goldy_dyn_broadcast<MyUniforms>(0);
+            StorageBuffer<int> b = goldy_dyn_scattered<int>(0);
+        "#;
+        let cats = analyze_push_constant_categories_from_source(src);
+        // Slot 0 saw conflicting categories; forced to None so the dispatch-time
+        // validator reports a clean error instead of a stale expectation.
+        assert_eq!(cats, vec![None]);
+    }
+
+    #[test]
+    fn slot_suffixed_with_u_is_accepted() {
+        let src = "let x = goldy_dyn_broadcast<MyUniforms>(3u).time;";
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert_eq!(
+            cats,
+            vec![None, None, None, Some(BindlessCategory::Broadcast)]
+        );
+    }
+
+    #[test]
+    fn word_boundary_prevents_prefix_match() {
+        // A hypothetical wrapper shouldn't be counted as `goldy_dyn_scattered`.
+        let src = "StorageBuffer<uint> b = __my_goldy_dyn_scattered<uint>(0);";
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert!(cats.is_empty());
+    }
+
+    #[test]
+    fn slot_above_16_is_ignored() {
+        let src = "let b = goldy_dyn_scattered<uint>(99);";
+        let cats = analyze_push_constant_categories_from_source(src);
+        assert!(cats.is_empty());
+    }
+
+    #[test]
+    fn trims_trailing_unknown_slots() {
+        let src = "let u = goldy_dyn_broadcast<MyUniforms>(2);";
+        let cats = analyze_push_constant_categories_from_source(src);
+        // 3 slots total: None, None, Some(Broadcast) — nothing after 2.
+        assert_eq!(cats.len(), 3);
+        assert_eq!(cats[2], Some(BindlessCategory::Broadcast));
     }
 }

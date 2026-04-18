@@ -266,6 +266,11 @@ pub(crate) struct PipelineState {
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
+    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
+    /// calls in the bound shader(s). Empty disables validation.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
@@ -278,6 +283,11 @@ pub(crate) struct ComputePipelineState {
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
+    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
+    /// calls in the bound compute shader. Empty disables validation.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    pub shader_debug_name: String,
 }
 
 /// GPU render target state with optional staging for CPU readback.

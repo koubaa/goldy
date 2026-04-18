@@ -4,6 +4,7 @@ use crate::backend::{ComputeCommand, ComputePipelineHandle, GpuBackend};
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::shader::ShaderModule;
+use crate::types::BindlessHandle;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -181,8 +182,10 @@ impl<'a> ComputePass<'a> {
 
     /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
     ///
-    /// Use this when you need to pass texture/sampler bindless indices or a mix of
-    /// buffer and texture indices. The shader receives these indices directly.
+    /// **Prefer [`ComputePass::set_push_constants_typed`]** for new code — the
+    /// raw form skips per-slot category validation, so binding a uniform-buffer
+    /// index into a slot the shader reads via `goldy_dyn_buf_ro` will silently
+    /// produce garbage reads rather than erroring at dispatch time.
     ///
     /// # Example
     /// ```ignore
@@ -194,6 +197,33 @@ impl<'a> ComputePass<'a> {
             .commands
             .push(ComputeCommand::SetPushConstantsRaw {
                 indices: indices.to_vec(),
+            });
+    }
+
+    /// Set push constants from typed [`BindlessHandle`]s.
+    ///
+    /// Each handle carries both the raw index and the resource's
+    /// [`crate::types::BindlessCategory`]. At dispatch time
+    /// the backend cross-checks these against the bound shader's reflection
+    /// and returns an error if any slot's category disagrees with how the
+    /// shader reads it (e.g. binding a
+    /// [`BindlessCategory::Broadcast`](crate::types::BindlessCategory::Broadcast)
+    /// handle to a slot accessed via `goldy_dyn_buf_ro`, which reads the
+    /// storage-buffer pool). When the shader provides no expectation for a slot
+    /// (e.g. computed slot indices that regex analysis can't resolve),
+    /// validation is skipped for that slot.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let uniforms = uniform_buf.bindless_handle().unwrap();    // Broadcast
+    /// let output  = output_tex.bindless_handle().unwrap();      // StorageImage
+    /// pass.set_push_constants_typed(&[uniforms, output]);
+    /// ```
+    pub fn set_push_constants_typed(&mut self, handles: &[BindlessHandle]) {
+        self.encoder
+            .commands
+            .push(ComputeCommand::SetPushConstantsTyped {
+                handles: handles.to_vec(),
             });
     }
 

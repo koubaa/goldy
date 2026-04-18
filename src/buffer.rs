@@ -2,7 +2,7 @@
 
 use crate::backend::{BufferHandle, GpuBackend};
 use crate::device::Device;
-use crate::types::DataAccess;
+use crate::types::{BindlessCategory, BindlessHandle, DataAccess};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -143,9 +143,37 @@ impl Buffer {
     ///
     /// Returns `Some(index)` if this buffer is registered in the global descriptor set.
     /// All buffers with Scattered or Broadcast access are registered.
+    ///
+    /// **Prefer [`Buffer::bindless_handle`]** for new code: the typed handle
+    /// captures the buffer's [`DataAccess`] category so push-constant setters
+    /// can catch category mismatches (e.g. binding a `Broadcast` buffer to a
+    /// slot read via `goldy_dyn_buf_ro`) at dispatch time instead of silently
+    /// producing garbage reads.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.buffer_bindless_index(self.handle)
+    }
+
+    /// Get this buffer's typed bindless descriptor handle.
+    ///
+    /// The returned handle carries both the raw u32 index and the
+    /// [`BindlessCategory`] implied by the buffer's [`DataAccess`]:
+    /// `Scattered` → [`BindlessCategory::Scattered`],
+    /// `Broadcast` → [`BindlessCategory::Broadcast`].
+    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
+        self.bindless_index()
+            .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
+    }
+
+    /// Get this buffer's typed bindless handle for read-only structured-buffer
+    /// access (maps to `goldy_dyn_buf_ro` / `StructuredBuffer<T>`).
+    ///
+    /// Uses the SRV index on DX12, which may differ from the UAV index.
+    /// Always returns a [`BindlessCategory::Scattered`] handle since
+    /// `goldy_dyn_buf_ro` reads from the storage-buffer pool on every backend.
+    pub fn bindless_srv_handle(&self) -> Option<BindlessHandle> {
+        self.bindless_srv_index()
+            .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))
     }
 
     /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_dyn_buf_ro` access.
@@ -267,10 +295,27 @@ impl BufferView {
         backend.buffer_bindless_index(self.handle)
     }
 
+    /// Get the view's typed bindless handle.
+    ///
+    /// Views are always created on top of `DataAccess::Scattered` backing storage
+    /// (the only access pattern for which sub-ranges make sense), so the handle
+    /// is always tagged [`BindlessCategory::Scattered`].
+    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
+        self.bindless_index()
+            .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))
+    }
+
     /// Get the view's SRV (read-only) bindless index.
     pub fn bindless_srv_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.buffer_bindless_srv_index(self.handle)
+    }
+
+    /// Get the view's typed bindless handle for read-only structured-buffer
+    /// access (same as `goldy_dyn_buf_ro`, [`BindlessCategory::Scattered`]).
+    pub fn bindless_srv_handle(&self) -> Option<BindlessHandle> {
+        self.bindless_srv_index()
+            .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))
     }
 
     /// Get the handle of the backing buffer that owns this view's memory.

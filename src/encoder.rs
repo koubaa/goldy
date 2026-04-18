@@ -3,7 +3,7 @@
 use crate::backend::RenderCommand;
 use crate::buffer::{Buffer, BufferSource};
 use crate::pipeline::RenderPipeline;
-use crate::types::{Color, IndexFormat};
+use crate::types::{BindlessHandle, Color, IndexFormat};
 
 /// Command encoder for recording GPU commands.
 ///
@@ -121,8 +121,8 @@ impl<'a> RenderPass<'a> {
 
     /// Set push constants with raw u32 indices.
     ///
-    /// Use this for textures and samplers, or when you already have the resource indices.
-    /// The indices are pushed in order to the shader's push/root constants.
+    /// **Prefer [`RenderPass::set_push_constants_typed`]** for new code — the
+    /// raw form bypasses per-slot category validation.
     ///
     /// # Example
     /// ```ignore
@@ -136,6 +136,27 @@ impl<'a> RenderPass<'a> {
             .commands
             .push(RenderCommand::SetPushConstantsRaw {
                 indices: indices.to_vec(),
+            });
+    }
+
+    /// Set push constants from typed [`BindlessHandle`]s.
+    ///
+    /// Each handle carries both the raw index and the
+    /// [`crate::types::BindlessCategory`] implied by the
+    /// resource. At dispatch time the backend validates each slot against the
+    /// bound shader's reflection and returns an error on mismatch.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let tex = texture.bindless_handle().unwrap();  // Texture
+    /// let samp = sampler.bindless_handle().unwrap(); // Sampler
+    /// pass.set_push_constants_typed(&[tex, samp]);
+    /// ```
+    pub fn set_push_constants_typed(&mut self, handles: &[BindlessHandle]) {
+        self.encoder
+            .commands
+            .push(RenderCommand::SetPushConstantsTyped {
+                handles: handles.to_vec(),
             });
     }
 

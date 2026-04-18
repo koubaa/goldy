@@ -361,7 +361,7 @@ pub(super) fn render(
     }
 
     // Execute render commands
-    render_commands::record(cmd, commands, device_handle, state);
+    render_commands::record(cmd, commands, device_handle, state)?;
 
     // RENDER_TARGET -> COPY_SOURCE for potential readback
     let to_copy = barriers::texture_barrier_full(

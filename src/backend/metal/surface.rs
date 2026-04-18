@@ -295,7 +295,7 @@ pub(super) fn render(
         height: surface_state.height as u64,
     });
 
-    record(encoder, commands, &state.pipelines, &state.buffers);
+    record(encoder, commands, &state.pipelines, &state.buffers)?;
 
     encoder.end_encoding();
     command_buffer.commit();

@@ -551,6 +551,11 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
+    /// Per-push-constant-slot category expected by the fragment/vertex shader,
+    /// inferred from `goldy_dyn_*(N)` calls. Empty disables validation.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
@@ -559,6 +564,14 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: MTLComputePipelineState,
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
+    /// Per-push-constant-slot category expected by the compute shader, inferred
+    /// from the shader's `goldy_dyn_*(N)` calls during Slang compile. Empty or
+    /// all-`None` disables validation. See
+    /// [`crate::slang::ShaderReflection::push_constant_categories`].
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier used in category-mismatch error messages.
+    /// Defaults to `"cs_main"` for compute pipelines.
+    pub shader_debug_name: String,
 }
 
 /// GPU render target state with optional staging for CPU readback.

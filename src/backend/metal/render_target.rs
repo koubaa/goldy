@@ -156,7 +156,7 @@ pub(super) fn render_to(
         height: render_target.height as u64,
     });
 
-    record(encoder, commands, &state.pipelines, &state.buffers);
+    record(encoder, commands, &state.pipelines, &state.buffers)?;
 
     encoder.end_encoding();
     command_buffer.commit();

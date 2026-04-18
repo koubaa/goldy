@@ -225,9 +225,8 @@ impl App {
         let texture = self.texture.as_ref().unwrap();
         let sampler = self.sampler.as_ref().unwrap();
 
-        // Get bindless indices
-        let tex_idx = texture.bindless_index().unwrap_or(0);
-        let samp_idx = sampler.bindless_index().unwrap_or(0);
+        let tex_handle = texture.bindless_handle().unwrap();
+        let samp_handle = sampler.bindless_handle().unwrap();
 
         let frame = surface.acquire()?;
 
@@ -242,7 +241,7 @@ impl App {
             });
             pass.set_pipeline(pipeline);
             // Pass texture and sampler indices via push constants
-            pass.set_push_constants_raw(&[tex_idx, samp_idx]);
+            pass.set_push_constants_typed(&[tex_handle, samp_handle]);
             pass.set_vertex_buffer(0, vertex_buffer);
             pass.draw(0..6, 0..1);
         }

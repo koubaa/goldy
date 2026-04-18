@@ -470,7 +470,7 @@ pub(super) fn render(
     }
 
     // Execute render commands
-    render_commands::record(cmd, commands, device_handle, state);
+    render_commands::record(cmd, commands, device_handle, state)?;
 
     // RENDER_TARGET -> PRESENT (enhanced barrier, per MS DirectX-Graphics-Samples).
     // SYNC_NONE + NO_ACCESS: no subsequent work on this resource in this command list.
