@@ -4,11 +4,12 @@
 
 use super::barriers;
 use super::render_commands;
-use super::types::{FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT};
-use super::utils::{depth_format_to_dxgi, dxgi_to_format, format_to_dxgi};
+use super::texture;
+use super::types::{FrameSync, LogicalDevice, SurfaceState, MAX_FRAMES_IN_FLIGHT};
+use super::utils::{depth_format_to_dxgi, dxgi_to_format};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::RenderCommand;
-use crate::types::{Color, DepthFormat, TextureFormat};
+use crate::types::{Color, DepthFormat, SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::{Context, Result};
 use raw_window_handle::RawWindowHandle;
 use windows::{
@@ -55,11 +56,10 @@ pub(super) fn create(
     let width = (rect.right - rect.left) as u32;
     let height = (rect.bottom - rect.top) as u32;
 
-    // Create swapchain
-    // ALLOW_UNORDERED_ACCESS lets compute shaders write directly to back buffers
-    // via UAV descriptors (the compute-to-surface path).
-    // Not all adapters support this — if creation fails, consider removing this flag
-    // and falling back to a separate render target + copy.
+    // Create swapchain (render-target usage only).
+    // DXGI/D3D12 rejects `DXGI_USAGE_UNORDERED_ACCESS` on flip-model swapchain buffers;
+    // `CreateSwapChainForHwnd` fails (e.g. HRESULT 0x887A698F). Compute-to-surface must
+    // use an intermediate UAV texture + copy, not a UAV on the swapchain image.
     let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
         Height: height,
@@ -69,7 +69,7 @@ pub(super) fn create(
             Count: 1,
             Quality: 0,
         },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_UNORDERED_ACCESS,
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: MAX_FRAMES_IN_FLIGHT as u32,
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
@@ -216,6 +216,7 @@ pub(super) fn create(
             command_list,
             command_allocator,
             fence_value: 0,
+            render_pass_submitted: false,
         });
     }
 
@@ -239,6 +240,7 @@ pub(super) fn create(
             current_image_index: None,
             frame_sync,
             current_texture_handle: None,
+            compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
         },
     );
 
@@ -248,13 +250,30 @@ pub(super) fn create(
 
 /// Destroy a surface.
 pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
-    // Clean up any outstanding surface texture
-    if let Some(tex_handle) = state
+    let scratch_handles: Vec<TextureHandle> = state
+        .surfaces
+        .get(&surface_handle)
+        .map(|s| {
+            s.compute_scratch_textures
+                .iter()
+                .filter_map(|x| *x)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if state
         .surfaces
         .get(&surface_handle)
         .and_then(|s| s.current_texture_handle)
+        .is_some()
     {
-        unregister_surface_texture(state, tex_handle);
+        tracing::warn!(
+            "Surface destroyed with an acquired frame; scratch textures freed separately"
+        );
+    }
+
+    for h in scratch_handles {
+        texture::destroy(state, h);
     }
 
     if let Some(surface_state) = state.surfaces.remove(&surface_handle) {
@@ -266,21 +285,20 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
 
 /// Acquire the next swapchain image.
 ///
-/// After acquiring, the back buffer is registered in the bindless descriptor
-/// heap as a UAV. The resulting `TextureHandle` is available via
-/// `frame_texture()` until `present()` is called.
+/// Binds a per-buffer **compute scratch** texture (UAV-capable) for `frame.texture()`.
+/// Swapchain back buffers cannot be UAVs on D3D12; `present` copies scratch → back buffer
+/// when no graphics `surface_render` ran this frame.
 pub(super) fn acquire(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
 ) -> Result<SwapchainImageHandle> {
-    // Clean up any previously acquired surface texture that wasn't presented
-    if let Some(tex_handle) = state
+    if state
         .surfaces
         .get(&surface_handle)
         .and_then(|s| s.current_texture_handle)
+        .is_some()
     {
-        tracing::warn!("Previous surface texture was not presented; cleaning up");
-        unregister_surface_texture(state, tex_handle);
+        tracing::warn!("Previous surface frame was not presented; continuing acquire");
     }
 
     let surface = state
@@ -288,24 +306,27 @@ pub(super) fn acquire(
         .get_mut(&surface_handle)
         .context("Invalid surface handle")?;
 
+    let cf = surface.current_frame;
+    surface.frame_sync[cf].render_pass_submitted = false;
+
     let image_index = unsafe { surface.swapchain.GetCurrentBackBufferIndex() };
     surface.current_image_index = Some(image_index);
 
     let device_handle = surface.device_handle;
-    let resource = surface.render_targets[image_index as usize].clone();
     let width = surface.width;
     let height = surface.height;
     let dxgi_format = surface.format;
     let goldy_format = dxgi_to_format(dxgi_format).unwrap_or(TextureFormat::Bgra8Unorm);
+    let idx = image_index as usize;
 
-    let tex_handle = register_surface_texture(
+    let tex_handle = ensure_compute_scratch_texture(
         state,
-        device_handle,
-        resource,
-        dxgi_format,
-        goldy_format,
+        surface_handle,
+        idx,
         width,
         height,
+        goldy_format,
+        device_handle,
     )?;
 
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();
@@ -510,47 +531,171 @@ pub(super) fn render(
         dev.fence_value += 1;
     }
 
+    if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+        surf.frame_sync[current_frame].render_pass_submitted = true;
+    }
+
     Ok(())
 }
 
 /// Present a rendered surface.
 ///
-/// Unregisters the transient surface texture from the bindless descriptor heap,
-/// then presents the swapchain image.
+/// Graphics path: waits for the last graphics submit then presents.
+/// Compute-only path: copies the scratch UAV texture to the swapchain back buffer, then presents.
 pub(super) fn present(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
 ) -> Result<()> {
-    // Unregister the transient surface texture before presenting
-    if let Some(tex_handle) = state
-        .surfaces
-        .get(&surface_handle)
-        .and_then(|s| s.current_texture_handle)
-    {
-        unregister_surface_texture(state, tex_handle);
+    let (
+        device_handle,
+        _image_index,
+        current_frame,
+        scratch_handle,
+        backbuffer,
+        render_pass_submitted,
+    ) = {
+        let surface = state
+            .surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        let image_index = surface
+            .current_image_index
+            .context("No image to present - call surface_acquire first")?
+            as usize;
+        let scratch_handle = surface
+            .current_texture_handle
+            .context("No acquired surface texture")?;
+        let expected = surface
+            .compute_scratch_textures
+            .get(image_index)
+            .copied()
+            .flatten();
+        if expected != Some(scratch_handle) {
+            anyhow::bail!("DX12 surface present: scratch texture handle mismatch");
+        }
+        let render_pass_submitted = surface.frame_sync[surface.current_frame].render_pass_submitted;
+        (
+            surface.device_handle,
+            image_index,
+            surface.current_frame,
+            scratch_handle,
+            surface.render_targets[image_index].clone(),
+            render_pass_submitted,
+        )
+    };
+
+    if let Some(s) = state.surfaces.get_mut(&surface_handle) {
+        s.current_texture_handle = None;
     }
 
-    if let Some(surface) = state.surfaces.get_mut(&surface_handle) {
-        surface.current_texture_handle = None;
-    }
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
 
-    let surface = state
-        .surfaces
-        .get(&surface_handle)
-        .context("Invalid surface handle")?;
-
-    let device_handle = surface.device_handle;
-
-    // Wait for render to complete before presenting
-    {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
-
+    if render_pass_submitted {
         let fence_value = logical_device.fence_value.saturating_sub(1);
         wait_for_fence(&logical_device.fence, fence_value)?;
+    } else {
+        let scratch_res = state
+            .textures
+            .get(&scratch_handle)
+            .context("Scratch texture not found")?
+            .resource
+            .clone();
+
+        let (cmd7, cmd_alloc) = {
+            let surface = state.surfaces.get(&surface_handle).unwrap();
+            let frame = &surface.frame_sync[current_frame];
+            (frame.command_list.clone(), frame.command_allocator.clone())
+        };
+
+        unsafe { cmd_alloc.Reset() }
+            .context("Failed to reset command allocator for present copy")?;
+        let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&cmd7) };
+        unsafe { cmd_gfx.Reset(&cmd_alloc, None) }
+            .context("Failed to reset command list for present copy")?;
+
+        // Flip-discard swapchain: the acquired buffer's contents are undefined until written.
+        // `D3D12_BARRIER_LAYOUT_PRESENT` and `COMMON` share the same numeric value in windows-rs
+        // (both 0), so treat the destination as UNDEFINED before COPY_DEST.
+        unsafe { cmd_gfx.DiscardResource(&backbuffer, None) };
+
+        let mut prep_barriers = vec![
+            barriers::texture_barrier_full(
+                &scratch_res,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+            ),
+            barriers::texture_barrier_full(
+                &backbuffer,
+                D3D12_BARRIER_SYNC_NONE,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_NO_ACCESS,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_LAYOUT_UNDEFINED,
+                D3D12_BARRIER_LAYOUT_COPY_DEST,
+            ),
+        ];
+        unsafe { barriers::barrier_textures(&cmd7, &prep_barriers) };
+        unsafe { barriers::drop_texture_barriers(&mut prep_barriers) };
+
+        unsafe { cmd_gfx.CopyResource(&backbuffer, &scratch_res) };
+
+        let mut post_barriers = vec![
+            barriers::texture_barrier_full(
+                &backbuffer,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_NONE,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_ACCESS_NO_ACCESS,
+                D3D12_BARRIER_LAYOUT_COPY_DEST,
+                D3D12_BARRIER_LAYOUT_PRESENT,
+            ),
+            barriers::texture_barrier_full(
+                &scratch_res,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+            ),
+        ];
+        unsafe { barriers::barrier_textures(&cmd7, &post_barriers) };
+        unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
+
+        unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
+
+        let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
+        unsafe {
+            logical_device
+                .command_queue
+                .ExecuteCommandLists(&[Some(cmd_list)]);
+        }
+
+        let fence_value = logical_device.fence_value;
+        unsafe {
+            logical_device
+                .command_queue
+                .Signal(&logical_device.fence, fence_value)
+        }
+        .context("Failed to signal fence after present copy")?;
+
+        wait_for_fence(&logical_device.fence, fence_value)?;
+
+        if let Some(dev) = state.devices.get_mut(&device_handle) {
+            dev.fence_value += 1;
+        }
+
+        if let Some(tex) = state.textures.get_mut(&scratch_handle) {
+            tex.last_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
+        }
     }
 
     // Present
@@ -591,6 +736,18 @@ pub(super) fn resize(
             .get(&device_handle)
             .context("Surface's device is invalid")?;
         let _ = wait_for_gpu(logical_device);
+    }
+
+    let scratch_destroy: Vec<TextureHandle> = {
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+        surface
+            .compute_scratch_textures
+            .iter_mut()
+            .filter_map(|slot| slot.take())
+            .collect()
+    };
+    for h in scratch_destroy {
+        texture::destroy(state, h);
     }
 
     // Release old render targets, depth buffer, and resize swapchain
@@ -736,9 +893,58 @@ pub(super) fn resize(
     surface.current_frame = 0;
     surface.current_image_index = None;
     surface.current_texture_handle = None;
+    surface.compute_scratch_textures = vec![None; MAX_FRAMES_IN_FLIGHT];
 
     tracing::debug!("Resized surface to {}x{}", width, height);
     Ok(())
+}
+
+/// Ensure a UAV scratch texture exists for swapchain buffer index `idx`.
+fn ensure_compute_scratch_texture(
+    state: &mut Dx12State,
+    surface_handle: SurfaceHandle,
+    idx: usize,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    device_handle: DeviceHandle,
+) -> Result<TextureHandle> {
+    let reuse = {
+        let surface = state
+            .surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        let slot = surface.compute_scratch_textures.get(idx).copied().flatten();
+        if let Some(h) = slot {
+            if let Some(tex) = state.textures.get(&h) {
+                if tex.width == width && tex.height == height && tex.format == format {
+                    return Ok(h);
+                }
+            }
+            Some(h)
+        } else {
+            None
+        }
+    };
+
+    if let Some(old) = reuse {
+        texture::destroy(state, old);
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+        surface.compute_scratch_textures[idx] = None;
+    }
+
+    let h = texture::create(
+        state,
+        device_handle,
+        width,
+        height,
+        format,
+        SpatialAccess::Direct,
+        TextureFlags::empty(),
+    )?;
+    let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+    surface.compute_scratch_textures[idx] = Some(h);
+    Ok(h)
 }
 
 /// Get surface dimensions.
@@ -776,139 +982,4 @@ fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
     unsafe { device.command_queue.Signal(&device.fence, fence_value) }
         .context("Failed to signal fence")?;
     wait_for_fence(&device.fence, fence_value)
-}
-
-// ---------------------------------------------------------------------------
-// Transient surface texture registration
-// ---------------------------------------------------------------------------
-// These functions register/unregister back-buffer resources in the global
-// bindless descriptor heap so that compute shaders can write to them via
-// RWTexture2D. The ID3D12Resource is COM-cloned (refcount bump) on acquire
-// and released (refcount decrement) on present — the swapchain retains its
-// own reference throughout.
-
-/// Register a back-buffer resource as a transient storage texture.
-///
-/// Creates a UAV descriptor in the CBV/SRV/UAV heap and inserts a `TextureState`.
-/// Returns a `TextureHandle` that the caller stores in
-/// `SurfaceState::current_texture_handle`.
-#[allow(clippy::too_many_arguments)]
-fn register_surface_texture(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    resource: ID3D12Resource,
-    dxgi_format: DXGI_FORMAT,
-    goldy_format: TextureFormat,
-    width: u32,
-    height: u32,
-) -> Result<TextureHandle> {
-    let handle = state.next_texture_handle;
-    state.next_texture_handle += 1;
-
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Device no longer valid")?;
-
-    // Register a UAV descriptor so compute shaders can write to this texture.
-    // SRV is also registered so the texture can be read back if needed.
-    let srv_offset = logical_device.resource_registry.register_texture(handle);
-    let uav_offset = logical_device
-        .resource_registry
-        .register_texture_uav(handle);
-
-    // Create SRV descriptor
-    let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
-        Format: dxgi_format,
-        ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
-        Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-        Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-            Texture2D: D3D12_TEX2D_SRV {
-                MostDetailedMip: 0,
-                MipLevels: 1,
-                PlaneSlice: 0,
-                ResourceMinLODClamp: 0.0,
-            },
-        },
-    };
-
-    let srv_cpu_handle = unsafe {
-        let mut h = logical_device
-            .cbv_srv_uav_heap
-            .GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
-        h
-    };
-    unsafe {
-        logical_device
-            .device
-            .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
-    }
-
-    // Create UAV descriptor for compute write access
-    let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-        Format: dxgi_format,
-        ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
-        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-            Texture2D: D3D12_TEX2D_UAV {
-                MipSlice: 0,
-                PlaneSlice: 0,
-            },
-        },
-    };
-
-    let uav_cpu_handle = unsafe {
-        let mut h = logical_device
-            .cbv_srv_uav_heap
-            .GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
-        h
-    };
-    unsafe {
-        logical_device.device.CreateUnorderedAccessView(
-            Some(&resource),
-            None,
-            Some(&uav_desc),
-            uav_cpu_handle,
-        );
-    }
-
-    state.textures.insert(
-        handle,
-        TextureState {
-            device_handle,
-            width,
-            height,
-            format: goldy_format,
-            resource,
-            srv_offset,
-            bindless_offset: Some(uav_offset),
-            last_layout: D3D12_BARRIER_LAYOUT_PRESENT,
-        },
-    );
-
-    tracing::debug!(
-        "Registered surface texture {} ({}x{}, srv={}, uav={})",
-        handle,
-        width,
-        height,
-        srv_offset,
-        uav_offset,
-    );
-
-    Ok(handle)
-}
-
-/// Unregister a transient surface texture.
-///
-/// Removes the `TextureState` and unregisters from the resource registry.
-/// The `ID3D12Resource` COM refcount decrements when the `TextureState` is dropped,
-/// but the swapchain retains its own reference, so the back buffer stays alive.
-fn unregister_surface_texture(state: &mut Dx12State, tex_handle: TextureHandle) {
-    if let Some(tex_state) = state.textures.remove(&tex_handle) {
-        if let Some(dev) = state.devices.get_mut(&tex_state.device_handle) {
-            dev.resource_registry.unregister_texture(tex_handle);
-        }
-        tracing::debug!("Unregistered surface texture {}", tex_handle);
-    }
 }

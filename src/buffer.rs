@@ -168,12 +168,14 @@ impl Buffer {
     /// Get this buffer's typed bindless handle for read-only structured-buffer
     /// access (maps to `goldy_dyn_buf_ro` / `StructuredBuffer<T>`).
     ///
-    /// Uses the SRV index on DX12, which may differ from the UAV index.
-    /// Always returns a [`BindlessCategory::Scattered`] handle since
-    /// `goldy_dyn_buf_ro` reads from the storage-buffer pool on every backend.
+    /// Uses [`Self::bindless_srv_index`]: on Direct3D 12, scattered storage buffers have a
+    /// separate SRV heap slot from the UAV; on Vulkan and Metal the read index matches
+    /// [`Self::bindless_index`]. The handle's [`BindlessCategory`] follows
+    /// [`Self::access`], same as [`Self::bindless_handle`], so non-DX12 backends produce the
+    /// same handle as `bindless_handle()` when the indices coincide.
     pub fn bindless_srv_handle(&self) -> Option<BindlessHandle> {
         self.bindless_srv_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))
+            .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
     }
 
     /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_dyn_buf_ro` access.
