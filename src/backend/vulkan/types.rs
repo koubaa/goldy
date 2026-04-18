@@ -227,6 +227,8 @@ pub(crate) struct BufferState {
     /// Whether this is a storage buffer (vs uniform buffer)
     #[allow(dead_code)]
     pub is_storage: bool,
+    /// Structured-buffer / uniform element stride from buffer creation (for optional validation).
+    pub element_stride: Option<u32>,
     /// HOST_VISIBLE staging buffer for DEVICE_LOCAL storage buffers (CPU upload/readback)
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
@@ -269,6 +271,8 @@ pub(crate) struct PipelineState {
     /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
     /// calls in the bound shader(s). Empty disables validation.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
+    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -286,6 +290,8 @@ pub(crate) struct ComputePipelineState {
     /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
     /// calls in the bound compute shader. Empty disables validation.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
+    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }

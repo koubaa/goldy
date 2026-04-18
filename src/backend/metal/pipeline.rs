@@ -129,6 +129,19 @@ pub(super) fn create_with_depth(
         })
         .unwrap_or_default();
 
+    let push_constant_buffer_strides = fs_shader
+        .reflection
+        .as_ref()
+        .map(|r| r.push_constant_buffer_strides.clone())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            vs_shader
+                .reflection
+                .as_ref()
+                .map(|r| r.push_constant_buffer_strides.clone())
+        })
+        .unwrap_or_default();
+
     let handle = state.next_pipeline_handle;
     state.next_pipeline_handle += 1;
 
@@ -140,6 +153,7 @@ pub(super) fn create_with_depth(
             depth_stencil: depth_stencil_state,
             primitive_type: topology_to_mtl(topology),
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name: "fs_main/vs_main".to_string(),
         },
     );

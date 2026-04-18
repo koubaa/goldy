@@ -6,6 +6,7 @@ use crate::backend::DataAccess;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
+use std::collections::HashMap;
 
 /// Create a buffer with the given size and access pattern.
 pub(super) fn create(
@@ -13,7 +14,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     size: u64,
     access: DataAccess,
-    _element_stride: Option<u32>,
+    element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
     let logical_device = state
         .devices
@@ -75,6 +76,8 @@ pub(super) fn create(
             buffer,
             size,
             arg_buffer_index,
+            access,
+            element_stride,
         },
     );
 
@@ -90,6 +93,7 @@ pub(super) fn create_view(
     parent_handle: BufferHandle,
     offset: u64,
     size: u64,
+    element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
     let parent = state
         .buffers
@@ -138,6 +142,8 @@ pub(super) fn create_view(
             buffer: parent_mtl_buffer,
             size,
             arg_buffer_index,
+            access: DataAccess::Scattered,
+            element_stride,
         },
     );
 
@@ -192,6 +198,38 @@ pub(super) fn bindless_index(state: &MetalState, buffer_handle: BufferHandle) ->
         .buffers
         .get(&buffer_handle)
         .map(|b| b.arg_buffer_index)
+}
+
+/// Effective structured-buffer element stride for `GOLDY_VALIDATE_BUFFER_STRIDES` checks.
+pub(super) fn element_stride_for_bindless_handle_map(
+    buffers: &HashMap<BufferHandle, BufferState>,
+    handle: crate::types::BindlessHandle,
+) -> Option<u32> {
+    use crate::types::{BindlessCategory, DataAccess};
+    let want_access = match handle.category() {
+        BindlessCategory::Scattered => DataAccess::Scattered,
+        BindlessCategory::Broadcast => DataAccess::Broadcast,
+        _ => return None,
+    };
+    let idx = handle.index();
+    for b in buffers.values() {
+        if b.access != want_access || b.arg_buffer_index != idx {
+            continue;
+        }
+        if b.access == DataAccess::Scattered {
+            return Some(b.element_stride.unwrap_or(4));
+        }
+        return b.element_stride;
+    }
+    None
+}
+
+/// See [`element_stride_for_bindless_handle_map`].
+pub(super) fn element_stride_for_bindless_handle(
+    state: &MetalState,
+    handle: crate::types::BindlessHandle,
+) -> Option<u32> {
+    element_stride_for_bindless_handle_map(&state.buffers, handle)
 }
 
 /// Read buffer contents back to CPU memory.

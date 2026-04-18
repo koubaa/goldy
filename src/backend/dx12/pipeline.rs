@@ -12,25 +12,38 @@ fn push_constant_expectations(
     state: &Dx12State,
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
-) -> (Vec<Option<crate::types::BindlessCategory>>, String) {
-    let fs_cats = state
+) -> (
+    Vec<Option<crate::types::BindlessCategory>>,
+    Vec<Option<u32>>,
+    String,
+) {
+    let fs = state
         .shaders
         .get(&fragment_shader)
-        .and_then(|s| s.reflection.as_ref())
+        .and_then(|s| s.reflection.as_ref());
+    let fs_cats = fs
         .map(|r| r.push_constant_categories.clone())
         .unwrap_or_default();
-    let cats = if !fs_cats.is_empty() {
-        fs_cats
+    let fs_strides = fs
+        .map(|r| r.push_constant_buffer_strides.clone())
+        .unwrap_or_default();
+    let (cats, strides) = if !fs_cats.is_empty() {
+        (fs_cats, fs_strides)
     } else {
-        state
+        let vs = state
             .shaders
             .get(&vertex_shader)
-            .and_then(|s| s.reflection.as_ref())
-            .map(|r| r.push_constant_categories.clone())
-            .unwrap_or_default()
+            .and_then(|s| s.reflection.as_ref());
+        (
+            vs.map(|r| r.push_constant_categories.clone())
+                .unwrap_or_default(),
+            vs.map(|r| r.push_constant_buffer_strides.clone())
+                .unwrap_or_default(),
+        )
     };
     (
         cats,
+        strides,
         format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})"),
     )
 }
@@ -52,7 +65,7 @@ pub(super) fn create(
     let fs_bytecode =
         shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-    let (push_constant_categories, shader_debug_name) =
+    let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
         push_constant_expectations(state, vertex_shader, fragment_shader);
 
     let logical_device = state
@@ -204,6 +217,7 @@ pub(super) fn create(
             topology,
             parameter_block_layouts: Vec::new(),
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         },
     );
@@ -229,7 +243,7 @@ pub(super) fn create_with_depth(
     let fs_bytecode =
         shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-    let (push_constant_categories, shader_debug_name) =
+    let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
         push_constant_expectations(state, vertex_shader, fragment_shader);
 
     let logical_device = state
@@ -393,6 +407,7 @@ pub(super) fn create_with_depth(
             topology,
             parameter_block_layouts: Vec::new(),
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         },
     );

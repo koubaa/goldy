@@ -676,6 +676,34 @@ pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle)
         .and_then(|b| b.bindless_srv_offset.or(b.bindless_offset))
 }
 
+/// Effective structured-buffer element stride for `GOLDY_VALIDATE_BUFFER_STRIDES` checks.
+pub(super) fn element_stride_for_bindless_handle(
+    state: &Dx12State,
+    handle: crate::types::BindlessHandle,
+) -> Option<u32> {
+    use crate::types::BindlessCategory;
+    let idx = handle.index();
+    for b in state.buffers.values() {
+        match handle.category() {
+            BindlessCategory::Scattered if !b.is_storage => continue,
+            BindlessCategory::Broadcast if b.is_storage => continue,
+            BindlessCategory::Scattered | BindlessCategory::Broadcast => {}
+            _ => continue,
+        }
+        let matches_idx = b.bindless_offset == Some(idx)
+            || (handle.category() == BindlessCategory::Scattered
+                && b.bindless_srv_offset == Some(idx));
+        if !matches_idx {
+            continue;
+        }
+        if b.is_storage {
+            return Some(b.element_stride.unwrap_or(4));
+        }
+        return b.element_stride;
+    }
+    None
+}
+
 /// Read buffer contents back to CPU memory.
 ///
 /// For DEFAULT heap buffers (storage), creates a readback buffer and copies.

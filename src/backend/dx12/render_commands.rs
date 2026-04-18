@@ -3,6 +3,7 @@
 //! This module contains `record` which is used by both
 //! `render_to_target` and `surface_render` to avoid code duplication.
 
+use super::buffer;
 use super::types::{self, Dx12State};
 use super::utils::{index_format_to_dxgi, topology_to_d3d12};
 use super::{DeviceHandle, RenderCommand};
@@ -119,6 +120,12 @@ pub(super) fn record(
                         typed_handles,
                         &pipeline.push_constant_categories,
                         &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_typed_push_constant_buffer_strides(
+                        typed_handles,
+                        &pipeline.push_constant_buffer_strides,
+                        &pipeline.shader_debug_name,
+                        |h| buffer::element_stride_for_bindless_handle(state, h),
                     )?;
                 }
                 let mut indices = types::BindlessIndices::default();

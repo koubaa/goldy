@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use super::ffi::*;
 use super::loader::SlangLibrary;
@@ -14,14 +14,14 @@ use crate::types::OptimizationLevel;
 use crate::{goldy_event, goldy_span};
 
 /// Returns `true` when `GOLDY_VALIDATE_LAYOUTS=1` (or any truthy value).
-/// Checked once per process and cached.
+///
+/// Controls both struct layout checks (at compile time) and buffer element-stride
+/// checks (at dispatch time). Reads the environment on every call so that tests
+/// can toggle the flag without restarting the process.
 pub fn layout_validation_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GOLDY_VALIDATE_LAYOUTS")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false)
-    })
+    std::env::var("GOLDY_VALIDATE_LAYOUTS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -228,6 +228,177 @@ pub fn analyze_push_constant_categories_from_source(
         .collect()
 }
 
+/// Parsed stride hint for a push-constant slot (before Slang resolution).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PushConstantStrideHint {
+    /// Reflect `T` from the same compile request to get the element byte stride.
+    Structured { type_name: String },
+    /// `goldy_dyn_byte_address` — host buffer should use byte stride 1.
+    ByteAddress,
+}
+
+/// Scan Slang source for `goldy_dyn_buf_ro<T>(N)`, `goldy_dyn_scattered<T>(N)`,
+/// `goldy_dyn_broadcast<T>(N)`, and `goldy_dyn_byte_address(N)` with literal
+/// slot indices. Returns a sparse vector aligned to slot indices (same trimming
+/// rules as [`analyze_push_constant_categories_from_source`]).
+///
+/// Conflicting hints for the same slot (e.g. different `T` or typed buffer vs
+/// byte-address) collapse to `None` so validation is skipped for that slot.
+pub fn analyze_push_constant_stride_hints_from_source(
+    source: &str,
+) -> Vec<Option<PushConstantStrideHint>> {
+    #[derive(Clone, PartialEq, Eq)]
+    enum Slot {
+        Unknown,
+        One(PushConstantStrideHint),
+        Conflict,
+    }
+    let mut slots = vec![Slot::Unknown; 16];
+
+    #[derive(Clone, Copy)]
+    struct DynStrideFunc {
+        name: &'static str,
+        /// `true` = requires a `<T>` generic before `(`.
+        needs_type_arg: bool,
+    }
+
+    const STRIDE_FUNCS: &[DynStrideFunc] = &[
+        DynStrideFunc {
+            name: "goldy_dyn_scattered",
+            needs_type_arg: true,
+        },
+        DynStrideFunc {
+            name: "goldy_dyn_buf_ro",
+            needs_type_arg: true,
+        },
+        DynStrideFunc {
+            name: "goldy_dyn_broadcast",
+            needs_type_arg: true,
+        },
+        DynStrideFunc {
+            name: "goldy_dyn_byte_address",
+            needs_type_arg: false,
+        },
+    ];
+
+    for spec in STRIDE_FUNCS {
+        let fn_name = spec.name;
+        let mut search_from = 0usize;
+        while let Some(rel) = source[search_from..].find(fn_name) {
+            let abs = search_from + rel;
+            search_from = abs + fn_name.len();
+
+            if abs > 0 {
+                let prev = source.as_bytes()[abs - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    continue;
+                }
+            }
+
+            let mut cursor = search_from;
+            let bytes = source.as_bytes();
+
+            let hint = if spec.needs_type_arg {
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor >= bytes.len() || bytes[cursor] != b'<' {
+                    continue;
+                }
+                let mut depth = 1i32;
+                let type_start = cursor + 1;
+                cursor += 1;
+                while cursor < bytes.len() && depth > 0 {
+                    match bytes[cursor] {
+                        b'<' => depth += 1,
+                        b'>' => depth -= 1,
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+                if depth != 0 {
+                    continue;
+                }
+                let type_end = cursor - 1;
+                let type_name = source[type_start..type_end].trim();
+                if type_name.is_empty() {
+                    continue;
+                }
+                PushConstantStrideHint::Structured {
+                    type_name: type_name.to_string(),
+                }
+            } else {
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                PushConstantStrideHint::ByteAddress
+            };
+
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+
+            if cursor >= bytes.len() || bytes[cursor] != b'(' {
+                continue;
+            }
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            let num_start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            if cursor == num_start {
+                continue;
+            }
+            let mut end = cursor;
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if end >= bytes.len() || (bytes[end] != b')' && bytes[end] != b'u') {
+                continue;
+            }
+            if bytes[end] == b'u' {
+                end += 1;
+                while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                    end += 1;
+                }
+                if end >= bytes.len() || bytes[end] != b')' {
+                    continue;
+                }
+            }
+
+            let Ok(n) = source[num_start..cursor].parse::<usize>() else {
+                continue;
+            };
+            if n >= slots.len() {
+                continue;
+            }
+
+            slots[n] = match (&slots[n], &hint) {
+                (Slot::Unknown, _) => Slot::One(hint.clone()),
+                (Slot::One(prev), next) if prev == next => Slot::One(prev.clone()),
+                _ => Slot::Conflict,
+            };
+        }
+    }
+
+    let mut last_known = 0usize;
+    for (i, s) in slots.iter().enumerate() {
+        if !matches!(s, Slot::Unknown) {
+            last_known = i + 1;
+        }
+    }
+    slots[..last_known]
+        .iter()
+        .map(|s| match s {
+            Slot::One(h) => Some(h.clone()),
+            Slot::Unknown | Slot::Conflict => None,
+        })
+        .collect()
+}
+
 /// Complete reflection information for a compiled shader
 #[derive(Debug, Clone, Default)]
 pub struct ShaderReflection {
@@ -242,6 +413,13 @@ pub struct ShaderReflection {
     /// [`crate::types::BindlessHandle`]-typed push-constant setters to catch
     /// category mismatches at dispatch time.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per push-constant slot, the structured-buffer / uniform element size in
+    /// bytes the shader expects for `goldy_dyn_*<T>(slot)` (or `1` for
+    /// `goldy_dyn_byte_address`), or `None` when stride checking doesn't apply
+    /// or couldn't be resolved. Populated at shader compile time from source
+    /// analysis + Slang reflection. Used when `GOLDY_VALIDATE_BUFFER_STRIDES`
+    /// is enabled.
+    pub push_constant_buffer_strides: Vec<Option<u32>>,
 }
 
 /// Byte layout of a Slang `struct` under uniform / constant-buffer rules (`SlangLayoutRules::Default`).
@@ -766,6 +944,9 @@ impl SlangCompiler {
                 let mut reflection = slf.extract_reflection(request)?;
                 reflection.push_constant_categories =
                     analyze_push_constant_categories_from_source(source);
+                let stride_hints = analyze_push_constant_stride_hints_from_source(source);
+                reflection.push_constant_buffer_strides =
+                    slf.resolve_push_constant_buffer_strides(request, &stride_hints);
 
                 if !layout_checks.is_empty() {
                     slf.validate_owned_layout_checks(request, layout_checks)?;
@@ -845,6 +1026,75 @@ impl SlangCompiler {
         }
 
         self.extract_struct_layout_uniform(layout_ptr, type_name)
+    }
+
+    /// Byte size of `type_name` for buffer / structured-buffer layout, using the
+    /// first non-zero size among Slang categories (shader resource, uniform,
+    /// constant buffer).
+    fn reflect_type_byte_stride_for_buffer(
+        &self,
+        request: *mut SlangCompileRequest,
+        type_name: &str,
+    ) -> Result<u32> {
+        let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
+        if reflection_ptr.is_null() {
+            anyhow::bail!("No Slang reflection available after compile");
+        }
+
+        let name_cstr = CString::new(type_name).context("type_name contains null bytes")?;
+        let ty = unsafe {
+            (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr())
+        };
+        if ty.is_null() {
+            anyhow::bail!("Slang reflection: type `{type_name}` not found");
+        }
+
+        let layout_ptr = unsafe {
+            (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default)
+        };
+        if layout_ptr.is_null() {
+            anyhow::bail!("Slang reflection: failed to get layout for `{type_name}`");
+        }
+
+        for cat in [
+            SlangParameterCategory::ShaderResource,
+            SlangParameterCategory::Uniform,
+            SlangParameterCategory::ConstantBuffer,
+        ] {
+            let size =
+                unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, cat as i32) };
+            if size > 0 {
+                return Ok(size as u32);
+            }
+        }
+
+        anyhow::bail!("Slang reflection: zero byte size for `{type_name}` in buffer layouts")
+    }
+
+    fn resolve_push_constant_buffer_strides(
+        &self,
+        request: *mut SlangCompileRequest,
+        hints: &[Option<PushConstantStrideHint>],
+    ) -> Vec<Option<u32>> {
+        hints
+            .iter()
+            .map(|h| match h {
+                None => None,
+                Some(PushConstantStrideHint::ByteAddress) => Some(1),
+                Some(PushConstantStrideHint::Structured { type_name }) => {
+                    match self.reflect_type_byte_stride_for_buffer(request, type_name) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "goldy::slang",
+                                "could not resolve push-constant stride for Slang type `{type_name}`: {e}"
+                            );
+                            None
+                        }
+                    }
+                }
+            })
+            .collect()
     }
 
     fn extract_struct_layout_uniform(
@@ -995,6 +1245,7 @@ impl SlangCompiler {
         Ok(ShaderReflection {
             parameter_blocks,
             push_constant_categories: Vec::new(),
+            push_constant_buffer_strides: Vec::new(),
         })
     }
 
@@ -1457,6 +1708,65 @@ mod struct_layout_validate_tests {
         assert!(err.contains("offset"), "expected offset mismatch: {err}");
         assert!(err.contains("`y`"), "expected field y: {err}");
     }
+
+    /// Integration test: feeds a deliberate layout mismatch through the full
+    /// `compile_with_reflection` path and checks that the error message is
+    /// actionable (contains the struct name and "offset").
+    ///
+    /// This is the path an agent hits when `GOLDY_VALIDATE_LAYOUTS=1` is set
+    /// and a `#[derive(LayoutCheckable)]` struct drifts from its Slang counterpart.
+    #[test]
+    fn layout_validation_end_to_end_catches_mismatch() {
+        use super::{OwnedLayoutCheck, ShaderTarget, SlangCompiler, SlangStage};
+        use crate::types::OptimizationLevel;
+
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable; skipping");
+
+        // A minimal compute shader that declares MyUniforms.
+        let source = r#"
+            struct MyUniforms { float x; float y; };
+            [shader("compute")]
+            [numthreads(1, 1, 1)]
+            void cs_main() {}
+        "#;
+
+        // Correct Rust layout for { float x; float y; } — size=8, y at offset 4.
+        // We intentionally claim y is at offset 8, which Slang will disagree with.
+        let bad_check = OwnedLayoutCheck {
+            type_name: "MyUniforms".into(),
+            rust_size: 8,
+            rust_fields: vec![
+                ("x".into(), 0, 4),
+                ("y".into(), 8, 4), // wrong: Slang reflects offset 4
+            ],
+        };
+
+        let err = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[],
+                &[],
+                &[bad_check],
+                OptimizationLevel::None,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("MyUniforms"),
+            "error should name the mismatched struct: {err}"
+        );
+        assert!(
+            err.contains("offset"),
+            "error should describe the offset mismatch: {err}"
+        );
+        assert!(
+            err.contains("`y`"),
+            "error should name the offending field: {err}"
+        );
+    }
 }
 
 impl Drop for SlangCompiler {
@@ -1573,5 +1883,38 @@ mod push_constant_source_analysis_tests {
         // 3 slots total: None, None, Some(Broadcast) — nothing after 2.
         assert_eq!(cats.len(), 3);
         assert_eq!(cats[2], Some(BindlessCategory::Broadcast));
+    }
+
+    #[test]
+    fn stride_hints_buf_ro() {
+        use super::{analyze_push_constant_stride_hints_from_source, PushConstantStrideHint};
+        let src = "ReadOnlyBuffer<Particle> p = goldy_dyn_buf_ro<Particle>(1);";
+        let h = analyze_push_constant_stride_hints_from_source(src);
+        assert_eq!(h.len(), 2);
+        assert_eq!(
+            h[1],
+            Some(PushConstantStrideHint::Structured {
+                type_name: "Particle".into()
+            })
+        );
+    }
+
+    #[test]
+    fn stride_hints_byte_address() {
+        use super::{analyze_push_constant_stride_hints_from_source, PushConstantStrideHint};
+        let src = "ByteAddressView v = goldy_dyn_byte_address(0);";
+        let h = analyze_push_constant_stride_hints_from_source(src);
+        assert_eq!(h, vec![Some(PushConstantStrideHint::ByteAddress)]);
+    }
+
+    #[test]
+    fn stride_hints_conflict_on_same_slot() {
+        use super::analyze_push_constant_stride_hints_from_source;
+        let src = r#"
+            ReadOnlyBuffer<A> a = goldy_dyn_buf_ro<A>(0);
+            ReadOnlyBuffer<B> b = goldy_dyn_buf_ro<B>(0);
+        "#;
+        let h = analyze_push_constant_stride_hints_from_source(src);
+        assert_eq!(h, vec![None]);
     }
 }

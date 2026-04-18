@@ -1,6 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::barriers;
+use super::buffer;
 use super::shader;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
 use super::{ComputePipelineHandle, DeviceHandle, ShaderHandle};
@@ -19,11 +20,16 @@ pub(super) fn create(
     let cs_bytecode =
         shader::ensure_stage_compiled(state, compute_shader, crate::slang::SlangStage::Compute)?;
 
-    let push_constant_categories = state
+    let (push_constant_categories, push_constant_buffer_strides) = state
         .shaders
         .get(&compute_shader)
         .and_then(|s| s.reflection.as_ref())
-        .map(|r| r.push_constant_categories.clone())
+        .map(|r| {
+            (
+                r.push_constant_categories.clone(),
+                r.push_constant_buffer_strides.clone(),
+            )
+        })
         .unwrap_or_default();
     let shader_debug_name = format!("compute_shader#{compute_shader}");
 
@@ -68,6 +74,7 @@ pub(super) fn create(
             root_signature,
             parameter_block_layouts: Vec::new(),
             push_constant_categories,
+            push_constant_buffer_strides,
             shader_debug_name,
         },
     );
@@ -234,6 +241,12 @@ pub(super) fn submit(
                         typed_handles,
                         &pipeline.push_constant_categories,
                         &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_typed_push_constant_buffer_strides(
+                        typed_handles,
+                        &pipeline.push_constant_buffer_strides,
+                        &pipeline.shader_debug_name,
+                        |h| buffer::element_stride_for_bindless_handle(state, h),
                     )?;
                 }
                 let mut indices = types::BindlessIndices::default();

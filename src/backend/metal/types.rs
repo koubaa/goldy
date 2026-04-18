@@ -521,6 +521,9 @@ pub(crate) struct BufferState {
     pub size: u64,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
+    pub access: crate::types::DataAccess,
+    /// Structured-buffer / uniform element stride from buffer creation.
+    pub element_stride: Option<u32>,
 }
 
 /// Shader module state with cached compiled stages.
@@ -554,6 +557,8 @@ pub(crate) struct PipelineState {
     /// Per-push-constant-slot category expected by the fragment/vertex shader,
     /// inferred from `goldy_dyn_*(N)` calls. Empty disables validation.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
+    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -569,6 +574,8 @@ pub(crate) struct ComputePipelineState {
     /// all-`None` disables validation. See
     /// [`crate::slang::ShaderReflection::push_constant_categories`].
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
+    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     /// Defaults to `"cs_main"` for compute pipelines.
     pub shader_debug_name: String,
