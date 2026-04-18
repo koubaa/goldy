@@ -36,7 +36,7 @@ pub(super) fn create(
 ) -> Result<SurfaceHandle> {
     let logical_device = state
         .devices
-        .get(&device_handle)
+        .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
     let window_handle = window
@@ -78,6 +78,14 @@ pub(super) fn create(
         logical_device.device.new_texture(&depth_desc)
     });
 
+    // Reserve a single persistent storage-image bindless slot for this surface's
+    // swapchain drawable. We re-encode the current frame's `MTLTexture` into this
+    // slot on every `acquire` rather than allocating a fresh slot per frame
+    // (which would leak the 64-slot storage-image window in ~1 second at 60 fps).
+    let bindless_storage_slot = logical_device
+        .resource_registry
+        .reserve_storage_image_slot();
+
     let handle = state.next_surface_handle;
     state.next_surface_handle += 1;
 
@@ -94,21 +102,42 @@ pub(super) fn create(
             layer: layer as *mut std::ffi::c_void,
             current_drawable: None,
             current_texture_handle: None,
+            bindless_storage_slot,
             present_mode: PresentMode::Auto,
         },
     );
-    tracing::info!("Created Metal surface {}", handle);
+    tracing::info!(
+        "Created Metal surface {} (bindless storage slot={})",
+        handle,
+        bindless_storage_slot
+    );
     Ok(handle)
 }
 
 /// Destroy a surface.
 pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
     // Clean up any acquired drawable texture before removing the surface
+    let (device_handle, slot) = match state.surfaces.get(&surface) {
+        Some(s) => (Some(s.device_handle), Some(s.bindless_storage_slot)),
+        None => (None, None),
+    };
+
     if let Some(surface_state) = state.surfaces.get(&surface) {
         if let Some(tex_handle) = surface_state.current_texture_handle {
             unregister_surface_texture(state, tex_handle);
         }
     }
+
+    // Release the persistent bindless storage-image slot back to the device
+    // registry's free list so another surface can claim it.
+    if let (Some(dev), Some(local)) = (device_handle, slot) {
+        if let Some(logical_device) = state.devices.get_mut(&dev) {
+            logical_device
+                .resource_registry
+                .release_storage_image_slot(local);
+        }
+    }
+
     state.surfaces.remove(&surface);
 }
 
@@ -160,9 +189,17 @@ pub(super) fn acquire(
     let width = surface_state.width;
     let height = surface_state.height;
     let format = surface_state.format;
+    let bindless_slot = surface_state.bindless_storage_slot;
 
-    let tex_handle =
-        register_surface_texture(state, device_handle, texture, width, height, format)?;
+    let tex_handle = register_surface_texture(
+        state,
+        device_handle,
+        texture,
+        width,
+        height,
+        format,
+        bindless_slot,
+    )?;
 
     let surface_state = state.surfaces.get_mut(&surface).unwrap();
     surface_state.current_texture_handle = Some(tex_handle);
@@ -298,7 +335,8 @@ pub(super) fn present(
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let drawable = drawable_ptr as id;
-    let _: () = unsafe { msg_send![command_buffer.as_ptr(), presentDrawable: drawable] };
+    let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
+    command_buffer.present_drawable(drawable_ref);
     command_buffer.commit();
 
     // Release the retained drawable
@@ -422,12 +460,20 @@ pub(super) fn format(state: &MetalState, surface: SurfaceHandle) -> TextureForma
 // Internal helpers for transient surface texture management
 // ---------------------------------------------------------------------------
 
-/// Register a drawable's MTLTexture in the texture system for bindless access.
+/// Register the current drawable's MTLTexture at the surface's pre-reserved
+/// bindless storage-image slot, so it's visible to compute shaders via
+/// `goldy_dyn_direct_spatial<T>(n)` and to the public API via
+/// [`SurfaceFrame::texture`].
 ///
-/// The texture is stored as a `TextureState` with a unique handle so it can be
-/// referenced via `texture_bindless_index` just like any other texture. It is
-/// registered as a storage image (Direct spatial access) since compute shaders
-/// need write access.
+/// The slot (`bindless_slot`) is allocated once in `create()` and released
+/// in `destroy()`, so only the *texture object* at offset
+/// `storage_image_global_index(bindless_slot) * encoded_length` is rewritten
+/// per frame. This is the "transient allocation path that doesn't leak
+/// indices" anticipated by `abstract-gpu-surface.md` (risk #2).
+///
+/// The drawable `MTLTexture` is owned via [`ForeignType::from_ptr`] after an
+/// explicit `retain` (never cast `&TextureRef` → `&Texture` and `clone()` —
+/// that was UB / PAC faults).
 fn register_surface_texture(
     state: &mut MetalState,
     device_handle: DeviceHandle,
@@ -435,40 +481,41 @@ fn register_surface_texture(
     width: u32,
     height: u32,
     format: TextureFormat,
+    bindless_slot: u32,
 ) -> Result<TextureHandle> {
     let handle = state.next_texture_handle;
     state.next_texture_handle += 1;
 
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Device no longer valid")?;
-
-    // Register as a storage image so compute shaders can write to it
-    let local_idx = logical_device
-        .resource_registry
-        .register_storage_image(handle);
-    let global_idx = ResourceRegistry::storage_image_global_index(local_idx);
-
-    // Encode the texture into the argument buffer
-    let encoded_length = logical_device.texture_encoder.encoded_length();
-    let offset = (global_idx as u64) * encoded_length;
-    if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
-        logical_device
-            .texture_encoder
-            .set_argument_buffer(&logical_device.argument_buffer, offset);
-        logical_device.texture_encoder.set_texture(0, texture);
-        tracing::trace!(
-            "Encoded surface texture {} at arg buffer offset {} (global slot {})",
-            handle,
-            offset,
-            global_idx
-        );
+    let raw = texture.as_ptr();
+    unsafe {
+        let () = msg_send![raw as id, retain];
     }
+    let texture_owned = unsafe { mtl::Texture::from_ptr(raw) };
 
-    // Retain the MTLTexture so it stays valid while we hold a reference
-    let texture_obj: &mtl::Texture =
-        unsafe { &*(texture as *const mtl::TextureRef as *const mtl::Texture) };
+    let global_idx = {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Device no longer valid")?;
+
+        logical_device
+            .resource_registry
+            .bind_storage_image_slot(handle, bindless_slot);
+        let global = ResourceRegistry::storage_image_global_index(bindless_slot);
+
+        let encoded_length = logical_device.texture_encoder.encoded_length();
+        let offset = (global as u64) * encoded_length;
+        if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
+            logical_device
+                .texture_encoder
+                .set_argument_buffer(&logical_device.argument_buffer, offset);
+            logical_device
+                .texture_encoder
+                .set_texture(0, texture_owned.as_ref());
+        }
+
+        global
+    };
 
     state.textures.insert(
         handle,
@@ -477,29 +524,34 @@ fn register_surface_texture(
             width,
             height,
             format,
-            texture: texture_obj.clone(),
-            arg_buffer_index: local_idx,
+            texture: texture_owned,
+            arg_buffer_index: bindless_slot,
+            is_storage_image: true,
+            slot_owned_externally: true,
         },
     );
 
     tracing::debug!(
-        "Registered surface texture {} ({}x{}, bindless local={} global={})",
+        "Encoded surface drawable into texture {} ({}x{}, bindless storage local={}, global={})",
         handle,
         width,
         height,
-        local_idx,
+        bindless_slot,
         global_idx,
     );
 
     Ok(handle)
 }
 
-/// Unregister a transient surface texture from the texture system.
+/// Unregister the per-frame TextureHandle for the drawable, releasing the
+/// owned `MTLTexture` (via `Drop` → `release`) and clearing the handle→slot
+/// map entry. The surface's bindless slot itself is NOT released here — it
+/// stays reserved across frames until the surface is destroyed.
 fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle) {
     if let Some(tex_state) = state.textures.remove(&tex_handle) {
         if let Some(device) = state.devices.get_mut(&tex_state.device_handle) {
             device.resource_registry.unregister_texture(tex_handle);
         }
-        tracing::debug!("Unregistered surface texture {}", tex_handle);
+        tracing::debug!("Unregistered surface drawable texture {}", tex_handle);
     }
 }

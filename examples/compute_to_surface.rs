@@ -39,22 +39,16 @@ struct Uniforms {
     float _padding;
 };
 
-[[vk::push_constant]]
-struct PushConstants {
-    uint uniforms_idx;
-    uint output_idx;
-};
-
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cs_main(uint3 tid : SV_DispatchThreadID) {
-    StructuredBuffer<Uniforms> ub = goldy_dyn_buf_ro(gGoldy, gGoldyDynamic.indices[0]);
+    ReadOnlyBuffer<Uniforms> ub = goldy_dyn_buf_ro<Uniforms>(0);
     Uniforms u = ub[0];
 
     if (tid.x >= u.width || tid.y >= u.height)
         return;
 
-    RWTexture2D<float4> output = goldy_dyn_storage_image(gGoldy, gGoldyDynamic.indices[1]);
+    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(1);
 
     float2 uv = float2(tid.xy) / float2(u.width, u.height);
 
@@ -128,7 +122,7 @@ impl App {
                 time: 0.0,
                 _padding: 0.0,
             }),
-            DataAccess::Broadcast,
+            DataAccess::Scattered,
         )?;
 
         self.state = Some(RenderState {

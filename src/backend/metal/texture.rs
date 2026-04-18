@@ -93,6 +93,8 @@ pub(super) fn create(
             format,
             texture,
             arg_buffer_index,
+            is_storage_image,
+            slot_owned_externally: false,
         },
     );
 
@@ -258,11 +260,26 @@ pub(super) fn read_to_cpu(
     Ok(())
 }
 
-/// Destroy a texture.
+/// Destroy a texture and return its bindless slot to the registry's free list.
+///
+/// If `slot_owned_externally` is set (e.g. a swapchain drawable whose slot is
+/// owned by `SurfaceState`), the slot is NOT released here — the owner manages
+/// it across frames.
 pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
     if let Some(texture) = state.textures.remove(&texture_handle) {
         if let Some(device) = state.devices.get_mut(&texture.device_handle) {
             device.resource_registry.unregister_texture(texture_handle);
+            if !texture.slot_owned_externally {
+                if texture.is_storage_image {
+                    device
+                        .resource_registry
+                        .release_storage_image_slot(texture.arg_buffer_index);
+                } else {
+                    device
+                        .resource_registry
+                        .release_texture_slot(texture.arg_buffer_index);
+                }
+            }
         }
     }
 }

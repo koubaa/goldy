@@ -96,6 +96,24 @@ fn begin_compute_encoder<'a>(
             );
         }
     }
+    // Declare textures resident for indirect access through the argument buffer.
+    //
+    // Heap-allocated textures are already covered by `use_heaps_for_compute`,
+    // but swapchain drawables (CAMetalLayer-owned `MTLTexture`s registered
+    // transiently in `state.textures`) are NOT in any Goldy-owned heap, so
+    // Metal Tier-2 bindless will read them as unresident unless we explicitly
+    // call `use_resource` on them before dispatch. Calling `use_resource` on
+    // already-heap-resident textures is safe and idempotent.
+    for tex_state in state.textures.values() {
+        if tex_state.device_handle == device_handle {
+            let usage = if tex_state.is_storage_image {
+                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write
+            } else {
+                mtl::MTLResourceUsage::Read
+            };
+            encoder.use_resource(&tex_state.texture, usage);
+        }
+    }
     encoder.set_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder
 }
