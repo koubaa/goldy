@@ -151,15 +151,37 @@ pub(super) fn create_view(
 }
 
 /// Destroy a buffer, unregistering it from the bindless registry.
+///
+/// Slot recycling is gated on GPU idleness: if any previously-submitted
+/// compute command buffer is still running, the slot parks in the registry's
+/// pending list and only becomes reusable after the next `wait_fence()`
+/// succeeds. This prevents the CPU from overwriting an argument-buffer
+/// descriptor that an in-flight shader is about to dereference (descriptor
+/// aliasing = random wrong-buffer reads and MTLCommandBufferError::Internal).
 pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
+    let gpu_idle = super::gpu_is_idle(state);
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
-            device.resource_registry.unregister_buffer(buffer_handle);
+            device
+                .resource_registry
+                .unregister_buffer(buffer_handle, !gpu_idle);
         }
     }
 }
 
 /// Write data to a buffer at the specified offset.
+///
+/// See [`clear`] for the full rationale. The short version: a CPU
+/// `copy_nonoverlapping` on `contents()` is **not** queue-ordered with
+/// subsequent compute dispatches, so we pair it with a queue-ordered blit
+/// copy (from a transient staging buffer) so the next command buffer
+/// submitted to this device queue is guaranteed to observe the written
+/// bytes. The observable symptom in ekrano/velato was the `config` uniform
+/// buffer returning stale `config.lines_size` to the binning shader, which
+/// then flagged `STAGE_FLATTEN` overflow even when the actual flatten
+/// output was tiny — only visible around scene transitions where the
+/// previous frame's config had happened to be re-uploaded into the same
+/// pool-recycled physical buffer.
 pub(super) fn write(
     state: &MetalState,
     buffer_handle: BufferHandle,
@@ -175,10 +197,39 @@ pub(super) fn write(
         anyhow::bail!("Write would exceed buffer bounds");
     }
 
+    if data.is_empty() {
+        return Ok(());
+    }
+
     unsafe {
         let ptr = buffer.buffer.contents().add(offset as usize);
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
     }
+
+    let device_handle = buffer.device_handle;
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    // Allocate a transient staging buffer (shared storage) populated with the
+    // same bytes and emit a blit `copy_from_buffer` into the destination on
+    // the device queue. Because this blit is committed to the same queue as
+    // all subsequent compute dispatches, Metal serializes it with them and
+    // the GPU is guaranteed to observe the new bytes. The staging buffer is
+    // retained only by the command buffer's autorelease pool, so it is
+    // dropped as soon as the blit completes.
+    let staging = logical_device.device.new_buffer_with_data(
+        data.as_ptr() as *const _,
+        data.len() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+
+    let command_buffer = logical_device.command_queue.new_command_buffer();
+    let blit = command_buffer.new_blit_command_encoder();
+    blit.copy_from_buffer(&staging, 0, &buffer.buffer, offset, data.len() as u64);
+    blit.end_encoding();
+    command_buffer.commit();
 
     Ok(())
 }
@@ -259,10 +310,41 @@ pub(super) fn read_to_cpu(
 }
 
 /// Fill buffer region with zeros.
-/// Metal buffers use StorageModeShared so we can memset via contents().
+///
+/// # Why both a CPU memset and a queue-ordered blit
+///
+/// Metal buffers on Apple Silicon use `StorageModeShared`, so the CPU and
+/// GPU ultimately observe the same bytes of physical memory. But the two
+/// paths have asymmetric visibility:
+///
+/// * A `contents()` + `write_bytes()` is **immediately** visible to any
+///   subsequent CPU read of the same buffer (tests and readback paths rely
+///   on this).
+/// * That same CPU store is **not** automatically serialized with the next
+///   command buffer submitted to the GPU queue. Without an explicit
+///   queue-ordered operation on the buffer, a compute dispatch encoded into
+///   a separately-built command buffer can read the GPU L2 cache's
+///   pre-clear contents. Even if the caller has just waited on prior GPU
+///   work, that wait establishes GPU→CPU ordering, not the reverse.
+///
+/// The observable symptom we hit in ekrano/velato was a `bump_buf` that had
+/// just been memset to zero still appearing non-zero to the flatten shader,
+/// which then flagged `STAGE_FLATTEN` overflow (`bump.lines >
+/// config.lines_size`) and triggered an endless retry cascade.
+///
+/// We therefore do both:
+///
+/// 1. `write_bytes` so CPU-side readers observe the clear immediately.
+/// 2. A `fillBuffer` blit committed to the same command queue so the next
+///    compute dispatch on that queue is queue-ordered after the clear and
+///    observes zeros.
+///
+/// The blit is committed without waiting — Metal's queue guarantees
+/// ordering with subsequent command buffers, and whichever future waits on
+/// the final fence will also drain this one.
 pub(super) fn clear(
     state: &MetalState,
-    _device_handle: DeviceHandle,
+    device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
     offset: u64,
     size: u64,
@@ -290,6 +372,18 @@ pub(super) fn clear(
         let ptr = (buffer.buffer.contents() as *mut u8).add(offset as usize);
         std::ptr::write_bytes(ptr, 0, clear_size as usize);
     }
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let command_buffer = logical_device.command_queue.new_command_buffer();
+    let blit = command_buffer.new_blit_command_encoder();
+    let range = mtl::NSRange::new(offset, clear_size);
+    blit.fill_buffer(&buffer.buffer, range, 0);
+    blit.end_encoding();
+    command_buffer.commit();
 
     Ok(())
 }

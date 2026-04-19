@@ -28,8 +28,50 @@ mod utils;
 
 use super::*;
 use crate::{goldy_event, goldy_span};
+use ::metal as mtl;
 use anyhow::{Context, Result};
 use types::MetalState;
+
+/// Returns `true` when every command buffer we've submitted has reached
+/// `MTLCommandBufferStatus::Completed`. Used by the destroy paths to decide
+/// whether a just-released bindless slot can be recycled immediately (GPU
+/// idle) or must park on the registry's pending list until the next
+/// `wait_fence()` confirms completion.
+///
+/// ## Why this exists
+///
+/// Metal argument buffers are CPU-writable GPU memory: each descriptor is a
+/// device pointer the shader dereferences at dispatch time. If the CPU
+/// overwrites slot N's descriptor while any in-flight command buffer still
+/// has a pending dispatch that will read slot N, the GPU reads the *new*
+/// descriptor and ends up pointing at the wrong buffer. Observationally this
+/// presents as:
+/// - Random glitches in parts of the scene that encode late (e.g. the
+///   stats/HUD overlay drawn after the main scene).
+/// - `MTLCommandBufferError::Internal` when the shader dereferences a pointer
+///   that isn't in the command buffer's residency set.
+///
+/// A conservative approximation — "if there's nothing in the fence pool, the
+/// GPU is idle" — isn't quite enough because `submit_graph` (non-blocking)
+/// leaves old fences in the pool until someone waits on them. Checking
+/// `status() == Completed` on each entry gives us an accurate snapshot.
+pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
+    let pool = state.compute_fence_pool.lock().unwrap();
+    pool.values()
+        .all(|buf| buf.status() == mtl::MTLCommandBufferStatus::Completed)
+}
+
+/// Move every entry in each device's pending-slot list to its free list.
+///
+/// Called by the compute module after a successful `wait_fence()`: at that
+/// point we've established that all previously-submitted GPU work has
+/// completed, so any slot that was parked pending (because it was released
+/// while the GPU was still busy) is now safe to recycle.
+pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
+    for device in state.devices.values_mut() {
+        device.resource_registry.drain_pending_slots();
+    }
+}
 
 /// Metal backend for macOS.
 pub struct MetalBackend {
@@ -51,6 +93,7 @@ impl MetalBackend {
             state: MetalState {
                 compute_fence_pool: std::sync::Mutex::new(std::collections::HashMap::new()),
                 next_compute_fence_token: std::sync::atomic::AtomicU64::new(1),
+                device_lost: std::sync::atomic::AtomicBool::new(false),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
                 buffers: std::collections::HashMap::new(),
@@ -461,7 +504,12 @@ impl GpuBackend for MetalBackend {
     }
 
     fn wait_fence(&mut self, device: DeviceHandle, token: super::FenceToken) -> Result<()> {
-        compute::wait_fence(&self.state, device, token)
+        compute::wait_fence(&self.state, device, token)?;
+        // Successful wait establishes GPU idleness for everything submitted
+        // up to and including `token`. Any bindless slots parked pending while
+        // those command buffers were in-flight are now safe to recycle.
+        drain_all_pending_slots(&mut self.state);
+        Ok(())
     }
 
     fn wait_fence_timeout(
@@ -470,7 +518,11 @@ impl GpuBackend for MetalBackend {
         token: super::FenceToken,
         timeout_ms: u32,
     ) -> Result<bool> {
-        compute::wait_fence_timeout(&self.state, device, token, timeout_ms)
+        let signaled = compute::wait_fence_timeout(&self.state, device, token, timeout_ms)?;
+        if signaled {
+            drain_all_pending_slots(&mut self.state);
+        }
+        Ok(signaled)
     }
 
     fn reset_buffer_heaps(&mut self, device: DeviceHandle) {

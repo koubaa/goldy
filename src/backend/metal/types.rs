@@ -14,7 +14,7 @@ use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
-use crate::backend::FenceToken;
+use crate::backend::{DataAccess, FenceToken};
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -60,6 +60,18 @@ const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 /// Minimum overflow heap size (16 MB).
 const MIN_OVERFLOW_HEAP_SIZE: u64 = 16 * 1024 * 1024;
 
+/// Upper bound on any single heap allocation. Metal can nominally create
+/// heaps up to the device's `maxBufferLength` (tens of GB on Apple Silicon),
+/// but in practice a request that large always reflects an upstream bug:
+/// a stale bump counter fed into `RenderConfig::with_bump_estimates`, a
+/// `u32` wraparound, or similar. Creating the heap anyway does not usually
+/// succeed, and when it does it bakes a pathological memory footprint into
+/// a process that will then be OOM-killed. Failing fast here instead turns
+/// the symptom (hours-long hangs, crash spirals logging tens of thousands
+/// of 12 GB allocation attempts) into a single clean error the caller can
+/// handle. Raise this if a legitimate workload needs it.
+const MAX_HEAP_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+
 /// Multi-heap allocator for Metal buffer allocations.
 ///
 /// Uses a long-lived primary heap that is right-sized between frames, plus
@@ -90,7 +102,19 @@ impl HeapAllocator {
     /// Allocate a buffer from the heap hierarchy.
     ///
     /// Tries primary, then the last overflow heap, then creates a new overflow.
+    /// Returns `None` if the requested size is larger than [`MAX_HEAP_SIZE`]
+    /// (see rationale there — we'd rather fail this one allocation than let
+    /// a corrupt size request wedge the whole process).
     pub fn allocate(&mut self, size: u64, options: MTLResourceOptions) -> Option<MTLBuffer> {
+        if size > MAX_HEAP_SIZE {
+            tracing::error!(
+                "Refusing buffer allocation of {}MB (cap={}MB); this usually indicates \
+                 a stale bump counter or similar upstream corruption",
+                size / 1024 / 1024,
+                MAX_HEAP_SIZE / 1024 / 1024,
+            );
+            return None;
+        }
         if let Some(buf) = self.primary.new_buffer(size, options) {
             self.buffer_count += 1;
             self.update_high_water_mark();
@@ -105,7 +129,9 @@ impl HeapAllocator {
             }
         }
 
-        let overflow_size = (size * 2).max(MIN_OVERFLOW_HEAP_SIZE);
+        // Clamp the overflow heap size too: `size * 2` on a ~1 GB request is
+        // already at the cap, and we do not want to chase the size in a loop.
+        let overflow_size = (size * 2).clamp(MIN_OVERFLOW_HEAP_SIZE, MAX_HEAP_SIZE);
         let new_heap = self.create_heap(overflow_size);
         tracing::info!(
             "Created overflow buffer heap (size={}MB, overflow_count={})",
@@ -356,7 +382,48 @@ pub(crate) struct ResourceRegistry {
     /// `next_texture_index`. Prevents slot exhaustion when textures are
     /// created and destroyed repeatedly at runtime.
     free_texture_slots: Vec<u32>,
-    pub buffer_indices: HashMap<BufferHandle, u32>,
+    /// Free list of previously-released storage-buffer LOCAL indices.
+    ///
+    /// Without this list, `register_storage_buffer()` monotonically bumps
+    /// `next_storage_buffer_index` forever. In workloads that allocate
+    /// transient pool views every frame (e.g. ekrano's per-frame
+    /// `BufferPool::alloc_bytes` calls, each of which creates a buffer view),
+    /// the counter grows past the 64-slot storage-buffer window within
+    /// seconds, then past 128 it writes descriptors into the uniform-buffer
+    /// region of the argument buffer, past 192 into the storage-image region
+    /// (corrupting the surface drawable!), and eventually past the whole
+    /// argument buffer — at which point `set_argument_buffer` silently skips
+    /// the encode (bounds check) and the shader reads a zero pointer,
+    /// producing empty frames or a wedged GPU.
+    free_storage_buffer_slots: Vec<u32>,
+    /// Free list of previously-released uniform-buffer LOCAL indices.
+    /// Same rationale as `free_storage_buffer_slots`.
+    free_uniform_buffer_slots: Vec<u32>,
+    /// Slots released while at least one GPU command buffer was in-flight.
+    ///
+    /// Metal's argument buffer is **just CPU-writable memory**: the descriptor
+    /// at slot N is a device pointer that the shader dereferences at dispatch
+    /// time. If we recycle slot N (overwrite its descriptor) while an in-flight
+    /// command buffer still has dispatches that will read slot N, the GPU
+    /// reads the *new* descriptor — pointing at a different buffer than the
+    /// shader was originally compiled to expect. The result is descriptor
+    /// aliasing: random garbage in some dispatches, and (eventually) an
+    /// `MTLCommandBufferError::Internal` when the shader dereferences a
+    /// pointer that happens to fall outside the resource's residency set.
+    ///
+    /// To prevent this, `destroy_*` checks whether the GPU is idle (all
+    /// entries in `compute_fence_pool` are `Completed`). If so, slots go
+    /// straight to the free list above. Otherwise they park here until
+    /// `wait_fence()` succeeds, at which point `drain_pending_slots()`
+    /// promotes them to the free list.
+    pending_free_storage_buffer_slots: Vec<u32>,
+    pending_free_uniform_buffer_slots: Vec<u32>,
+    pending_free_texture_slots: Vec<u32>,
+    pending_free_storage_image_slots: Vec<u32>,
+    /// (local_index, access) for each live buffer handle. The access is
+    /// needed at `unregister_buffer()` time to know which free list the slot
+    /// should be returned to.
+    pub buffer_indices: HashMap<BufferHandle, (u32, DataAccess)>,
     pub texture_indices: HashMap<TextureHandle, u32>,
     pub sampler_indices: HashMap<SamplerHandle, u32>,
 }
@@ -376,29 +443,96 @@ impl ResourceRegistry {
             next_sampler_index: 4 * MAX_RESOURCES_PER_CATEGORY,
             free_storage_image_slots: Vec::new(),
             free_texture_slots: Vec::new(),
+            free_storage_buffer_slots: Vec::new(),
+            free_uniform_buffer_slots: Vec::new(),
+            pending_free_storage_buffer_slots: Vec::new(),
+            pending_free_uniform_buffer_slots: Vec::new(),
+            pending_free_texture_slots: Vec::new(),
+            pending_free_storage_image_slots: Vec::new(),
             buffer_indices: HashMap::new(),
             texture_indices: HashMap::new(),
             sampler_indices: HashMap::new(),
         }
     }
 
-    /// Register a storage buffer (Scattered access) - indices 0-63
+    /// Register a storage buffer (Scattered access) - indices 0-63.
+    ///
+    /// Reuses a freed slot if available (see `unregister_buffer`). Without
+    /// this reuse, long-running apps that churn transient buffers every frame
+    /// (e.g. pool views) exhaust the argument-buffer encoder in seconds.
+    ///
+    /// # Panics on overflow
+    ///
+    /// If the local index would exceed [`MAX_RESOURCES_PER_CATEGORY`], the
+    /// returned slot would silently bleed into the next category's
+    /// argument-buffer region (uniform buffers at 64-127). The shader's
+    /// `goldy_dyn_buf_ro<T>(slot)` would then read undefined / zero bytes
+    /// from a wrong heap entry — observed in ekrano as binning's
+    /// `config.lines_size == 0` and a spurious `STAGE_FLATTEN` overflow.
+    /// Failing fast surfaces the leak instead of producing corrupt frames.
     pub fn register_storage_buffer(&mut self, handle: BufferHandle) -> u32 {
-        let index = self.next_storage_buffer_index;
-        self.next_storage_buffer_index += 1;
-        self.buffer_indices.insert(handle, index);
-        index
+        let local_index = if let Some(free) = self.free_storage_buffer_slots.pop() {
+            free
+        } else {
+            let index = self.next_storage_buffer_index;
+            assert!(
+                index < MAX_RESOURCES_PER_CATEGORY,
+                "storage-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
+                 next_index={} free={} pending_free={} live_indices={} \
+                 (Scattered={}, Broadcast={}). \
+                 Likely a per-frame leak in bind_map; check that all transient buffers \
+                 (config_buf, scene_buf, indirect_buf, etc.) are explicitly freed via \
+                 `recording.free_buffer(...)` and that `run_recording` evicts them at \
+                 the end of the frame.",
+                self.next_storage_buffer_index,
+                self.free_storage_buffer_slots.len(),
+                self.pending_free_storage_buffer_slots.len(),
+                self.buffer_indices.len(),
+                self.buffer_indices
+                    .values()
+                    .filter(|(_, a)| *a == DataAccess::Scattered)
+                    .count(),
+                self.buffer_indices
+                    .values()
+                    .filter(|(_, a)| *a == DataAccess::Broadcast)
+                    .count(),
+            );
+            self.next_storage_buffer_index += 1;
+            index
+        };
+        self.buffer_indices
+            .insert(handle, (local_index, DataAccess::Scattered));
+        local_index
     }
 
     /// Register a uniform buffer (Broadcast access) - local indices 0-63 (shader slot),
     /// global indices 64-127 (argument buffer encoding offset).
     /// Returns the LOCAL index so push constants pass 0-63 to the shader
     /// (which indexes into uniformBuffers[0..63]).
+    ///
+    /// Reuses a freed slot if available (see `unregister_buffer`).
+    ///
+    /// # Panics on overflow
+    ///
+    /// See [`Self::register_storage_buffer`] for the analogous rationale —
+    /// a uniform-slot overflow would alias into the texture-index region
+    /// and cause silent shader-side garbage reads.
     pub fn register_uniform_buffer(&mut self, handle: BufferHandle) -> u32 {
-        let global_index = self.next_uniform_buffer_index;
-        let local_index = global_index - MAX_RESOURCES_PER_CATEGORY;
-        self.next_uniform_buffer_index += 1;
-        self.buffer_indices.insert(handle, local_index);
+        let local_index = if let Some(free) = self.free_uniform_buffer_slots.pop() {
+            free
+        } else {
+            let global_index = self.next_uniform_buffer_index;
+            let local = global_index - MAX_RESOURCES_PER_CATEGORY;
+            assert!(
+                local < MAX_RESOURCES_PER_CATEGORY,
+                "uniform-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
+                 Likely a per-frame leak in bind_map for Broadcast buffers."
+            );
+            self.next_uniform_buffer_index += 1;
+            local
+        };
+        self.buffer_indices
+            .insert(handle, (local_index, DataAccess::Broadcast));
         local_index
     }
 
@@ -427,8 +561,17 @@ impl ResourceRegistry {
 
     /// Return a sampled-texture LOCAL index to the free list so it can be
     /// reused by a subsequent `register_texture`.
-    pub fn release_texture_slot(&mut self, local_index: u32) {
-        self.free_texture_slots.push(local_index);
+    ///
+    /// If `defer` is true, the slot is parked in the pending list until the
+    /// next successful `drain_pending_slots()`. Callers should pass `true`
+    /// whenever any GPU command buffer is still in-flight that might still
+    /// reference this slot's descriptor.
+    pub fn release_texture_slot(&mut self, local_index: u32, defer: bool) {
+        if defer {
+            self.pending_free_texture_slots.push(local_index);
+        } else {
+            self.free_texture_slots.push(local_index);
+        }
     }
 
     /// Returns the global argument buffer index for a sampled texture.
@@ -465,8 +608,14 @@ impl ResourceRegistry {
 
     /// Return a storage-image LOCAL index to the free list so it can be
     /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
-    pub fn release_storage_image_slot(&mut self, local_index: u32) {
-        self.free_storage_image_slots.push(local_index);
+    ///
+    /// See [`Self::release_texture_slot`] for the `defer` semantics.
+    pub fn release_storage_image_slot(&mut self, local_index: u32, defer: bool) {
+        if defer {
+            self.pending_free_storage_image_slots.push(local_index);
+        } else {
+            self.free_storage_image_slots.push(local_index);
+        }
     }
 
     /// Pop a free slot if any, otherwise bump the monotonic counter.
@@ -501,8 +650,31 @@ impl ResourceRegistry {
         local_index + 4 * MAX_RESOURCES_PER_CATEGORY
     }
 
-    pub fn unregister_buffer(&mut self, handle: BufferHandle) {
-        self.buffer_indices.remove(&handle);
+    /// Remove a buffer handle from the registry and return its LOCAL slot
+    /// to the appropriate free list so subsequent `register_*_buffer` calls
+    /// reuse it. Without this, per-frame buffer churn exhausts the 64-slot
+    /// argument-buffer window in ~9 seconds and the shader starts reading
+    /// into corrupt / out-of-range descriptors.
+    ///
+    /// If `defer` is true, the slot is parked in the pending list rather
+    /// than the free list. See the `pending_free_*` fields for rationale.
+    pub fn unregister_buffer(&mut self, handle: BufferHandle, defer: bool) {
+        if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
+            match (access, defer) {
+                (DataAccess::Scattered, false) => {
+                    self.free_storage_buffer_slots.push(local_index);
+                }
+                (DataAccess::Scattered, true) => {
+                    self.pending_free_storage_buffer_slots.push(local_index);
+                }
+                (DataAccess::Broadcast, false) => {
+                    self.free_uniform_buffer_slots.push(local_index);
+                }
+                (DataAccess::Broadcast, true) => {
+                    self.pending_free_uniform_buffer_slots.push(local_index);
+                }
+            }
+        }
     }
 
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
@@ -511,6 +683,32 @@ impl ResourceRegistry {
 
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
         self.sampler_indices.remove(&handle);
+    }
+
+    /// Promote every pending slot to its corresponding free list.
+    ///
+    /// Called by the Metal backend after a successful `wait_fence()` (or any
+    /// other synchronization that establishes "all previously-submitted GPU
+    /// work has completed"). At that point the argument buffer descriptors
+    /// the pending slots used to hold are no longer reachable from any
+    /// in-flight command buffer, so the slots are safe to overwrite on the
+    /// next `register_*` call.
+    pub fn drain_pending_slots(&mut self) {
+        self.free_storage_buffer_slots
+            .append(&mut self.pending_free_storage_buffer_slots);
+        self.free_uniform_buffer_slots
+            .append(&mut self.pending_free_uniform_buffer_slots);
+        self.free_texture_slots
+            .append(&mut self.pending_free_texture_slots);
+        self.free_storage_image_slots
+            .append(&mut self.pending_free_storage_image_slots);
+    }
+
+    /// Number of buffer slots currently waiting for GPU idle before reuse.
+    /// Exposed for tests; not part of the public API.
+    #[cfg(test)]
+    pub fn pending_buffer_slot_count(&self) -> usize {
+        self.pending_free_storage_buffer_slots.len() + self.pending_free_uniform_buffer_slots.len()
     }
 }
 
@@ -668,6 +866,12 @@ pub(super) struct MetalState {
     /// Key: FenceToken. Removed when wait completes.
     pub compute_fence_pool: Mutex<HashMap<FenceToken, mtl::CommandBuffer>>,
     pub next_compute_fence_token: AtomicU64,
+    /// Set once any GPU wait has timed out (the GPU has wedged in a compute
+    /// shader without the driver watchdog noticing). Subsequent waits fail
+    /// fast instead of burning the full timeout budget per frame, letting
+    /// the app cascade errors quickly and exit cleanly rather than appearing
+    /// frozen for tens of seconds while each frame times out.
+    pub device_lost: std::sync::atomic::AtomicBool,
     pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
     pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
@@ -687,4 +891,205 @@ pub(super) struct MetalState {
     pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
     pub next_sampler_handle: SamplerHandle,
     pub slang_compiler: crate::slang::SlangCompiler,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the ekrano "black screen after ~540 frames" bug.
+    ///
+    /// Before the free-list fix, `register_storage_buffer` bumped a monotonic
+    /// counter with every call and `unregister_buffer` merely deleted the
+    /// HashMap entry — the LOCAL slot was leaked. Per-frame pool-view churn
+    /// blew through the 64-slot storage-buffer window in ~9 s and subsequent
+    /// slots bled into the uniform/texture/storage-image categories, which
+    /// corrupted the surface drawable and wedged the GPU.
+    ///
+    /// This test would have failed: after 64 register+unregister cycles, the
+    /// 65th registration would have returned slot 64 instead of recycling 0.
+    #[test]
+    fn storage_buffer_slots_are_reused_after_unregister() {
+        let mut reg = ResourceRegistry::new();
+        let mut all_indices = Vec::new();
+
+        // Churn 4x the per-category capacity; without slot reuse this would
+        // return 0, 1, 2, ..., 4*64 - 1 and blow through into the uniform
+        // region of the argument buffer.
+        for handle in 0..(MAX_RESOURCES_PER_CATEGORY as u64 * 4) {
+            let idx = reg.register_storage_buffer(handle);
+            all_indices.push(idx);
+            // defer=false: simulate the "GPU idle when destroy fires" case,
+            // e.g. ekrano's end-of-frame deferred_free_buffers after flush.
+            reg.unregister_buffer(handle, false);
+        }
+
+        assert!(
+            all_indices.iter().all(|&i| i < MAX_RESOURCES_PER_CATEGORY),
+            "storage buffer slots escaped the 0..{} window: {:?}",
+            MAX_RESOURCES_PER_CATEGORY,
+            all_indices
+                .iter()
+                .filter(|&&i| i >= MAX_RESOURCES_PER_CATEGORY)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn uniform_buffer_slots_are_reused_after_unregister() {
+        let mut reg = ResourceRegistry::new();
+        let mut all_indices = Vec::new();
+        for handle in 0..(MAX_RESOURCES_PER_CATEGORY as u64 * 4) {
+            let idx = reg.register_uniform_buffer(handle);
+            all_indices.push(idx);
+            reg.unregister_buffer(handle, false);
+        }
+        assert!(
+            all_indices.iter().all(|&i| i < MAX_RESOURCES_PER_CATEGORY),
+            "uniform buffer slots escaped the 0..{} window: {:?}",
+            MAX_RESOURCES_PER_CATEGORY,
+            all_indices
+                .iter()
+                .filter(|&&i| i >= MAX_RESOURCES_PER_CATEGORY)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Ensure a Broadcast handle freed via `unregister_buffer` goes to the
+    /// uniform free list (not the storage list), so a subsequent Scattered
+    /// registration can't accidentally re-hand out a uniform-local index
+    /// that isn't actually free in the storage category.
+    #[test]
+    fn unregister_routes_slot_to_correct_category() {
+        let mut reg = ResourceRegistry::new();
+        let h_uni: BufferHandle = 10;
+        let h_sto: BufferHandle = 20;
+
+        let _ = reg.register_uniform_buffer(h_uni);
+        let _ = reg.register_storage_buffer(h_sto);
+        reg.unregister_buffer(h_uni, false);
+        reg.unregister_buffer(h_sto, false);
+
+        assert_eq!(
+            reg.free_uniform_buffer_slots.len(),
+            1,
+            "uniform free list should have reclaimed the uniform slot"
+        );
+        assert_eq!(
+            reg.free_storage_buffer_slots.len(),
+            1,
+            "storage free list should have reclaimed the storage slot"
+        );
+    }
+
+    /// Slots recycled via the free list must hand back the most recently
+    /// freed index first (LIFO) — primarily to make behavior deterministic
+    /// for tests, and to keep hot slots warm.
+    #[test]
+    fn freed_storage_buffer_slot_is_reused_lifo() {
+        let mut reg = ResourceRegistry::new();
+        let h0: BufferHandle = 1;
+        let h1: BufferHandle = 2;
+
+        let i0 = reg.register_storage_buffer(h0);
+        let i1 = reg.register_storage_buffer(h1);
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+
+        reg.unregister_buffer(h0, false);
+        reg.unregister_buffer(h1, false);
+
+        let h2: BufferHandle = 3;
+        let i2 = reg.register_storage_buffer(h2);
+        assert_eq!(i2, 1, "expected LIFO reuse of freed slot");
+    }
+
+    /// Deferred release: slots freed while `defer=true` must not be reused by
+    /// the next `register_*` call — they stay in the pending list until
+    /// `drain_pending_slots()` promotes them. This is the core mechanism
+    /// protecting against descriptor-aliasing with in-flight GPU work.
+    #[test]
+    fn deferred_buffer_slot_is_not_reused_until_drain() {
+        let mut reg = ResourceRegistry::new();
+        let h0: BufferHandle = 1;
+
+        let i0 = reg.register_storage_buffer(h0);
+        assert_eq!(i0, 0);
+
+        // GPU is "busy" → park on pending.
+        reg.unregister_buffer(h0, true);
+        assert_eq!(
+            reg.pending_buffer_slot_count(),
+            1,
+            "expected slot to land in pending"
+        );
+
+        // Until drain, register must NOT re-hand out slot 0.
+        let h1: BufferHandle = 2;
+        let i1 = reg.register_storage_buffer(h1);
+        assert_eq!(
+            i1, 1,
+            "register_storage_buffer must not recycle a still-pending slot"
+        );
+
+        // After drain, pending→free, and the next register picks it up.
+        reg.drain_pending_slots();
+        assert_eq!(reg.pending_buffer_slot_count(), 0);
+
+        reg.unregister_buffer(h1, false);
+        let h2: BufferHandle = 3;
+        let i2 = reg.register_storage_buffer(h2);
+        assert_eq!(i2, 1, "LIFO pick from free list after drain");
+    }
+
+    /// Drain must route pending slots back to the right category (storage vs
+    /// uniform). A bug here would let a pending uniform slot show up as a
+    /// "free" storage slot and vice versa.
+    #[test]
+    fn drain_pending_routes_to_correct_category() {
+        let mut reg = ResourceRegistry::new();
+        let h_sto: BufferHandle = 10;
+        let h_uni: BufferHandle = 20;
+        let _ = reg.register_storage_buffer(h_sto);
+        let _ = reg.register_uniform_buffer(h_uni);
+
+        reg.unregister_buffer(h_sto, true);
+        reg.unregister_buffer(h_uni, true);
+        reg.drain_pending_slots();
+
+        assert_eq!(reg.free_storage_buffer_slots.len(), 1);
+        assert_eq!(reg.free_uniform_buffer_slots.len(), 1);
+        assert_eq!(reg.pending_buffer_slot_count(), 0);
+    }
+
+    /// Texture slots must honor the same deferred-release pattern. In the
+    /// pre-fix behaviour, a font-atlas texture slot could be recycled while
+    /// the previous frame's compute shader was still reading it, producing
+    /// the "glitchy stats-overlay text" symptom.
+    #[test]
+    fn deferred_texture_slot_is_not_reused_until_drain() {
+        let mut reg = ResourceRegistry::new();
+        let h0: TextureHandle = 100;
+        let i0 = reg.register_texture(h0);
+        reg.release_texture_slot(i0, true);
+
+        let h1: TextureHandle = 101;
+        let i1 = reg.register_texture(h1);
+        assert_ne!(
+            i1, i0,
+            "texture slot must not be recycled while still pending"
+        );
+
+        reg.drain_pending_slots();
+        reg.release_texture_slot(i1, false);
+        let h2: TextureHandle = 102;
+        let i2 = reg.register_texture(h2);
+        // Either the just-released i1 or the drained i0 is acceptable; the
+        // guarantee we need is that it's one of the freed slots (not a fresh
+        // monotonic bump).
+        assert!(
+            i2 == i0 || i2 == i1,
+            "expected texture slot reuse after drain, got {i2}"
+        );
+    }
 }
