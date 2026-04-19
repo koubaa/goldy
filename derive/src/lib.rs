@@ -2,6 +2,42 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
+/// Marker trait for types safe to pass to [`goldy::Buffer::with_data`].
+///
+/// Add this alongside `bytemuck::Pod` on `#[repr(C)]` structs used as GPU buffer elements.
+#[proc_macro_derive(StructuredBufferElement)]
+pub fn derive_structured_buffer_element(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    if !input.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            name,
+            "StructuredBufferElement cannot be derived for generic structs; implement manually if needed",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    match &input.data {
+        Data::Struct(_) => {}
+        _ => {
+            return syn::Error::new_spanned(
+                name,
+                "StructuredBufferElement can only be derived for structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
+    let expanded = quote! {
+        impl ::goldy::StructuredBufferElement for #name {}
+    };
+
+    expanded.into()
+}
+
 /// Derive a `LAYOUT_CHECK` constant for `#[repr(C)]` structs.
 ///
 /// Generates a `const LAYOUT_CHECK: goldy::LayoutCheck<'static>` that captures

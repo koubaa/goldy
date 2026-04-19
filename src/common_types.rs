@@ -18,6 +18,7 @@
 //! let buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
 //! ```
 
+use crate::buffer::StructuredBufferElement;
 use bytemuck::{Pod, Zeroable};
 
 // ============================================================================
@@ -184,6 +185,12 @@ impl Instance2D {
         }
     }
 }
+
+impl StructuredBufferElement for Particle2D {}
+impl StructuredBufferElement for Particle3D {}
+impl StructuredBufferElement for FrameUniforms {}
+impl StructuredBufferElement for Transform2D {}
+impl StructuredBufferElement for Instance2D {}
 
 #[cfg(test)]
 mod tests {

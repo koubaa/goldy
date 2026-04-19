@@ -35,6 +35,7 @@ struct Line {
     _pad2: u32,
     _pad3: u32,
 }
+impl goldy::StructuredBufferElement for Line {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();

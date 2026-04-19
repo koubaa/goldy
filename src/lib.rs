@@ -36,13 +36,14 @@ pub mod slang;
 pub mod instrumentation;
 
 // Re-export main types
-pub use buffer::{Buffer, BufferPool, BufferSource, BufferView};
+pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use compute_graph::{ComputeGraph, ComputeProgram, DimSlotId, NodeAccess, NodeBuilder, SlotId};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;
+pub use goldy_derive::StructuredBufferElement;
 pub use gpu_future::GpuFuture;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use render_target::RenderTarget;

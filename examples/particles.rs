@@ -43,6 +43,8 @@ struct ParticleParams {
     _pad1: f32,
     _pad2: f32,
 }
+impl goldy::StructuredBufferElement for Particle {}
+impl goldy::StructuredBufferElement for ParticleParams {}
 
 // Simple pseudo-random for initialization
 static mut SEED: u32 = 42;

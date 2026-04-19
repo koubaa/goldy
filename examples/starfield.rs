@@ -47,6 +47,8 @@ struct StarfieldParams {
     _pad1: f32,
     _pad2: f32,
 }
+impl goldy::StructuredBufferElement for Star {}
+impl goldy::StructuredBufferElement for StarfieldParams {}
 
 // Simple pseudo-random for initialization
 static mut SEED: u32 = 12345;

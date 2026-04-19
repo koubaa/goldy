@@ -36,6 +36,7 @@ struct AnimParams {
     total_instances: u32,
     _pad: u32,
 }
+impl goldy::StructuredBufferElement for AnimParams {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();

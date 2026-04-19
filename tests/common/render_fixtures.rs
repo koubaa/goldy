@@ -258,6 +258,7 @@ pub struct Depth3DVertex {
     pub position: [f32; 3],
     pub color: [f32; 4],
 }
+impl goldy::StructuredBufferElement for Depth3DVertex {}
 
 pub fn depth_vertex_layout() -> VertexBufferLayout {
     VertexBufferLayout {

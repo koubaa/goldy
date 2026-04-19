@@ -3,6 +3,7 @@
 //! This module provides shared types and utilities that work across
 //! both native (Vulkan) and web (WebGPU) platforms.
 
+use crate::buffer::StructuredBufferElement;
 use crate::types::{VertexBufferLayout, VertexFormat};
 use bytemuck::{Pod, Zeroable};
 
@@ -60,6 +61,9 @@ impl VertexUvTime {
         ])
     }
 }
+
+impl StructuredBufferElement for VertexUv {}
+impl StructuredBufferElement for VertexUvTime {}
 
 /// Create a fullscreen quad with time baked into vertices.
 pub fn create_fullscreen_quad_with_time(time: f32) -> [VertexUvTime; 6] {

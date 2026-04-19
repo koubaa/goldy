@@ -150,6 +150,7 @@ struct QuadVertex {
     uv: [f32; 2],
     time: f32,
 }
+impl goldy::StructuredBufferElement for QuadVertex {}
 
 impl QuadVertex {
     fn layout() -> VertexBufferLayout {
