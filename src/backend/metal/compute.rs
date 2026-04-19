@@ -4,13 +4,17 @@ use super::super::{ComputeCommand, ComputePipelineHandle, DeviceHandle, FenceTok
 use super::buffer;
 use super::shader::parse_numthreads;
 use super::types::PUSH_CONSTANTS_SLOT;
-use super::types::{BindlessIndices, ComputePipelineState, MetalState, MAX_PUSH_CONSTANT_INDICES};
+use super::types::{
+    BindlessIndices, ComputePipelineState, FenceEntry, FenceSignal, MetalState,
+    MAX_PUSH_CONSTANT_INDICES,
+};
 use crate::slang::SlangStage;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLCommandBufferStatus, MTLSize};
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// Create a compute pipeline.
 pub(super) fn create(
@@ -405,13 +409,20 @@ pub(super) fn submit(
         .next_compute_fence_token
         .fetch_add(1, Ordering::SeqCst);
 
-    // Attach a completion handler that logs any Metal error the moment the
-    // GPU reports it. This fires even when no one is waiting (e.g. for work
-    // submitted by `submit_graph` whose `GpuFuture` has already been dropped
-    // because a later frame called `flush_graph`), giving us visibility into
-    // silent GPU faults that would otherwise only manifest as a hang on the
-    // *next* frame's `waitUntilCompleted`.
+    // Completion handler responsibilities:
+    //  1. Publish the terminal status into the `FenceSignal` so any thread
+    //     waiting in `wait_fence` / `wait_fence_timeout` / `wait_all_in_flight`
+    //     wakes up immediately instead of ticking a 1 ms poll clock. This is
+    //     the pipeline win: a frame's GPU tail latency + 0 µs instead of
+    //     tail + avg(0.5 ms) polling jitter.
+    //  2. Log any non-`Completed` status so silent GPU faults on work that
+    //     nobody waits on (e.g. `submit_graph` whose `GpuFuture` was dropped
+    //     because a later `flush_graph` superseded it) still surface in the
+    //     tracing stream rather than only manifesting as a hang on the next
+    //     `wait_fence` call.
     let handler_token = token;
+    let signal = Arc::new(FenceSignal::new());
+    let signal_for_handler = signal.clone();
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {
@@ -423,15 +434,21 @@ pub(super) fn submit(
                 description
             );
         }
+        let mut done = signal_for_handler.done.lock().unwrap();
+        *done = Some(status);
+        drop(done);
+        signal_for_handler.cv.notify_all();
     })
     .copy();
     command_buffer_ref.add_completed_handler(&handler);
 
-    state
-        .compute_fence_pool
-        .lock()
-        .unwrap()
-        .insert(token, owned_buffer);
+    state.compute_fence_pool.lock().unwrap().insert(
+        token,
+        FenceEntry {
+            buffer: owned_buffer,
+            signal,
+        },
+    );
 
     command_buffer_ref.commit();
 
@@ -448,8 +465,15 @@ pub(super) fn is_fence_complete(
         return true;
     }
     let pool = state.compute_fence_pool.lock().unwrap();
-    if let Some(buf) = pool.get(&token) {
-        buf.status() == MTLCommandBufferStatus::Completed
+    if let Some(entry) = pool.get(&token) {
+        // Prefer the completion-handler-published status so callers don't
+        // need to reach into Metal. Fall back to the live `status()` read if
+        // the handler has not fired yet.
+        if let Some(status) = *entry.signal.done.lock().unwrap() {
+            status == MTLCommandBufferStatus::Completed
+        } else {
+            entry.buffer.status() == MTLCommandBufferStatus::Completed
+        }
     } else {
         true // Already removed (waited on), consider complete
     }
@@ -463,11 +487,12 @@ pub(super) fn is_fence_complete(
 /// `GPU Restart Count` unchanged). In that state `waitUntilCompleted` blocks
 /// forever and the whole app has to be force-quit.
 ///
-/// Instead we poll `status()` at 1ms intervals, bounded by
-/// `GOLDY_GPU_WAIT_TIMEOUT_MS` (default 5000). If the timeout expires we
-/// return an error so the caller can recover / report instead of silently
-/// hanging. On normal completion we still check `status`/`error` to surface
-/// any Metal-reported failure with its `localizedDescription`.
+/// Instead we block on a [`Condvar`] that the command buffer's completion
+/// handler signals from the Metal dispatch queue. A hard timeout of
+/// `GOLDY_GPU_WAIT_TIMEOUT_MS` (default 5000 ms) bounds the wait so a wedged
+/// GPU — where the completion handler never fires — is still recoverable.
+/// The 0.5 ms average jitter from the previous 1 ms poll loop is gone: wait
+/// completion is now granular to the handler dispatch (microseconds).
 pub(super) fn wait_fence(
     state: &MetalState,
     _device: DeviceHandle,
@@ -477,64 +502,111 @@ pub(super) fn wait_fence(
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to wait on fence");
     }
 
-    let mut pool = state.compute_fence_pool.lock().unwrap();
-    let buf = match pool.remove(&token) {
-        Some(b) => b,
-        None => return Ok(()),
+    let entry = {
+        let mut pool = state.compute_fence_pool.lock().unwrap();
+        match pool.remove(&token) {
+            Some(e) => e,
+            None => return Ok(()),
+        }
     };
-    drop(pool);
 
     let timeout = std::time::Duration::from_millis(gpu_wait_timeout_ms());
-    let start = std::time::Instant::now();
-    let poll_interval = std::time::Duration::from_millis(1);
     let warn_threshold = std::time::Duration::from_millis(500);
-    let mut warned = false;
+    let status = wait_signal(&entry.signal, warn_threshold, timeout, |elapsed, status| {
+        tracing::warn!(
+            "GPU wait_fence exceeding {}ms (status={:?}); still waiting up to {}ms",
+            elapsed.as_millis(),
+            status,
+            timeout.as_millis()
+        );
+    });
 
-    loop {
-        let status = buf.status();
-        match status {
-            MTLCommandBufferStatus::Completed => return Ok(()),
-            MTLCommandBufferStatus::Error => {
-                let description = read_command_buffer_error_description(&buf);
-                tracing::error!("Metal command buffer finished with error: {}", description);
-                anyhow::bail!("Metal compute command buffer error: {}", description);
-            }
-            _ => {}
+    match status {
+        Some(MTLCommandBufferStatus::Completed) => Ok(()),
+        Some(MTLCommandBufferStatus::Error) => {
+            let description = read_command_buffer_error_description(&entry.buffer);
+            tracing::error!("Metal command buffer finished with error: {}", description);
+            anyhow::bail!("Metal compute command buffer error: {}", description);
         }
-
-        let elapsed = start.elapsed();
-        if !warned && elapsed > warn_threshold {
-            warned = true;
-            tracing::warn!(
-                "GPU wait_fence exceeding {}ms (status={:?}); still polling up to {}ms",
-                warn_threshold.as_millis(),
-                status,
-                timeout.as_millis()
+        Some(other) => {
+            // Completion handler fired with an unexpected non-terminal status.
+            // Treat as a wedge — the handler contract says it only fires on
+            // Completed or Error.
+            state.device_lost.store(true, Ordering::Relaxed);
+            anyhow::bail!(
+                "Metal completion handler reported non-terminal status={:?}",
+                other
             );
         }
-        if elapsed >= timeout {
+        None => {
+            // Timeout reached without the completion handler firing.
             state.device_lost.store(true, Ordering::Relaxed);
+            let status = entry.buffer.status();
             tracing::error!(
-                "GPU wait_fence timed out after {}ms without the command buffer \
-                 reaching Completed/Error (status={:?}). The GPU is likely wedged \
-                 in a compute shader. Marking device as lost; all subsequent \
-                 fence waits will fail fast so the app can exit cleanly instead \
-                 of deadlocking.",
+                "GPU wait_fence timed out after {}ms without the completion \
+                 handler firing (status={:?}). The GPU is likely wedged in a \
+                 compute shader. Marking device as lost; all subsequent fence \
+                 waits will fail fast so the app can exit cleanly instead of \
+                 deadlocking.",
                 timeout.as_millis(),
                 status
             );
-            // Intentionally drop `buf` without completion: letting it go out of
-            // scope calls `release`, but the Metal runtime retains it while the
-            // GPU is still "running" it. Attempting another `waitUntilCompleted`
-            // here would reproduce the hang, so we bail.
+            // Letting `entry` go out of scope calls `release`, but the Metal
+            // runtime retains the command buffer while the GPU is still
+            // "running" it. Attempting another wait here would reproduce the
+            // hang, so we bail.
             anyhow::bail!(
                 "GPU wait_fence timed out after {}ms (status={:?}); GPU appears wedged",
                 timeout.as_millis(),
                 status
             );
         }
+    }
+}
 
-        std::thread::sleep(poll_interval);
+/// Block on `signal.cv` until the completion handler publishes a terminal
+/// status or `hard_timeout` elapses. Returns the published status, or `None`
+/// on timeout.
+///
+/// If the wait exceeds `warn_after`, `on_warn` is invoked exactly once and
+/// the wait continues with the remaining budget. This preserves the legacy
+/// "GPU wait_fence exceeding 500ms" heartbeat without burning CPU on it.
+fn wait_signal(
+    signal: &FenceSignal,
+    warn_after: std::time::Duration,
+    hard_timeout: std::time::Duration,
+    mut on_warn: impl FnMut(std::time::Duration, Option<MTLCommandBufferStatus>),
+) -> Option<MTLCommandBufferStatus> {
+    let start = std::time::Instant::now();
+    let mut warned = false;
+    let mut guard = signal.done.lock().unwrap();
+    loop {
+        if let Some(status) = *guard {
+            return Some(status);
+        }
+        let elapsed = start.elapsed();
+        let remaining = hard_timeout.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            return None;
+        }
+        let wait_slice = if !warned {
+            warn_after.saturating_sub(elapsed).min(remaining)
+        } else {
+            remaining
+        };
+        // `wait_slice` of zero means the warn threshold is reached and we've
+        // already fallen through once — loop again to log and continue.
+        if wait_slice.is_zero() && !warned {
+            warned = true;
+            on_warn(elapsed, *guard);
+            continue;
+        }
+        let (g, result) = signal.cv.wait_timeout(guard, wait_slice).unwrap();
+        guard = g;
+        if !warned && result.timed_out() && start.elapsed() >= warn_after {
+            warned = true;
+            on_warn(start.elapsed(), *guard);
+        }
     }
 }
 
@@ -584,26 +656,24 @@ pub(super) fn wait_fence_timeout(
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out)");
     }
-    let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_millis(timeout_ms as u64);
-
-    loop {
-        {
-            let pool = state.compute_fence_pool.lock().unwrap();
-            if let Some(buf) = pool.get(&token) {
-                if buf.status() == MTLCommandBufferStatus::Completed {
-                    drop(pool);
-                    let mut p = state.compute_fence_pool.lock().unwrap();
-                    p.remove(&token);
-                    return Ok(true);
-                }
-            } else {
-                return Ok(true); // Already removed
-            }
+    // Snapshot the signal without removing the entry so a subsequent
+    // wait_fence call can still observe the command buffer when the timeout
+    // path returns `Ok(false)`.
+    let signal = {
+        let pool = state.compute_fence_pool.lock().unwrap();
+        match pool.get(&token) {
+            Some(entry) => entry.signal.clone(),
+            None => return Ok(true), // Already waited on / removed.
         }
-        if start.elapsed() >= timeout {
-            return Ok(false);
+    };
+    let status = wait_signal(&signal, timeout, timeout, |_, _| {});
+    match status {
+        Some(MTLCommandBufferStatus::Completed) | Some(MTLCommandBufferStatus::Error) => {
+            state.compute_fence_pool.lock().unwrap().remove(&token);
+            Ok(true)
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        Some(_) => Ok(true), // Non-terminal but handler fired; treat as signaled.
+        None => Ok(false),
     }
 }

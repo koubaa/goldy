@@ -18,7 +18,7 @@ use crate::backend::{DataAccess, FenceToken};
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
@@ -859,12 +859,44 @@ pub(crate) struct SurfaceState {
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
 
+/// Terminal status of a submitted command buffer, published by its Metal
+/// completion handler. `None` means the command buffer is still in flight.
+///
+/// Paired with [`FenceSignal::cv`] so waiters can block on a condvar instead
+/// of polling `MTLCommandBuffer::status()` at a fixed 1 ms cadence. On a
+/// GPU frame that finishes in e.g. 2.3 ms the poll loop wasted an average
+/// of ~0.5 ms of wall time per frame simply waiting for the next tick; the
+/// condvar wakes within microseconds of Metal's completion-handler callback
+/// firing. The polling path remains available as a bounded-timeout safety
+/// net (see [`super::compute::wait_fence`]) for a truly wedged GPU where
+/// the completion handler never fires.
+pub(super) struct FenceSignal {
+    pub done: Mutex<Option<mtl::MTLCommandBufferStatus>>,
+    pub cv: Condvar,
+}
+
+impl FenceSignal {
+    pub fn new() -> Self {
+        Self {
+            done: Mutex::new(None),
+            cv: Condvar::new(),
+        }
+    }
+}
+
+/// An in-flight command buffer tracked by the fence pool, bundled with the
+/// completion-signal primitive its handler writes to.
+pub(super) struct FenceEntry {
+    pub buffer: mtl::CommandBuffer,
+    pub signal: Arc<FenceSignal>,
+}
+
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
     /// Pool of in-flight compute command buffers for non-blocking submit.
     /// Key: FenceToken. Removed when wait completes.
-    pub compute_fence_pool: Mutex<HashMap<FenceToken, mtl::CommandBuffer>>,
+    pub compute_fence_pool: Mutex<HashMap<FenceToken, FenceEntry>>,
     pub next_compute_fence_token: AtomicU64,
     /// Set once any GPU wait has timed out (the GPU has wedged in a compute
     /// shader without the driver watchdog noticing). Subsequent waits fail
