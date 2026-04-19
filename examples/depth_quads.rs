@@ -34,6 +34,7 @@ struct DepthVertex {
     position: [f32; 3],
     color: [f32; 4],
 }
+impl goldy::StructuredBufferElement for DepthVertex {}
 
 impl DepthVertex {
     const fn new(x: f32, y: f32, z: f32, r: f32, g: f32, b: f32) -> Self {

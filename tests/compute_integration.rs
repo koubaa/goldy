@@ -611,6 +611,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         position: [f32; 2],
         velocity: [f32; 2],
     }
+    impl goldy::StructuredBufferElement for Particle {}
 
     let particles = vec![
         Particle {
@@ -1053,6 +1054,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         a: u32,
         b: u32,
     }
+    impl goldy::StructuredBufferElement for Pair {}
 
     let input_data: Vec<Pair> = (0..8)
         .map(|i| Pair {

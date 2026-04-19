@@ -132,9 +132,20 @@ impl TextureFormat {
 /// - `Scattered`: Any thread can access any address. No coherence assumptions.
 /// - `Broadcast`: All threads read the same address. Hardware can broadcast
 ///   a single fetch to the entire wave (32-64 threads).
+///
+/// When creating buffers with [`crate::Buffer::with_data`], the inferred element stride
+/// must match what the shader expects. Passing `&[u8]` (e.g. from `bytemuck::bytes_of`)
+/// sets stride to 1 byte; for structured data use a typed slice or
+/// [`crate::Buffer::with_bytes_stride`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DataAccess {
     /// Any thread, any address, read/write. No coherence assumptions.
+    ///
+    /// Structured-buffer views use the buffer's recorded **element stride** (from
+    /// [`crate::Buffer::with_data`], [`crate::Buffer::with_bytes_stride`], etc.). A stride
+    /// that does not match the shader's `T` in `goldy_dyn_*<T>` can read incorrectly on
+    /// some backends without error.
+    ///
     /// Maps to storage buffers (StructuredBuffer, RWStructuredBuffer in shaders).
     #[default]
     Scattered,
@@ -539,6 +550,11 @@ impl Vertex2DUv {
         ])
     }
 }
+
+// StructuredBufferElement impls for public vertex types
+use crate::buffer::StructuredBufferElement;
+impl StructuredBufferElement for Vertex2D {}
+impl StructuredBufferElement for Vertex2DUv {}
 
 // ============================================================================
 // Depth Buffer Types

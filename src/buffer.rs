@@ -6,6 +6,45 @@ use crate::types::{BindlessCategory, BindlessHandle, DataAccess};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
+/// Types allowed as elements in [`Buffer::with_data`] and [`BufferPool::alloc_with_data`].
+///
+/// This is implemented for common multi-byte primitives, arrays of those types, and
+/// `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
+///
+/// **Not** implemented for `u8` / `i8`: passing `&[u8]` (e.g. from `bytemuck::bytes_of`) would
+/// set element stride to 1 while shaders usually expect a larger struct stride. Use
+/// [`Buffer::with_bytes_stride`] or a typed slice instead.
+///
+/// Unit type `()` is included so empty slices type-check.
+pub trait StructuredBufferElement: bytemuck::Pod {}
+
+macro_rules! impl_structured_buffer_element_for_primitives {
+    ($($t:ty),+ $(,)?) => {
+        $(impl StructuredBufferElement for $t {})+
+    };
+}
+
+impl_structured_buffer_element_for_primitives!(
+    (),
+    i16,
+    u16,
+    i32,
+    u32,
+    i64,
+    u64,
+    i128,
+    u128,
+    isize,
+    usize,
+    f32,
+    f64,
+);
+
+impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T; N] where
+    [T; N]: bytemuck::Pod
+{
+}
+
 /// A GPU buffer.
 pub struct Buffer {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
@@ -48,8 +87,17 @@ impl Buffer {
 
     /// Create a buffer initialized with data.
     ///
-    /// See [`Buffer::new`] for access pattern documentation.
-    pub fn with_data<T: bytemuck::Pod>(
+    /// Element stride for structured-buffer views is `size_of::<T>()`. The type parameter is
+    /// load-bearing: passing a **`&[u8]`** (for example from `bytemuck::bytes_of(&uniforms)`)
+    /// fixes stride at **1 byte** while shaders usually expect `size_of::<YourStruct>()`.
+    /// On some backends that mismatch reads as zeros or garbage with no error. Prefer a
+    /// typed slice such as `&[YourStruct]` or [`Buffer::with_bytes_stride`] /
+    /// [`Buffer::with_bytes`] with an explicit stride.
+    ///
+    /// See [`StructuredBufferElement`] for which `T` are allowed (`u8` / `i8` are not).
+    ///
+    /// See [`Buffer::new`] and [`DataAccess::Scattered`] for access-pattern details.
+    pub fn with_data<T: StructuredBufferElement>(
         device: &Device,
         data: &[T],
         access: DataAccess,
@@ -75,7 +123,10 @@ impl Buffer {
         Ok(buffer)
     }
 
-    /// Create a buffer initialized with raw bytes.
+    /// Create a buffer initialized with raw bytes (element stride **1**).
+    ///
+    /// Use this or [`Buffer::with_bytes_stride`] when data is naturally `&[u8]`. For typed
+    /// structs, prefer [`Buffer::with_data`] with `&[T]` so stride matches the shader type.
     ///
     /// See [`Buffer::new`] for access pattern documentation.
     pub fn with_bytes(device: &Device, data: &[u8], access: DataAccess) -> Result<Self> {
@@ -464,7 +515,7 @@ impl BufferPool {
     ///
     /// Returns a `BufferView` spanning `count` elements of type `T`, with the offset
     /// aligned to the pool's alignment requirement.
-    pub fn alloc<T: bytemuck::Pod>(&mut self, count: u64) -> Result<BufferView> {
+    pub fn alloc<T: StructuredBufferElement>(&mut self, count: u64) -> Result<BufferView> {
         let stride = std::mem::size_of::<T>() as u64;
         let size = count * stride;
         self.alloc_bytes(size, Some(stride as u32))
@@ -473,8 +524,11 @@ impl BufferPool {
     /// Allocate and fill a typed region in one call.
     ///
     /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
-    /// Matches the ergonomics of [`Buffer::with_data`].
-    pub fn alloc_with_data<T: bytemuck::Pod>(&mut self, data: &[T]) -> Result<BufferView> {
+    /// Same element-stride rules as [`Buffer::with_data`].
+    pub fn alloc_with_data<T: StructuredBufferElement>(
+        &mut self,
+        data: &[T],
+    ) -> Result<BufferView> {
         let view = self.alloc::<T>(data.len() as u64)?;
         view.write_data(data)?;
         Ok(view)

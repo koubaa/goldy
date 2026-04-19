@@ -30,6 +30,7 @@ struct Particle {
     position: [f32; 2],
     velocity: [f32; 2],
 }
+impl goldy::StructuredBufferElement for Particle {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
