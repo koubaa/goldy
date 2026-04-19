@@ -73,6 +73,66 @@ pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState)
     }
 }
 
+/// Block until every command buffer in `compute_fence_pool` is `Completed`
+/// (or `Error`), then remove the drained entries so the pool doesn't keep
+/// growing across frames. Uses the same bounded-polling pattern as
+/// [`compute::wait_fence`] so a wedged GPU is reported as a timeout rather
+/// than hanging the caller forever.
+///
+/// Returns `Ok(())` if all in-flight work finished; bails if any command
+/// buffer ended in `Error` status (so an upstream failure isn't silently
+/// swallowed by a reset) or if the timeout budget is exhausted.
+pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    if state.device_lost.load(Ordering::Relaxed) {
+        anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
+    }
+    let tokens: Vec<_> = {
+        let pool = state.compute_fence_pool.lock().unwrap();
+        pool.keys().copied().collect()
+    };
+    if tokens.is_empty() {
+        return Ok(());
+    }
+    let timeout = std::time::Duration::from_millis(5000);
+    let poll_interval = std::time::Duration::from_millis(1);
+    let start = std::time::Instant::now();
+    for token in tokens {
+        loop {
+            let status = {
+                let pool = state.compute_fence_pool.lock().unwrap();
+                match pool.get(&token) {
+                    Some(buf) => buf.status(),
+                    None => break,
+                }
+            };
+            match status {
+                mtl::MTLCommandBufferStatus::Completed => {
+                    let mut pool = state.compute_fence_pool.lock().unwrap();
+                    pool.remove(&token);
+                    break;
+                }
+                mtl::MTLCommandBufferStatus::Error => {
+                    let mut pool = state.compute_fence_pool.lock().unwrap();
+                    pool.remove(&token);
+                    anyhow::bail!("Metal command buffer errored while waiting for idle");
+                }
+                _ => {}
+            }
+            if start.elapsed() >= timeout {
+                state.device_lost.store(true, Ordering::Relaxed);
+                anyhow::bail!(
+                    "GPU wait_all_in_flight timed out after {}ms (status={:?})",
+                    timeout.as_millis(),
+                    status
+                );
+            }
+            std::thread::sleep(poll_interval);
+        }
+    }
+    Ok(())
+}
+
 /// Metal backend for macOS.
 pub struct MetalBackend {
     state: MetalState,
@@ -526,6 +586,18 @@ impl GpuBackend for MetalBackend {
     }
 
     fn reset_buffer_heaps(&mut self, device: DeviceHandle) {
+        // Safety: dropping the old primary heap and clearing overflow heaps
+        // is only sound once every command buffer that allocated buffers from
+        // them has finished. Wait on all outstanding fences (bounded; see
+        // wait_all_in_flight) and drain deferred-release slots before
+        // mutating the allocator. If the wait fails we log and skip the
+        // reset — leaving memory slightly over-committed is far cheaper than
+        // yanking a heap out from under a still-running dispatch.
+        if let Err(e) = wait_all_in_flight(&self.state) {
+            tracing::warn!("reset_buffer_heaps skipped: could not confirm GPU idle ({e})");
+            return;
+        }
+        drain_all_pending_slots(&mut self.state);
         if let Some(logical_device) = self.state.devices.get_mut(&device) {
             logical_device.heap_allocator.reset_for_frame();
         }
