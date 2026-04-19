@@ -130,11 +130,17 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
 
     // Release the persistent bindless storage-image slot back to the device
     // registry's free list so another surface can claim it.
+    //
+    // Surface destruction is a teardown path that callers typically only
+    // invoke after stopping rendering, so GPU-in-flight aliasing is unlikely
+    // here — but we still go through the idle check for uniformity with
+    // texture/buffer destroy.
+    let gpu_idle = super::gpu_is_idle(state);
     if let (Some(dev), Some(local)) = (device_handle, slot) {
         if let Some(logical_device) = state.devices.get_mut(&dev) {
             logical_device
                 .resource_registry
-                .release_storage_image_slot(local);
+                .release_storage_image_slot(local, !gpu_idle);
         }
     }
 
