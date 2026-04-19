@@ -55,13 +55,13 @@ fn compile_stage_with_reflection(
         .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
 
     if !result.reflection.parameter_blocks.is_empty() {
-        tracing::info!(
+        tracing::debug!(
             "Shader {} has {} ParameterBlock(s):",
             entry_point,
             result.reflection.parameter_blocks.len()
         );
         for pb in &result.reflection.parameter_blocks {
-            tracing::info!(
+            tracing::debug!(
                 "  - {} at slot {} (size={}, alignment={}, fields={})",
                 pb.name,
                 pb.binding_slot,

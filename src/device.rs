@@ -453,13 +453,22 @@ impl Device {
             .collect()
     }
 
-    /// Notify the backend that a frame has completed and all transient buffers
-    /// have been freed. On Metal, this allows the heap allocator to right-size
-    /// the primary heap based on observed peak usage, eliminating overflow heaps
-    /// for subsequent frames.
+    /// Notify the backend that all transient buffers have been freed and the
+    /// underlying heap/allocator bookkeeping should be rebalanced. On Metal
+    /// this replaces the primary heap (right-sized to recent peak usage) and
+    /// drops overflow heaps, so subsequent frames allocate from one contiguous
+    /// heap instead of chasing overflow after overflow.
     ///
-    /// Call this after the GPU has completed and all transient resources have
-    /// been released (e.g. after `clear_transients` in ekrano).
+    /// The backend is responsible for making the call safe: it will block
+    /// until in-flight GPU work finishes before touching the heaps, so
+    /// callers do not need to issue their own `wait_fence` first. They must
+    /// however have already dropped any Rust-side references to buffers
+    /// allocated from these heaps (otherwise the underlying Metal allocation
+    /// remains alive and the reset is a no-op for that range).
+    ///
+    /// Typical use is just before a large reallocation (e.g. recreating a
+    /// long-lived pool backing buffer) or at a natural steady-state boundary
+    /// such as a resize or scene change.
     pub fn reset_buffer_heaps(&self) {
         self.backend.lock().unwrap().reset_buffer_heaps(self.handle);
     }
