@@ -57,8 +57,16 @@ use types::MetalState;
 /// `status() == Completed` on each entry gives us an accurate snapshot.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
     let pool = state.compute_fence_pool.lock().unwrap();
-    pool.values()
-        .all(|buf| buf.status() == mtl::MTLCommandBufferStatus::Completed)
+    pool.values().all(|entry| {
+        // Prefer the handler-published status to avoid a Metal call on the
+        // fast (already-done) path; fall back to the live `status()` read if
+        // the handler has not yet been dispatched.
+        if let Some(status) = *entry.signal.done.lock().unwrap() {
+            status == mtl::MTLCommandBufferStatus::Completed
+        } else {
+            entry.buffer.status() == mtl::MTLCommandBufferStatus::Completed
+        }
+    })
 }
 
 /// Move every entry in each device's pending-slot list to its free list.
@@ -87,39 +95,53 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
     }
-    let tokens: Vec<_> = {
+    // Snapshot (token, signal) pairs without holding the pool lock across a
+    // blocking wait — the completion handler also locks the pool briefly
+    // to drop itself, and we must not deadlock against it.
+    let entries: Vec<(super::FenceToken, std::sync::Arc<types::FenceSignal>)> = {
         let pool = state.compute_fence_pool.lock().unwrap();
-        pool.keys().copied().collect()
+        pool.iter().map(|(t, e)| (*t, e.signal.clone())).collect()
     };
-    if tokens.is_empty() {
+    if entries.is_empty() {
         return Ok(());
     }
     let timeout = std::time::Duration::from_millis(5000);
-    let poll_interval = std::time::Duration::from_millis(1);
     let start = std::time::Instant::now();
-    for token in tokens {
-        loop {
-            let status = {
-                let pool = state.compute_fence_pool.lock().unwrap();
-                match pool.get(&token) {
-                    Some(buf) => buf.status(),
-                    None => break,
+    for (token, signal) in entries {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            state.device_lost.store(true, Ordering::Relaxed);
+            anyhow::bail!(
+                "GPU wait_all_in_flight timed out after {}ms",
+                timeout.as_millis()
+            );
+        }
+        let status = {
+            let mut guard = signal.done.lock().unwrap();
+            loop {
+                if let Some(status) = *guard {
+                    break status;
                 }
-            };
-            match status {
-                mtl::MTLCommandBufferStatus::Completed => {
-                    let mut pool = state.compute_fence_pool.lock().unwrap();
-                    pool.remove(&token);
-                    break;
+                let now_remaining = timeout.saturating_sub(start.elapsed());
+                if now_remaining.is_zero() {
+                    break mtl::MTLCommandBufferStatus::NotEnqueued;
                 }
-                mtl::MTLCommandBufferStatus::Error => {
-                    let mut pool = state.compute_fence_pool.lock().unwrap();
-                    pool.remove(&token);
-                    anyhow::bail!("Metal command buffer errored while waiting for idle");
+                let (g, result) = signal.cv.wait_timeout(guard, now_remaining).unwrap();
+                guard = g;
+                if result.timed_out() && guard.is_none() {
+                    break mtl::MTLCommandBufferStatus::NotEnqueued;
                 }
-                _ => {}
             }
-            if start.elapsed() >= timeout {
+        };
+        match status {
+            mtl::MTLCommandBufferStatus::Completed => {
+                state.compute_fence_pool.lock().unwrap().remove(&token);
+            }
+            mtl::MTLCommandBufferStatus::Error => {
+                state.compute_fence_pool.lock().unwrap().remove(&token);
+                anyhow::bail!("Metal command buffer errored while waiting for idle");
+            }
+            _ => {
                 state.device_lost.store(true, Ordering::Relaxed);
                 anyhow::bail!(
                     "GPU wait_all_in_flight timed out after {}ms (status={:?})",
@@ -127,7 +149,6 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
                     status
                 );
             }
-            std::thread::sleep(poll_interval);
         }
     }
     Ok(())
