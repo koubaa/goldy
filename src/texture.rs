@@ -275,6 +275,26 @@ impl Texture {
         self.access
     }
 
+    /// Create a non-owning view of this texture.
+    ///
+    /// The returned `Texture` shares the same GPU resource and handle but does
+    /// **not** destroy the underlying resource when dropped. Use this when you
+    /// need to hand a reference into a system (e.g. a bind map) that may drop
+    /// it before the original owner is done — for example to avoid a
+    /// use-after-free when the bind map entry is evicted while the caller still
+    /// holds the original `Texture`.
+    pub fn borrow(&self) -> Self {
+        Self {
+            backend: Arc::clone(&self.backend),
+            handle: self.handle,
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            access: self.access,
+            owned: false,
+        }
+    }
+
     /// Create a borrowed texture wrapping an externally-owned GPU resource.
     ///
     /// The returned `Texture` provides the same read/query API but does **not**
