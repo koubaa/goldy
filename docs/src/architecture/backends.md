@@ -144,22 +144,42 @@ By default, Goldy selects the platform-preferred backend:
 
 ### Runtime Override
 
-You can override the default backend at runtime using the `GOLDY_BACKEND` environment variable:
+Override the backend at runtime with `GOLDY_BACKEND`:
 
 ```bash
-# Use Vulkan on Windows (instead of DX12)
+# Valid values: vulkan (or vk), dx12 (or d3d12, directx), metal (or mtl)
 GOLDY_BACKEND=vulkan cargo run --example triangle
-
-# Use DX12 explicitly
-GOLDY_BACKEND=dx12 cargo run --example triangle
-
-# Valid values: vulkan (or vk), dx12 (or d3d12), metal (or mtl)
+GOLDY_BACKEND=dx12   cargo run --example triangle
 ```
 
-This is useful for:
-- Testing your app on different backends
-- Working around driver bugs
-- Debugging backend-specific issues
+### DX12: Additional Environment Variables
+
+| Variable | Values | Purpose |
+|---|---|---|
+| `GOLDY_DX12_FORCE_WARP` | `1` | Use the DX12 WARP software rasterizer (see below) |
+| `GOLDY_DX12_NO_DEBUG` | `1` | Disable the D3D12 debug layer (always off in release; set in parallel tests to avoid debug-layer crashes) |
+| `GOLDY_DX12_DEBUG` | `1` | Force-enable the D3D12 debug layer even in release builds |
+| `GOLDY_DX12_GBV` | `1` | Enable GPU-Based Validation (very slow, requires debug layer) |
+
+### DX12 WARP — Software Rasterizer
+
+[WARP](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/directx-warp) is
+Microsoft's software implementation of D3D12. It is used on headless CI runners (no GPU)
+and to reproduce GPU-driver or WARP-specific rendering bugs locally.
+
+**Set `GOLDY_DX12_FORCE_WARP=1`** to run on WARP regardless of what hardware is present.
+On Windows, DX12 is the default backend, so this is the only variable you need:
+
+```bash
+GOLDY_DX12_FORCE_WARP=1 cargo nextest run ...
+```
+
+After the first WARP device is created Goldy prints one stderr line:
+
+```
+[WARP] d3d10warp.dll loaded from: C:\WINDOWS\SYSTEM32\d3d10warp.dll
+```
+
 
 ### Compile-Time Selection
 
