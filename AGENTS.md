@@ -19,4 +19,6 @@ To run all examples in a row interactively, use
 
 For debugging tips, see [DEBUGGING.md](DEBUGGING.md).
 
+For backend selection, see [Backend Architecture](docs/src/architecture/backends.md).
+
 For conditional compilation, see [Conditional Compilation](docs/src/architecture/conditional-compilation.md).

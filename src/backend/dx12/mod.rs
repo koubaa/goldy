@@ -5,10 +5,16 @@
 //!
 //! ## WARP (software D3D12)
 //!
-//! Set `GOLDY_DX12_ALLOW_WARP=1` to register the WARP adapter (`IDXGIFactory4::EnumWarpAdapter`).
-//! Use on headless CI or machines with no hardware GPU. Select it with [`WARP_ADAPTER_ID`] and
-//! `Instance::create_device_for_adapter`, or use `Instance::create_device` when WARP is the only
-//! adapter.
+//! Set **`GOLDY_DX12_FORCE_WARP=1`** to run on the DX12 WARP software rasterizer.
+//! This registers WARP with DXGI and redirects [`Instance::create_device`](crate::Instance::create_device)
+//! to it, even when hardware GPUs are present. Use on headless CI (no GPU) or locally to
+//! reproduce WARP-specific rendering bugs.
+//!
+//! After the first WARP device is created, Goldy logs one stderr line showing which
+//! `d3d10warp.dll` was loaded — useful to confirm a side-loaded NuGet build is active.
+//!
+//! See `docs/src/architecture/backends.md` (DX12 / WARP section) for NuGet side-loading
+//! instructions.
 //!
 //! ## Module Structure
 //!
@@ -18,6 +24,8 @@
 mod barriers;
 mod buffer;
 mod compute;
+mod diagnostic;
+pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod pipeline;
 mod render_commands;
@@ -40,11 +48,19 @@ use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug, 
 use windows::Win32::Graphics::Dxgi::*;
 
 /// Adapter ID for the WARP device from [`IDXGIFactory4::EnumWarpAdapter`].
-/// Used when `GOLDY_DX12_ALLOW_WARP=1` (CI, headless, or software-only machines).
+/// Used when `GOLDY_DX12_FORCE_WARP=1`.
 pub const WARP_ADAPTER_ID: u32 = u32::MAX;
 
+/// Whether `GOLDY_DX12_FORCE_WARP=1` is set.
+///
+/// Registers WARP with DXGI and redirects [`Instance::create_device`](crate::Instance::create_device)
+/// to the WARP adapter regardless of what hardware GPUs are present.
+pub(crate) fn env_force_warp() -> bool {
+    std::env::var("GOLDY_DX12_FORCE_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 fn env_allow_warp() -> bool {
-    std::env::var("GOLDY_DX12_ALLOW_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    env_force_warp()
 }
 
 static DEBUG_LAYER_INIT: Once = Once::new();

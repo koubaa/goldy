@@ -75,7 +75,20 @@ impl Instance {
     }
 
     /// Create a device on the first adapter matching the given type.
+    ///
+    /// On Windows with the DX12 backend, set `GOLDY_DX12_FORCE_WARP=1` to create the device on
+    /// the WARP software adapter instead, even if a real GPU is present (WARP is still listed via
+    /// `GOLDY_DX12_ALLOW_WARP=1` or by setting `GOLDY_DX12_FORCE_WARP=1` alone, which also
+    /// registers the WARP adapter). Ignored for non-DX12 backends.
     pub fn create_device(&self, preferred_type: DeviceType) -> Result<Device> {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            if self.backend_type() == BackendType::Dx12 && crate::backend::dx12::env_force_warp() {
+                tracing::info!("GOLDY_DX12_FORCE_WARP=1 — using WARP adapter");
+                return self.create_device_for_adapter(crate::backend::dx12::WARP_ADAPTER_ID);
+            }
+        }
+
         tracing::info!(?preferred_type, "Requesting GPU device");
         let adapters = self.enumerate_adapters();
 
@@ -112,6 +125,15 @@ impl Instance {
             .unwrap_or(DeviceType::Other);
 
         let handle = backend.create_device(adapter_id)?;
+
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            if adapter_id == crate::backend::dx12::WARP_ADAPTER_ID
+                && self.backend_type() == BackendType::Dx12
+            {
+                crate::backend::dx12::log_warp_module_path_once();
+            }
+        }
 
         let mut registry = ShaderLibraryRegistry::new();
         registry.register(ShaderLibrary::goldy_experimental())?;

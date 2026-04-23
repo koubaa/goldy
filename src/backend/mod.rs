@@ -97,8 +97,7 @@ pub(crate) fn validate_typed_push_constants(
     }
 }
 
-/// Validate typed push-constant buffer element strides when
-/// `GOLDY_VALIDATE_BUFFER_STRIDES` is enabled (see repository `DEBUGGING.md`).
+/// Pure stride validation — always runs, no env-var check.
 ///
 /// `expected_strides[i]` is the byte stride the shader expects at slot `i`
 /// (from Slang reflection). `None` skips that slot. `resolve_stride` must return
@@ -109,15 +108,12 @@ pub(crate) fn validate_typed_push_constants(
     all(feature = "dx12", target_os = "windows"),
     all(feature = "metal", target_os = "macos"),
 ))]
-pub(crate) fn validate_typed_push_constant_buffer_strides(
+fn check_push_constant_buffer_strides(
     handles: &[BindlessHandle],
     expected_strides: &[Option<u32>],
     shader_name: &str,
     mut resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
 ) -> Result<()> {
-    if !crate::slang::layout_validation_enabled() {
-        return Ok(());
-    }
     let mut mismatches: Vec<String> = Vec::new();
     for (slot, handle) in handles.iter().enumerate() {
         let Some(expected) = expected_strides.get(slot).copied().flatten() else {
@@ -152,6 +148,26 @@ pub(crate) fn validate_typed_push_constant_buffer_strides(
             mismatches.join("\n  ")
         );
     }
+}
+
+/// Hot-path wrapper: skips validation unless `GOLDY_VALIDATE_LAYOUTS=1`.
+/// Called by each backend's dispatch path.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_typed_push_constant_buffer_strides(
+    handles: &[BindlessHandle],
+    expected_strides: &[Option<u32>],
+    shader_name: &str,
+    resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
+) -> Result<()> {
+    if !crate::slang::layout_validation_enabled() {
+        return Ok(());
+    }
+    check_push_constant_buffer_strides(handles, expected_strides, shader_name, resolve_stride)
 }
 
 // Re-export raw_window_handle for Surface API users
@@ -795,73 +811,31 @@ mod typed_push_constant_validation_tests {
 
 #[cfg(test)]
 mod typed_push_constant_stride_validation_tests {
-    use super::validate_typed_push_constant_buffer_strides;
+    use super::check_push_constant_buffer_strides;
     use crate::types::{BindlessCategory, BindlessHandle};
-    use std::ffi::OsString;
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
 
     #[test]
-    fn stride_skipped_when_env_off() {
-        let _g = EnvGuard::remove("GOLDY_VALIDATE_LAYOUTS");
+    fn stride_ok() {
         let handles = [BindlessHandle::new(BindlessCategory::Scattered, 0)];
         let expected = [Some(16u32)];
-        validate_typed_push_constant_buffer_strides(&handles, &expected, "s", |_| Some(4)).unwrap();
-    }
-
-    #[test]
-    fn stride_ok_when_env_on() {
-        let _g = EnvGuard::set("GOLDY_VALIDATE_LAYOUTS", "1");
-        let handles = [BindlessHandle::new(BindlessCategory::Scattered, 0)];
-        let expected = [Some(16u32)];
-        validate_typed_push_constant_buffer_strides(&handles, &expected, "s", |_| Some(16))
-            .unwrap();
+        check_push_constant_buffer_strides(&handles, &expected, "s", |_| Some(16)).unwrap();
     }
 
     #[test]
     fn stride_err_on_mismatch() {
-        let _g = EnvGuard::set("GOLDY_VALIDATE_LAYOUTS", "1");
         let handles = [BindlessHandle::new(BindlessCategory::Scattered, 0)];
         let expected = [Some(16u32)];
-        let err =
-            validate_typed_push_constant_buffer_strides(&handles, &expected, "my_cs", |_| Some(1))
-                .unwrap_err()
-                .to_string();
-        assert!(err.contains("16"), "expected stride: {err}");
-        assert!(err.contains('1'), "actual stride: {err}");
+        let err = check_push_constant_buffer_strides(&handles, &expected, "my_cs", |_| Some(1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("16"), "expected stride in err: {err}");
+        assert!(err.contains('1'), "actual stride in err: {err}");
     }
 
     #[test]
     fn stride_skips_non_buffer_categories() {
-        let _g = EnvGuard::set("GOLDY_VALIDATE_LAYOUTS", "1");
         let handles = [BindlessHandle::new(BindlessCategory::Texture, 0)];
         let expected = [Some(4u32)];
-        validate_typed_push_constant_buffer_strides(&handles, &expected, "s", |_| None).unwrap();
+        check_push_constant_buffer_strides(&handles, &expected, "s", |_| None).unwrap();
     }
 }
