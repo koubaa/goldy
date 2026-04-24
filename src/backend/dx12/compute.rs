@@ -270,17 +270,10 @@ pub(super) fn submit(
                 workgroups_y,
                 workgroups_z,
             } => {
-                // Global barrier: previous dispatch's UAV writes visible to next dispatch's UAV+SRV reads
-                let g = D3D12_GLOBAL_BARRIER {
-                    SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    AccessAfter: D3D12_BARRIER_ACCESS(
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
-                    ),
-                };
-                unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                // No per-dispatch barrier: the graph scheduler emits ResourceBarrier
+                // commands at wave boundaries where cross-wave data dependencies
+                // exist. Dispatches within the same wave are independent and can
+                // overlap on the GPU.
                 unsafe {
                     command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
                 }
@@ -295,17 +288,10 @@ pub(super) fn submit(
                     .as_ref()
                     .context("DispatchIndirect: compute indirect signature not available")?;
 
-                let g = D3D12_GLOBAL_BARRIER {
-                    SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    AccessAfter: D3D12_BARRIER_ACCESS(
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
-                    ),
-                };
-                unsafe { barriers::barrier_globals(&command_list7, &[g]) };
-
+                // Transition the indirect argument buffer from UAV to
+                // INDIRECT_ARGUMENT for ExecuteIndirect. This is an access-mode
+                // transition, not a data-dependency barrier (the graph's
+                // ResourceBarrier handles data visibility).
                 let to_indirect = barriers::buffer_barrier_full(
                     &buf_state.resource,
                     D3D12_BARRIER_SYNC_COMPUTE_SHADING,
@@ -336,12 +322,60 @@ pub(super) fn submit(
                 unsafe { barriers::barrier_buffers(&command_list7, &[to_uav]) };
             }
             ComputeCommand::Barrier => {
-                // No-op: DX12 already emits global UAV barriers before each dispatch.
+                let g = D3D12_GLOBAL_BARRIER {
+                    SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    AccessAfter: D3D12_BARRIER_ACCESS(
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                    ),
+                };
+                unsafe { barriers::barrier_globals(&command_list7, &[g]) };
             }
-            ComputeCommand::ResourceBarrier { .. } => {
-                // Falls back to global barrier behavior. DX12 already inserts a
-                // global UAV barrier before each dispatch, so this is a no-op.
-                // Per-resource D3D12_RESOURCE_BARRIER is a future optimization.
+            ComputeCommand::ResourceBarrier {
+                buffers: buf_handles,
+                textures: tex_handles,
+            } => {
+                // Per-resource enhanced barriers at graph wave boundaries.
+                let buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
+                    .iter()
+                    .filter_map(|h| state.buffers.get(h))
+                    .map(|bs| {
+                        barriers::buffer_barrier_full(
+                            &bs.resource,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            D3D12_BARRIER_ACCESS(
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                    | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                            ),
+                        )
+                    })
+                    .collect();
+                unsafe { barriers::barrier_buffers(&command_list7, &buf_barriers) };
+
+                let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_handles
+                    .iter()
+                    .filter_map(|h| state.textures.get(h))
+                    .map(|ts| {
+                        barriers::texture_barrier_full(
+                            &ts.resource,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            D3D12_BARRIER_ACCESS(
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                    | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                            ),
+                            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                        )
+                    })
+                    .collect();
+                unsafe { barriers::barrier_textures(&command_list7, &tex_barriers) };
+                unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
             }
             ComputeCommand::ClearBuffer {
                 buffer,
