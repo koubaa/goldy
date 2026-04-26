@@ -10,6 +10,62 @@ use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
+/// Drain any pending debug-layer messages for this device into a single
+/// human-readable string. Returns `None` when the device has no
+/// `ID3D12InfoQueue` (debug layer disabled) or no messages are queued.
+///
+/// Useful in error paths like a `Close()` failure, where the actual cause
+/// is written to the info queue before the HRESULT bubbles up. Without
+/// this drain the debug-layer text goes to `OutputDebugString` and is
+/// invisible to anyone not attached with a debugger.
+fn drain_info_queue(device: &ID3D12Device10) -> Option<String> {
+    let info_queue: ID3D12InfoQueue = device.cast().ok()?;
+    let count = unsafe { info_queue.GetNumStoredMessages() };
+    if count == 0 {
+        return None;
+    }
+    let mut out = String::new();
+    for i in 0..count {
+        let mut len: usize = 0;
+        unsafe {
+            if info_queue.GetMessage(i, None, &mut len).is_err() {
+                continue;
+            }
+        }
+        let mut buf = vec![0u8; len];
+        let msg_ptr = buf.as_mut_ptr() as *mut D3D12_MESSAGE;
+        unsafe {
+            if info_queue.GetMessage(i, Some(msg_ptr), &mut len).is_err() {
+                continue;
+            }
+            let msg = &*msg_ptr;
+            let desc = std::slice::from_raw_parts(
+                msg.pDescription as *const u8,
+                msg.DescriptionByteLength.saturating_sub(1),
+            );
+            let text = std::str::from_utf8(desc).unwrap_or("<non-utf8 description>");
+            let severity = match msg.Severity {
+                D3D12_MESSAGE_SEVERITY_CORRUPTION => "CORRUPTION",
+                D3D12_MESSAGE_SEVERITY_ERROR => "ERROR",
+                D3D12_MESSAGE_SEVERITY_WARNING => "WARNING",
+                D3D12_MESSAGE_SEVERITY_INFO => "INFO",
+                D3D12_MESSAGE_SEVERITY_MESSAGE => "MSG",
+                _ => "?",
+            };
+            out.push_str(&format!(
+                "  [D3D12 {}] id={} {}\n",
+                severity, msg.ID.0, text
+            ));
+        }
+    }
+    unsafe { info_queue.ClearStoredMessages() };
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Create a compute pipeline.
 pub(super) fn create(
     state: &mut Dx12State,
@@ -360,17 +416,39 @@ pub(super) fn submit(
                     .iter()
                     .filter_map(|h| state.textures.get(h))
                     .map(|ts| {
+                        // Enhanced barriers require Access and Layout to agree:
+                        // `AccessAfter` bits including SHADER_RESOURCE are
+                        // incompatible with `LayoutAfter = UNORDERED_ACCESS`
+                        // (and vice versa), so we can't use the buffer-style
+                        // "UAV | SRV" conservative after-access for textures.
+                        // Since a Goldy texture is materialized once as
+                        // either Direct (UAV) or Interpolated (SRV) and that
+                        // category is fixed for its lifetime, the graph-
+                        // emitted barrier between two compute nodes that
+                        // both touch the same texture just needs to
+                        // synchronise within that single access mode.
+                        let (access, layout) = if ts.last_layout
+                            == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+                            || ts.last_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+                        {
+                            (
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                            )
+                        } else {
+                            (
+                                D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                            )
+                        };
                         barriers::texture_barrier_full(
                             &ts.resource,
                             D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                             D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                            D3D12_BARRIER_ACCESS(
-                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                                    | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
-                            ),
-                            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
-                            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                            access,
+                            access,
+                            layout,
+                            layout,
                         )
                     })
                     .collect();
@@ -435,7 +513,18 @@ pub(super) fn submit(
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     // Close and execute
-    unsafe { command_list.Close() }.context("Failed to close command list")?;
+    if let Err(e) = unsafe { command_list.Close() } {
+        let diag = state
+            .devices
+            .get(&device_handle)
+            .and_then(|dev| drain_info_queue(&dev.device))
+            .unwrap_or_else(|| {
+                "  (no debug-layer messages; enable GOLDY_DX12_DEBUG=1)\n".to_string()
+            });
+        return Err(anyhow::anyhow!(
+            "Failed to close command list: {e}\nDebug layer messages:\n{diag}"
+        ));
+    }
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
