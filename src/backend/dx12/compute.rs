@@ -40,7 +40,7 @@ fn drain_info_queue(device: &ID3D12Device10) -> Option<String> {
             }
             let msg = &*msg_ptr;
             let desc = std::slice::from_raw_parts(
-                msg.pDescription as *const u8,
+                msg.pDescription,
                 msg.DescriptionByteLength.saturating_sub(1),
             );
             let text = std::str::from_utf8(desc).unwrap_or("<non-utf8 description>");

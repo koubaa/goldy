@@ -81,7 +81,12 @@ pub struct BindlessIndices {
 unsafe impl bytemuck::Pod for BindlessIndices {}
 unsafe impl bytemuck::Zeroable for BindlessIndices {}
 
-/// Registry for tracking bindless resource indices
+/// Registry for tracking bindless resource indices.
+///
+/// Each resource type has a monotonically-allocated counter plus a free list of
+/// slots reclaimed by `unregister_*`. Registration prefers a recycled slot so the
+/// total live + free count stays bounded by `MAX_BINDLESS_RESOURCES` rather than
+/// growing unbounded with creation churn.
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
     next_storage_buffer_index: u32,
@@ -89,8 +94,15 @@ pub(crate) struct ResourceRegistry {
     next_sampled_texture_index: u32,
     next_storage_image_index: u32,
     next_sampler_index: u32,
-    pub buffer_indices: HashMap<BufferHandle, u32>,
-    pub texture_indices: HashMap<TextureHandle, u32>,
+    free_storage_buffer_indices: Vec<u32>,
+    free_uniform_buffer_indices: Vec<u32>,
+    free_sampled_texture_indices: Vec<u32>,
+    free_storage_image_indices: Vec<u32>,
+    free_sampler_indices: Vec<u32>,
+    /// Map BufferHandle -> (bindless_index, is_storage)
+    pub buffer_indices: HashMap<BufferHandle, (u32, bool)>,
+    /// Map TextureHandle -> (bindless_index, is_storage_image)
+    pub texture_indices: HashMap<TextureHandle, (u32, bool)>,
     pub sampler_indices: HashMap<SamplerHandle, u32>,
 }
 
@@ -102,6 +114,11 @@ impl ResourceRegistry {
             next_sampled_texture_index: 0,
             next_storage_image_index: 0,
             next_sampler_index: 0,
+            free_storage_buffer_indices: Vec::new(),
+            free_uniform_buffer_indices: Vec::new(),
+            free_sampled_texture_indices: Vec::new(),
+            free_storage_image_indices: Vec::new(),
+            free_sampler_indices: Vec::new(),
             buffer_indices: HashMap::new(),
             texture_indices: HashMap::new(),
             sampler_indices: HashMap::new(),
@@ -110,49 +127,191 @@ impl ResourceRegistry {
 
     pub fn register_buffer(&mut self, handle: BufferHandle, is_storage: bool) -> u32 {
         let index = if is_storage {
-            let idx = self.next_storage_buffer_index;
-            self.next_storage_buffer_index += 1;
-            idx
+            self.free_storage_buffer_indices.pop().unwrap_or_else(|| {
+                let idx = self.next_storage_buffer_index;
+                self.next_storage_buffer_index += 1;
+                idx
+            })
         } else {
-            let idx = self.next_uniform_buffer_index;
-            self.next_uniform_buffer_index += 1;
-            idx
+            self.free_uniform_buffer_indices.pop().unwrap_or_else(|| {
+                let idx = self.next_uniform_buffer_index;
+                self.next_uniform_buffer_index += 1;
+                idx
+            })
         };
-        self.buffer_indices.insert(handle, index);
+        self.buffer_indices.insert(handle, (index, is_storage));
         index
     }
 
     pub fn register_texture(&mut self, handle: TextureHandle, is_storage_image: bool) -> u32 {
         let index = if is_storage_image {
-            let idx = self.next_storage_image_index;
-            self.next_storage_image_index += 1;
-            idx
+            self.free_storage_image_indices.pop().unwrap_or_else(|| {
+                let idx = self.next_storage_image_index;
+                self.next_storage_image_index += 1;
+                idx
+            })
         } else {
-            let idx = self.next_sampled_texture_index;
-            self.next_sampled_texture_index += 1;
-            idx
+            self.free_sampled_texture_indices.pop().unwrap_or_else(|| {
+                let idx = self.next_sampled_texture_index;
+                self.next_sampled_texture_index += 1;
+                idx
+            })
         };
-        self.texture_indices.insert(handle, index);
+        self.texture_indices
+            .insert(handle, (index, is_storage_image));
         index
     }
 
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
-        let index = self.next_sampler_index;
-        self.next_sampler_index += 1;
+        let index = self.free_sampler_indices.pop().unwrap_or_else(|| {
+            let idx = self.next_sampler_index;
+            self.next_sampler_index += 1;
+            idx
+        });
         self.sampler_indices.insert(handle, index);
         index
     }
 
     pub fn unregister_buffer(&mut self, handle: BufferHandle) {
-        self.buffer_indices.remove(&handle);
+        if let Some((index, is_storage)) = self.buffer_indices.remove(&handle) {
+            if is_storage {
+                self.free_storage_buffer_indices.push(index);
+            } else {
+                self.free_uniform_buffer_indices.push(index);
+            }
+        }
     }
 
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
-        self.texture_indices.remove(&handle);
+        if let Some((index, is_storage_image)) = self.texture_indices.remove(&handle) {
+            if is_storage_image {
+                self.free_storage_image_indices.push(index);
+            } else {
+                self.free_sampled_texture_indices.push(index);
+            }
+        }
     }
 
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
-        self.sampler_indices.remove(&handle);
+        if let Some(index) = self.sampler_indices.remove(&handle) {
+            self.free_sampler_indices.push(index);
+        }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// Simulate the per-frame create/destroy churn that ekrano generates for transient
+    /// pool-view storage buffers. The counter must stay bounded — well below
+    /// MAX_BINDLESS_RESOURCES — even after far more iterations than the heap limit.
+    #[test]
+    fn storage_buffer_slots_recycled_under_churn() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..50_000u64 {
+            let handle = i as BufferHandle;
+            reg.register_buffer(handle, true);
+            reg.unregister_buffer(handle);
+        }
+        assert_eq!(
+            reg.next_storage_buffer_index, 1,
+            "storage buffer counter grew; slot recycling not working"
+        );
+        assert_eq!(reg.free_storage_buffer_indices.len(), 1);
+    }
+
+    /// Uniform buffer (non-storage) slots must recycle independently.
+    #[test]
+    fn uniform_buffer_slots_recycled_under_churn() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..50_000u64 {
+            let handle = i as BufferHandle;
+            reg.register_buffer(handle, false);
+            reg.unregister_buffer(handle);
+        }
+        assert_eq!(
+            reg.next_uniform_buffer_index, 1,
+            "uniform buffer counter grew; slot recycling not working"
+        );
+    }
+
+    /// Sampled textures (non-storage) must recycle their indices.
+    #[test]
+    fn sampled_texture_slots_recycled_under_churn() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..50_000u64 {
+            let handle = i as TextureHandle;
+            reg.register_texture(handle, false);
+            reg.unregister_texture(handle);
+        }
+        assert_eq!(reg.next_sampled_texture_index, 1);
+        assert_eq!(reg.free_sampled_texture_indices.len(), 1);
+    }
+
+    /// Storage images (RWTexture2D) must recycle their indices.
+    #[test]
+    fn storage_image_slots_recycled_under_churn() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..50_000u64 {
+            let handle = i as TextureHandle;
+            reg.register_texture(handle, true);
+            reg.unregister_texture(handle);
+        }
+        assert_eq!(reg.next_storage_image_index, 1);
+        assert_eq!(reg.free_storage_image_indices.len(), 1);
+    }
+
+    /// Sampler slots must recycle independently.
+    #[test]
+    fn sampler_slots_recycled_under_churn() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..5_000u64 {
+            let handle = i as SamplerHandle;
+            reg.register_sampler(handle);
+            reg.unregister_sampler(handle);
+        }
+        assert_eq!(reg.next_sampler_index, 1);
+        assert_eq!(reg.free_sampler_indices.len(), 1);
+    }
+
+    /// Simultaneously-live resources must receive distinct indices.
+    #[test]
+    fn live_resources_get_distinct_indices() {
+        let mut reg = ResourceRegistry::new();
+        const N: u64 = 64;
+        let mut indices: Vec<u32> = (0..N)
+            .map(|i| reg.register_buffer(i as BufferHandle, true))
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        assert_eq!(
+            indices.len(),
+            N as usize,
+            "duplicate indices assigned to live resources"
+        );
+    }
+
+    /// The high-water mark of the monotonic counter must never exceed the number of
+    /// concurrently-live resources, i.e. freed slots are reused before fresh ones are minted.
+    #[test]
+    fn high_water_mark_bounded_by_live_count() {
+        let mut reg = ResourceRegistry::new();
+        const LIVE: u64 = 8;
+        const ROUNDS: u64 = 10_000;
+
+        for i in 0..LIVE {
+            reg.register_buffer(i as BufferHandle, true);
+        }
+        for i in LIVE..LIVE + ROUNDS {
+            reg.unregister_buffer((i - LIVE) as BufferHandle);
+            reg.register_buffer(i as BufferHandle, true);
+        }
+        assert!(
+            reg.next_storage_buffer_index <= LIVE as u32,
+            "counter ({}) exceeded live count ({LIVE}); slot recycling broken",
+            reg.next_storage_buffer_index
+        );
     }
 }
 
@@ -348,7 +507,7 @@ pub(crate) struct SamplerState {
 }
 
 /// Maximum number of frames that can be in-flight at once.
-pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
+pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 /// Per-frame synchronization resources for proper swapchain pipelining.
 pub(crate) struct FrameSync {
@@ -382,6 +541,8 @@ pub(crate) struct SurfaceState {
     pub width: u32,
     pub height: u32,
     pub format: vk::Format,
+    /// Current swapchain present mode (vsync strategy).
+    pub present_mode: vk::PresentModeKHR,
     /// Depth buffer (when depth_format is Some)
     pub depth_format: Option<DepthFormat>,
     pub depth_image: Option<vk::Image>,

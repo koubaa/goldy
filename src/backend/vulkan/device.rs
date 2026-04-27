@@ -322,9 +322,58 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 /// Destroy a logical device and all resources associated with it.
 #[allow(clippy::too_many_lines)]
 pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
+    tracing::info!(
+        %device_handle,
+        global_devices = state.devices.len(),
+        buffers = state.buffers.len(),
+        shaders = state.shaders.len(),
+        graphics_pipelines = state.pipelines.len(),
+        compute_pipelines = state.compute_pipelines.len(),
+        render_targets = state.render_targets.len(),
+        textures = state.textures.len(),
+        samplers = state.samplers.len(),
+        "destroying Vulkan device"
+    );
     if let Some(mut logical_device) = state.devices.remove(&device_handle) {
         unsafe {
-            logical_device.device.device_wait_idle().ok();
+            let wait_result = logical_device.device.device_wait_idle();
+
+            // When the device is lost, individual Vulkan destroy calls are unsafe
+            // (driver bookkeeping is already corrupt). Per spec, vkDestroyDevice is
+            // always valid and implicitly reclaims all child objects, so skip
+            // individual cleanup and jump straight to it.
+            if matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
+                let pending = logical_device.deletion_queue.pending.len();
+                tracing::warn!(
+                    %device_handle,
+                    pending_deferred = pending,
+                    "lost Vulkan device — skipping per-object destroy, calling vkDestroyDevice only (driver may be in an invalid state)"
+                );
+                // Drop map entries without calling Vulkan (handles become invalid).
+                state
+                    .buffers
+                    .retain(|_, b| b.device_handle != device_handle);
+                state
+                    .shaders
+                    .retain(|_, s| s.device_handle != device_handle);
+                state
+                    .pipelines
+                    .retain(|_, p| p.device_handle != device_handle);
+                state
+                    .compute_pipelines
+                    .retain(|_, p| p.device_handle != device_handle);
+                state
+                    .render_targets
+                    .retain(|_, t| t.device_handle != device_handle);
+                state
+                    .textures
+                    .retain(|_, t| t.device_handle != device_handle);
+                state
+                    .samplers
+                    .retain(|_, s| s.device_handle != device_handle);
+                logical_device.device.destroy_device(None);
+                return;
+            }
 
             // Flush any pending deferred deletions
             logical_device
@@ -508,7 +557,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 .destroy_command_pool(logical_device.command_pool, None);
             logical_device.device.destroy_device(None);
         }
-        tracing::info!("Destroyed Vulkan device {}", device_handle);
+        tracing::info!(%device_handle, "destroyed Vulkan device");
     }
 }
 
