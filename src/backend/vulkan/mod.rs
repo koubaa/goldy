@@ -79,6 +79,37 @@ pub struct VulkanBackend {
     state: VulkanState,
 }
 
+impl Drop for VulkanBackend {
+    fn drop(&mut self) {
+        tracing::info!(
+            devices = self.state.devices.len(),
+            surfaces = self.state.surfaces.len(),
+            compute_fences = self.state.compute_fence_pool.len(),
+            "VulkanBackend drop"
+        );
+
+        // Explicitly destroy the Vulkan instance before ash::Entry drops and unloads
+        // the DLL. On device-lost, vkDestroyDevice may leave driver-internal background
+        // state (TDR recovery threads) alive; vkDestroyInstance signals them to stop
+        // before the DLL code is unmapped. Without this call the loader entry drop
+        // (FreeLibrary) races with those threads and causes STATUS_HEAP_CORRUPTION.
+        //
+        // Only safe when all child objects (devices, surfaces) have been destroyed first.
+        if self.state.devices.is_empty() && self.state.surfaces.is_empty() {
+            unsafe {
+                self.state.instance.destroy_instance(None);
+            }
+            tracing::info!("vkDestroyInstance complete");
+        } else {
+            tracing::warn!(
+                devices = self.state.devices.len(),
+                surfaces = self.state.surfaces.len(),
+                "skipped vkDestroyInstance with child devices/surfaces still live (cleanup order bug?)"
+            );
+        }
+    }
+}
+
 impl VulkanBackend {
     /// Create a new Vulkan backend.
     pub fn new() -> Result<Self> {
@@ -628,6 +659,25 @@ impl GpuBackend for VulkanBackend {
 
     fn surface_format(&self, surface_handle: SurfaceHandle) -> TextureFormat {
         surface::format(&self.state.surfaces, surface_handle)
+    }
+
+    fn surface_set_present_mode(
+        &mut self,
+        surface_handle: SurfaceHandle,
+        mode: crate::types::PresentMode,
+    ) -> Result<()> {
+        surface::set_present_mode(
+            &self.state.entry,
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.surfaces,
+            surface_handle,
+            mode,
+        )
+    }
+
+    fn surface_present_mode(&self, surface_handle: SurfaceHandle) -> crate::types::PresentMode {
+        surface::get_present_mode(&self.state.surfaces, surface_handle)
     }
 
     fn create_pipeline_with_depth(

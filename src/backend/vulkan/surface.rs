@@ -154,12 +154,16 @@ pub(super) fn create(
         }
     };
 
-    // Create swapchain
-    let image_count = (capabilities.min_image_count + 1).min(if capabilities.max_image_count > 0 {
-        capabilities.max_image_count
-    } else {
-        u32::MAX
-    });
+    // Create swapchain: need at least `MAX_FRAMES_IN_FLIGHT` images so
+    // `acquire_next_image` does not stall on availability independently of
+    // the in-flight fence.
+    let image_count = (capabilities.min_image_count + 1)
+        .max(MAX_FRAMES_IN_FLIGHT as u32)
+        .min(if capabilities.max_image_count > 0 {
+            capabilities.max_image_count
+        } else {
+            u32::MAX
+        });
 
     let swapchain_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
@@ -334,6 +338,7 @@ pub(super) fn create(
             width: extent.width,
             height: extent.height,
             format: format.format,
+            present_mode,
             current_frame: 0,
             current_image_index: None,
             frame_sync,
@@ -439,7 +444,7 @@ pub(super) fn acquire(
     }
 
     // Get surface state and current frame index
-    let (device_handle, _current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
+    let (device_handle, current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
         let surface_state = surfaces
             .get(&surface_handle)
             .context("Invalid surface handle")?;
@@ -458,12 +463,22 @@ pub(super) fn acquire(
         .context("Surface's device is invalid")?;
 
     // Wait for the previous frame using this slot to finish
-    unsafe {
+    let wait_result = unsafe {
         logical_device
             .device
             .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+    };
+    if let Err(e) = &wait_result {
+        tracing::warn!(
+            surface_handle,
+            %device_handle,
+            current_frame,
+            pending_deferred = logical_device.deletion_queue.pending.len(),
+            result = ?e,
+            "surface acquire: wait_for_fences (frame fence) failed"
+        );
     }
-    .context("Failed to wait for frame fence")?;
+    wait_result.context("Failed to wait for frame fence")?;
 
     {
         let surface_state = surfaces.get_mut(&surface_handle).unwrap();
@@ -491,8 +506,17 @@ pub(super) fn acquire(
         .context("Surface's device is invalid")?;
 
     // Reset fence for this frame
-    unsafe { logical_device.device.reset_fences(&[in_flight_fence]) }
-        .context("Failed to reset frame fence")?;
+    let reset_result = unsafe { logical_device.device.reset_fences(&[in_flight_fence]) };
+    if let Err(e) = &reset_result {
+        tracing::warn!(
+            surface_handle,
+            %device_handle,
+            current_frame,
+            result = ?e,
+            "surface acquire: reset_fences (frame fence) failed"
+        );
+    }
+    reset_result.context("Failed to reset frame fence")?;
 
     // Acquire next swapchain image
     let swapchain_loader = khr::swapchain::Device::new(instance, &logical_device.device);
@@ -588,14 +612,24 @@ pub(super) fn acquire(
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(std::slice::from_ref(&prep_cmd))
                 .signal_semaphores(&signal_semaphores);
-            unsafe {
+            let prep_submit_result = unsafe {
                 logical_device.device.queue_submit(
                     logical_device.queue,
                     std::slice::from_ref(&prep_submit),
                     vk::Fence::null(),
                 )
+            };
+            if let Err(e) = &prep_submit_result {
+                tracing::warn!(
+                    surface_handle,
+                    %device_handle,
+                    current_frame,
+                    image_index,
+                    result = ?e,
+                    "surface acquire: prep barrier queue_submit failed"
+                );
             }
-            .context("Failed to submit acquire prep barrier")?;
+            prep_submit_result.context("Failed to submit acquire prep barrier")?;
 
             // Register the swapchain image as a storage texture for compute access.
             // The image view is created for GENERAL layout so compute shaders can write
@@ -637,6 +671,13 @@ pub(super) fn acquire(
             anyhow::bail!("Surface lost - recreate surface")
         }
         Err(e) => {
+            tracing::warn!(
+                surface_handle,
+                %device_handle,
+                current_frame,
+                result = ?e,
+                "acquire_next_image failed"
+            );
             anyhow::bail!("Failed to acquire swapchain image: {:?}", e)
         }
     }
@@ -1001,14 +1042,24 @@ pub(super) fn present(
             .command_buffers(std::slice::from_ref(&cmd))
             .signal_semaphores(&signal_semaphores);
 
-        unsafe {
+        let submit_result = unsafe {
             logical_device.device.queue_submit(
                 logical_device.queue,
                 std::slice::from_ref(&submit_info),
                 frame.in_flight_fence,
             )
+        };
+        if let Err(e) = &submit_result {
+            tracing::warn!(
+                surface_handle,
+                %device_handle,
+                current_frame,
+                image_index,
+                result = ?e,
+                "compute-present layout barrier queue_submit failed"
+            );
         }
-        .context("Failed to submit compute-present layout barrier")?;
+        submit_result.context("Failed to submit compute-present layout barrier")?;
     }
 
     let frame = &surface_state.frame_sync[current_frame];
@@ -1025,6 +1076,16 @@ pub(super) fn present(
         .image_indices(&image_indices);
 
     let result = unsafe { swapchain_loader.queue_present(logical_device.queue, &present_info) };
+    if let Err(e) = &result {
+        tracing::warn!(
+            surface_handle,
+            %device_handle,
+            current_frame,
+            image_index,
+            result = ?e,
+            "queue_present failed"
+        );
+    }
 
     // Clear the current image and advance frame counter
     let surface_state = surfaces.get_mut(&surface_handle).unwrap();
@@ -1056,7 +1117,7 @@ pub(super) fn resize(
     height: u32,
 ) -> Result<()> {
     // Get surface info we need
-    let (device_handle, surface, old_swapchain, format, depth_fmt) = {
+    let (device_handle, surface, old_swapchain, format, depth_fmt, stored_present_mode) = {
         let surface_state = surfaces
             .get(&surface_handle)
             .context("Invalid surface handle")?;
@@ -1066,6 +1127,7 @@ pub(super) fn resize(
             surface_state.swapchain,
             surface_state.format,
             surface_state.depth_format,
+            surface_state.present_mode,
         )
     };
 
@@ -1115,11 +1177,13 @@ pub(super) fn resize(
         ),
     };
 
-    let image_count = (capabilities.min_image_count + 1).min(if capabilities.max_image_count > 0 {
-        capabilities.max_image_count
-    } else {
-        u32::MAX
-    });
+    let image_count = (capabilities.min_image_count + 1)
+        .max(MAX_FRAMES_IN_FLIGHT as u32)
+        .min(if capabilities.max_image_count > 0 {
+            capabilities.max_image_count
+        } else {
+            u32::MAX
+        });
 
     // Create new swapchain (reusing old one for efficiency)
     let swapchain_info = vk::SwapchainCreateInfoKHR::default()
@@ -1133,7 +1197,7 @@ pub(super) fn resize(
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-        .present_mode(vk::PresentModeKHR::FIFO)
+        .present_mode(stored_present_mode)
         .clipped(true)
         .old_swapchain(old_swapchain);
 
@@ -1245,10 +1309,107 @@ pub(super) fn resize(
         surface_state.depth_image = new_depth_image;
         surface_state.depth_memory = new_depth_memory;
         surface_state.depth_view = new_depth_view;
+        surface_state.present_mode = stored_present_mode;
     }
 
     tracing::debug!("Resized surface to {}x{}", extent.width, extent.height);
+
     Ok(())
+}
+
+/// Set swapchain present mode (vsync). Recreates the swapchain when the mode changes.
+pub(super) fn set_present_mode(
+    entry: &Entry,
+    instance: &Instance,
+    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    surface_handle: SurfaceHandle,
+    mode: crate::types::PresentMode,
+) -> Result<()> {
+    let (w, h, current_vk) = {
+        let s = surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        (s.width, s.height, s.present_mode)
+    };
+
+    let (physical_device, vk_surface) = {
+        let surface_state = surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        let pd = devices
+            .get(&surface_state.device_handle)
+            .context("Surface's device is invalid")?
+            .physical_device;
+        (pd, surface_state.surface)
+    };
+
+    let surface_loader = khr::surface::Instance::new(entry, instance);
+    let present_modes = unsafe {
+        surface_loader.get_physical_device_surface_present_modes(physical_device, vk_surface)
+    }
+    .context("Failed to get present modes")?;
+
+    let vk_mode = pick_vk_present_mode(mode, &present_modes)?;
+    if vk_mode == current_vk {
+        return Ok(());
+    }
+
+    {
+        let surface_state = surfaces
+            .get_mut(&surface_handle)
+            .context("Invalid surface handle")?;
+        surface_state.present_mode = vk_mode;
+    }
+
+    resize(entry, instance, devices, surfaces, surface_handle, w, h)
+}
+
+fn pick_vk_present_mode(
+    requested: crate::types::PresentMode,
+    present_modes: &[vk::PresentModeKHR],
+) -> Result<vk::PresentModeKHR> {
+    use crate::types::PresentMode;
+    let vk_target = match requested {
+        PresentMode::Fifo => vk::PresentModeKHR::FIFO,
+        PresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
+        PresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
+        PresentMode::Auto => {
+            if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+                vk::PresentModeKHR::MAILBOX
+            } else {
+                vk::PresentModeKHR::FIFO
+            }
+        }
+    };
+    if !present_modes.contains(&vk_target) {
+        anyhow::bail!(
+            "Requested present mode {:?} is not supported by this surface",
+            requested
+        );
+    }
+    Ok(vk_target)
+}
+
+/// Active swapchain present mode as a Goldy enum.
+pub(super) fn get_present_mode(
+    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
+    surface_handle: SurfaceHandle,
+) -> crate::types::PresentMode {
+    surfaces
+        .get(&surface_handle)
+        .map(|s| vk_to_goldy_present_mode(s.present_mode))
+        .unwrap_or_default()
+}
+
+fn vk_to_goldy_present_mode(mode: vk::PresentModeKHR) -> crate::types::PresentMode {
+    use crate::types::PresentMode;
+    match mode {
+        vk::PresentModeKHR::FIFO | vk::PresentModeKHR::FIFO_RELAXED => PresentMode::Fifo,
+        vk::PresentModeKHR::MAILBOX => PresentMode::Mailbox,
+        vk::PresentModeKHR::IMMEDIATE => PresentMode::Immediate,
+        _ => PresentMode::Fifo,
+    }
 }
 
 /// Get the current size of the surface.

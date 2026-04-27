@@ -552,7 +552,12 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        tracing::debug!(adapter_id = self.adapter_id, "Destroying GPU device");
+        tracing::debug!(
+            %self.handle,
+            adapter_id = self.adapter_id,
+            device_type = ?self.device_type,
+            "Destroying GPU device"
+        );
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_device(self.handle);
     }

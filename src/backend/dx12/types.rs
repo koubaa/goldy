@@ -42,12 +42,24 @@ pub struct BindlessIndices {
 ///
 /// IMPORTANT: All CBV, SRV, and UAV descriptors share the same heap (cbv_srv_uav_heap),
 /// so we use a unified offset counter to avoid collisions.
+///
+/// Each `register_*` call pops a slot from the appropriate free list before minting a
+/// new one, preventing monotonic counter exhaustion when transient resources (e.g.
+/// per-frame pool views or swapchain-back-buffer UAVs) are created and destroyed every
+/// frame. Without this recycling the `next_cbv_srv_uav_offset` would hit
+/// `MAX_BINDLESS_CBV_SRV_UAV` (16 384) and subsequent descriptor writes would go
+/// out-of-bounds, corrupting the heap and causing GPU hangs / device loss.
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    /// Unified offset counter for CBV/SRV/UAV heap (they all share the same heap!)
+    /// Monotonic fallback counter: only advanced when the free list is empty.
     next_cbv_srv_uav_offset: u32,
     next_sampler_offset: u32,
-    /// Maps buffer handle to its primary descriptor offset
+    /// Recycled CBV/SRV/UAV heap slots returned by `unregister_buffer` /
+    /// `unregister_texture`. Popped first by every `register_*` call.
+    free_cbv_srv_uav_slots: Vec<u32>,
+    /// Recycled sampler heap slots returned by `unregister_sampler`.
+    free_sampler_slots: Vec<u32>,
+    /// Maps buffer handle to its primary descriptor offset (UAV for storage, CBV for uniform)
     pub buffer_offsets: HashMap<BufferHandle, u32>,
     /// Maps buffer handle to its secondary SRV offset (for storage buffers that need read access)
     pub buffer_srv_offsets: HashMap<BufferHandle, u32>,
@@ -61,10 +73,10 @@ pub(crate) struct ResourceRegistry {
 impl ResourceRegistry {
     pub fn new() -> Self {
         Self {
-            // All CBV/SRV/UAV descriptors use a single unified counter
-            // to avoid descriptor heap collisions
             next_cbv_srv_uav_offset: 0,
             next_sampler_offset: 0,
+            free_cbv_srv_uav_slots: Vec::new(),
+            free_sampler_slots: Vec::new(),
             buffer_offsets: HashMap::new(),
             buffer_srv_offsets: HashMap::new(),
             texture_offsets: HashMap::new(),
@@ -73,46 +85,58 @@ impl ResourceRegistry {
         }
     }
 
+    /// Pop a recycled CBV/SRV/UAV slot or mint a fresh one.
+    fn alloc_cbv_srv_uav(&mut self) -> u32 {
+        self.free_cbv_srv_uav_slots.pop().unwrap_or_else(|| {
+            let offset = self.next_cbv_srv_uav_offset;
+            self.next_cbv_srv_uav_offset += 1;
+            offset
+        })
+    }
+
+    /// Pop a recycled sampler slot or mint a fresh one.
+    fn alloc_sampler(&mut self) -> u32 {
+        self.free_sampler_slots.pop().unwrap_or_else(|| {
+            let offset = self.next_sampler_offset;
+            self.next_sampler_offset += 1;
+            offset
+        })
+    }
+
     pub fn register_buffer_cbv(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.next_cbv_srv_uav_offset;
-        self.next_cbv_srv_uav_offset += 1;
+        let offset = self.alloc_cbv_srv_uav();
         self.buffer_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_buffer_srv(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.next_cbv_srv_uav_offset;
-        self.next_cbv_srv_uav_offset += 1;
+        let offset = self.alloc_cbv_srv_uav();
         // Store in secondary map since buffer may already have a UAV offset
         self.buffer_srv_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_buffer_uav(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.next_cbv_srv_uav_offset;
-        self.next_cbv_srv_uav_offset += 1;
+        let offset = self.alloc_cbv_srv_uav();
         self.buffer_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
-        let offset = self.next_cbv_srv_uav_offset;
-        self.next_cbv_srv_uav_offset += 1;
+        let offset = self.alloc_cbv_srv_uav();
         self.texture_offsets.insert(handle, offset);
         offset
     }
 
     /// Register a UAV descriptor for a texture (e.g. storage image / SpatialAccess::Direct).
     pub fn register_texture_uav(&mut self, handle: TextureHandle) -> u32 {
-        let offset = self.next_cbv_srv_uav_offset;
-        self.next_cbv_srv_uav_offset += 1;
+        let offset = self.alloc_cbv_srv_uav();
         self.texture_uav_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
-        let offset = self.next_sampler_offset;
-        self.next_sampler_offset += 1;
+        let offset = self.alloc_sampler();
         self.sampler_offsets.insert(handle, offset);
         offset
     }
@@ -122,25 +146,156 @@ impl ResourceRegistry {
         self.buffer_srv_offsets.get(&handle).copied()
     }
 
-    /// Allocate a raw descriptor slot (not tied to any resource).
+    /// Allocate a raw descriptor slot not tied to any resource handle.
+    /// Used for permanent device-lifetime slots (e.g. `scratch_clear_uav_offset`).
     pub fn alloc_cbv_srv_uav_slot(&mut self) -> u32 {
-        let offset = self.next_cbv_srv_uav_offset;
-        self.next_cbv_srv_uav_offset += 1;
-        offset
+        self.alloc_cbv_srv_uav()
     }
 
+    /// Unregister a buffer, returning all of its descriptor slots to the free list.
+    ///
+    /// Storage buffers may occupy two slots (UAV primary + SRV secondary); both are
+    /// recycled here. Without this, per-frame buffer churn exhausts the 16 384-slot
+    /// heap in seconds and subsequent descriptor writes corrupt adjacent entries.
     pub fn unregister_buffer(&mut self, handle: BufferHandle) {
-        self.buffer_offsets.remove(&handle);
-        self.buffer_srv_offsets.remove(&handle);
+        if let Some(offset) = self.buffer_offsets.remove(&handle) {
+            self.free_cbv_srv_uav_slots.push(offset);
+        }
+        if let Some(offset) = self.buffer_srv_offsets.remove(&handle) {
+            self.free_cbv_srv_uav_slots.push(offset);
+        }
     }
 
+    /// Unregister a texture, returning all of its descriptor slots to the free list.
+    ///
+    /// Storage textures may occupy two slots (SRV + UAV); both are recycled here.
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
-        self.texture_offsets.remove(&handle);
-        self.texture_uav_offsets.remove(&handle);
+        if let Some(offset) = self.texture_offsets.remove(&handle) {
+            self.free_cbv_srv_uav_slots.push(offset);
+        }
+        if let Some(offset) = self.texture_uav_offsets.remove(&handle) {
+            self.free_cbv_srv_uav_slots.push(offset);
+        }
     }
 
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
-        self.sampler_offsets.remove(&handle);
+        if let Some(offset) = self.sampler_offsets.remove(&handle) {
+            self.free_sampler_slots.push(offset);
+        }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// Simulate the per-frame create/destroy churn that ekrano generates for transient
+    /// pool-view buffers. The counter must stay bounded — well below MAX_BINDLESS_CBV_SRV_UAV
+    /// — even after far more iterations than the heap limit.
+    #[test]
+    fn buffer_slots_recycled_under_churn() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..50_000u64 {
+            let handle = i as BufferHandle;
+            reg.register_buffer_uav(handle);
+            reg.unregister_buffer(handle);
+        }
+        // Only one slot should ever have been minted (slot 0), now sitting in the free list.
+        assert_eq!(
+            reg.next_cbv_srv_uav_offset, 1,
+            "UAV counter grew; slot recycling not working"
+        );
+        assert_eq!(reg.free_cbv_srv_uav_slots.len(), 1);
+    }
+
+    /// Storage buffers register two slots (UAV primary + SRV secondary).
+    /// Both must be returned to the free list on unregister.
+    #[test]
+    fn storage_buffer_dual_slot_recycled() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..1_000u64 {
+            let handle = i as BufferHandle;
+            reg.register_buffer_uav(handle);
+            reg.register_buffer_srv(handle);
+            reg.unregister_buffer(handle);
+        }
+        assert_eq!(
+            reg.next_cbv_srv_uav_offset, 2,
+            "counter should only have advanced twice (one UAV + one SRV slot ever minted)"
+        );
+        assert_eq!(
+            reg.free_cbv_srv_uav_slots.len(),
+            2,
+            "both slots must be in the free list"
+        );
+    }
+
+    /// Textures with both SRV and UAV views (storage textures) must recycle both slots.
+    #[test]
+    fn texture_dual_slot_recycled() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..1_000u64 {
+            let handle = i as TextureHandle;
+            reg.register_texture(handle);
+            reg.register_texture_uav(handle);
+            reg.unregister_texture(handle);
+        }
+        assert_eq!(reg.next_cbv_srv_uav_offset, 2);
+        assert_eq!(reg.free_cbv_srv_uav_slots.len(), 2);
+    }
+
+    /// Sampler slots are in a separate heap; verify they recycle independently.
+    #[test]
+    fn sampler_slots_recycled() {
+        let mut reg = ResourceRegistry::new();
+        for i in 0..5_000u64 {
+            let handle = i as SamplerHandle;
+            reg.register_sampler(handle);
+            reg.unregister_sampler(handle);
+        }
+        assert_eq!(reg.next_sampler_offset, 1);
+        assert_eq!(reg.free_sampler_slots.len(), 1);
+    }
+
+    /// Simultaneously-live resources must receive distinct slots.
+    #[test]
+    fn live_resources_get_distinct_slots() {
+        let mut reg = ResourceRegistry::new();
+        const N: u64 = 64;
+        let mut slots: Vec<u32> = (0..N)
+            .map(|i| reg.register_buffer_uav(i as BufferHandle))
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        assert_eq!(
+            slots.len(),
+            N as usize,
+            "duplicate slots assigned to live resources"
+        );
+    }
+
+    /// Slots freed by destroyed resources must be reused before the counter advances,
+    /// keeping the high-water mark at or below the number of concurrently-live resources.
+    #[test]
+    fn high_water_mark_bounded_by_live_count() {
+        let mut reg = ResourceRegistry::new();
+        const LIVE: u64 = 8;
+        const ROUNDS: u64 = 10_000;
+
+        // Prime with LIVE simultaneous resources.
+        for i in 0..LIVE {
+            reg.register_buffer_uav(i as BufferHandle);
+        }
+        // Repeatedly destroy the oldest and create a new one.
+        for i in LIVE..LIVE + ROUNDS {
+            reg.unregister_buffer((i - LIVE) as BufferHandle);
+            reg.register_buffer_uav(i as BufferHandle);
+        }
+        assert!(
+            reg.next_cbv_srv_uav_offset <= LIVE as u32,
+            "counter ({}) exceeded live count ({LIVE}); slot recycling broken",
+            reg.next_cbv_srv_uav_offset
+        );
     }
 }
 

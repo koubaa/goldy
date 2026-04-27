@@ -8,6 +8,48 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 
+/// Reap fences that have already signaled from the compute fence pool.
+///
+/// Without this, every `submit_graph` that doesn't have a paired `wait_fence`
+/// (the common ekrano pattern: only the *last* `GpuFuture` in a recording is
+/// waited on; the intermediate ones are silently dropped) leaks a `VkFence` +
+/// `VkCommandBuffer` into the pool. Over a few thousand frames the pool grows
+/// large enough that the driver's command-pool / fence-pool internal arenas
+/// fall over, the device is lost (`ERROR_DEVICE_LOST` on the next
+/// `queue_submit`), and the unbounded HashMap teardown corrupts the heap on
+/// shutdown.
+fn reap_signaled_fences(state: &mut super::types::VulkanState) {
+    let signaled: Vec<u64> = state
+        .compute_fence_pool
+        .iter()
+        .filter_map(|(token, (device_handle, fence, _))| {
+            let logical_device = state.devices.get(device_handle)?;
+            let signaled =
+                unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
+            if signaled {
+                Some(*token)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for token in signaled {
+        if let Some((device_handle, fence, cmd_buf)) = state.compute_fence_pool.remove(&token) {
+            if let Some(logical_device) = state.devices.get(&device_handle) {
+                unsafe {
+                    if let Some(cb) = cmd_buf {
+                        logical_device
+                            .device
+                            .free_command_buffers(logical_device.command_pool, &[cb]);
+                    }
+                    logical_device.device.destroy_fence(fence, None);
+                }
+            }
+        }
+    }
+}
+
 /// Create a compute pipeline.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create(
@@ -107,6 +149,10 @@ pub(super) fn submit(
     device_handle: DeviceHandle,
     commands: &[ComputeCommand],
 ) -> Result<FenceToken> {
+    // Reap any previously-submitted fences that have already signaled. Keeps
+    // the pool bounded when callers (ekrano) don't wait on every GpuFuture.
+    reap_signaled_fences(state);
+
     let devices = &state.devices;
     let compute_pipelines = &state.compute_pipelines;
     let buffers = &state.buffers;
@@ -424,16 +470,27 @@ pub(super) fn wait_fence(
             .wait_for_fences(&[fence], true, u64::MAX)
     };
 
-    // Fence done (or failed) — safe to free command buffer and fence now.
-    if let Some(cb) = cmd_buf {
-        unsafe {
-            logical_device
-                .device
-                .free_command_buffers(logical_device.command_pool, &[cb]);
+    // On ERROR_DEVICE_LOST the driver's internal bookkeeping is corrupt;
+    // calling free_command_buffers / destroy_fence on a lost device is a
+    // known Windows heap-corruption trigger. vkDestroyDevice (called later
+    // from device::destroy) implicitly reclaims these objects.
+    let device_lost = matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST));
+    if !device_lost {
+        if let Some(cb) = cmd_buf {
+            unsafe {
+                logical_device
+                    .device
+                    .free_command_buffers(logical_device.command_pool, &[cb]);
+            }
         }
-    }
-    unsafe {
-        logical_device.device.destroy_fence(fence, None);
+        unsafe {
+            logical_device.device.destroy_fence(fence, None);
+        }
+    } else {
+        tracing::warn!(
+            %token,
+            "skipping free_command_buffers/destroy_fence on lost device (avoids driver heap corruption on some Windows drivers)"
+        );
     }
 
     if let Err(e) = wait_result {
@@ -488,14 +545,25 @@ pub(super) fn wait_fence_timeout(
         }
         Err(vk::Result::TIMEOUT) => Ok(false),
         Err(e) => {
+            // Same device-lost cleanup hazard as wait_fence: skip Vulkan
+            // destroy calls if the device is lost (vkDestroyDevice will
+            // implicitly reclaim them).
+            let device_lost = matches!(e, vk::Result::ERROR_DEVICE_LOST);
             if let Some((_, f, cb)) = state.compute_fence_pool.remove(&token) {
-                unsafe {
-                    if let Some(c) = cb {
-                        logical_device
-                            .device
-                            .free_command_buffers(logical_device.command_pool, &[c]);
+                if !device_lost {
+                    unsafe {
+                        if let Some(c) = cb {
+                            logical_device
+                                .device
+                                .free_command_buffers(logical_device.command_pool, &[c]);
+                        }
+                        logical_device.device.destroy_fence(f, None);
                     }
-                    logical_device.device.destroy_fence(f, None);
+                } else {
+                    tracing::warn!(
+                        %token,
+                        "skipping free_command_buffers/destroy_fence on lost device in wait_fence_timeout (avoids driver heap corruption on some Windows drivers)"
+                    );
                 }
             }
             Err(anyhow::anyhow!(
