@@ -34,9 +34,9 @@ pub mod mock;
 pub mod metal;
 
 use crate::types::{
-    BackendType, BindlessHandle, Color, DataAccess, DepthFormat, DepthStencilState, DeviceType,
-    IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess, TextureFlags,
-    TextureFormat, VertexBufferLayout,
+    BackendType, BindlessHandle, BufferFlags, Color, DataAccess, DepthFormat, DepthStencilState,
+    DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess,
+    TextureFlags, TextureFormat, VertexBufferLayout,
 };
 use anyhow::Result;
 
@@ -317,6 +317,7 @@ pub trait GpuBackend: Send + Sync {
         size: u64,
         access: DataAccess,
         element_stride: Option<u32>,
+        flags: BufferFlags,
     ) -> Result<BufferHandle>;
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
@@ -327,6 +328,27 @@ pub trait GpuBackend: Send + Sync {
         buffer: BufferHandle,
         output: &mut [u8],
     ) -> Result<()>;
+    /// Copy bytes from a buffer created with [`BufferFlags::CPU_COHERENT`] into `output`
+    /// without a staging readback. Caller must have completed GPU work that wrote the buffer;
+    /// on Direct3D 12, call [`Self::copy_to_coherent_readback`] first after that work.
+    fn read_buffer_coherent(
+        &self,
+        buffer: BufferHandle,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<()> {
+        let _ = (buffer, offset, output);
+        anyhow::bail!("read_buffer_coherent: buffer is not CPU_COHERENT or not supported")
+    }
+    /// Direct3D 12 only: copy GPU-visible storage (UAV) contents into the persistently mapped
+    /// readback buffer. No-op on other backends. Call after the submit that produced the data.
+    fn copy_to_coherent_readback(
+        &mut self,
+        _device: DeviceHandle,
+        _buffer: BufferHandle,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
     fn clear_buffer(
         &mut self,

@@ -4,7 +4,7 @@ use super::types::{self, BufferState};
 use super::utils::find_memory_type;
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::DataAccess;
-use crate::types::{BindlessCategory, BindlessHandle};
+use crate::types::{BindlessCategory, BindlessHandle, BufferFlags};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -77,6 +77,7 @@ pub(super) fn create(
     size: u64,
     access: DataAccess,
     element_stride: Option<u32>,
+    flags: BufferFlags,
 ) -> Result<BufferHandle> {
     let logical_device = devices
         .get(&device_handle)
@@ -101,6 +102,13 @@ pub(super) fn create(
         }
     };
 
+    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
+    if cpu_coherent && !is_storage {
+        anyhow::bail!(
+            "BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers"
+        );
+    }
+
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
     let buffer_info = vk::BufferCreateInfo::default()
@@ -113,10 +121,15 @@ pub(super) fn create(
 
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };
 
-    // Storage buffers → DEVICE_LOCAL for GPU compute performance.
+    // Storage buffers → DEVICE_LOCAL for GPU compute performance, unless CPU_COHERENT
+    // (host-visible storage for persistent map + stable UAV bindless use).
     // Uniform buffers → HOST_VISIBLE|HOST_COHERENT for frequent CPU writes.
     let desired_flags = if is_storage {
-        vk::MemoryPropertyFlags::DEVICE_LOCAL
+        if cpu_coherent {
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+        } else {
+            vk::MemoryPropertyFlags::DEVICE_LOCAL
+        }
     } else {
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
     };
@@ -143,6 +156,21 @@ pub(super) fn create(
     // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
     // Clear uses vkCmdFillBuffer (GPU-side) so staging isn't needed for that.
     let (staging_buffer, staging_memory) = (None, None);
+
+    let host_mapped: Option<usize> = if cpu_coherent && is_storage {
+        let device = devices
+            .get(&device_handle)
+            .context("Buffer's device is invalid for host map")?;
+        let ptr = unsafe { device.map_memory2(memory, 0, size) }
+            .context("Failed to map CPU_COHERENT buffer memory")?;
+        let p = ptr as *mut u8;
+        if p.is_null() {
+            anyhow::bail!("map_memory2 returned null for CPU_COHERENT buffer");
+        }
+        Some(p as usize)
+    } else {
+        None
+    };
 
     let handle = *next_buffer_handle;
     *next_buffer_handle += 1;
@@ -210,6 +238,8 @@ pub(super) fn create(
             staging_buffer,
             staging_memory,
             is_view: false,
+            host_mapped,
+            flags,
         },
     );
 
@@ -230,6 +260,14 @@ pub(super) fn destroy(
             device.resource_registry.unregister_buffer(buffer_handle);
 
             if !buffer.is_view {
+                if buffer.host_mapped.is_some() {
+                    if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
+                        tracing::warn!(
+                            ?e,
+                            "unmap_memory2 failed for CPU_COHERENT buffer on destroy"
+                        );
+                    }
+                }
                 // Queue for deferred deletion - the buffer may still be in use by in-flight commands
                 device.deletion_queue.queue(types::PendingDeletion::Buffer {
                     buffer: buffer.buffer,
@@ -275,6 +313,7 @@ pub(super) fn create_view(
     let device_handle = parent.device_handle;
     let vk_buffer = parent.buffer;
     let is_storage = parent.is_storage;
+    let parent_flags = parent.flags;
 
     let logical_device = devices
         .get_mut(&device_handle)
@@ -336,6 +375,8 @@ pub(super) fn create_view(
             staging_buffer: None,
             staging_memory: None,
             is_view: true,
+            host_mapped: None,
+            flags: parent_flags,
         },
     );
 
@@ -352,7 +393,10 @@ pub(super) fn ensure_staging(
     let buffer = buffers
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;
-    if !buffer.is_storage || buffer.staging_buffer.is_some() {
+    if !buffer.is_storage
+        || buffer.staging_buffer.is_some()
+        || buffer.flags.contains(BufferFlags::CPU_COHERENT)
+    {
         return Ok(());
     }
     let size = buffer.size;
@@ -416,6 +460,19 @@ pub(super) fn write(
         }
     }
 
+    {
+        let buffer = buffers
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        if let Some(base) = buffer.host_mapped {
+            let p = base as *mut u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), p.add(offset as usize), data.len());
+            }
+            return Ok(());
+        }
+    }
+
     // Lazily create staging buffer for storage buffers
     ensure_staging(instance, devices, buffers, buffer_handle)?;
 
@@ -460,6 +517,36 @@ pub(super) fn write(
         }
     }
 
+    Ok(())
+}
+
+/// Copy from a `CPU_COHERENT` host mapping (no staging, no map/unmap per call).
+pub(super) fn read_coherent(
+    buffers: &HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
+        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
+    }
+    let Some(base) = buffer.host_mapped else {
+        anyhow::bail!("CPU_COHERENT buffer has no host mapping");
+    };
+    if offset + output.len() as u64 > buffer.size {
+        anyhow::bail!("read_coherent would exceed buffer bounds");
+    }
+    let p = base as *mut u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            p.add(offset as usize) as *const u8,
+            output.as_mut_ptr(),
+            output.len(),
+        );
+    }
     Ok(())
 }
 
@@ -515,6 +602,26 @@ pub(super) fn read_to_cpu(
     buffer_handle: BufferHandle,
     output: &mut [u8],
 ) -> Result<()> {
+    {
+        let buffer = buffers
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        if buffer.device_handle != device_handle {
+            anyhow::bail!("Buffer belongs to different device");
+        }
+        let len = output.len() as u64;
+        if len > buffer.size {
+            anyhow::bail!("Read would exceed buffer bounds");
+        }
+        if let Some(base) = buffer.host_mapped {
+            let p = base as *const u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(p, output.as_mut_ptr(), output.len());
+            }
+            return Ok(());
+        }
+    }
+
     // Lazily create staging buffer for storage buffers
     ensure_staging(instance, devices, buffers, buffer_handle)?;
 

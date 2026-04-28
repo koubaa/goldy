@@ -373,6 +373,14 @@ pub(crate) struct BufferState {
     pub element_stride: Option<u32>,
     /// If true, this is a view into another buffer — don't free the resource on destroy.
     pub is_view: bool,
+    /// Direct3D 12: paired READBACK resource for [`crate::types::BufferFlags::CPU_COHERENT`]
+    /// storage buffers; CPU reads copy from this after [`super::buffer::copy_to_coherent_readback`].
+    pub coherent_readback: Option<Direct3D12::ID3D12Resource>,
+    /// Persistent map of `coherent_readback` (see above).
+    /// Persistent `Map` result address for the readback resource (`usize` for `Send`/`Sync`).
+    pub coherent_readback_mapped: Option<usize>,
+    /// Creation-time flags.
+    pub flags: crate::types::BufferFlags,
 }
 
 /// Shader module state with cached compiled bytecode.

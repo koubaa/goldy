@@ -383,8 +383,16 @@ impl GpuBackend for Dx12Backend {
         size: u64,
         access: DataAccess,
         element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
     ) -> Result<BufferHandle> {
-        buffer::create(&mut self.state, device_handle, size, access, element_stride)
+        buffer::create(
+            &mut self.state,
+            device_handle,
+            size,
+            access,
+            element_stride,
+            flags,
+        )
     }
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
@@ -429,6 +437,23 @@ impl GpuBackend for Dx12Backend {
         output: &mut [u8],
     ) -> Result<()> {
         buffer::read_to_cpu(&mut self.state, device, buffer, output)
+    }
+
+    fn read_buffer_coherent(
+        &self,
+        buffer: BufferHandle,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_coherent(&self.state.buffers, buffer, offset, output)
+    }
+
+    fn copy_to_coherent_readback(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+    ) -> Result<()> {
+        buffer::copy_to_coherent_readback(&mut self.state, device, buffer)
     }
 
     fn clear_buffer(
