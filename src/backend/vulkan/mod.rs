@@ -305,6 +305,7 @@ impl GpuBackend for VulkanBackend {
         size: u64,
         access: DataAccess,
         element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
     ) -> Result<BufferHandle> {
         buffer::create(
             &mut self.state.devices,
@@ -315,6 +316,7 @@ impl GpuBackend for VulkanBackend {
             size,
             access,
             element_stride,
+            flags,
         )
     }
 
@@ -387,6 +389,15 @@ impl GpuBackend for VulkanBackend {
             buffer_handle,
             output,
         )
+    }
+
+    fn read_buffer_coherent(
+        &self,
+        buffer_handle: BufferHandle,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_coherent(&self.state.buffers, buffer_handle, offset, output)
     }
 
     fn clear_buffer(

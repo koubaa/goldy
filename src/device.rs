@@ -7,7 +7,7 @@
 //! - **Command Recording**: [`CommandEncoder`](crate::CommandEncoder) is completely lock-free.
 //!   You can create and record commands on any thread without any synchronization.
 //!   
-//! - **Resource Creation**: Creating resources ([`Buffer`](crate::Buffer),
+//! - **Resource Creation**: Creating resources ([`Buffer`],
 //!   [`RenderPipeline`](crate::RenderPipeline), etc.) acquires the backend lock.
 //!   These operations are safe from any thread but serialize internally.
 //!
@@ -25,6 +25,7 @@
 //! multi-queue support for parallel command submission if needed.
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
+use crate::buffer::Buffer;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
@@ -380,6 +381,14 @@ impl Device {
     /// Check if the device is still valid.
     pub fn is_valid(&self) -> bool {
         self.backend.lock().unwrap().is_device_valid(self.handle)
+    }
+
+    /// Direct3D 12: after GPU work writes a [`Buffer`] created with [`BufferFlags::CPU_COHERENT`],
+    /// copies from the UAV resource into the persistently mapped readback buffer so
+    /// [`Buffer::read_coherent`] sees the data. No-op on Vulkan and Metal.
+    pub fn copy_to_coherent_readback(&self, buffer: &Buffer) -> Result<()> {
+        let mut backend = self.backend.lock().unwrap();
+        backend.copy_to_coherent_readback(self.handle, buffer.handle)
     }
 
     /// Get device capabilities and format preferences.

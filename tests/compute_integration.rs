@@ -5,7 +5,7 @@
 mod common;
 
 use goldy::{
-    types::{SpatialAccess, TextureFlags, TextureFormat},
+    types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
     Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
     ShaderModule, Texture,
 };
@@ -1232,4 +1232,124 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     assert_eq!(output[1], 0, "G channel should be 0");
     assert_eq!(output[2], 0, "B channel should be 0");
     assert_eq!(output[3], 255, "A channel should be 255");
+}
+
+// ─── CPU_COHERENT buffer tests ────────────────────────────────────────────────
+
+/// A compute shader that doubles each element (same as `DOUBLE_SHADER`). Used by the
+/// coherent tests to avoid a dependency on the module-level constant's exact binding layout.
+const DOUBLE_SHADER_COHERENT: &str = r#"
+import goldy_exp;
+
+#define DATA goldy_dyn_scattered<uint>(0)
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    DATA[id.x] = DATA[id.x] * 2;
+}
+"#;
+
+/// Create a `CPU_COHERENT` storage buffer, run a GPU compute pass that doubles every
+/// element, then read back via `Buffer::read_coherent`.
+///
+/// `read_coherent` performs a pure `memcpy` from the persistent host mapping — no
+/// fence wait, no staging copy on Vulkan/Metal. On DX12 `Device::copy_to_coherent_readback`
+/// is called first to sync the READBACK heap (the test calls it explicitly so the
+/// low-level path is exercised).
+#[test]
+fn test_cpu_coherent_compute_write_and_read() {
+    let device = make_device();
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER_COHERENT).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let initial: Vec<u32> = (0..N as u32).collect();
+
+    let buffer = Buffer::with_bytes_stride_and_flags(
+        &device,
+        bytemuck::cast_slice(&initial),
+        DataAccess::Scattered,
+        size_of::<u32>() as u32,
+        BufferFlags::CPU_COHERENT,
+    )
+    .expect("create CPU_COHERENT buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.set_push_constants(&[&buffer]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    // On DX12 the backend writes to a DEFAULT-heap UAV and must copy to the
+    // persistent READBACK heap so the host mapping reflects current GPU contents.
+    device
+        .copy_to_coherent_readback(&buffer)
+        .expect("copy_to_coherent_readback");
+
+    let mut out = vec![0u8; N * size_of::<u32>()];
+    buffer.read_coherent(0, &mut out).expect("read_coherent");
+
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            (i as u32) * 2,
+            "element {i}: expected {} got {val}",
+            i * 2
+        );
+    }
+}
+
+/// `read_coherent` reflects CPU writes made directly to the persistent mapping.
+///
+/// On Vulkan and Metal the buffer lives in host-visible/shared memory, so a plain
+/// `buffer.write()` followed immediately by `buffer.read_coherent()` must round-trip
+/// without any GPU involvement. This validates the zero-copy read path.
+///
+/// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so this
+/// test skips the coherent-read assertion on DX12 and only checks that creation and
+/// `copy_to_coherent_readback` do not panic.
+#[test]
+fn test_cpu_coherent_cpu_write_read_roundtrip() {
+    let device = make_device();
+
+    const N: usize = 16;
+    let initial: Vec<u32> = vec![0xABCD_1234u32; N];
+
+    let buffer = Buffer::with_bytes_stride_and_flags(
+        &device,
+        bytemuck::cast_slice(&initial),
+        DataAccess::Scattered,
+        size_of::<u32>() as u32,
+        BufferFlags::CPU_COHERENT,
+    )
+    .expect("create CPU_COHERENT buffer");
+
+    let new_values: Vec<u32> = (100..100 + N as u32).collect();
+    buffer
+        .write(0, bytemuck::cast_slice(&new_values))
+        .expect("write");
+
+    // Ensure the readback path at least completes without error (required for DX12 parity).
+    device
+        .copy_to_coherent_readback(&buffer)
+        .expect("copy_to_coherent_readback");
+
+    let mut out = vec![0u8; N * size_of::<u32>()];
+    buffer.read_coherent(0, &mut out).expect("read_coherent");
+
+    let result: &[u32] = bytemuck::cast_slice(&out);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            100 + i as u32,
+            "element {i}: expected {} got {val}",
+            100 + i
+        );
+    }
 }

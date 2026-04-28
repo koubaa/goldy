@@ -722,6 +722,11 @@ pub(crate) struct BufferState {
     pub access: crate::types::DataAccess,
     /// Structured-buffer / uniform element stride from buffer creation.
     pub element_stride: Option<u32>,
+    /// Persistent `contents()` pointer when created with [`crate::types::BufferFlags::CPU_COHERENT`]
+    /// (shared storage: same as a normal read for other buffers).
+    /// `buffer.contents() as usize` when `CPU_COHERENT` (for `Send`/`Sync`).
+    pub host_mapped: Option<usize>,
+    pub flags: crate::types::BufferFlags,
 }
 
 /// Shader module state with cached compiled stages.

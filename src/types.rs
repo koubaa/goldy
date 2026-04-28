@@ -299,13 +299,15 @@ pub enum SpatialAccess {
 }
 
 bitflags! {
-    /// Additional buffer flags for copy operations.
+    /// Additional buffer flags for copy operations and CPU readback.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct BufferFlags: u32 {
         /// Can be used as a copy source.
         const COPY_SRC = 1 << 0;
         /// Can be used as a copy destination.
         const COPY_DST = 1 << 1;
+        /// Can be read by the CPU.
+        const CPU_COHERENT = 1 << 2;
     }
 }
 

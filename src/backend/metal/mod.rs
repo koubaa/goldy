@@ -237,8 +237,9 @@ impl GpuBackend for MetalBackend {
         size: u64,
         access: DataAccess,
         element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
     ) -> Result<BufferHandle> {
-        buffer::create(&mut self.state, device, size, access, element_stride)
+        buffer::create(&mut self.state, device, size, access, element_stride, flags)
     }
 
     fn destroy_buffer(&mut self, buffer: BufferHandle) {
@@ -279,6 +280,15 @@ impl GpuBackend for MetalBackend {
         output: &mut [u8],
     ) -> Result<()> {
         buffer::read_to_cpu(&self.state, device, buffer, output)
+    }
+
+    fn read_buffer_coherent(
+        &self,
+        buffer: BufferHandle,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_coherent(&self.state.buffers, buffer, offset, output)
     }
 
     fn clear_buffer(
@@ -672,7 +682,13 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer = backend
-            .create_buffer(device, 256, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                256,
+                DataAccess::Scattered,
+                None,
+                crate::types::BufferFlags::empty(),
+            )
             .unwrap();
 
         assert_eq!(backend.buffer_size(buffer), 256);

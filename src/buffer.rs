@@ -2,7 +2,7 @@
 
 use crate::backend::{BufferHandle, GpuBackend};
 use crate::device::Device;
-use crate::types::{BindlessCategory, BindlessHandle, DataAccess};
+use crate::types::{BindlessCategory, BindlessHandle, BufferFlags, DataAccess};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -51,6 +51,7 @@ pub struct Buffer {
     pub(crate) handle: BufferHandle,
     size: u64,
     access: DataAccess,
+    flags: BufferFlags,
 }
 
 impl Buffer {
@@ -64,7 +65,7 @@ impl Buffer {
     /// - `DataAccess::Broadcast`: All threads read the same address.
     ///   Hardware optimizes for wave-wide broadcast (ConstantBuffer).
     pub fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self> {
-        Self::new_with_stride(device, size, access, None)
+        Self::new_with_stride_and_flags(device, size, access, None, BufferFlags::empty())
     }
 
     pub fn new_with_stride(
@@ -73,15 +74,27 @@ impl Buffer {
         access: DataAccess,
         element_stride: Option<u32>,
     ) -> Result<Self> {
-        tracing::debug!(size, ?access, element_stride, "Creating buffer");
+        Self::new_with_stride_and_flags(device, size, access, element_stride, BufferFlags::empty())
+    }
+
+    /// Create a buffer with optional element stride and [`BufferFlags`].
+    pub fn new_with_stride_and_flags(
+        device: &Device,
+        size: u64,
+        access: DataAccess,
+        element_stride: Option<u32>,
+        flags: BufferFlags,
+    ) -> Result<Self> {
+        tracing::debug!(size, ?access, element_stride, ?flags, "Creating buffer");
         let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_buffer(device.handle, size, access, element_stride)?;
+        let handle = backend.create_buffer(device.handle, size, access, element_stride, flags)?;
 
         Ok(Self {
             backend: Arc::clone(&device.backend),
             handle,
             size,
             access,
+            flags,
         })
     }
 
@@ -102,6 +115,16 @@ impl Buffer {
         data: &[T],
         access: DataAccess,
     ) -> Result<Self> {
+        Self::with_data_and_flags(device, data, access, BufferFlags::empty())
+    }
+
+    /// Like [`Self::with_data`], with explicit [`BufferFlags`].
+    pub fn with_data_and_flags<T: StructuredBufferElement>(
+        device: &Device,
+        data: &[T],
+        access: DataAccess,
+        flags: BufferFlags,
+    ) -> Result<Self> {
         let bytes = bytemuck::cast_slice(data);
         let element_stride = std::mem::size_of::<T>() as u32;
         let mut backend = device.backend.lock().unwrap();
@@ -110,6 +133,7 @@ impl Buffer {
             bytes.len() as u64,
             access,
             Some(element_stride),
+            flags,
         )?;
         drop(backend);
 
@@ -118,6 +142,7 @@ impl Buffer {
             handle,
             size: bytes.len() as u64,
             access,
+            flags,
         };
         buffer.write(0, bytes)?;
         Ok(buffer)
@@ -131,7 +156,7 @@ impl Buffer {
     /// See [`Buffer::new`] for access pattern documentation.
     pub fn with_bytes(device: &Device, data: &[u8], access: DataAccess) -> Result<Self> {
         // For raw bytes, use stride of 1 (byte-addressable)
-        Self::with_bytes_stride(device, data, access, 1)
+        Self::with_bytes_stride_and_flags(device, data, access, 1, BufferFlags::empty())
     }
 
     /// Create a buffer initialized with raw bytes and a custom element stride.
@@ -147,12 +172,30 @@ impl Buffer {
         access: DataAccess,
         element_stride: u32,
     ) -> Result<Self> {
+        Self::with_bytes_stride_and_flags(
+            device,
+            data,
+            access,
+            element_stride,
+            BufferFlags::empty(),
+        )
+    }
+
+    /// Like [`Self::with_bytes_stride`], with explicit [`BufferFlags`].
+    pub fn with_bytes_stride_and_flags(
+        device: &Device,
+        data: &[u8],
+        access: DataAccess,
+        element_stride: u32,
+        flags: BufferFlags,
+    ) -> Result<Self> {
         let mut backend = device.backend.lock().unwrap();
         let handle = backend.create_buffer(
             device.handle,
             data.len() as u64,
             access,
             Some(element_stride),
+            flags,
         )?;
         drop(backend);
 
@@ -161,6 +204,7 @@ impl Buffer {
             handle,
             size: data.len() as u64,
             access,
+            flags,
         };
         buffer.write(0, data)?;
         Ok(buffer)
@@ -188,6 +232,11 @@ impl Buffer {
     /// Get the buffer's access pattern.
     pub fn access(&self) -> DataAccess {
         self.access
+    }
+
+    /// Creation flags (e.g. [`BufferFlags::CPU_COHERENT`]).
+    pub fn flags(&self) -> BufferFlags {
+        self.flags
     }
 
     /// Get the buffer's index in the global bindless descriptor set.
@@ -245,6 +294,14 @@ impl Buffer {
     pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
         backend.read_buffer_to_cpu(device.handle, self.handle, output)
+    }
+
+    /// Read from a [`BufferFlags::CPU_COHERENT`] buffer without staging. On Direct3D 12, call
+    /// [`Device::copy_to_coherent_readback`](crate::Device::copy_to_coherent_readback) after
+    /// the GPU work that produced the data.
+    pub fn read_coherent(&self, offset: u64, output: &mut [u8]) -> Result<()> {
+        let backend = self.backend.lock().unwrap();
+        backend.read_buffer_coherent(self.handle, offset, output)
     }
 
     /// Clear the buffer (fill with zeros) from offset for size bytes.

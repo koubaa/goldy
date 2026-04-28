@@ -3,6 +3,7 @@
 use super::super::{BufferHandle, DeviceHandle};
 use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE};
 use crate::backend::DataAccess;
+use crate::types::BufferFlags;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
@@ -15,7 +16,15 @@ pub(super) fn create(
     size: u64,
     access: DataAccess,
     element_stride: Option<u32>,
+    flags: BufferFlags,
 ) -> Result<BufferHandle> {
+    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
+    let is_storage = access == DataAccess::Scattered;
+    if cpu_coherent && !is_storage {
+        anyhow::bail!(
+            "BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers"
+        );
+    }
     let logical_device = state
         .devices
         .get_mut(&device_handle)
@@ -69,6 +78,16 @@ pub(super) fn create(
         );
     }
 
+    let host_mapped = if cpu_coherent && is_storage {
+        let ptr = buffer.contents() as *mut u8;
+        if ptr.is_null() {
+            anyhow::bail!("Metal buffer contents() returned null for CPU_COHERENT");
+        }
+        Some(ptr as usize)
+    } else {
+        None
+    };
+
     state.buffers.insert(
         handle,
         BufferState {
@@ -78,6 +97,8 @@ pub(super) fn create(
             arg_buffer_index,
             access,
             element_stride,
+            host_mapped,
+            flags,
         },
     );
 
@@ -111,6 +132,7 @@ pub(super) fn create_view(
 
     let device_handle = parent.device_handle;
     let parent_mtl_buffer = parent.buffer.clone();
+    let parent_flags = parent.flags;
 
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
@@ -144,10 +166,42 @@ pub(super) fn create_view(
             arg_buffer_index,
             access: DataAccess::Scattered,
             element_stride,
+            host_mapped: None,
+            flags: parent_flags,
         },
     );
 
     Ok(handle)
+}
+
+/// Read from a `CPU_COHERENT` host mapping (same physical memory as the GPU on shared storage).
+pub(super) fn read_coherent(
+    buffers: &HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
+        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
+    }
+    let base = buffer
+        .host_mapped
+        .context("CPU_COHERENT buffer has no host mapping")?;
+    if offset + output.len() as u64 > buffer.size {
+        anyhow::bail!("read_coherent would exceed buffer bounds");
+    }
+    let p = base as *mut u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            p.add(offset as usize) as *const u8,
+            output.as_mut_ptr(),
+            output.len(),
+        );
+    }
+    Ok(())
 }
 
 /// Destroy a buffer, unregistering it from the bindless registry.

@@ -4,6 +4,7 @@ use super::barriers;
 use super::types::{BufferState, Dx12State};
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::DataAccess;
+use crate::types::BufferFlags;
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
@@ -16,9 +17,11 @@ pub(super) fn create(
     size: u64,
     access: DataAccess,
     element_stride: Option<u32>,
+    flags: BufferFlags,
 ) -> Result<BufferHandle> {
+    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
     // First pass: create the resource (immutable borrow of device)
-    let (resource, upload_buffer, is_storage) = {
+    let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
         let logical_device = state
             .devices
             .get(&device_handle)
@@ -26,6 +29,10 @@ pub(super) fn create(
 
         // Scattered access -> storage buffer (UAV), Broadcast access -> uniform buffer (CBV)
         let is_storage = access == DataAccess::Scattered;
+
+        if cpu_coherent && !is_storage {
+            anyhow::bail!("BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers");
+        }
 
         // Storage buffers need DEFAULT heap for UAV support (bindless)
         // Non-storage buffers can use UPLOAD heap for simpler CPU access
@@ -88,7 +95,63 @@ pub(super) fn create(
         // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
         let upload_buffer = None;
 
-        (resource, upload_buffer, is_storage)
+        // CPU_COHERENT storage: pair DEFAULT UAV with a READBACK heap for `read_coherent` / `copy_to_coherent_readback`.
+        let (coherent_readback, coherent_readback_mapped) = if cpu_coherent && is_storage {
+            let readback_heap = D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_READBACK,
+                CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+                MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+                CreationNodeMask: 0,
+                VisibleNodeMask: 0,
+            };
+            let readback_desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Alignment: 0,
+                Width: size,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: DXGI_FORMAT_UNKNOWN,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                Flags: D3D12_RESOURCE_FLAG_NONE,
+            };
+            let mut rb: Option<ID3D12Resource> = None;
+            unsafe {
+                logical_device.device.CreateCommittedResource(
+                    &readback_heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &readback_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut rb,
+                )
+            }
+            .context("Failed to create CPU_COHERENT readback buffer")?;
+            let rb = rb.context("CreateCommittedResource readback returned null")?;
+            let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+            let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+            unsafe { rb.Map(0, Some(&no_read), Some(&mut mapped)) }
+                .context("Failed to map CPU_COHERENT readback buffer")?;
+            let p = mapped as *mut u8;
+            if p.is_null() {
+                anyhow::bail!("Map returned null for CPU_COHERENT readback");
+            }
+            (Some(rb), Some(p as usize))
+        } else {
+            (None, None)
+        };
+
+        (
+            resource,
+            upload_buffer,
+            is_storage,
+            coherent_readback,
+            coherent_readback_mapped,
+        )
     };
 
     let handle = state.next_buffer_handle;
@@ -242,6 +305,9 @@ pub(super) fn create(
             upload_buffer,
             element_stride,
             is_view: false,
+            coherent_readback,
+            coherent_readback_mapped,
+            flags,
         },
     );
 
@@ -255,6 +321,12 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
             device.resource_registry.unregister_buffer(buffer_handle);
+        }
+        if buffer.coherent_readback_mapped.is_some() {
+            if let Some(ref rb) = buffer.coherent_readback {
+                let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                unsafe { rb.Unmap(0, Some(&no_write)) };
+            }
         }
         // Views don't own the resource — the parent does.
         // When `is_view` is false the ID3D12Resource drops naturally via its Drop impl.
@@ -305,6 +377,7 @@ pub(super) fn create_view(
 
     let device_handle = parent.device_handle;
     let resource = parent.resource.clone();
+    let parent_flags = parent.flags;
     let first_element = (offset / stride as u64) as u32;
     let num_elements = (size as u32) / stride;
 
@@ -413,6 +486,9 @@ pub(super) fn create_view(
             upload_buffer: None,
             element_stride,
             is_view: true,
+            coherent_readback: None,
+            coherent_readback_mapped: None,
+            flags: parent_flags,
         },
     );
 
@@ -704,6 +780,120 @@ pub(super) fn element_stride_for_bindless_handle(
     None
 }
 
+/// GPU copy DEFAULT UAV → paired READBACK for `CPU_COHERENT` storage buffers. Wait until complete.
+pub(super) fn copy_to_coherent_readback(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+) -> Result<()> {
+    use super::utils::wait_for_fence;
+    use windows::Win32::Graphics::Direct3D12::*;
+
+    let (main_resource, readback, len) = {
+        let buffer = state
+            .buffers
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        if !buffer.flags.contains(BufferFlags::CPU_COHERENT) || !buffer.is_storage {
+            return Ok(());
+        }
+        let readback = buffer
+            .coherent_readback
+            .as_ref()
+            .context("CPU_COHERENT buffer missing readback resource")?;
+        (buffer.resource.clone(), readback.clone(), buffer.size)
+    };
+
+    let device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let copy_allocator: ID3D12CommandAllocator = unsafe {
+        device
+            .device
+            .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+    }
+    .context("Failed to create copy command allocator (coherent readback)")?;
+
+    let copy_list: ID3D12GraphicsCommandList = unsafe {
+        device
+            .device
+            .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &copy_allocator, None)
+    }
+    .context("Failed to create copy command list (coherent readback)")?;
+    let copy_list7: ID3D12GraphicsCommandList7 = copy_list.cast()?;
+
+    let pre_copy = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_ALL,
+        SyncAfter: D3D12_BARRIER_SYNC_COPY,
+        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+    };
+    let post_copy = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_COPY,
+        SyncAfter: D3D12_BARRIER_SYNC_ALL,
+        AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+    };
+    unsafe {
+        barriers::barrier_globals(&copy_list7, &[pre_copy]);
+    }
+    unsafe {
+        copy_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
+    }
+    unsafe {
+        barriers::barrier_globals(&copy_list7, &[post_copy]);
+    }
+    unsafe { copy_list.Close() }
+        .context("Failed to close copy command list (coherent readback)")?;
+
+    let lists: [Option<ID3D12CommandList>; 1] = [Some(
+        copy_list.cast().context("Failed to cast command list")?,
+    )];
+    unsafe { device.command_queue.ExecuteCommandLists(&lists) };
+
+    let fence_value = device.fence_value + 1;
+    unsafe { device.command_queue.Signal(&device.fence, fence_value) }
+        .context("Failed to signal fence (coherent readback)")?;
+    wait_for_fence(&device.fence, fence_value)?;
+
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        dev.fence_value = fence_value + 1;
+    }
+    Ok(())
+}
+
+/// Read from the persistent READBACK map after `copy_to_coherent_readback`.
+pub(super) fn read_coherent(
+    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
+    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
+        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
+    }
+    let base = buffer
+        .coherent_readback_mapped
+        .context("CPU_COHERENT buffer not mapped for readback")?;
+    if offset + output.len() as u64 > buffer.size {
+        anyhow::bail!("read_coherent would exceed buffer bounds");
+    }
+    let p = base as *mut u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            p.add(offset as usize) as *const u8,
+            output.as_mut_ptr(),
+            output.len(),
+        );
+    }
+    Ok(())
+}
+
 /// Read buffer contents back to CPU memory.
 ///
 /// For DEFAULT heap buffers (storage), creates a readback buffer and copies.
@@ -724,6 +914,14 @@ pub(super) fn read_to_cpu(
     let len = output.len() as u64;
     if len > buffer.size {
         anyhow::bail!("Read would exceed buffer bounds");
+    }
+
+    if buffer.is_storage
+        && buffer.flags.contains(BufferFlags::CPU_COHERENT)
+        && buffer.coherent_readback.is_some()
+    {
+        copy_to_coherent_readback(state, device_handle, buffer_handle)?;
+        return read_coherent(&state.buffers, buffer_handle, 0, output);
     }
 
     if buffer.is_storage {

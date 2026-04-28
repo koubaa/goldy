@@ -67,6 +67,7 @@ struct MockBuffer {
     size: u64,
     data: Vec<u8>,
     bindless_index: u32,
+    flags: BufferFlags,
 }
 
 #[allow(dead_code)]
@@ -241,6 +242,7 @@ impl GpuBackend for MockBackend {
         size: u64,
         _access: DataAccess,
         _element_stride: Option<u32>,
+        flags: BufferFlags,
     ) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -259,6 +261,7 @@ impl GpuBackend for MockBackend {
                 size,
                 data: vec![0u8; size as usize],
                 bindless_index,
+                flags,
             },
         );
 
@@ -326,6 +329,7 @@ impl GpuBackend for MockBackend {
                 size,
                 data: vec![0; size as usize],
                 bindless_index: index,
+                flags: BufferFlags::empty(),
             },
         );
 
@@ -345,6 +349,28 @@ impl GpuBackend for MockBackend {
 
         let len = output.len().min(buf.data.len());
         output[..len].copy_from_slice(&buf.data[..len]);
+        Ok(())
+    }
+
+    fn read_buffer_coherent(
+        &self,
+        buffer: BufferHandle,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<()> {
+        let buf = self
+            .buffers
+            .get(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if !buf.flags.contains(BufferFlags::CPU_COHERENT) {
+            anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
+        }
+        let start = offset as usize;
+        let end = start.saturating_add(output.len());
+        if end > buf.data.len() {
+            anyhow::bail!("read_coherent would exceed buffer bounds");
+        }
+        output.copy_from_slice(&buf.data[start..end]);
         Ok(())
     }
 
@@ -1088,7 +1114,13 @@ mod tests {
 
         // Create an index buffer
         let index_buffer = backend
-            .create_buffer(device, 12, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                12,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         // Write some indices (6 u16 indices for 2 triangles)
@@ -1163,7 +1195,13 @@ mod tests {
             .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
             .unwrap();
         let index_buffer = backend
-            .create_buffer(device, 24, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                24,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         // Test with offset and base_vertex
@@ -1374,13 +1412,31 @@ mod tests {
 
         // Create multiple buffers and verify they get sequential bindless indices
         let buffer1 = backend
-            .create_buffer(device, 64, DataAccess::Broadcast, None)
+            .create_buffer(
+                device,
+                64,
+                DataAccess::Broadcast,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                128,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
         let buffer3 = backend
-            .create_buffer(device, 256, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                256,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         assert_eq!(backend.buffer_bindless_index(buffer1), Some(0));
@@ -1395,7 +1451,13 @@ mod tests {
 
         // Create a buffer first to verify textures share the same index namespace
         let _buffer = backend
-            .create_buffer(device, 64, DataAccess::Broadcast, None)
+            .create_buffer(
+                device,
+                64,
+                DataAccess::Broadcast,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         let texture1 = backend
@@ -1447,7 +1509,13 @@ mod tests {
 
         // Create resources in interleaved order to verify shared namespace
         let buffer1 = backend
-            .create_buffer(device, 64, DataAccess::Broadcast, None)
+            .create_buffer(
+                device,
+                64,
+                DataAccess::Broadcast,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
         let texture1 = backend
             .create_texture(
@@ -1463,7 +1531,13 @@ mod tests {
             .create_sampler(device, &SamplerDesc::default())
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                128,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         // All resources share a single incrementing index
@@ -1492,10 +1566,22 @@ mod tests {
             .unwrap();
 
         let buffer1 = backend
-            .create_buffer(device, 64, DataAccess::Broadcast, None)
+            .create_buffer(
+                device,
+                64,
+                DataAccess::Broadcast,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                128,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         // Record render commands with push constants (bindless path)
@@ -1558,10 +1644,22 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer1 = backend
-            .create_buffer(device, 64, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                64,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
         let buffer2 = backend
-            .create_buffer(device, 128, DataAccess::Scattered, None)
+            .create_buffer(
+                device,
+                128,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         // Record compute commands with push constants (bindless path)
