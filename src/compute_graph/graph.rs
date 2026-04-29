@@ -9,8 +9,6 @@ use crate::device::Device;
 use crate::gpu_future::GpuFuture;
 use crate::texture::Texture;
 use anyhow::Result;
-use std::sync::Arc;
-
 /// A dynamic compute graph that analyzes dependencies at submit time.
 ///
 /// Build a DAG of dispatch nodes with per-resource access declarations,
@@ -36,12 +34,16 @@ use std::sync::Arc;
 /// ```
 pub struct ComputeGraph {
     ir: GraphIR,
+    /// Prepend arbitrary compute commands **before** the analyzed graph (e.g. pool /
+    /// buffer clears) so they batch into one compute submit.
+    pub prelude: Vec<crate::backend::ComputeCommand>,
 }
 
 impl ComputeGraph {
     pub fn new() -> Self {
         Self {
             ir: GraphIR::default(),
+            prelude: Vec::new(),
         }
     }
 
@@ -64,13 +66,7 @@ impl ComputeGraph {
     /// Returns a [`GpuFuture`] for non-blocking completion.
     pub fn submit(&self, device: &Device) -> Result<GpuFuture> {
         let commands = self.compile_commands();
-        let mut backend = device.backend.lock().unwrap();
-        let token = backend.submit_compute(device.handle, &commands)?;
-        Ok(GpuFuture {
-            backend: Arc::clone(&device.backend),
-            device: device.handle,
-            fence_token: token,
-        })
+        device.submit_compute_commands(&commands)
     }
 
     /// Analyze the graph, submit, and block until complete.
@@ -86,13 +82,15 @@ impl ComputeGraph {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ir.nodes.is_empty()
+        self.ir.nodes.is_empty() && self.prelude.is_empty()
     }
 
-    pub(crate) fn compile_commands(&self) -> Vec<crate::backend::ComputeCommand> {
+    pub fn compile_commands(&self) -> Vec<crate::backend::ComputeCommand> {
+        let mut commands = self.prelude.clone();
         let edges = analysis::build_edges(&self.ir);
         let schedule = analysis::schedule_waves(&self.ir, &edges);
-        analysis::emit_commands(&self.ir, &schedule)
+        commands.extend(analysis::emit_commands(&self.ir, &schedule));
+        commands
     }
 }
 

@@ -329,8 +329,11 @@ pub trait GpuBackend: Send + Sync {
         output: &mut [u8],
     ) -> Result<()>;
     /// Copy bytes from a buffer created with [`BufferFlags::CPU_COHERENT`] into `output`
-    /// without a staging readback. Caller must have completed GPU work that wrote the buffer;
-    /// on Direct3D 12, call [`Self::copy_to_coherent_readback`] first after that work.
+    /// without a staging readback. Caller must have completed GPU work that wrote the buffer.
+    ///
+    /// On Vulkan / Metal, reads directly from the host-visible mapping. On Direct3D 12,
+    /// reads from the READBACK heap (caller must ensure it was synced — prefer
+    /// [`GpuBackend::read_buffer_to_cpu`] which handles the copy transparently).
     fn read_buffer_coherent(
         &self,
         buffer: BufferHandle,
@@ -339,15 +342,6 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<()> {
         let _ = (buffer, offset, output);
         anyhow::bail!("read_buffer_coherent: buffer is not CPU_COHERENT or not supported")
-    }
-    /// Direct3D 12 only: copy GPU-visible storage (UAV) contents into the persistently mapped
-    /// readback buffer. No-op on other backends. Call after the submit that produced the data.
-    fn copy_to_coherent_readback(
-        &mut self,
-        _device: DeviceHandle,
-        _buffer: BufferHandle,
-    ) -> Result<()> {
-        Ok(())
     }
     /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
     fn clear_buffer(

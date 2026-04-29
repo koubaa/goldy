@@ -448,14 +448,6 @@ impl GpuBackend for Dx12Backend {
         buffer::read_coherent(&self.state.buffers, buffer, offset, output)
     }
 
-    fn copy_to_coherent_readback(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-    ) -> Result<()> {
-        buffer::copy_to_coherent_readback(&mut self.state, device, buffer)
-    }
-
     fn clear_buffer(
         &mut self,
         device: DeviceHandle,

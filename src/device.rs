@@ -25,7 +25,7 @@
 //! multi-queue support for parallel command submission if needed.
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
-use crate::buffer::Buffer;
+use crate::gpu_future::GpuFuture;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
@@ -383,12 +383,19 @@ impl Device {
         self.backend.lock().unwrap().is_device_valid(self.handle)
     }
 
-    /// Direct3D 12: after GPU work writes a [`Buffer`] created with [`BufferFlags::CPU_COHERENT`],
-    /// copies from the UAV resource into the persistently mapped readback buffer so
-    /// [`Buffer::read_coherent`] sees the data. No-op on Vulkan and Metal.
-    pub fn copy_to_coherent_readback(&self, buffer: &Buffer) -> Result<()> {
+    /// Submit a full compute command stream (typically [`ComputeGraph::compile_commands`]
+    /// merged with prelude). Returns [`GpuFuture`] — does not block.
+    pub fn submit_compute_commands(
+        &self,
+        commands: &[backend::ComputeCommand],
+    ) -> Result<GpuFuture> {
         let mut backend = self.backend.lock().unwrap();
-        backend.copy_to_coherent_readback(self.handle, buffer.handle)
+        let token = backend.submit_compute(self.handle, commands)?;
+        Ok(GpuFuture {
+            backend: Arc::clone(&self.backend),
+            device: self.handle,
+            fence_token: token,
+        })
     }
 
     /// Get device capabilities and format preferences.

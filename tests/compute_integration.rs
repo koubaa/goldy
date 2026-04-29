@@ -1253,10 +1253,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 /// Create a `CPU_COHERENT` storage buffer, run a GPU compute pass that doubles every
 /// element, then read back via `Buffer::read_coherent`.
 ///
-/// `read_coherent` performs a pure `memcpy` from the persistent host mapping — no
-/// fence wait, no staging copy on Vulkan/Metal. On DX12 `Device::copy_to_coherent_readback`
-/// is called first to sync the READBACK heap (the test calls it explicitly so the
-/// low-level path is exercised).
+/// Create a `CPU_COHERENT` storage buffer, run a GPU compute pass that doubles every
+/// element, then read back via `Buffer::read_to_cpu` (which handles the DX12
+/// UAV → READBACK copy transparently).
 #[test]
 fn test_cpu_coherent_compute_write_and_read() {
     let device = make_device();
@@ -1285,14 +1284,8 @@ fn test_cpu_coherent_compute_write_and_read() {
     }
     encoder.dispatch(&device).expect("dispatch");
 
-    // On DX12 the backend writes to a DEFAULT-heap UAV and must copy to the
-    // persistent READBACK heap so the host mapping reflects current GPU contents.
-    device
-        .copy_to_coherent_readback(&buffer)
-        .expect("copy_to_coherent_readback");
-
     let mut out = vec![0u8; N * size_of::<u32>()];
-    buffer.read_coherent(0, &mut out).expect("read_coherent");
+    buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&out);
     for (i, &val) in result.iter().enumerate() {
@@ -1305,15 +1298,14 @@ fn test_cpu_coherent_compute_write_and_read() {
     }
 }
 
-/// `read_coherent` reflects CPU writes made directly to the persistent mapping.
+/// CPU writes to a `CPU_COHERENT` buffer are reflected in reads.
 ///
 /// On Vulkan and Metal the buffer lives in host-visible/shared memory, so a plain
-/// `buffer.write()` followed immediately by `buffer.read_coherent()` must round-trip
-/// without any GPU involvement. This validates the zero-copy read path.
+/// `buffer.write()` followed immediately by `buffer.read_coherent()` round-trips
+/// without any GPU involvement.
 ///
-/// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so this
-/// test skips the coherent-read assertion on DX12 and only checks that creation and
-/// `copy_to_coherent_readback` do not panic.
+/// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so
+/// `read_to_cpu` is used — it copies UAV → READBACK internally.
 #[test]
 fn test_cpu_coherent_cpu_write_read_roundtrip() {
     let device = make_device();
@@ -1335,13 +1327,8 @@ fn test_cpu_coherent_cpu_write_read_roundtrip() {
         .write(0, bytemuck::cast_slice(&new_values))
         .expect("write");
 
-    // Ensure the readback path at least completes without error (required for DX12 parity).
-    device
-        .copy_to_coherent_readback(&buffer)
-        .expect("copy_to_coherent_readback");
-
     let mut out = vec![0u8; N * size_of::<u32>()];
-    buffer.read_coherent(0, &mut out).expect("read_coherent");
+    buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&out);
     for (i, &val) in result.iter().enumerate() {

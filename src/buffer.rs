@@ -55,6 +55,12 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// [`BufferHandle`] for backend commands (e.g. [`crate::backend::ComputeCommand::ClearBuffer`]).
+    #[inline]
+    pub fn gpu_buffer_handle(&self) -> BufferHandle {
+        self.handle
+    }
+
     /// Create a new buffer with the specified access pattern.
     ///
     /// # Access Patterns
@@ -296,9 +302,12 @@ impl Buffer {
         backend.read_buffer_to_cpu(device.handle, self.handle, output)
     }
 
-    /// Read from a [`BufferFlags::CPU_COHERENT`] buffer without staging. On Direct3D 12, call
-    /// [`Device::copy_to_coherent_readback`](crate::Device::copy_to_coherent_readback) after
-    /// the GPU work that produced the data.
+    /// Read from a [`BufferFlags::CPU_COHERENT`] buffer without staging.
+    ///
+    /// On Vulkan / Metal the buffer is host-visible, so this is a direct `memcpy`.
+    /// On Direct3D 12 this reads from the READBACK heap — use
+    /// [`Buffer::read_to_cpu`] instead, which handles the UAV → READBACK copy
+    /// transparently.
     pub fn read_coherent(&self, offset: u64, output: &mut [u8]) -> Result<()> {
         let backend = self.backend.lock().unwrap();
         backend.read_buffer_coherent(self.handle, offset, output)

@@ -95,7 +95,7 @@ pub(super) fn create(
         // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
         let upload_buffer = None;
 
-        // CPU_COHERENT storage: pair DEFAULT UAV with a READBACK heap for `read_coherent` / `copy_to_coherent_readback`.
+        // CPU_COHERENT storage: pair DEFAULT UAV with a READBACK heap for `read_coherent`.
         let (coherent_readback, coherent_readback_mapped) = if cpu_coherent && is_storage {
             let readback_heap = D3D12_HEAP_PROPERTIES {
                 Type: D3D12_HEAP_TYPE_READBACK,
@@ -780,13 +780,14 @@ pub(super) fn element_stride_for_bindless_handle(
     None
 }
 
-/// GPU copy DEFAULT UAV → paired READBACK for `CPU_COHERENT` storage buffers. Wait until complete.
-pub(super) fn copy_to_coherent_readback(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
+/// Record DEFAULT → READBACK copy for a `CPU_COHERENT` buffer on an already-open command list.
+/// Does not submit.
+pub(super) fn emit_copy_coherent_readback_on_command_list(
+    state: &Dx12State,
     buffer_handle: BufferHandle,
+    command_list: &ID3D12GraphicsCommandList,
+    command_list7: &ID3D12GraphicsCommandList7,
 ) -> Result<()> {
-    use super::utils::wait_for_fence;
     use windows::Win32::Graphics::Direct3D12::*;
 
     let (main_resource, readback, len) = {
@@ -803,6 +804,40 @@ pub(super) fn copy_to_coherent_readback(
             .context("CPU_COHERENT buffer missing readback resource")?;
         (buffer.resource.clone(), readback.clone(), buffer.size)
     };
+
+    let pre_copy = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_ALL,
+        SyncAfter: D3D12_BARRIER_SYNC_COPY,
+        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+    };
+    let post_copy = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_COPY,
+        SyncAfter: D3D12_BARRIER_SYNC_ALL,
+        AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+    };
+    unsafe {
+        barriers::barrier_globals(command_list7, &[pre_copy]);
+    }
+    unsafe {
+        command_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
+    }
+    unsafe {
+        barriers::barrier_globals(command_list7, &[post_copy]);
+    }
+    Ok(())
+}
+
+/// Standalone GPU copy + wait for `read_to_cpu` on `CPU_COHERENT` buffers.
+/// Creates a one-shot command list to copy the UAV to the paired READBACK heap.
+fn standalone_copy_coherent_readback(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+) -> Result<()> {
+    use super::utils::wait_for_fence;
+    use windows::Win32::Graphics::Direct3D12::*;
 
     let device = state
         .devices
@@ -824,27 +859,7 @@ pub(super) fn copy_to_coherent_readback(
     .context("Failed to create copy command list (coherent readback)")?;
     let copy_list7: ID3D12GraphicsCommandList7 = copy_list.cast()?;
 
-    let pre_copy = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_ALL,
-        SyncAfter: D3D12_BARRIER_SYNC_COPY,
-        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-        AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-    };
-    let post_copy = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_COPY,
-        SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-    };
-    unsafe {
-        barriers::barrier_globals(&copy_list7, &[pre_copy]);
-    }
-    unsafe {
-        copy_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
-    }
-    unsafe {
-        barriers::barrier_globals(&copy_list7, &[post_copy]);
-    }
+    emit_copy_coherent_readback_on_command_list(state, buffer_handle, &copy_list, &copy_list7)?;
     unsafe { copy_list.Close() }
         .context("Failed to close copy command list (coherent readback)")?;
 
@@ -864,7 +879,7 @@ pub(super) fn copy_to_coherent_readback(
     Ok(())
 }
 
-/// Read from the persistent READBACK map after `copy_to_coherent_readback`.
+/// Read from the persistent READBACK map after the submit's auto-copy.
 pub(super) fn read_coherent(
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
@@ -920,7 +935,7 @@ pub(super) fn read_to_cpu(
         && buffer.flags.contains(BufferFlags::CPU_COHERENT)
         && buffer.coherent_readback.is_some()
     {
-        copy_to_coherent_readback(state, device_handle, buffer_handle)?;
+        standalone_copy_coherent_readback(state, device_handle, buffer_handle)?;
         return read_coherent(&state.buffers, buffer_handle, 0, output);
     }
 
