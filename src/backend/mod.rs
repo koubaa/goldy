@@ -286,6 +286,17 @@ pub enum ComputeCommand {
         offset: u64,
         size: u64,
     },
+    /// Write CPU data into a buffer, batched onto the compute command list.
+    ///
+    /// For DEVICE_LOCAL storage buffers the backend writes to the staging area
+    /// then records a GPU copy; for HOST_VISIBLE buffers it maps directly.
+    /// This avoids a per-upload `queue_wait_idle` by deferring the GPU copy
+    /// to the same submission as the dispatches that consume the data.
+    WriteBuffer {
+        buffer: BufferHandle,
+        offset: u64,
+        data: Vec<u8>,
+    },
     /// Memory barrier between compute dispatches.
     /// Ensures all prior shader writes are visible to subsequent reads.
     Barrier,

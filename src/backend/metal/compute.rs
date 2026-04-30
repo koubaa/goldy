@@ -373,6 +373,33 @@ fn record_commands_to_buffer(
                     blit.end_encoding();
                 }
             }
+            ComputeCommand::WriteBuffer {
+                buffer: buf_handle,
+                offset,
+                data,
+            } => {
+                // Metal buffers live in shared/managed memory — direct memcpy.
+                let buf_state = match state.buffers.get(buf_handle) {
+                    Some(b) => b,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("WriteBuffer: invalid buffer handle");
+                    }
+                };
+                let ptr = buf_state.buffer.contents() as *mut u8;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        ptr.add(*offset as usize),
+                        data.len(),
+                    );
+                }
+                if buf_state.buffer.storage_mode() == mtl::MTLStorageMode::Managed {
+                    buf_state
+                        .buffer
+                        .did_modify_range(mtl::NSRange::new(*offset, data.len() as u64));
+                }
+            }
         }
     }
 

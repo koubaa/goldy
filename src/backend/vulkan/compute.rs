@@ -153,6 +153,68 @@ pub(super) fn submit(
     // the pool bounded when callers (ekrano) don't wait on every GpuFuture.
     reap_signaled_fences(state);
 
+    // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable buffer
+    // access before we borrow state immutably for the command loop).
+    for command in commands {
+        if let ComputeCommand::WriteBuffer {
+            buffer: buf_handle,
+            offset,
+            data,
+        } = command
+        {
+            let buf = state
+                .buffers
+                .get(buf_handle)
+                .context("WriteBuffer: invalid buffer handle")?;
+            if let Some(base) = buf.host_mapped {
+                let p = base as *mut u8;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        p.add(*offset as usize),
+                        data.len(),
+                    );
+                }
+            } else if !buf.is_storage {
+                let dev = state
+                    .devices
+                    .get(&buf.device_handle)
+                    .context("WriteBuffer: device invalid")?;
+                unsafe {
+                    let ptr = dev
+                        .map_memory2(buf.memory, *offset, data.len() as u64)
+                        .context("WriteBuffer: map failed")?;
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                    dev.unmap_memory2(buf.memory)
+                        .context("WriteBuffer: unmap failed")?;
+                }
+            } else {
+                buffer::ensure_staging(
+                    &state.instance,
+                    &state.devices,
+                    &mut state.buffers,
+                    *buf_handle,
+                )?;
+                let buf = state.buffers.get(buf_handle).unwrap();
+                let stg_mem = buf
+                    .staging_memory
+                    .context("WriteBuffer: staging not created")?;
+                let dev = state
+                    .devices
+                    .get(&buf.device_handle)
+                    .context("WriteBuffer: device invalid")?;
+                unsafe {
+                    let ptr = dev
+                        .map_memory2(stg_mem, *offset, data.len() as u64)
+                        .context("WriteBuffer: staging map failed")?;
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                    dev.unmap_memory2(stg_mem)
+                        .context("WriteBuffer: staging unmap failed")?;
+                }
+            }
+        }
+    }
+
     let devices = &state.devices;
     let compute_pipelines = &state.compute_pipelines;
     let buffers = &state.buffers;
@@ -200,6 +262,32 @@ pub(super) fn submit(
 
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
+
+    // Cross-submission memory barrier: ensure writes from prior queue
+    // submissions (WriteBuffer copies, dispatches, texture uploads) are
+    // visible to this submission's operations.  Vulkan guarantees execution
+    // ordering for same-queue submissions but NOT memory visibility.
+    unsafe {
+        let acquire = vk::MemoryBarrier2::default()
+            .src_stage_mask(
+                vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+            )
+            .src_access_mask(
+                vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_WRITE,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::TRANSFER_READ
+                    | vk::AccessFlags2::TRANSFER_WRITE
+                    | vk::AccessFlags2::SHADER_READ
+                    | vk::AccessFlags2::SHADER_WRITE,
+            );
+        let dep = vk::DependencyInfo::default()
+            .memory_barriers(std::slice::from_ref(&acquire));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+    }
 
     // Track current pipeline for push constants
     let mut current_pipeline: Option<ComputePipelineHandle> = None;
@@ -391,6 +479,47 @@ pub(super) fn submit(
                             *offset,
                             clear_size,
                             0,
+                        );
+
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                            .dst_access_mask(
+                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+                            );
+                        let dep_info = vk::DependencyInfo::default()
+                            .memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+                    }
+                }
+            }
+            ComputeCommand::WriteBuffer {
+                buffer: buf_handle,
+                offset,
+                data,
+            } => {
+                let buf_state = buffers
+                    .get(buf_handle)
+                    .context("WriteBuffer: invalid buffer handle")?;
+                // HOST_VISIBLE / CPU_COHERENT paths were handled in the pre-pass;
+                // only DEVICE_LOCAL storage buffers need a GPU copy here.
+                if buf_state.is_storage
+                    && buf_state.host_mapped.is_none()
+                    && buf_state.staging_buffer.is_some()
+                {
+                    let stg = buf_state.staging_buffer.unwrap();
+                    let region = vk::BufferCopy {
+                        src_offset: *offset,
+                        dst_offset: *offset,
+                        size: data.len() as u64,
+                    };
+                    unsafe {
+                        logical_device.device.cmd_copy_buffer(
+                            cmd,
+                            stg,
+                            buf_state.buffer,
+                            std::slice::from_ref(&region),
                         );
 
                         let mem_barrier = vk::MemoryBarrier2::default()

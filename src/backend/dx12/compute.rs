@@ -204,6 +204,25 @@ pub(super) fn submit(
         .cast()
         .context("ID3D12GraphicsCommandList7 required")?;
 
+    // Pre-pass: prepare upload buffers for WriteBuffer commands (needs
+    // mutable state access before we borrow the device immutably).
+    for command in commands {
+        if let ComputeCommand::WriteBuffer {
+            buffer: buf_handle,
+            data,
+            ..
+        } = command
+        {
+            let buf = state
+                .buffers
+                .get(buf_handle)
+                .context("WriteBuffer pre-pass: invalid handle")?;
+            if buf.is_storage && buf.upload_buffer.is_none() {
+                buffer::ensure_upload_buffer(state, *buf_handle, data.len() as u64)?;
+            }
+        }
+    }
+
     // Bind descriptor heaps for bindless rendering
     let logical_device = state
         .devices
@@ -500,14 +519,102 @@ pub(super) fn submit(
                     }
                 }
             }
+            ComputeCommand::WriteBuffer {
+                buffer: buf_handle,
+                offset,
+                data,
+            } => {
+                let buf_state = state
+                    .buffers
+                    .get(buf_handle)
+                    .context("WriteBuffer: invalid buffer handle")?;
+                if !buf_state.is_storage {
+                    // UPLOAD heap: direct map (same as existing write path)
+                    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                    unsafe { buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+                        .context("WriteBuffer: map failed")?;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            (mapped as *mut u8).add(*offset as usize),
+                            data.len(),
+                        );
+                    }
+                    let written_range = D3D12_RANGE {
+                        Begin: *offset as usize,
+                        End: (*offset as usize) + data.len(),
+                    };
+                    unsafe { buf_state.resource.Unmap(0, Some(&written_range)) };
+                } else {
+                    // DEFAULT heap storage: upload via staging + on-list copy.
+                    // Upload buffer was ensured in the pre-pass.
+                    let buf_state = state.buffers.get(buf_handle).unwrap();
+                    let upload_buf = buf_state
+                        .upload_buffer
+                        .as_ref()
+                        .context("WriteBuffer: upload buffer missing")?;
+
+                    // Map upload buffer, write data
+                    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                    unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
+                        .context("WriteBuffer: upload map failed")?;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            mapped as *mut u8,
+                            data.len(),
+                        );
+                    }
+                    let write_range = D3D12_RANGE {
+                        Begin: 0,
+                        End: data.len(),
+                    };
+                    unsafe { upload_buf.Unmap(0, Some(&write_range)) };
+
+                    // Record copy from upload → default heap on the command list
+                    let b_to_copy = barriers::buffer_barrier_full(
+                        &buf_state.resource,
+                        D3D12_BARRIER_SYNC_ALL,
+                        D3D12_BARRIER_SYNC_COPY,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        D3D12_BARRIER_ACCESS_COPY_DEST,
+                    );
+                    let b_to_uav = barriers::buffer_barrier_full(
+                        &buf_state.resource,
+                        D3D12_BARRIER_SYNC_COPY,
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        D3D12_BARRIER_ACCESS_COPY_DEST,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    );
+                    unsafe {
+                        barriers::barrier_buffers(&command_list7, &[b_to_copy]);
+                        command_list.CopyBufferRegion(
+                            &buf_state.resource,
+                            *offset,
+                            upload_buf,
+                            0,
+                            data.len() as u64,
+                        );
+                        barriers::barrier_buffers(&command_list7, &[b_to_uav]);
+                    }
+                }
+            }
         }
     }
 
-    // Global barrier so compute UAV writes are visible to subsequent graphics / CPU
+    // Global barrier so compute UAV writes AND copy writes are visible to
+    // subsequent graphics / CPU.  WriteBuffer records CopyBufferRegion on this
+    // command list, so we must include COPY in the tail sync.
     let tail = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+        SyncBefore: D3D12_BARRIER_SYNC(
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,
+        ),
         SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        AccessBefore: D3D12_BARRIER_ACCESS(
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0,
+        ),
         AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
     };
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };

@@ -518,6 +518,70 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 /// Large uploads are split into chunks of this size to avoid massive staging allocations.
 const UPLOAD_CHUNK_SIZE: u64 = 16 * 1024 * 1024; // 16 MB
 
+/// Ensure the upload (staging) buffer exists for a DEFAULT-heap storage buffer.
+///
+/// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
+/// upload resource is ready before command recording begins.
+pub(super) fn ensure_upload_buffer(
+    state: &mut Dx12State,
+    buffer_handle: BufferHandle,
+    min_size: u64,
+) -> Result<()> {
+    let buffer = state
+        .buffers
+        .get(&buffer_handle)
+        .context("ensure_upload_buffer: invalid handle")?;
+    if buffer.upload_buffer.is_some() {
+        return Ok(());
+    }
+    let chunk_size = min_size.min(UPLOAD_CHUNK_SIZE);
+    let device_handle = buffer.device_handle;
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("ensure_upload_buffer: invalid device")?;
+    let upload_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_UPLOAD,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+    let upload_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: chunk_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut upload: Option<ID3D12Resource> = None;
+    unsafe {
+        logical_device.device.CreateCommittedResource(
+            &upload_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &upload_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            None,
+            &mut upload,
+        )
+    }
+    .context("ensure_upload_buffer: create failed")?;
+    state
+        .buffers
+        .get_mut(&buffer_handle)
+        .unwrap()
+        .upload_buffer = Some(upload.context("Upload buffer is null")?);
+    Ok(())
+}
+
 /// Write data to a buffer at the specified offset.
 ///
 /// For storage buffers (DEFAULT heap), uses a capped-size upload buffer and copies
