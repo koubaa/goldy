@@ -396,14 +396,15 @@ pub(super) fn submit(
                 // INDIRECT_ARGUMENT for ExecuteIndirect. This is an access-mode
                 // transition, not a data-dependency barrier (the graph's
                 // ResourceBarrier handles data visibility).
-                let to_indirect = barriers::buffer_barrier_full(
+                let mut to_indirect = [barriers::buffer_barrier_full(
                     &buf_state.resource,
                     D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                     D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                );
-                unsafe { barriers::barrier_buffers(&command_list7, &[to_indirect]) };
+                )];
+                unsafe { barriers::barrier_buffers(&command_list7, &to_indirect) };
+                unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
 
                 unsafe {
                     command_list.ExecuteIndirect(
@@ -416,14 +417,15 @@ pub(super) fn submit(
                     );
                 }
 
-                let to_uav = barriers::buffer_barrier_full(
+                let mut to_uav = [barriers::buffer_barrier_full(
                     &buf_state.resource,
                     D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
                     D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                );
-                unsafe { barriers::barrier_buffers(&command_list7, &[to_uav]) };
+                )];
+                unsafe { barriers::barrier_buffers(&command_list7, &to_uav) };
+                unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
             }
             ComputeCommand::Barrier => {
                 let g = D3D12_GLOBAL_BARRIER {
@@ -442,7 +444,7 @@ pub(super) fn submit(
                 textures: tex_handles,
             } => {
                 // Per-resource enhanced barriers at graph wave boundaries.
-                let buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
+                let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
                     .iter()
                     .filter_map(|h| state.buffers.get(h))
                     .map(|bs| {
@@ -459,6 +461,7 @@ pub(super) fn submit(
                     })
                     .collect();
                 unsafe { barriers::barrier_buffers(&command_list7, &buf_barriers) };
+                unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
 
                 let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_handles
                     .iter()
@@ -585,22 +588,23 @@ pub(super) fn submit(
                     let upload_off = belt_entry.1;
                     let buf_state = state.buffers.get(buf_handle).unwrap();
 
-                    let b_to_copy = barriers::buffer_barrier_full(
+                    let mut b_to_copy = [barriers::buffer_barrier_full(
                         &buf_state.resource,
                         D3D12_BARRIER_SYNC_ALL,
                         D3D12_BARRIER_SYNC_COPY,
                         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                         D3D12_BARRIER_ACCESS_COPY_DEST,
-                    );
-                    let b_to_uav = barriers::buffer_barrier_full(
+                    )];
+                    let mut b_to_uav = [barriers::buffer_barrier_full(
                         &buf_state.resource,
                         D3D12_BARRIER_SYNC_COPY,
                         D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                         D3D12_BARRIER_ACCESS_COPY_DEST,
                         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    );
+                    )];
                     unsafe {
-                        barriers::barrier_buffers(&command_list7, &[b_to_copy]);
+                        barriers::barrier_buffers(&command_list7, &b_to_copy);
+                        barriers::drop_buffer_barriers(&mut b_to_copy);
                         command_list.CopyBufferRegion(
                             &buf_state.resource,
                             *offset,
@@ -608,7 +612,8 @@ pub(super) fn submit(
                             upload_off,
                             data.len() as u64,
                         );
-                        barriers::barrier_buffers(&command_list7, &[b_to_uav]);
+                        barriers::barrier_buffers(&command_list7, &b_to_uav);
+                        barriers::drop_buffer_barriers(&mut b_to_uav);
                     }
                 }
             }

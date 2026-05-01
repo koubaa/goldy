@@ -480,6 +480,8 @@ pub(crate) struct TextureState {
     pub bindless_offset: Option<u32>,
     /// Last known layout for enhanced texture barriers (replaces legacy `current_state`).
     pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
+    /// Whether this texture was created with UAV access (SpatialAccess::Direct).
+    pub is_storage: bool,
 }
 
 /// GPU sampler state.

@@ -712,24 +712,26 @@ pub(super) fn write(
         let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
         let dst_offset = offset + written;
-        let b_to_copy = barriers::buffer_barrier_full(
+        let mut b_to_copy = [barriers::buffer_barrier_full(
             &main_resource,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_SYNC_COPY,
             D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
             D3D12_BARRIER_ACCESS_COPY_DEST,
-        );
-        let b_to_uav = barriers::buffer_barrier_full(
+        )];
+        let mut b_to_uav = [barriers::buffer_barrier_full(
             &main_resource,
             D3D12_BARRIER_SYNC_COPY,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_ACCESS_COPY_DEST,
             D3D12_BARRIER_ACCESS_COMMON,
-        );
+        )];
         unsafe {
-            barriers::barrier_buffers(&cmd7, &[b_to_copy]);
+            barriers::barrier_buffers(&cmd7, &b_to_copy);
+            barriers::drop_buffer_barriers(&mut b_to_copy);
             cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk);
-            barriers::barrier_buffers(&cmd7, &[b_to_uav]);
+            barriers::barrier_buffers(&cmd7, &b_to_uav);
+            barriers::drop_buffer_barriers(&mut b_to_uav);
         }
         unsafe { cmd.Close() }.context("Failed to close command list")?;
 

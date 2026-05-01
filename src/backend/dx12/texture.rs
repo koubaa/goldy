@@ -71,9 +71,12 @@ pub(super) fn create(
         .get_mut(&cache_key)
         .and_then(|v| v.pop());
 
+    let was_cached;
     let (resource, last_layout) = if let Some(c) = cached {
+        was_cached = true;
         (c.resource, c.last_layout)
     } else {
+        was_cached = false;
         let logical_device = state
             .devices
             .get(&device_handle)
@@ -112,7 +115,7 @@ pub(super) fn create(
         let initial_state = D3D12_RESOURCE_STATE_COMMON;
 
         let mut resource: Option<ID3D12Resource> = None;
-        unsafe {
+        let hr = unsafe {
             logical_device.device.CreateCommittedResource(
                 &heap_properties,
                 D3D12_HEAP_FLAG_NONE,
@@ -121,8 +124,8 @@ pub(super) fn create(
                 None,
                 &mut resource,
             )
-        }
-        .context("Failed to create texture")?;
+        };
+        hr.context("Failed to create texture")?;
         let resource = resource.context("CreateCommittedResource returned null")?;
 
         (resource, D3D12_BARRIER_LAYOUT_COMMON)
@@ -278,6 +281,7 @@ pub(super) fn create(
             srv_offset,
             bindless_offset,
             last_layout,
+            is_storage,
         },
     );
 
@@ -936,8 +940,7 @@ pub(super) fn read_to_cpu(
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.get(&texture_handle) {
         let device_handle = tex.device_handle;
-        let is_storage = tex.last_layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-            || tex.last_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+        let is_storage = tex.is_storage;
         let cache_key: TextureCacheKey = (tex.width, tex.height, tex.format, is_storage);
         let cache_entry = CachedTextureResource {
             resource: tex.resource.clone(),
