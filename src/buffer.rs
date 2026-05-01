@@ -438,18 +438,63 @@ impl BufferView {
     }
 
     /// Get the handle of the backing buffer that owns this view's memory.
-    pub fn parent_handle(&self) -> BufferHandle {
+    pub(crate) fn parent_handle(&self) -> BufferHandle {
         self.parent_handle
     }
 
     /// Get the view's offset within the parent buffer in bytes.
-    pub fn offset(&self) -> u64 {
+    pub(crate) fn offset(&self) -> u64 {
         self.offset
     }
 
     /// Get the view size in bytes.
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Clear (zero-fill) a region within this view.
+    ///
+    /// `offset` is relative to the view's start. If `size` is 0, clears from
+    /// `offset` to the end of the view.
+    pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
+        let clear_size = if size == 0 {
+            self.size.saturating_sub(offset)
+        } else {
+            size
+        };
+        if offset + clear_size > self.size {
+            anyhow::bail!(
+                "BufferView::clear [{}, {}) exceeds view size {}",
+                offset,
+                offset + clear_size,
+                self.size
+            );
+        }
+        let mut backend = self.backend.lock().unwrap();
+        backend.clear_buffer(device.handle, self.parent_handle, self.offset + offset, clear_size)
+    }
+
+    /// Read this view's contents back to CPU memory.
+    ///
+    /// `output` must be exactly `self.size()` bytes. Reads only the view's
+    /// sub-region from the parent buffer.
+    pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
+        if output.len() as u64 != self.size {
+            anyhow::bail!(
+                "BufferView::read_to_cpu: output len {} != view size {}",
+                output.len(),
+                self.size
+            );
+        }
+        if self.size == 0 {
+            return Ok(());
+        }
+        let mut backend = self.backend.lock().unwrap();
+        let parent_size = backend.buffer_size(self.parent_handle);
+        let mut full = vec![0u8; parent_size as usize];
+        backend.read_buffer_to_cpu(device.handle, self.parent_handle, &mut full)?;
+        output.copy_from_slice(&full[self.offset as usize..self.offset as usize + self.size as usize]);
+        Ok(())
     }
 
     /// Write typed data into this view's region of the parent buffer.

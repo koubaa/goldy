@@ -39,7 +39,7 @@ pub mod instrumentation;
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
-pub use compute_graph::{ComputeGraph, ComputeProgram, DimSlotId, NodeAccess, NodeBuilder, SlotId};
+pub use compute_graph::{ComputeGraph, NodeAccess, NodeBuilder};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;

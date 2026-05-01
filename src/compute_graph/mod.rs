@@ -17,16 +17,12 @@
 //! compute graph that declares what each dispatch reads and writes, so Goldy
 //! can insert minimal barriers and maximize parallelism on all backends.
 //!
-//! # Design: two-tier API
+//! # Usage
 //!
-//! Both tiers share one underlying graph IR. They are opt-in alongside the
-//! existing [`ComputeEncoder`](crate::ComputeEncoder).
-//!
-//! ## Tier 1: [`ComputeGraph`] — interpreted, dynamic
-//!
-//! Build a DAG of dispatch nodes with per-resource access declarations each
-//! frame. At submit time Goldy analyzes the graph, inserts barriers, and
-//! executes. Best for dynamic workloads or prototyping.
+//! Build a DAG of dispatch nodes with per-resource access declarations, then
+//! submit. Goldy analyzes the graph, inserts minimal barriers, and executes
+//! with maximum parallelism. Opt-in alongside the existing
+//! [`ComputeEncoder`](crate::ComputeEncoder).
 //!
 //! ```rust,ignore
 //! let mut graph = ComputeGraph::new();
@@ -43,34 +39,6 @@
 //!     .dispatch(16, 1, 1);
 //!
 //! graph.submit(&device)?.wait()?;
-//! ```
-//!
-//! ## Tier 2: [`ComputeProgram`] — compiled, specializable
-//!
-//! Separate graph topology (static) from bindings and dimensions (dynamic).
-//! Compile once, specialize cheaply per frame. Analogous to NVIDIA Warp's JIT
-//! model where a graph is compiled and then specialized with runtime values.
-//!
-//! ```rust,ignore
-//! // Build phase (once)
-//! let mut builder = ComputeProgram::builder();
-//! let scene     = builder.buffer_slot("scene");
-//! let tagmonoid = builder.buffer_slot("tagmonoid");
-//! let wg_reduce = builder.dim_slot("wg_reduce");
-//!
-//! builder.step("pathtag_reduce", &pipeline_a)
-//!     .bind_buffer(scene, NodeAccess::Read)
-//!     .bind_buffer(tagmonoid, NodeAccess::ReadWrite)
-//!     .dispatch_slot(wg_reduce);
-//!
-//! let program = builder.compile()?;
-//!
-//! // Execute phase (each frame)
-//! let mut exec = program.specialize();
-//! exec.bind_buffer(scene, &scene_buf);
-//! exec.bind_buffer(tagmonoid, &tagmonoid_buf);
-//! exec.set_dim(wg_reduce, (64, 1, 1));
-//! exec.submit(&device)?.wait()?;
 //! ```
 //!
 //! # SWMR scheduling
@@ -102,21 +70,51 @@
 mod analysis;
 mod graph;
 mod ir;
-mod program;
 
 pub use graph::{ComputeGraph, NodeBuilder};
 pub use ir::{DispatchKind, NodeAccess};
-pub use program::{ComputeProgram, DimSlotId, Execution, ProgramBuilder, SlotId, StepBuilder};
 
 use crate::backend::{BufferHandle, TextureHandle};
 
 /// Identifies a GPU resource within a compute graph.
 ///
 /// Used internally by the graph IR. The public API accepts `&Buffer` /
-/// `&Texture` and extracts handles automatically (matching the pattern
-/// used by [`ComputePass`](crate::ComputePass)).
+/// `&BufferView` / `&Texture` and extracts handles automatically.
+///
+/// # View semantics
+///
+/// `BufferRange` represents a sub-range of a parent `Buffer` (e.g. a
+/// `BufferPool` allocation). Two `BufferRange`s with the same parent are
+/// **independent** unless their byte ranges overlap. This enables the
+/// scheduler to execute dispatches that touch non-overlapping pool views
+/// in the same wave, matching the behaviour of per-allocation tracking in
+/// wgpu and the GPU's own memory model.
+///
+/// Backends never see `BufferRange` — barriers are always emitted against
+/// the parent handle via [`ResourceId::canonical_buffer_handle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ResourceId {
+pub(crate) enum ResourceId {
+    /// A whole-buffer resource (own allocation).
     Buffer(BufferHandle),
+    /// A sub-range `[offset, offset+len)` within a parent buffer.
+    BufferRange {
+        parent: BufferHandle,
+        offset: u64,
+        len: u64,
+    },
     Texture(TextureHandle),
+}
+
+impl ResourceId {
+    /// The `BufferHandle` used in backend barrier commands.
+    ///
+    /// For `Buffer(h)` returns `h`; for `BufferRange { parent, .. }` returns `parent`.
+    /// Returns `None` for textures.
+    pub(crate) fn canonical_buffer_handle(self) -> Option<BufferHandle> {
+        match self {
+            ResourceId::Buffer(h) => Some(h),
+            ResourceId::BufferRange { parent, .. } => Some(parent),
+            ResourceId::Texture(_) => None,
+        }
+    }
 }

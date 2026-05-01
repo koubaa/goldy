@@ -1,12 +1,11 @@
 //! Compute graph integration tests.
 //!
-//! These tests verify that `ComputeGraph` (Tier 1) and `ComputeProgram` (Tier 2)
-//! produce correct GPU results using real backends, exercising the dependency
-//! analysis, barrier insertion, and wave scheduling on actual hardware.
+//! These tests verify that `ComputeGraph` produces correct GPU results using
+//! real backends, exercising dependency analysis, barrier insertion, and wave
+//! scheduling on actual hardware.
 
 use goldy::{
-    Buffer, ComputeEncoder, ComputeGraph, ComputePipeline, ComputeProgram, DataAccess, NodeAccess,
-    ShaderModule,
+    Buffer, ComputeEncoder, ComputeGraph, ComputePipeline, DataAccess, NodeAccess, ShaderModule,
 };
 
 /// Doubles each element: out[i] = in[i] * 2
@@ -274,45 +273,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         let expected = (i as u32) * 4;
         assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
     }
-}
-
-// ---------------------------------------------------------------------------
-// ComputeProgram (Tier 2) tests
-// ---------------------------------------------------------------------------
-
-/// Compile a program once, specialize and run it twice with different buffers
-/// and dimensions. Verifies that the cached schedule is reusable.
-#[test]
-fn program_reuse() {
-    let device = make_device();
-
-    let fill_shader = ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap();
-    let fill_pipe = ComputePipeline::new(&device, &fill_shader).unwrap();
-
-    let mut builder = ComputeProgram::builder();
-    let buf_slot = builder.buffer_slot("buf");
-    let wg = builder.dim_slot("wg");
-
-    builder
-        .step("fill", &fill_pipe)
-        .bind_buffer(buf_slot, NodeAccess::Write)
-        .dispatch_slot(wg);
-
-    let program = builder.compile().unwrap();
-
-    // Specialize #1
-    let buf1 = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let mut exec1 = program.specialize();
-    exec1.bind_buffer(buf_slot, &buf1);
-    exec1.set_dim(wg, (1, 1, 1));
-    exec1.dispatch(&device).unwrap();
-
-    // Specialize #2 with a different buffer
-    let buf2 = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let mut exec2 = program.specialize();
-    exec2.bind_buffer(buf_slot, &buf2);
-    exec2.set_dim(wg, (1, 1, 1));
-    exec2.dispatch(&device).unwrap();
 }
 
 /// ComputeGraph produces the same result as manual ComputeEncoder for the same workload.
