@@ -568,4 +568,7 @@ pub(super) struct Dx12State {
     pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
     /// Pending texture copies awaiting batch submission via [`super::texture::flush_pending_copies`].
     pub(super) pending_texture_copies: Vec<super::texture::PendingTextureCopy>,
+    /// Free-list of `ID3D12Resource` objects for reuse, keyed by (width, height, format, is_storage).
+    /// Avoids progressive `CreateCommittedResource` slowdown from GPU heap fragmentation.
+    pub(super) texture_cache: HashMap<super::texture::TextureCacheKey, Vec<super::texture::CachedTextureResource>>,
 }

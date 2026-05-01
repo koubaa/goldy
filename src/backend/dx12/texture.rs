@@ -20,6 +20,17 @@ pub(super) struct PendingTextureCopy {
     pub layout_before: D3D12_BARRIER_LAYOUT,
 }
 
+/// Key for the texture resource cache: (width, height, format, is_storage).
+pub(super) type TextureCacheKey = (u32, u32, TextureFormat, bool);
+
+const MAX_TEXTURE_CACHE_PER_KEY: usize = 8;
+
+/// A cached `ID3D12Resource` ready for reuse, avoiding `CreateCommittedResource`.
+pub(super) struct CachedTextureResource {
+    pub resource: ID3D12Resource,
+    pub last_layout: D3D12_BARRIER_LAYOUT,
+}
+
 /// [`D3D12_BARRIER_ACCESS`] that matches `layout` for texture barriers.
 fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
     if layout == D3D12_BARRIER_LAYOUT_COMMON {
@@ -51,57 +62,71 @@ pub(super) fn create(
     access: SpatialAccess,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
-
-    let heap_properties = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_DEFAULT,
-        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-        CreationNodeMask: 0,
-        VisibleNodeMask: 0,
-    };
-
     let is_storage = matches!(access, SpatialAccess::Direct);
-    let resource_flags = if is_storage {
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+
+    // Try to reuse a cached resource to avoid expensive CreateCommittedResource
+    let cache_key: TextureCacheKey = (width, height, format, is_storage);
+    let cached = state
+        .texture_cache
+        .get_mut(&cache_key)
+        .and_then(|v| v.pop());
+
+    let (resource, last_layout) = if let Some(c) = cached {
+        (c.resource, c.last_layout)
     } else {
-        D3D12_RESOURCE_FLAG_NONE
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+
+        let resource_flags = if is_storage {
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+        } else {
+            D3D12_RESOURCE_FLAG_NONE
+        };
+
+        let resource_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: width as u64,
+            Height: height,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: format_to_dxgi(format),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: resource_flags,
+        };
+
+        let initial_state = D3D12_RESOURCE_STATE_COMMON;
+
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &heap_properties,
+                D3D12_HEAP_FLAG_NONE,
+                &resource_desc,
+                initial_state,
+                None,
+                &mut resource,
+            )
+        }
+        .context("Failed to create texture")?;
+        let resource = resource.context("CreateCommittedResource returned null")?;
+
+        (resource, D3D12_BARRIER_LAYOUT_COMMON)
     };
-
-    let resource_desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-        Alignment: 0,
-        Width: width as u64,
-        Height: height,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Format: format_to_dxgi(format),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        Flags: resource_flags,
-    };
-
-    let initial_state = D3D12_RESOURCE_STATE_COMMON;
-
-    let mut resource: Option<ID3D12Resource> = None;
-    unsafe {
-        logical_device.device.CreateCommittedResource(
-            &heap_properties,
-            D3D12_HEAP_FLAG_NONE,
-            &resource_desc,
-            initial_state,
-            None,
-            &mut resource,
-        )
-    }
-    .context("Failed to create texture")?;
-    let resource = resource.context("CreateCommittedResource returned null")?;
 
     // Get texture handle first (needed for registry)
     let handle = state.next_texture_handle;
@@ -178,11 +203,7 @@ pub(super) fn create(
         Some(srv_offset)
     };
 
-    let last_layout = if is_storage {
-        // Storage textures need explicit layout transition from COMMON to UAV-compatible
-        // layout. Global compute barriers don't change texture layouts, so this must
-        // happen once at creation. Without this, UAV writes via compute shaders may
-        // silently fail on some drivers when the texture is still in COMMON layout.
+    let last_layout = if is_storage && last_layout != D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS {
         let logical_device = state
             .devices
             .get(&device_handle)
@@ -208,7 +229,7 @@ pub(super) fn create(
             D3D12_BARRIER_SYNC_COMPUTE_SHADING,
             D3D12_BARRIER_ACCESS_NO_ACCESS,
             D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-            D3D12_BARRIER_LAYOUT_COMMON,
+            last_layout,
             D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
         );
         unsafe {
@@ -234,13 +255,16 @@ pub(super) fn create(
         }
         .context("Failed to signal fence for init barrier")?;
         super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
+
         if let Some(dev) = state.devices.get_mut(&device_handle) {
             dev.fence_value += 1;
         }
 
         D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+    } else if is_storage {
+        last_layout
     } else {
-        D3D12_BARRIER_LAYOUT_COMMON
+        last_layout
     };
 
     state.textures.insert(
@@ -258,6 +282,7 @@ pub(super) fn create(
     );
 
     let _ = flags; // reserved for future use
+
     tracing::debug!(
         "Created texture {}x{} (handle={}, storage={})",
         width,
@@ -911,8 +936,21 @@ pub(super) fn read_to_cpu(
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.get(&texture_handle) {
         let device_handle = tex.device_handle;
+        let is_storage = tex.last_layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+            || tex.last_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+        let cache_key: TextureCacheKey = (tex.width, tex.height, tex.format, is_storage);
+        let cache_entry = CachedTextureResource {
+            resource: tex.resource.clone(),
+            last_layout: tex.last_layout,
+        };
+
         if let Some(dev) = state.devices.get_mut(&device_handle) {
             dev.resource_registry.unregister_texture(texture_handle);
+        }
+
+        let cache = state.texture_cache.entry(cache_key).or_default();
+        if cache.len() < MAX_TEXTURE_CACHE_PER_KEY {
+            cache.push(cache_entry);
         }
     }
     state.textures.remove(&texture_handle);
