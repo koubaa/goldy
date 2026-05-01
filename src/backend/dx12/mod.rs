@@ -246,6 +246,7 @@ impl Dx12Backend {
             next_dsv_offset: 0,
             slang_compiler,
             staging_belts: HashMap::new(),
+            pending_texture_copies: Vec::new(),
         };
 
         Ok(Self { state })
@@ -264,6 +265,16 @@ impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
         if let Some(logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
+
+            // Drop pending texture copies for this device.
+            self.state
+                .pending_texture_copies
+                .retain(|c| {
+                    self.state
+                        .textures
+                        .get(&c.texture_handle)
+                        .map_or(true, |t| t.device_handle != device_handle)
+                });
 
             if let Some(mut belt) = self.state.staging_belts.remove(&device_handle) {
                 unsafe {
@@ -709,6 +720,10 @@ impl GpuBackend for Dx12Backend {
 
     fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {
         texture::bindless_index(&self.state, texture_handle)
+    }
+
+    fn flush_texture_uploads(&mut self) -> Result<()> {
+        texture::flush_pending_copies(&mut self.state)
     }
 
     fn create_sampler(

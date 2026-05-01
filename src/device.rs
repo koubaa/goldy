@@ -511,6 +511,15 @@ impl Device {
         self.backend.lock().unwrap().reset_buffer_heaps(self.handle);
     }
 
+    /// Flush any deferred texture uploads to the GPU.
+    ///
+    /// This is called automatically before compute submissions and texture
+    /// readbacks, but may be called explicitly when immediate availability
+    /// is required.
+    pub fn flush_texture_uploads(&self) -> Result<()> {
+        self.backend.lock().unwrap().flush_texture_uploads()
+    }
+
     /// Get search paths for shader compilation (internal use).
     pub(crate) fn get_shader_search_paths(&self) -> Result<Vec<PathBuf>> {
         self.library_registry.lock().unwrap().get_search_paths()

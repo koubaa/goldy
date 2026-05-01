@@ -566,4 +566,6 @@ pub(super) struct Dx12State {
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-device upload belts for `ComputeCommand::WriteBuffer`.
     pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
+    /// Pending texture copies awaiting batch submission via [`super::texture::flush_pending_copies`].
+    pub(super) pending_texture_copies: Vec<super::texture::PendingTextureCopy>,
 }

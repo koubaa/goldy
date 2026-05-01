@@ -513,6 +513,17 @@ pub trait GpuBackend: Send + Sync {
     /// Returns None if the texture is not registered.
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
 
+    /// Flush any pending (deferred) texture uploads to the GPU.
+    ///
+    /// Backends that batch texture writes should submit all pending copies
+    /// in a single command list here. Called automatically before compute
+    /// submissions and texture readbacks; callers may also invoke explicitly.
+    ///
+    /// Default: no-op.
+    fn flush_texture_uploads(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     // Sampler management
     fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc)
         -> Result<SamplerHandle>;

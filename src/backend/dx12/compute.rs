@@ -151,6 +151,9 @@ pub(super) fn submit(
     device_handle: DeviceHandle,
     commands: &[ComputeCommand],
 ) -> Result<FenceToken> {
+    // Flush any deferred texture uploads so they're visible to this submission.
+    super::texture::flush_pending_copies(state)?;
+
     let (allocator, fence_value, slot_idx) = {
         let logical_device = state
             .devices
