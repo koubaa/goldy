@@ -32,6 +32,7 @@ mod render_commands;
 mod render_target;
 mod sampler;
 mod shader;
+mod staging;
 mod surface;
 mod texture;
 mod types;
@@ -244,6 +245,7 @@ impl Dx12Backend {
             next_rtv_offset: 0,
             next_dsv_offset: 0,
             slang_compiler,
+            staging_belts: HashMap::new(),
         };
 
         Ok(Self { state })
@@ -262,6 +264,12 @@ impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
         if let Some(logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
+
+            if let Some(mut belt) = self.state.staging_belts.remove(&device_handle) {
+                unsafe {
+                    belt.destroy_all();
+                }
+            }
 
             let buffer_handles: Vec<_> = self
                 .state

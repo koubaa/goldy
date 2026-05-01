@@ -1298,6 +1298,97 @@ fn test_cpu_coherent_compute_write_and_read() {
     }
 }
 
+/// Two back-to-back non-blocking submits: `WriteBuffer` into the **same**
+/// scattered buffer handle, copying to distinct outputs — exercises per-buffer
+/// staging races fixed by the compute staging belt (Vulkan/DX12).
+#[test]
+fn test_write_buffer_reuse_across_submissions() {
+    use goldy::backend::ComputeCommand;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+    let ph = pipeline.gpu_pipeline_handle();
+
+    const N: usize = 16;
+    let mid = Buffer::new(&device, (N * core::mem::size_of::<u32>()) as u64, DataAccess::Scattered)
+        .expect("mid buffer");
+    let out_a = Buffer::new(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        DataAccess::Scattered,
+    )
+    .expect("out_a");
+    let out_b = Buffer::new(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        DataAccess::Scattered,
+    )
+    .expect("out_b");
+
+    let idx_in = mid.bindless_index().expect("mid bindless");
+    let idx_out_a = out_a.bindless_index().expect("out_a bindless");
+    let idx_out_b = out_b.bindless_index().expect("out_b bindless");
+
+    let data_a: Vec<u32> = (100..100 + N as u32).collect();
+    let data_b: Vec<u32> = (900..900 + N as u32).collect();
+
+    let commands1 = vec![
+        ComputeCommand::WriteBuffer {
+            buffer: mid.gpu_buffer_handle(),
+            offset: 0,
+            data: bytemuck::cast_slice(&data_a).to_vec(),
+        },
+        ComputeCommand::SetPipeline(ph),
+        ComputeCommand::SetPushConstantsRaw {
+            indices: vec![idx_in, idx_out_a],
+        },
+        ComputeCommand::Dispatch {
+            workgroups_x: 1,
+            workgroups_y: 1,
+            workgroups_z: 1,
+        },
+    ];
+
+    let commands2 = vec![
+        ComputeCommand::WriteBuffer {
+            buffer: mid.gpu_buffer_handle(),
+            offset: 0,
+            data: bytemuck::cast_slice(&data_b).to_vec(),
+        },
+        ComputeCommand::SetPipeline(ph),
+        ComputeCommand::SetPushConstantsRaw {
+            indices: vec![idx_in, idx_out_b],
+        },
+        ComputeCommand::Dispatch {
+            workgroups_x: 1,
+            workgroups_y: 1,
+            workgroups_z: 1,
+        },
+    ];
+
+    let fut1 = device
+        .submit_compute_commands(&commands1)
+        .expect("submit 1");
+    let fut2 = device
+        .submit_compute_commands(&commands2)
+        .expect("submit 2");
+
+    fut1.wait().expect("wait 1");
+    fut2.wait().expect("wait 2");
+
+    let read_u32 = |buf: &Buffer| -> Vec<u32> {
+        let mut raw = vec![0u8; N * core::mem::size_of::<u32>()];
+        buf.read_to_cpu(&device, &mut raw).expect("readback");
+        bytemuck::cast_slice(&raw).to_vec()
+    };
+
+    let got_a = read_u32(&out_a);
+    let got_b = read_u32(&out_b);
+    assert_eq!(got_a, data_a, "output A corrupted (staging race?)");
+    assert_eq!(got_b, data_b, "output B wrong");
+}
+
 /// CPU writes to a `CPU_COHERENT` buffer are reflected in reads.
 ///
 /// On Vulkan and Metal the buffer lives in host-visible/shared memory, so a plain

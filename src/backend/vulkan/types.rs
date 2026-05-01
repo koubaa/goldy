@@ -757,4 +757,6 @@ pub(super) struct VulkanState {
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
     pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
     pub next_compute_fence_token: u64,
+    /// Per-device staging belts for batched WriteBuffer uploads.
+    pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
 }

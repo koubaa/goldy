@@ -59,6 +59,13 @@ impl ComputePipeline {
             handle,
         })
     }
+
+    /// GPU handle for building raw [`ComputeCommand`](crate::backend::ComputeCommand) streams
+    /// (e.g. [`Device::submit_compute_commands`](crate::Device::submit_compute_commands)).
+    #[inline]
+    pub fn gpu_pipeline_handle(&self) -> ComputePipelineHandle {
+        self.handle
+    }
 }
 
 impl Drop for ComputePipeline {

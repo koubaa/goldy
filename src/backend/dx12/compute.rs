@@ -3,6 +3,7 @@
 use super::barriers;
 use super::buffer;
 use super::shader;
+use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
 use super::{ComputePipelineHandle, DeviceHandle, ShaderHandle};
 use crate::backend::{ComputeCommand, FenceToken};
@@ -184,6 +185,20 @@ pub(super) fn submit(
         (allocator, token, slot_idx)
     };
 
+    let fence_clone = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .fence
+        .clone();
+    state
+        .staging_belts
+        .entry(device_handle)
+        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+        .reclaim(&fence_clone)?;
+
+    let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
+
     // Create command list (allocator is owned, no borrow of state)
     let command_list: ID3D12GraphicsCommandList = {
         let logical_device = state
@@ -204,8 +219,7 @@ pub(super) fn submit(
         .cast()
         .context("ID3D12GraphicsCommandList7 required")?;
 
-    // Pre-pass: prepare upload buffers for WriteBuffer commands (needs
-    // mutable state access before we borrow the device immutably).
+    // Pre-pass: memcpy into staging belt chunks for DEVICE_LOCAL WriteBuffer uploads.
     for command in commands {
         if let ComputeCommand::WriteBuffer {
             buffer: buf_handle,
@@ -217,8 +231,18 @@ pub(super) fn submit(
                 .buffers
                 .get(buf_handle)
                 .context("WriteBuffer pre-pass: invalid handle")?;
-            if buf.is_storage && buf.upload_buffer.is_none() {
-                buffer::ensure_upload_buffer(state, *buf_handle, data.len() as u64)?;
+            if buf.is_storage {
+                let buf_dev = buf.device_handle;
+                let ld = state
+                    .devices
+                    .get(&buf_dev)
+                    .context("WriteBuffer pre-pass: device missing")?;
+                let belt_entry = state
+                    .staging_belts
+                    .entry(buf_dev)
+                    .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE));
+                let (res, off) = belt_entry.write(ld, data.as_slice())?;
+                belt_slices.push((res, off));
             }
         }
     }
@@ -237,6 +261,7 @@ pub(super) fn submit(
     }
 
     let mut current_pipeline_handle: Option<ComputePipelineHandle> = None;
+    let mut belt_idx = 0usize;
 
     // Process commands
     for command in commands {
@@ -547,33 +572,15 @@ pub(super) fn submit(
                     };
                     unsafe { buf_state.resource.Unmap(0, Some(&written_range)) };
                 } else {
-                    // DEFAULT heap storage: upload via staging + on-list copy.
-                    // Upload buffer was ensured in the pre-pass.
+                    // DEFAULT heap: copy from staging belt slice (prepended in pre-pass).
+                    let belt_entry = belt_slices.get(belt_idx).context(
+                        "WriteBuffer: belt slice missing (internal)",
+                    )?;
+                    belt_idx += 1;
+                    let upload_src = belt_entry.0.clone();
+                    let upload_off = belt_entry.1;
                     let buf_state = state.buffers.get(buf_handle).unwrap();
-                    let upload_buf = buf_state
-                        .upload_buffer
-                        .as_ref()
-                        .context("WriteBuffer: upload buffer missing")?;
 
-                    // Map upload buffer, write data
-                    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-                    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-                    unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
-                        .context("WriteBuffer: upload map failed")?;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            data.as_ptr(),
-                            mapped as *mut u8,
-                            data.len(),
-                        );
-                    }
-                    let write_range = D3D12_RANGE {
-                        Begin: 0,
-                        End: data.len(),
-                    };
-                    unsafe { upload_buf.Unmap(0, Some(&write_range)) };
-
-                    // Record copy from upload → default heap on the command list
                     let b_to_copy = barriers::buffer_barrier_full(
                         &buf_state.resource,
                         D3D12_BARRIER_SYNC_ALL,
@@ -593,8 +600,8 @@ pub(super) fn submit(
                         command_list.CopyBufferRegion(
                             &buf_state.resource,
                             *offset,
-                            upload_buf,
-                            0,
+                            &upload_src,
+                            upload_off,
                             data.len() as u64,
                         );
                         barriers::barrier_buffers(&command_list7, &[b_to_uav]);
@@ -656,6 +663,18 @@ pub(super) fn submit(
             slot.fence_value = fence_value;
         }
     }
+
+    state
+        .staging_belts
+        .entry(device_handle)
+        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+        .finish(fence_value);
+
+    debug_assert_eq!(
+        belt_idx,
+        belt_slices.len(),
+        "WriteBuffer storage count mismatch vs belt prepass"
+    );
 
     Ok(fence_value)
 }

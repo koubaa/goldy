@@ -564,4 +564,6 @@ pub(super) struct Dx12State {
     pub next_dsv_offset: u32,
     /// Per-backend Slang compiler instance
     pub slang_compiler: crate::slang::SlangCompiler,
+    /// Per-device upload belts for `ComputeCommand::WriteBuffer`.
+    pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
 }

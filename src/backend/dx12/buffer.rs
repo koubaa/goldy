@@ -653,48 +653,8 @@ pub(super) fn write(
     let main_resource = buffer.resource.clone();
 
     // Create or reuse the upload buffer (capped at chunk_size)
-    let upload_needed = buffer.upload_buffer.is_none();
-    if upload_needed {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-        let upload_heap = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_UPLOAD,
-            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-            CreationNodeMask: 0,
-            VisibleNodeMask: 0,
-        };
-        let upload_desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Alignment: 0,
-            Width: chunk_size,
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_NONE,
-        };
-        let mut upload: Option<ID3D12Resource> = None;
-        unsafe {
-            logical_device.device.CreateCommittedResource(
-                &upload_heap,
-                D3D12_HEAP_FLAG_NONE,
-                &upload_desc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                None,
-                &mut upload,
-            )
-        }
-        .context("Failed to create upload staging buffer")?;
-        state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer =
-            Some(upload.context("Upload buffer is null")?);
+    if buffer.upload_buffer.is_none() {
+        ensure_upload_buffer(state, buffer_handle, chunk_size)?;
     }
 
     let upload_buf = state

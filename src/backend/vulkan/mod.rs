@@ -19,6 +19,7 @@ mod render_commands;
 mod render_target;
 mod sampler;
 mod shader;
+mod staging;
 mod surface;
 mod texture;
 mod types;
@@ -255,6 +256,7 @@ impl VulkanBackend {
             slang_compiler,
             compute_fence_pool: HashMap::new(),
             next_compute_fence_token: 1,
+            staging_belts: HashMap::new(),
         };
 
         Ok(Self { state })

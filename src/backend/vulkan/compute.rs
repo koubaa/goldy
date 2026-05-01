@@ -1,6 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::buffer;
+use super::staging;
 use super::types::{self, BindlessIndices, ComputePipelineState, LogicalDevice};
 use super::{ComputePipelineHandle, DeviceHandle};
 use crate::backend::{ComputeCommand, FenceToken};
@@ -151,7 +152,14 @@ pub(super) fn submit(
 ) -> Result<FenceToken> {
     // Reap any previously-submitted fences that have already signaled. Keeps
     // the pool bounded when callers (ekrano) don't wait on every GpuFuture.
+    // Belt before reap: need live VkFence handles to poll completion.
+    for belt in state.staging_belts.values_mut() {
+        belt.reclaim(&state.compute_fence_pool, &state.devices)?;
+    }
     reap_signaled_fences(state);
+
+    // Belt slices for DEVICE_LOCAL WriteBuffer copies (same iteration order as command loop).
+    let mut belt_slices: Vec<(vk::Buffer, u64)> = Vec::new();
 
     // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable buffer
     // access before we borrow state immutably for the command loop).
@@ -189,28 +197,20 @@ pub(super) fn submit(
                         .context("WriteBuffer: unmap failed")?;
                 }
             } else {
-                buffer::ensure_staging(
-                    &state.instance,
-                    &state.devices,
-                    &mut state.buffers,
-                    *buf_handle,
-                )?;
-                let buf = state.buffers.get(buf_handle).unwrap();
-                let stg_mem = buf
-                    .staging_memory
-                    .context("WriteBuffer: staging not created")?;
+                let buf_device = buf.device_handle;
                 let dev = state
                     .devices
-                    .get(&buf.device_handle)
+                    .get(&buf_device)
                     .context("WriteBuffer: device invalid")?;
-                unsafe {
-                    let ptr = dev
-                        .map_memory2(stg_mem, *offset, data.len() as u64)
-                        .context("WriteBuffer: staging map failed")?;
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-                    dev.unmap_memory2(stg_mem)
-                        .context("WriteBuffer: staging unmap failed")?;
-                }
+                let belt_entry = state
+                    .staging_belts
+                    .entry(buf_device)
+                    .or_insert_with(|| {
+                        staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
+                    });
+                let (stg_buf, stg_off) =
+                    belt_entry.write(&state.instance, dev, data.as_slice())?;
+                belt_slices.push((stg_buf, stg_off));
             }
         }
     }
@@ -291,6 +291,7 @@ pub(super) fn submit(
 
     // Track current pipeline for push constants
     let mut current_pipeline: Option<ComputePipelineHandle> = None;
+    let mut belt_idx = 0usize;
 
     // Process commands (same logic as dispatch)
     for command in commands {
@@ -503,21 +504,21 @@ pub(super) fn submit(
                     .get(buf_handle)
                     .context("WriteBuffer: invalid buffer handle")?;
                 // HOST_VISIBLE / CPU_COHERENT paths were handled in the pre-pass;
-                // only DEVICE_LOCAL storage buffers need a GPU copy here.
-                if buf_state.is_storage
-                    && buf_state.host_mapped.is_none()
-                    && buf_state.staging_buffer.is_some()
-                {
-                    let stg = buf_state.staging_buffer.unwrap();
+                // DEVICE_LOCAL storage uses the staging belt (see pre-pass).
+                if buf_state.is_storage && buf_state.host_mapped.is_none() {
+                    let (stg, stg_off) = belt_slices
+                        .get(belt_idx)
+                        .context("WriteBuffer: belt slice missing (internal error)")?;
+                    belt_idx += 1;
                     let region = vk::BufferCopy {
-                        src_offset: *offset,
+                        src_offset: *stg_off,
                         dst_offset: *offset,
                         size: data.len() as u64,
                     };
                     unsafe {
                         logical_device.device.cmd_copy_buffer(
                             cmd,
-                            stg,
+                            *stg,
                             buf_state.buffer,
                             std::slice::from_ref(&region),
                         );
@@ -558,6 +559,18 @@ pub(super) fn submit(
     state
         .compute_fence_pool
         .insert(token, (device_handle, fence, Some(cmd)));
+
+    state
+        .staging_belts
+        .entry(device_handle)
+        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+        .finish(token);
+
+    debug_assert_eq!(
+        belt_idx,
+        belt_slices.len(),
+        "WriteBuffer DEVICE_LOCAL count must match belt pre-pass"
+    );
 
     Ok(token)
 }

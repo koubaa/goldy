@@ -380,6 +380,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 .deletion_queue
                 .flush_all(&logical_device.device);
 
+            if let Some(mut belt) = state.staging_belts.remove(&device_handle) {
+                belt.destroy_all(&logical_device);
+            }
+
             // Destroy buffers owned by this device
             let buffer_handles: Vec<_> = state
                 .buffers
