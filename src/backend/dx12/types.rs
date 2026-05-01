@@ -535,12 +535,17 @@ pub(crate) struct SurfaceState {
     /// Per swapchain buffer index: persistent UAV texture for compute; results are
     /// copied to the real back buffer in `present` (swapchain images cannot be UAVs).
     pub compute_scratch_textures: Vec<Option<super::TextureHandle>>,
+    /// Presentation mode (vsync strategy).
+    pub present_mode: crate::types::PresentMode,
 }
 
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
 pub(super) struct Dx12State {
     pub factory: Dxgi::IDXGIFactory4,
+    /// Whether the DXGI factory/driver supports `DXGI_PRESENT_ALLOW_TEARING`
+    /// (needed for tear-free immediate presentation in windowed mode).
+    pub allow_tearing: bool,
     pub adapters: Vec<DxgiAdapterInfo>,
     pub devices: HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,

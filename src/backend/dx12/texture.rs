@@ -71,12 +71,9 @@ pub(super) fn create(
         .get_mut(&cache_key)
         .and_then(|v| v.pop());
 
-    let was_cached;
     let (resource, last_layout) = if let Some(c) = cached {
-        was_cached = true;
         (c.resource, c.last_layout)
     } else {
-        was_cached = false;
         let logical_device = state
             .devices
             .get(&device_handle)

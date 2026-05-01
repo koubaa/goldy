@@ -60,6 +60,11 @@ pub(super) fn create(
     // DXGI/D3D12 rejects `DXGI_USAGE_UNORDERED_ACCESS` on flip-model swapchain buffers;
     // `CreateSwapChainForHwnd` fails (e.g. HRESULT 0x887A698F). Compute-to-surface must
     // use an intermediate UAV texture + copy, not a UAV on the swapchain image.
+    let swap_chain_flags = if state.allow_tearing {
+        DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+    } else {
+        DXGI_SWAP_CHAIN_FLAG(0)
+    };
     let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
         Height: height,
@@ -74,7 +79,7 @@ pub(super) fn create(
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         AlphaMode: DXGI_ALPHA_MODE_UNSPECIFIED,
-        Flags: 0,
+        Flags: swap_chain_flags.0 as u32,
     };
 
     let swapchain: IDXGISwapChain1 = unsafe {
@@ -241,6 +246,7 @@ pub(super) fn create(
             frame_sync,
             current_texture_handle: None,
             compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
+            present_mode: crate::types::PresentMode::Fifo,
         },
     );
 
@@ -700,7 +706,8 @@ pub(super) fn present(
 
     // Present
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();
-    let hr = unsafe { surface.swapchain.Present(1, DXGI_PRESENT(0)) };
+    let (sync_interval, present_flags) = present_args(surface.present_mode, state.allow_tearing);
+    let hr = unsafe { surface.swapchain.Present(sync_interval, present_flags) };
     if hr.is_err() {
         anyhow::bail!("Present failed with HRESULT: {:?}", hr);
     }
@@ -759,6 +766,11 @@ pub(super) fn resize(
         surface.dsv_offset = None;
         let df = surface.depth_format;
 
+        let resize_flags = if state.allow_tearing {
+            DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+        } else {
+            DXGI_SWAP_CHAIN_FLAG(0)
+        };
         // Resize swapchain
         unsafe {
             surface.swapchain.ResizeBuffers(
@@ -766,7 +778,7 @@ pub(super) fn resize(
                 width,
                 height,
                 surface_format,
-                DXGI_SWAP_CHAIN_FLAG(0),
+                resize_flags,
             )
         }
         .context("Failed to resize swapchain")?;
@@ -982,4 +994,46 @@ fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
     unsafe { device.command_queue.Signal(&device.fence, fence_value) }
         .context("Failed to signal fence")?;
     wait_for_fence(&device.fence, fence_value)
+}
+
+/// Map a `PresentMode` to DXGI `Present()` arguments (SyncInterval, Flags).
+fn present_args(mode: crate::types::PresentMode, allow_tearing: bool) -> (u32, DXGI_PRESENT) {
+    use crate::types::PresentMode;
+    match mode {
+        PresentMode::Fifo | PresentMode::Mailbox | PresentMode::Auto => (1, DXGI_PRESENT(0)),
+        PresentMode::Immediate => {
+            if allow_tearing {
+                (0, DXGI_PRESENT_ALLOW_TEARING)
+            } else {
+                (0, DXGI_PRESENT(0))
+            }
+        }
+    }
+}
+
+/// Set the present mode on a surface (takes effect on the next Present call).
+pub(super) fn set_present_mode(
+    state: &mut Dx12State,
+    surface_handle: SurfaceHandle,
+    mode: crate::types::PresentMode,
+) -> Result<()> {
+    let surface = state
+        .surfaces
+        .get_mut(&surface_handle)
+        .context("Invalid surface handle")?;
+    surface.present_mode = mode;
+    tracing::debug!(?mode, "DX12 present mode set");
+    Ok(())
+}
+
+/// Get the current present mode of a surface.
+pub(super) fn get_present_mode(
+    state: &Dx12State,
+    surface_handle: SurfaceHandle,
+) -> crate::types::PresentMode {
+    state
+        .surfaces
+        .get(&surface_handle)
+        .map(|s| s.present_mode)
+        .unwrap_or_default()
 }

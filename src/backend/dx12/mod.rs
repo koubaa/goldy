@@ -151,6 +151,24 @@ impl Dx12Backend {
         let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory2(factory_flags) }
             .context("Failed to create DXGI factory")?;
 
+        // Check tearing support (IDXGIFactory5::CheckFeatureSupport)
+        let allow_tearing = factory
+            .cast::<IDXGIFactory5>()
+            .ok()
+            .and_then(|f5| {
+                let mut allow: i32 = 0;
+                let hr = unsafe {
+                    f5.CheckFeatureSupport(
+                        DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                        &mut allow as *mut _ as *mut _,
+                        std::mem::size_of::<i32>() as u32,
+                    )
+                };
+                hr.ok().map(|()| allow != 0)
+            })
+            .unwrap_or(false);
+        tracing::info!("DXGI tearing support: {allow_tearing}");
+
         // Enumerate adapters
         let mut adapters = Vec::new();
         let mut adapter_index = 0u32;
@@ -223,6 +241,7 @@ impl Dx12Backend {
 
         let state = Dx12State {
             factory,
+            allow_tearing,
             adapters,
             devices: HashMap::new(),
             next_device_handle: 1,
@@ -627,6 +646,18 @@ impl GpuBackend for Dx12Backend {
 
     fn surface_format(&self, surface_handle: SurfaceHandle) -> TextureFormat {
         surface::format(&self.state, surface_handle)
+    }
+
+    fn surface_set_present_mode(
+        &mut self,
+        surface_handle: SurfaceHandle,
+        mode: crate::types::PresentMode,
+    ) -> Result<()> {
+        surface::set_present_mode(&mut self.state, surface_handle, mode)
+    }
+
+    fn surface_present_mode(&self, surface_handle: SurfaceHandle) -> crate::types::PresentMode {
+        surface::get_present_mode(&self.state, surface_handle)
     }
 
     fn create_pipeline_with_depth(
