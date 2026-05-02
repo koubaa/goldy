@@ -1,7 +1,6 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::{ComputeCommand, ComputePipelineHandle, DeviceHandle, FenceToken, ShaderHandle};
-use super::buffer;
 use super::shader::parse_numthreads;
 use super::types::PUSH_CONSTANTS_SLOT;
 use super::types::{
@@ -352,7 +351,6 @@ fn record_commands_to_buffer(
                 offset,
                 data,
             } => {
-                // Metal buffers live in shared/managed memory — direct memcpy.
                 let buf_state = match state.buffers.get(buf_handle) {
                     Some(b) => b,
                     None => {
@@ -360,19 +358,26 @@ fn record_commands_to_buffer(
                         anyhow::bail!("WriteBuffer: invalid buffer handle");
                     }
                 };
-                let ptr = buf_state.buffer.contents() as *mut u8;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        ptr.add(*offset as usize),
-                        data.len(),
-                    );
+                if data.is_empty() {
+                    continue;
                 }
-                if buf_state.buffer.storage_mode() == mtl::MTLStorageMode::Managed {
-                    buf_state
-                        .buffer
-                        .did_modify_range(mtl::NSRange::new(*offset, data.len() as u64));
+                if *offset as u64 + data.len() as u64 > buf_state.size {
+                    end_compute!();
+                    anyhow::bail!("WriteBuffer: write exceeds buffer bounds");
                 }
+                // Same rationale as `buffer::write`: a CPU memcpy into `contents()` is not
+                // ordered with other command buffers on the queue. Two back-to-back submits that
+                // write the same buffer would record the second memcpy while the first submit's
+                // GPU work is still reading that memory (shared storage), corrupting results.
+                end_compute!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let blit = command_buffer.new_blit_command_encoder();
+                blit.copy_from_buffer(&staging, 0, &buf_state.buffer, *offset, data.len() as u64);
+                blit.end_encoding();
             }
         }
     }

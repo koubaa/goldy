@@ -1434,6 +1434,7 @@ mod uniform_entry_point_param_binding_tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn uniform_params_compile_dxil() {
         let compiler = SlangCompiler::new().expect("Slang unavailable");
