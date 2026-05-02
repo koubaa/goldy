@@ -6,48 +6,6 @@ use crate::types::{DepthStencilState, PrimitiveTopology, TextureFormat, VertexBu
 use anyhow::{Context, Result};
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
-/// Collect per-push-constant-slot categories from shader reflection on the
-/// vertex+fragment pair. Fragment takes precedence.
-fn push_constant_expectations(
-    state: &Dx12State,
-    vertex_shader: ShaderHandle,
-    fragment_shader: ShaderHandle,
-) -> (
-    Vec<Option<crate::types::BindlessCategory>>,
-    Vec<Option<u32>>,
-    String,
-) {
-    let fs = state
-        .shaders
-        .get(&fragment_shader)
-        .and_then(|s| s.reflection.as_ref());
-    let fs_cats = fs
-        .map(|r| r.push_constant_categories.clone())
-        .unwrap_or_default();
-    let fs_strides = fs
-        .map(|r| r.push_constant_buffer_strides.clone())
-        .unwrap_or_default();
-    let (cats, strides) = if !fs_cats.is_empty() {
-        (fs_cats, fs_strides)
-    } else {
-        let vs = state
-            .shaders
-            .get(&vertex_shader)
-            .and_then(|s| s.reflection.as_ref());
-        (
-            vs.map(|r| r.push_constant_categories.clone())
-                .unwrap_or_default(),
-            vs.map(|r| r.push_constant_buffer_strides.clone())
-                .unwrap_or_default(),
-        )
-    };
-    (
-        cats,
-        strides,
-        format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})"),
-    )
-}
-
 /// Create a graphics pipeline state object.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) fn create(
@@ -65,8 +23,7 @@ pub(super) fn create(
     let fs_bytecode =
         shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-    let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
-        push_constant_expectations(state, vertex_shader, fragment_shader);
+    let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
     let logical_device = state
         .devices
@@ -216,8 +173,6 @@ pub(super) fn create(
             vertex_stride: vertex_layout.stride,
             topology,
             parameter_block_layouts: Vec::new(),
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
         },
     );
@@ -243,8 +198,7 @@ pub(super) fn create_with_depth(
     let fs_bytecode =
         shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-    let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
-        push_constant_expectations(state, vertex_shader, fragment_shader);
+    let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
     let logical_device = state
         .devices
@@ -406,8 +360,6 @@ pub(super) fn create_with_depth(
             vertex_stride: vertex_layout.stride,
             topology,
             parameter_block_layouts: Vec::new(),
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
         },
     );

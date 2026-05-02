@@ -378,6 +378,11 @@ impl Device {
         self.device_type
     }
 
+    /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
+    pub fn backend_type(&self) -> BackendType {
+        self.backend.lock().unwrap().backend_type()
+    }
+
     /// Check if the device is still valid.
     pub fn is_valid(&self) -> bool {
         self.backend.lock().unwrap().is_device_valid(self.handle)

@@ -16,10 +16,6 @@ struct AnimParams {
     uint _pad;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[instances_slot, params_slot])
-#define INSTANCES goldy_dyn_scattered<QuadInstance>(0)
-#define PARAMS goldy_dyn_broadcast<AnimParams>(1)
-
 float3 hsv_to_rgb(float h, float s, float v) {
     float4 K = float4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
     float3 p = abs(frac(h.xxx + K.xyz) * 6.0 - K.www);
@@ -28,7 +24,10 @@ float3 hsv_to_rgb(float h, float s, float v) {
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint instances_slot, uniform uint params_slot,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<QuadInstance> INSTANCES = goldy_scattered<QuadInstance>(instances_slot);
+    AnimParams PARAMS = goldy_broadcast<AnimParams>(params_slot);
     uint idx = id.x;
     if (idx >= PARAMS.total_instances) return;
     

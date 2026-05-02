@@ -5,7 +5,7 @@
 use super::barriers;
 use super::render_commands;
 use super::texture;
-use super::types::{FrameSync, LogicalDevice, SurfaceState, MAX_FRAMES_IN_FLIGHT};
+use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::{depth_format_to_dxgi, dxgi_to_format};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::RenderCommand;
@@ -60,10 +60,12 @@ pub(super) fn create(
     // DXGI/D3D12 rejects `DXGI_USAGE_UNORDERED_ACCESS` on flip-model swapchain buffers;
     // `CreateSwapChainForHwnd` fails (e.g. HRESULT 0x887A698F). Compute-to-surface must
     // use an intermediate UAV texture + copy, not a UAV on the swapchain image.
-    let swap_chain_flags = if state.allow_tearing {
-        DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
-    } else {
-        DXGI_SWAP_CHAIN_FLAG(0)
+    let swap_chain_flags = {
+        let mut flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        if state.allow_tearing {
+            flags = DXGI_SWAP_CHAIN_FLAG(flags.0 | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0);
+        }
+        flags
     };
     let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
@@ -96,6 +98,23 @@ pub(super) fn create(
     let swapchain: IDXGISwapChain3 = swapchain
         .cast()
         .context("Failed to cast swapchain to IDXGISwapChain3")?;
+
+    // Set up the frame-latency waitable object so that acquire() blocks on DXGI
+    // readiness rather than stalling the CPU with an explicit fence inside present().
+    let frame_latency_waitable: Option<SendSyncHandle> = {
+        let sc2: IDXGISwapChain2 = swapchain
+            .cast()
+            .context("Failed to cast swapchain to IDXGISwapChain2")?;
+        unsafe { sc2.SetMaximumFrameLatency(MAX_FRAMES_IN_FLIGHT as u32) }
+            .context("Failed to set swapchain maximum frame latency")?;
+        let handle = unsafe { sc2.GetFrameLatencyWaitableObject() };
+        if handle.0.is_null() {
+            tracing::warn!("GetFrameLatencyWaitableObject returned null; waitable disabled");
+            None
+        } else {
+            Some(SendSyncHandle(handle))
+        }
+    };
 
     // Get swapchain buffers and create RTVs
     let mut render_targets = Vec::new();
@@ -245,9 +264,10 @@ pub(super) fn create(
             current_image_index: None,
             frame_sync,
             current_texture_handle: None,
-            compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
-            present_mode: crate::types::PresentMode::Fifo,
-        },
+        compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
+        present_mode: crate::types::PresentMode::Fifo,
+        frame_latency_waitable,
+    },
     );
 
     tracing::info!("Created surface {}x{}", width, height);
@@ -286,6 +306,9 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
         if let Some(logical_device) = state.devices.get(&surface_state.device_handle) {
             let _ = wait_for_gpu(logical_device);
         }
+        if let Some(SendSyncHandle(waitable)) = surface_state.frame_latency_waitable {
+            unsafe { CloseHandle(waitable) }.ok();
+        }
     }
 }
 
@@ -307,18 +330,55 @@ pub(super) fn acquire(
         tracing::warn!("Previous surface frame was not presented; continuing acquire");
     }
 
+    // Extract values needed before the pre-acquire blocking waits.
+    let (cf, device_handle, waitable, prev_fence) = {
+        let surface = state
+            .surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        let cf = surface.current_frame;
+        (
+            cf,
+            surface.device_handle,
+            surface.frame_latency_waitable,
+            surface.frame_sync[cf].fence_value,
+        )
+    };
+
+    // Fix 2: Block until DXGI signals it is ready to accept a new frame.
+    // This caps CPU-ahead frames to MAX_FRAMES_IN_FLIGHT and replaces the
+    // ad-hoc fence stall that previously occurred inside present().
+    if let Some(SendSyncHandle(waitable_handle)) = waitable {
+        unsafe { WaitForSingleObject(waitable_handle, INFINITE) };
+    }
+
+    // Fix 1: Ensure this slot's command allocator and scratch texture are no
+    // longer in use by the GPU before we reset and reuse them.  With
+    // MAX_FRAMES_IN_FLIGHT=2 this is almost always a near-zero stall because
+    // roughly two CPU frames have elapsed since the slot was last submitted.
+    if prev_fence > 0 {
+        {
+            let logical_device = state
+                .devices
+                .get(&device_handle)
+                .context("Surface's device is invalid")?;
+            wait_for_fence(&logical_device.fence, prev_fence)?;
+        }
+        if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+            surf.frame_sync[cf].fence_value = 0;
+        }
+    }
+
     let surface = state
         .surfaces
         .get_mut(&surface_handle)
         .context("Invalid surface handle")?;
 
-    let cf = surface.current_frame;
     surface.frame_sync[cf].render_pass_submitted = false;
 
     let image_index = unsafe { surface.swapchain.GetCurrentBackBufferIndex() };
     surface.current_image_index = Some(image_index);
 
-    let device_handle = surface.device_handle;
     let width = surface.width;
     let height = surface.height;
     let dxgi_format = surface.format;
@@ -538,6 +598,7 @@ pub(super) fn render(
     }
 
     if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+        surf.frame_sync[current_frame].fence_value = fence_value;
         surf.frame_sync[current_frame].render_pass_submitted = true;
     }
 
@@ -595,15 +656,14 @@ pub(super) fn present(
         s.current_texture_handle = None;
     }
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
-
     if render_pass_submitted {
-        let fence_value = logical_device.fence_value.saturating_sub(1);
-        wait_for_fence(&logical_device.fence, fence_value)?;
+        // fence_value was stored in frame_sync[current_frame].fence_value by
+        // surface::render; acquire() waits for it on the next cycle through this slot.
     } else {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
         let scratch_res = state
             .textures
             .get(&scratch_handle)
@@ -693,10 +753,13 @@ pub(super) fn present(
         }
         .context("Failed to signal fence after present copy")?;
 
-        wait_for_fence(&logical_device.fence, fence_value)?;
-
         if let Some(dev) = state.devices.get_mut(&device_handle) {
             dev.fence_value += 1;
+        }
+
+        // Record the fence so acquire() can wait for it before reusing this slot.
+        if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+            surf.frame_sync[current_frame].fence_value = fence_value;
         }
 
         if let Some(tex) = state.textures.get_mut(&scratch_handle) {
@@ -766,10 +829,12 @@ pub(super) fn resize(
         surface.dsv_offset = None;
         let df = surface.depth_format;
 
-        let resize_flags = if state.allow_tearing {
-            DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
-        } else {
-            DXGI_SWAP_CHAIN_FLAG(0)
+        let resize_flags = {
+            let mut flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+            if state.allow_tearing {
+                flags = DXGI_SWAP_CHAIN_FLAG(flags.0 | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0);
+            }
+            flags
         };
         // Resize swapchain
         unsafe {

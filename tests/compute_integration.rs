@@ -14,12 +14,11 @@ use goldy::{
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] * 2;
+void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x] = data[id.x] * 2;
 }
 "#;
 
@@ -27,13 +26,12 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const COPY_SHADER: &str = r#"
 import goldy_exp;
 
-#define INPUT goldy_dyn_scattered<uint>(0)
-#define OUTPUT goldy_dyn_scattered<uint>(1)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    OUTPUT[id.x] = INPUT[id.x];
+void cs_main(uniform uint input_slot, uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> input  = goldy_scattered<uint>(input_slot);
+    StorageBuffer<uint> output = goldy_scattered<uint>(output_slot);
+    output[id.x] = input[id.x];
 }
 "#;
 
@@ -201,12 +199,11 @@ fn test_compute_with_srv_and_uav() {
 const INCREMENT_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] + 1;
+void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x] = data[id.x] + 1;
 }
 "#;
 
@@ -215,19 +212,20 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const SIX_SLOT_SUM_SHADER: &str = r#"
 import goldy_exp;
 
-#define A   goldy_dyn_scattered<uint>(0)
-#define B   goldy_dyn_scattered<uint>(1)
-#define C   goldy_dyn_scattered<uint>(2)
-#define D   goldy_dyn_scattered<uint>(3)
-#define E   goldy_dyn_scattered<uint>(4)
-#define OUT goldy_dyn_scattered<uint>(5)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint a_slot, uniform uint b_slot, uniform uint c_slot,
+             uniform uint d_slot, uniform uint e_slot, uniform uint out_slot,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> a   = goldy_scattered<uint>(a_slot);
+    StorageBuffer<uint> b   = goldy_scattered<uint>(b_slot);
+    StorageBuffer<uint> c   = goldy_scattered<uint>(c_slot);
+    StorageBuffer<uint> d   = goldy_scattered<uint>(d_slot);
+    StorageBuffer<uint> e   = goldy_scattered<uint>(e_slot);
+    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
     uint idx = id.x;
     if (idx >= 16) return;
-    OUT[idx] = A[idx] + B[idx] + C[idx] + D[idx] + E[idx];
+    out[idx] = a[idx] + b[idx] + c[idx] + d[idx] + e[idx];
 }
 "#;
 
@@ -583,16 +581,15 @@ struct Particle {
     float2 velocity;
 };
 
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint particles_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Particle> particles = goldy_scattered<Particle>(particles_slot);
     uint idx = id.x;
     if (idx >= 4) return;
-    Particle p = PARTICLES[idx];
+    Particle p = particles[idx];
     p.position += float2(0.01, 0.01);
-    PARTICLES[idx] = p;
+    particles[idx] = p;
 }
 "#;
 
@@ -865,24 +862,23 @@ fn test_positive_mod_correctness() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-#define OUT goldy_dyn_scattered<float>(0)
-
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint out_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<float> out = goldy_scattered<float>(out_slot);
     // scalar: negative dividend
-    OUT[0] = positive_mod(-1.0, 3.0);    // 2.0
-    OUT[1] = positive_mod(-3.0, 3.0);    // 0.0
-    OUT[2] = positive_mod(-0.5, 1.0);    // 0.5
+    out[0] = positive_mod(-1.0, 3.0);    // 2.0
+    out[1] = positive_mod(-3.0, 3.0);    // 0.0
+    out[2] = positive_mod(-0.5, 1.0);    // 0.5
 
     // scalar: positive / zero inputs (must be unchanged)
-    OUT[3] = positive_mod(2.5, 3.0);     // 2.5
-    OUT[4] = positive_mod(0.0, 1.0);     // 0.0
+    out[3] = positive_mod(2.5, 3.0);     // 2.5
+    out[4] = positive_mod(0.0, 1.0);     // 0.0
 
     // float2 overload
     float2 r = positive_mod(float2(-1.0, -0.5), float2(3.0, 1.0));
-    OUT[5] = r.x;   // 2.0
-    OUT[6] = r.y;   // 0.5
+    out[5] = r.x;   // 2.0
+    out[6] = r.y;   // 0.5
 }
 "#;
 
@@ -934,11 +930,10 @@ fn test_billboard_math() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-#define OUT goldy_dyn_scattered<float>(0)
-
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint out_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<float> out = goldy_scattered<float>(out_slot);
     // Row-major construction. Column 0 = (m[0][0], m[1][0], m[2][0]) = (1, 5, 9).
     float4x4 m = float4x4(
         1, 0, 0, 0,
@@ -947,9 +942,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         0, 0, 0, 1
     );
     float3 r = modelview_right(m);
-    OUT[0] = r.x;   // 1.0
-    OUT[1] = r.y;   // 5.0
-    OUT[2] = r.z;   // 9.0
+    out[0] = r.x;   // 1.0
+    out[1] = r.y;   // 5.0
+    out[2] = r.z;   // 9.0
 
     // center=(1,2,3), cam_right=(1,0,0), offset=5 → (6, 2, 3)
     float3 off = billboard_cylindrical_offset(
@@ -957,9 +952,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         float3(1.0, 0.0, 0.0),
         5.0
     );
-    OUT[3] = off.x;  // 6.0
-    OUT[4] = off.y;  // 2.0
-    OUT[5] = off.z;  // 3.0
+    out[3] = off.x;  // 6.0
+    out[4] = off.y;  // 2.0
+    out[5] = off.z;  // 3.0
 
     // Identity matrix: right = (1, 0, 0)
     float4x4 ident = float4x4(
@@ -969,9 +964,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         0, 0, 0, 1
     );
     float3 ident_right = modelview_right(ident);
-    OUT[6] = ident_right.x;  // 1.0
-    OUT[7] = ident_right.y;  // 0.0
-    OUT[8] = ident_right.z;  // 0.0
+    out[6] = ident_right.x;  // 1.0
+    out[7] = ident_right.y;  // 0.0
+    out[8] = ident_right.z;  // 0.0
 }
 "#;
 
@@ -1020,12 +1015,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 // ─── RWStructuredBuffer<T> typed variable assignment ──────────────────────────
 
-/// Verify `goldy_dyn_buf_ro` / `goldy_dyn_scattered` can be assigned to locals and used together.
-/// `goldy_dyn_buf_ro` returns `StructuredBuffer<T>` on DX12 (SRV) but `StorageBuffer<T>` on SPIRV/Metal;
-/// use `var` so Slang infers the correct type per target. Push constants: slot 0 = read buffer
-/// (`bindless_srv_index()` on DX12, same as `bindless_index()` on Vulkan), slot 1 = UAV.
+/// Verify `goldy_buf_ro` / `goldy_scattered` can be assigned to locals and used together.
+/// `goldy_buf_ro` returns `ReadOnlyBuffer<T>` (SRV on DX12, StorageBuffer on Vulkan/Metal).
+/// Push constants: slot 0 = read buffer (`bindless_srv_index()` on DX12), slot 1 = UAV.
 #[test]
-fn test_dyn_scattered_typed_variable_assignment() {
+fn test_scattered_typed_variable_assignment() {
     const SHADER: &str = r#"
 import goldy_exp;
 
@@ -1033,9 +1027,9 @@ struct Pair { uint a; uint b; };
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    ReadOnlyBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
-    StorageBuffer<Pair> output = goldy_dyn_scattered<Pair>(1);
+void cs_main(uniform uint input_slot, uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Pair> input   = goldy_buf_ro<Pair>(input_slot);
+    StorageBuffer<Pair>  output  = goldy_scattered<Pair>(output_slot);
     uint idx = id.x;
     if (idx >= 8) return;
     Pair p = input[idx];
@@ -1071,7 +1065,6 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // goldy_dyn_buf_ro uses SRV on DX12; goldy_dyn_scattered uses UAV
         pass.set_push_constants_raw(&[
             input_buf.bindless_srv_index().expect("srv"),
             output_buf.bindless_index().expect("uav"),
@@ -1110,15 +1103,14 @@ fn test_heap_overflow_allocation() {
     const LARGE_COPY_SHADER: &str = r#"
 import goldy_exp;
 
-#define INPUT  goldy_dyn_scattered<uint>(0)
-#define OUTPUT goldy_dyn_scattered<uint>(1)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint input_slot, uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> input  = goldy_scattered<uint>(input_slot);
+    StorageBuffer<uint> output = goldy_scattered<uint>(output_slot);
     uint idx = id.x;
     if (idx >= 2097152) return;  // 8 MB / 4 bytes = 2M elements
-    OUTPUT[idx] = INPUT[idx];
+    output[idx] = input[idx];
 }
 "#;
 
@@ -1176,8 +1168,8 @@ import goldy_exp;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(0);
+void cs_main(uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
+    RWTexture2D<float4> output = goldy_direct_spatial<float4>(output_slot);
     uint2 dims;
     output.GetDimensions(dims.x, dims.y);
     if (id.x < dims.x && id.y < dims.y) {
@@ -1241,12 +1233,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const DOUBLE_SHADER_COHERENT: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] * 2;
+void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x] = data[id.x] * 2;
 }
 "#;
 
@@ -1428,6 +1419,255 @@ fn test_cpu_coherent_cpu_write_read_roundtrip() {
             100 + i as u32,
             "element {i}: expected {} got {val}",
             100 + i
+        );
+    }
+}
+
+// ── uniform entry-point parameter tests ──────────────────────────────────────
+//
+// `uniform T param` in a `cs_main` signature maps directly to a push-constant
+// slot. The tests below exercise:
+//
+//  • uint round-trip (basic sanity)
+//  • zero value is preserved
+//  • maximum u32 (0xFFFF_FFFF) passes through unmodified
+//  • float (bit-for-bit round-trip of f32)
+//  • two independent scalar params in adjacent slots
+//  • scalar param after two buffer slots
+
+/// A `uniform uint` entry-point param round-trips a u32.
+#[test]
+fn test_uniform_param_uint_roundtrip() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+
+    const EXPECTED: u32 = 42;
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.set_push_constants_raw(&[heap_idx, EXPECTED]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: u32 = bytemuck::pod_read_unaligned(&raw);
+    assert_eq!(result, EXPECTED, "uniform uint round-trip failed");
+}
+
+/// Zero passes through a `uniform uint` parameter unchanged.
+#[test]
+fn test_uniform_param_uint_zero() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0xDEAD_BEEFu32; 1], DataAccess::Scattered).expect("out");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.set_push_constants_raw(&[heap_idx, 0u32]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: u32 = bytemuck::pod_read_unaligned(&raw);
+    assert_eq!(result, 0, "zero should pass through uniform uint param unchanged");
+}
+
+/// Maximum u32 (0xFFFF_FFFF) passes through a `uniform uint` parameter unchanged.
+#[test]
+fn test_uniform_param_uint_max() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.set_push_constants_raw(&[heap_idx, u32::MAX]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: u32 = bytemuck::pod_read_unaligned(&raw);
+    assert_eq!(result, u32::MAX, "u32::MAX should pass through uniform uint param unchanged");
+}
+
+/// A `uniform float` entry-point param reinterprets raw bits as a float.
+/// We push the bit-pattern of a float and expect the shader to write it back,
+/// then reinterpret on the CPU side to confirm identity.
+#[test]
+fn test_uniform_param_float_reinterpret() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uniform uint out_slot, uniform float value, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<float> out = goldy_scattered<float>(out_slot);
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+
+    let value: f32 = 3.14159;
+    let bits = value.to_bits();
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.set_push_constants_raw(&[heap_idx, bits]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result_bits: u32 = bytemuck::pod_read_unaligned(&raw);
+    let result_float = f32::from_bits(result_bits);
+    assert_eq!(
+        result_bits, bits,
+        "float bit pattern should survive uniform float param round-trip (got {result_float}, expected {value})"
+    );
+}
+
+/// Two independent `uniform uint` params in adjacent slots each retrieve their own value.
+#[test]
+fn test_uniform_two_independent_scalar_params() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uniform uint out_slot, uniform uint a, uniform uint b,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+    out[0] = a;
+    out[1] = b;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 2], DataAccess::Scattered).expect("out");
+
+    const A: u32 = 0xABCD;
+    const B: u32 = 0x1234;
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.set_push_constants_raw(&[heap_idx, A, B]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 8];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+    assert_eq!(result[0], A, "param a → out[0] mismatch");
+    assert_eq!(result[1], B, "param b → out[1] mismatch");
+}
+
+/// A scalar `uniform uint` param after two buffer-slot params correctly
+/// retrieves its value from the third push-constant slot.
+#[test]
+fn test_uniform_scalar_after_two_buffer_params() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uniform uint in_slot, uniform uint out_slot, uniform uint offset,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> inp = goldy_scattered<uint>(in_slot);
+    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+    out[id.x] = inp[id.x] + offset;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    const N: usize = 64;
+    let input: Vec<u32> = (0..N as u32).collect();
+    let inp = Buffer::with_data(&device, &input, DataAccess::Scattered).expect("inp");
+    let out = Buffer::with_data(&device, &[0u32; N], DataAccess::Scattered).expect("out");
+
+    const OFFSET: u32 = 100;
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let inp_idx = inp.bindless_index().unwrap();
+        let out_idx = out.bindless_index().unwrap();
+        pass.set_push_constants_raw(&[inp_idx, out_idx, OFFSET]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; N * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            i as u32 + OFFSET,
+            "element {i}: expected {}, got {val}",
+            i as u32 + OFFSET
         );
     }
 }

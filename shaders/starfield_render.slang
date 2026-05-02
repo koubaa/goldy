@@ -15,9 +15,6 @@ struct Star {
     float star_type;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[stars_slot])
-#define STARS goldy_dyn_scattered<Star>(0)
-
 struct VSOutput {
     float4 position : SV_Position;
     float4 color : COLOR;
@@ -31,7 +28,8 @@ static const float2 quadVerts[6] = {
 };
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+VSOutput vs_main(uniform uint stars_slot, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+    StorageBuffer<Star> STARS = goldy_scattered<Star>(stars_slot);
     VSOutput output;
     
     Star s = STARS[instanceID];

@@ -32,12 +32,12 @@ use mtl::{
 pub const ARGUMENT_BUFFER_SIZE: u64 = 16 * 1024 * 8; // 8 bytes per resource ID
 
 /// Buffer slot for push constants (resource indices) in shaders.
-/// Slang assigns gGoldyDynamic to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
+/// Slang assigns uniform entry-point params to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
 pub const PUSH_CONSTANTS_SLOT: u64 = 1;
 
 /// Starting Metal buffer index for vertex attributes.
-/// Slots 0 and 1 are reserved for the argument buffer (gGoldy) and push constants
-/// (gGoldyDynamic). Vertex data must use higher indices to avoid collisions.
+/// Slots 0 and 1 are reserved for the argument buffer (gGoldy) and push constants.
+/// Vertex data must use higher indices to avoid collisions.
 pub const VERTEX_BUFFER_START_SLOT: u64 = 2;
 
 /// Maximum number of resource indices in push constants
@@ -466,7 +466,7 @@ impl ResourceRegistry {
     /// If the local index would exceed [`MAX_RESOURCES_PER_CATEGORY`], the
     /// returned slot would silently bleed into the next category's
     /// argument-buffer region (uniform buffers at 64-127). The shader's
-    /// `goldy_dyn_buf_ro<T>(slot)` would then read undefined / zero bytes
+    /// `goldy_buf_ro<T>(slot)` would then read undefined / zero bytes
     /// from a wrong heap entry — observed in ekrano as binning's
     /// `config.lines_size == 0` and a spurious `STAGE_FLATTEN` overflow.
     /// Failing fast surfaces the leak instead of producing corrupt frames.
@@ -757,11 +757,6 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
-    /// Per-push-constant-slot category expected by the fragment/vertex shader,
-    /// inferred from `goldy_dyn_*(N)` calls. Empty disables validation.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -772,13 +767,6 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: MTLComputePipelineState,
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
-    /// Per-push-constant-slot category expected by the compute shader, inferred
-    /// from the shader's `goldy_dyn_*(N)` calls during Slang compile. Empty or
-    /// all-`None` disables validation. See
-    /// [`crate::slang::ShaderReflection::push_constant_categories`].
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     /// Defaults to `"cs_main"` for compute pipelines.
     pub shader_debug_name: String,

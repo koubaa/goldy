@@ -168,7 +168,7 @@ pub(super) fn create(
     }
 
     // For storage images (Direct access): create UAV so compute shaders can write via RWTexture2D.
-    // bindless_offset must point to UAV for goldy_dyn_direct_spatial.
+    // bindless_offset must point to UAV for goldy_direct_spatial.
     let bindless_offset = if is_storage {
         let uav_offset = logical_device
             .resource_registry

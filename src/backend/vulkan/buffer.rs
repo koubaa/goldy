@@ -4,7 +4,7 @@ use super::types::{self, BufferState};
 use super::utils::find_memory_type;
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::DataAccess;
-use crate::types::{BindlessCategory, BindlessHandle, BufferFlags};
+use crate::types::BufferFlags;
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -564,30 +564,6 @@ pub(super) fn bindless_index(
     buffer_handle: BufferHandle,
 ) -> Option<u32> {
     buffers.get(&buffer_handle).and_then(|b| b.bindless_index)
-}
-
-/// Effective structured-buffer element stride for `GOLDY_VALIDATE_BUFFER_STRIDES` checks.
-pub(super) fn element_stride_for_bindless_handle(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    handle: BindlessHandle,
-) -> Option<u32> {
-    let idx = handle.index();
-    for b in buffers.values() {
-        match handle.category() {
-            BindlessCategory::Scattered if !b.is_storage => continue,
-            BindlessCategory::Broadcast if b.is_storage => continue,
-            BindlessCategory::Scattered | BindlessCategory::Broadcast => {}
-            _ => continue,
-        }
-        if b.bindless_index != Some(idx) {
-            continue;
-        }
-        if b.is_storage {
-            return Some(b.element_stride.unwrap_or(4));
-        }
-        return b.element_stride;
-    }
-    None
 }
 
 /// Read buffer contents to CPU. Copies from offset 0 for length output.len().

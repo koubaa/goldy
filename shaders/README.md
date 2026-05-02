@@ -191,7 +191,7 @@ device.register_library(ShaderLibrary::from_source("myutils", r#"
 
 | File | Description | Uses Module |
 |------|-------------|-------------|
-| `plasma.slang` | Classic demoscene plasma (uses `goldy_dyn_broadcast<T>()`) | ✓ `import goldy_exp` |
+| `plasma.slang` | Classic demoscene plasma (uses `goldy_broadcast<T>()`) | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
 | `gradient.slang` | Animated color gradient | ✓ `import goldy_exp` |
 | `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
@@ -301,7 +301,10 @@ Slang's `reinterpret<>` handles buffer types specially, avoiding the problematic
 
 ### Cross-Platform Resource Binding
 
-Goldy provides **unified access functions** that work across all platforms:
+Goldy provides **unified access functions** that work across all platforms. Resources are
+addressed by **bindless slot indices** — small integers passed as `uniform uint` parameters
+directly in the entry-point signature. Slang maps these to push constants (SPIR-V), root
+constants (DX12), and argument-buffer entries (Metal) automatically.
 
 ```slang
 import goldy_exp;
@@ -309,12 +312,18 @@ import goldy_exp;
 struct TimeUniforms { float time; };
 
 [shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    // Unified access - works on SPIRV, DX12, and Metal!
-    // Rust side: pass.set_push_constants(&[uniform_buffer]);
-    float t = goldy_dyn_broadcast<TimeUniforms>(0).time;
+float4 fs_main(uniform uint uniforms_slot, FullscreenVarying input) : SV_Target {
+    // uniforms_slot is a bindless heap index sent from Rust via set_push_constants_raw.
+    float t = goldy_broadcast<TimeUniforms>(uniforms_slot).time;
     return float4(rainbow(t), 1.0);
 }
+```
+
+On the Rust side, push the heap index with:
+
+```rust
+let idx = uniform_buffer.bindless_index().unwrap();
+pass.set_push_constants_raw(&[idx]);
 ```
 
 #### Access Pattern Functions
@@ -323,15 +332,40 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 |----------|----------------|---------|
 | `goldy_broadcast<T>(slot)` | All threads read same address | Uniforms, material params |
 | `goldy_scattered<T>(slot)` | Any thread, any address, read/write | Particle buffers, compute storage |
-| `goldy_dyn_buf_ro<T>(slot)` | Any thread, any address, read-only | Input buffers (hardware read cache) |
+| `goldy_buf_ro<T>(slot)` | Read-only buffer (SRV / read cache) | Input buffers |
+| `goldy_byte_address(slot)` | Untyped byte-address buffer | Raw byte access |
 | `goldy_interpolated<T>(slot)` | Hardware-filtered texture reads | Material textures |
 | `goldy_direct_spatial<T>(slot)` | Unfiltered read/write texture | Compute output, framebuffer effects |
 | `goldy_filter(slot)` | Sampler state for filtering | Texture sampling config |
 
+All functions accept a `uint slot` — the bindless heap index, received as a `uniform uint`
+entry-point parameter.
+
+#### Per-dispatch Scalars
+
+Any `uniform` parameter whose type is not a heap index (e.g. a raw offset or count) is passed
+in a subsequent push-constant slot. No `goldy_*` call is needed — just declare the parameter:
+
+```slang
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uniform uint data_slot, uniform uint base, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x + base] += 1;
+}
+```
+
+```rust
+// Rust: [heap_index, base_offset]
+pass.set_push_constants_raw(&[data_buf.bindless_index().unwrap(), base_offset]);
+```
+
 **Platform support:**
-- **SPIRV**: Routes to Goldy's custom binding layout (bindings 0-4)
-- **DX12**: Uses `DescriptorHandle<T>` → `ResourceDescriptorHeap`
-- **Metal**: Uses `ParameterBlock` with typed resource arrays (Tier 2 required)
+- **SPIR-V**: `uniform` entry-point params → push constants (std430 layout, offset 0)
+- **DX12**: `uniform` entry-point params → root constants at `b0, space0`
+- **Metal**: Slang wraps params in an `EntryPointParams` struct at `[[buffer(1)]]`
 
 **See `plasma.slang` and `test_access_functions.slang` for complete examples.**
 
@@ -390,15 +424,11 @@ This is transparent to shader code — just `import goldy_exp` and use `Descript
    - Use functions instead of macros (functions export, macros don't)
    - Don't use guards in modules that are only imported when needed
 
-2. **Push constants require specific syntax** for Vulkan SPIR-V:
+2. **Push constants** are expressed as `uniform` entry-point parameters — no manual
+   `[[vk::push_constant]]` declaration is needed:
    ```slang
-   // WRONG - cbuffer doesn't generate push constants
-   [[vk::push_constant]]
-   cbuffer MyData { ... };
-   
-   // CORRECT - struct + ConstantBuffer pattern
-   struct MyDataBlock { ... };
-   [[vk::push_constant]] ConstantBuffer<MyDataBlock> myData;
+   // Preferred: Slang maps uniform params to push constants on all backends
+   void cs_main(uniform uint slot, uint3 id : SV_DispatchThreadID) { ... }
    ```
 
 3. **DX12: Use named indices, not arrays** in cbuffers for buffer indices:

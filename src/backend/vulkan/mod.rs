@@ -33,48 +33,6 @@ use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 
-/// Collect per-push-constant-slot categories for a render pipeline by looking
-/// up reflection data on the bound vertex/fragment shaders. Fragment shader
-/// expectations take precedence (that's where `goldy_dyn_*` is typically used);
-/// vertex shader data is used as a fallback when fragment has none.
-fn render_push_constant_expectations(
-    shaders: &HashMap<ShaderHandle, ShaderState>,
-    vertex_shader: ShaderHandle,
-    fragment_shader: ShaderHandle,
-) -> (
-    Vec<Option<crate::types::BindlessCategory>>,
-    Vec<Option<u32>>,
-    String,
-) {
-    let fs = shaders
-        .get(&fragment_shader)
-        .and_then(|s| s.reflection.as_ref());
-    let fs_cats = fs
-        .map(|r| r.push_constant_categories.clone())
-        .unwrap_or_default();
-    let fs_strides = fs
-        .map(|r| r.push_constant_buffer_strides.clone())
-        .unwrap_or_default();
-    let (cats, strides) = if !fs_cats.is_empty() {
-        (fs_cats, fs_strides)
-    } else {
-        let vs = shaders
-            .get(&vertex_shader)
-            .and_then(|s| s.reflection.as_ref());
-        (
-            vs.map(|r| r.push_constant_categories.clone())
-                .unwrap_or_default(),
-            vs.map(|r| r.push_constant_buffer_strides.clone())
-                .unwrap_or_default(),
-        )
-    };
-    (
-        cats,
-        strides,
-        format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})"),
-    )
-}
-
 /// Vulkan backend.
 pub struct VulkanBackend {
     state: VulkanState,
@@ -478,8 +436,8 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
-            render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
+        let shader_debug_name =
+            format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
         pipeline::create(
             &self.state.devices,
@@ -491,8 +449,6 @@ impl GpuBackend for VulkanBackend {
             vertex_layout,
             topology,
             target_format,
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
         )
     }
@@ -709,8 +665,8 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
-            render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
+        let shader_debug_name =
+            format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
         pipeline::create_with_depth(
             &self.state.devices,
@@ -723,8 +679,6 @@ impl GpuBackend for VulkanBackend {
             topology,
             target_format,
             depth_stencil,
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
         )
     }
@@ -874,21 +828,7 @@ impl GpuBackend for VulkanBackend {
         let cs_module =
             self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
-        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) = self
-            .state
-            .shaders
-            .get(&compute_shader)
-            .map(|s| {
-                let refl = s.reflection.as_ref();
-                let cats = refl
-                    .map(|r| r.push_constant_categories.clone())
-                    .unwrap_or_default();
-                let strides = refl
-                    .map(|r| r.push_constant_buffer_strides.clone())
-                    .unwrap_or_default();
-                (cats, strides, format!("compute_shader#{compute_shader}"))
-            })
-            .unwrap_or_default();
+        let shader_debug_name = format!("compute_shader#{compute_shader}");
 
         compute::create(
             &self.state.devices,
@@ -896,8 +836,6 @@ impl GpuBackend for VulkanBackend {
             &mut self.state.next_compute_pipeline_handle,
             device_handle,
             cs_module,
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
         )
     }

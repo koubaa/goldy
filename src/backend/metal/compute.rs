@@ -53,17 +53,6 @@ pub(super) fn create(
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("Failed to create compute pipeline: {}", e))?;
 
-    let (push_constant_categories, push_constant_buffer_strides) = shader
-        .reflection
-        .as_ref()
-        .map(|r| {
-            (
-                r.push_constant_categories.clone(),
-                r.push_constant_buffer_strides.clone(),
-            )
-        })
-        .unwrap_or_default();
-
     let handle = state.next_compute_pipeline_handle;
     state.next_compute_pipeline_handle += 1;
 
@@ -73,8 +62,6 @@ pub(super) fn create(
             device_handle,
             pipeline,
             workgroup_size,
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name: "cs_main".to_string(),
         },
     );
@@ -228,19 +215,6 @@ fn record_commands_to_buffer(
             }
             ComputeCommand::SetPushConstantsTyped { handles } => {
                 ensure_compute!();
-                let pipeline = current_pipeline
-                    .context("SetPushConstantsTyped without a bound compute pipeline")?;
-                super::super::validate_typed_push_constants(
-                    handles,
-                    &pipeline.push_constant_categories,
-                    &pipeline.shader_debug_name,
-                )?;
-                super::super::validate_typed_push_constant_buffer_strides(
-                    handles,
-                    &pipeline.push_constant_buffer_strides,
-                    &pipeline.shader_debug_name,
-                    |h| buffer::element_stride_for_bindless_handle(state, h),
-                )?;
                 let mut indices = BindlessIndices::default();
                 for (i, handle) in handles.iter().enumerate() {
                     if i >= MAX_PUSH_CONSTANT_INDICES {

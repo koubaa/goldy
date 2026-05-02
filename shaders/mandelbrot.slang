@@ -9,9 +9,6 @@ struct ViewUniforms {
     float _padding;
 };
 
-#define CENTER goldy_dyn_broadcast<ViewUniforms>(0).center
-#define ZOOM goldy_dyn_broadcast<ViewUniforms>(0).zoom
-
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
     FullscreenVarying output;
@@ -28,8 +25,9 @@ FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
 }
 
 [shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    float2 c = CENTER + (input.uv - 0.5) * 4.0 / ZOOM;
+float4 fs_main(uniform uint view_slot, FullscreenVarying input) : SV_Target {
+    ViewUniforms view = goldy_broadcast<ViewUniforms>(view_slot);
+    float2 c = view.center + (input.uv - 0.5) * 4.0 / view.zoom;
     float2 z = float2(0.0, 0.0);
     uint i = 0;
     const uint max_iter = 256;

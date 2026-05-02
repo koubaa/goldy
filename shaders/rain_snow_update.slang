@@ -19,10 +19,6 @@ struct ParticleParams {
     float _pad2;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot, params_slot])
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-#define PARAMS goldy_dyn_broadcast<ParticleParams>(1)
-
 static const uint NUM_PARTICLES = 1000;
 
 float hash(float p) {
@@ -31,7 +27,10 @@ float hash(float p) {
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint particles_slot, uniform uint params_slot,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Particle> PARTICLES = goldy_scattered<Particle>(particles_slot);
+    ParticleParams PARAMS = goldy_broadcast<ParticleParams>(params_slot);
     uint idx = id.x;
     
     if (idx >= NUM_PARTICLES) return;

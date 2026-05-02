@@ -12,13 +12,12 @@ use goldy::{
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
 
-#define INPUT  goldy_dyn_scattered<uint>(0)
-#define OUTPUT goldy_dyn_scattered<uint>(1)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    OUTPUT[id.x] = INPUT[id.x] * 2;
+void cs_main(uniform uint input_slot, uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> input  = goldy_scattered<uint>(input_slot);
+    StorageBuffer<uint> output = goldy_scattered<uint>(output_slot);
+    output[id.x] = input[id.x] * 2;
 }
 "#;
 
@@ -26,12 +25,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const ADD_TEN_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] + 10;
+void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x] = data[id.x] + 10;
 }
 "#;
 
@@ -39,12 +37,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const FILL_42_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = 42;
+void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x] = 42;
 }
 "#;
 
@@ -52,12 +49,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const FILL_99_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = 99;
+void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x] = 99;
 }
 "#;
 
@@ -65,14 +61,14 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const SUM_SHADER: &str = r#"
 import goldy_exp;
 
-#define A   goldy_dyn_scattered<uint>(0)
-#define B   goldy_dyn_scattered<uint>(1)
-#define OUT goldy_dyn_scattered<uint>(2)
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    OUT[id.x] = A[id.x] + B[id.x];
+void cs_main(uniform uint a_slot, uniform uint b_slot, uniform uint out_slot,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> a   = goldy_scattered<uint>(a_slot);
+    StorageBuffer<uint> b   = goldy_scattered<uint>(b_slot);
+    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+    out[id.x] = a[id.x] + b[id.x];
 }
 "#;
 
@@ -206,11 +202,11 @@ fn graph_diamond_dependency() {
 
     let fill_shader_src = r#"
 import goldy_exp;
-#define DATA goldy_dyn_scattered<uint>(0)
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = id.x;
+void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x] = id.x;
 }
 "#;
     let fill_shader = ShaderModule::from_slang(&device, fill_shader_src).unwrap();

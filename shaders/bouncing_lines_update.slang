@@ -14,14 +14,12 @@ struct Line {
     uint _pad3;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[lines_slot])
-#define LINES goldy_dyn_scattered<Line>(0)
-
 static const uint NUM_LINES = 20;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint lines_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Line> LINES = goldy_scattered<Line>(lines_slot);
     uint idx = id.x;
     
     if (idx >= NUM_LINES) return;

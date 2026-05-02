@@ -3,7 +3,6 @@
 //! This module contains `record_render_commands` which is used by both
 //! `render_to_target` and `surface_render` to avoid code duplication.
 
-use super::buffer;
 use super::types::{self, BindlessIndices, MAX_PUSH_CONSTANT_INDICES};
 use super::utils::index_format_to_vk;
 use super::{BufferHandle, PipelineHandle, RenderCommand};
@@ -120,17 +119,6 @@ pub(super) fn record(
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
-                    crate::backend::validate_typed_push_constants(
-                        typed_handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                    crate::backend::validate_typed_push_constant_buffer_strides(
-                        typed_handles,
-                        &pipeline.push_constant_buffer_strides,
-                        &pipeline.shader_debug_name,
-                        |h| buffer::element_stride_for_bindless_handle(buffers, h),
-                    )?;
                     let mut indices = BindlessIndices::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
                         if i >= MAX_PUSH_CONSTANT_INDICES {

@@ -16,7 +16,21 @@ use super::super::{
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
+
+/// Newtype around [`HANDLE`] that is `Send + Sync`.
+///
+/// Win32 kernel-object handles (e.g. the DXGI frame-latency waitable) are
+/// valid to use from any thread; the raw-pointer representation is purely an
+/// ABI artifact and is never dereferenced by user code.
+#[derive(Clone, Copy)]
+pub(crate) struct SendSyncHandle(pub HANDLE);
+// Safety: Win32 kernel handles identify kernel objects by integer value and
+// carry no thread-affinity; `WaitForSingleObject` / `CloseHandle` are safe to
+// call from any thread on the same handle.
+unsafe impl Send for SendSyncHandle {}
+unsafe impl Sync for SendSyncHandle {}
 
 /// Maximum number of descriptors in the CBV/SRV/UAV heap for bindless rendering
 #[allow(dead_code)]
@@ -417,11 +431,6 @@ pub(crate) struct PipelineState {
     pub topology: crate::types::PrimitiveTopology,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound shader(s). Empty disables validation.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -434,11 +443,6 @@ pub(crate) struct ComputePipelineState {
     pub root_signature: Direct3D12::ID3D12RootSignature,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound compute shader. Empty disables validation.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -537,6 +541,11 @@ pub(crate) struct SurfaceState {
     pub compute_scratch_textures: Vec<Option<super::TextureHandle>>,
     /// Presentation mode (vsync strategy).
     pub present_mode: crate::types::PresentMode,
+    /// DXGI frame-latency waitable object handle.
+    /// Acquired once at swapchain creation via `IDXGISwapChain2::GetFrameLatencyWaitableObject`;
+    /// closed in `surface::destroy`.  `acquire()` calls `WaitForSingleObject` on this handle
+    /// to block until DXGI is ready to accept a new frame, replacing the per-present CPU stall.
+    pub frame_latency_waitable: Option<SendSyncHandle>,
 }
 
 /// Consolidated DX12 backend state.

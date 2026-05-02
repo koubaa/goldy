@@ -1,7 +1,6 @@
 //! Compute pipeline and dispatch logic.
 
 use super::barriers;
-use super::buffer;
 use super::shader;
 use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
@@ -77,17 +76,6 @@ pub(super) fn create(
     let cs_bytecode =
         shader::ensure_stage_compiled(state, compute_shader, crate::slang::SlangStage::Compute)?;
 
-    let (push_constant_categories, push_constant_buffer_strides) = state
-        .shaders
-        .get(&compute_shader)
-        .and_then(|s| s.reflection.as_ref())
-        .map(|r| {
-            (
-                r.push_constant_categories.clone(),
-                r.push_constant_buffer_strides.clone(),
-            )
-        })
-        .unwrap_or_default();
     let shader_debug_name = format!("compute_shader#{compute_shader}");
 
     let logical_device = state
@@ -130,8 +118,6 @@ pub(super) fn create(
             pipeline_state,
             root_signature,
             parameter_block_layouts: Vec::new(),
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
         },
     );
@@ -264,7 +250,6 @@ pub(super) fn submit(
         ]);
     }
 
-    let mut current_pipeline_handle: Option<ComputePipelineHandle> = None;
     let mut belt_idx = 0usize;
 
     // Process commands
@@ -276,7 +261,6 @@ pub(super) fn submit(
                         command_list.SetComputeRootSignature(&pipeline_state.root_signature);
                         command_list.SetPipelineState(&pipeline_state.pipeline_state);
                     }
-                    current_pipeline_handle = Some(*handle);
                 }
             }
             ComputeCommand::SetPushConstants { buffers } => {
@@ -287,7 +271,7 @@ pub(super) fn submit(
                         break;
                     }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
-                        // Compute shaders use goldy_dyn_scattered() which returns RWStructuredBuffer.
+                        // Compute shaders use goldy_scattered() which returns RWStructuredBuffer.
                         // RWStructuredBuffer requires UAV descriptors, not SRV.
                         // Always use bindless_offset (UAV) for storage buffers in compute shaders.
                         // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
@@ -338,21 +322,6 @@ pub(super) fn submit(
             ComputeCommand::SetPushConstantsTyped {
                 handles: typed_handles,
             } => {
-                if let Some(pipeline) =
-                    current_pipeline_handle.and_then(|h| state.compute_pipelines.get(&h))
-                {
-                    crate::backend::validate_typed_push_constants(
-                        typed_handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                    crate::backend::validate_typed_push_constant_buffer_strides(
-                        typed_handles,
-                        &pipeline.push_constant_buffer_strides,
-                        &pipeline.shader_debug_name,
-                        |h| buffer::element_stride_for_bindless_handle(state, h),
-                    )?;
-                }
                 let mut indices = types::BindlessIndices::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
                     if i >= types::MAX_ROOT_CONSTANT_INDICES {

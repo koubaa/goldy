@@ -189,10 +189,9 @@ impl<'a> ComputePass<'a> {
 
     /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
     ///
-    /// **Prefer [`ComputePass::set_push_constants_typed`]** for new code — the
-    /// raw form skips per-slot category validation, so binding a uniform-buffer
-    /// index into a slot the shader reads via `goldy_dyn_buf_ro` will silently
-    /// produce garbage reads rather than erroring at dispatch time.
+    /// Use this when you need to pass texture or sampler slot indices, or when
+    /// constructing push constants manually. The indices must match the order of
+    /// `uniform uint` parameters declared in the shader's entry point.
     ///
     /// # Example
     /// ```ignore
@@ -210,15 +209,9 @@ impl<'a> ComputePass<'a> {
     /// Set push constants from typed [`BindlessHandle`]s.
     ///
     /// Each handle carries both the raw index and the resource's
-    /// [`crate::types::BindlessCategory`]. At dispatch time
-    /// the backend cross-checks these against the bound shader's reflection
-    /// and returns an error if any slot's category disagrees with how the
-    /// shader reads it (e.g. binding a
-    /// [`BindlessCategory::Broadcast`](crate::types::BindlessCategory::Broadcast)
-    /// handle to a slot accessed via `goldy_dyn_buf_ro`, which reads the
-    /// storage-buffer pool). When the shader provides no expectation for a slot
-    /// (e.g. computed slot indices that regex analysis can't resolve),
-    /// validation is skipped for that slot.
+    /// [`crate::types::BindlessCategory`]. The indices are extracted in order and
+    /// passed to the shader's `uniform uint` entry-point parameters in the
+    /// same order as this slice.
     ///
     /// # Example
     /// ```ignore

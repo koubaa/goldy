@@ -7,16 +7,14 @@ struct TimeUniforms {
     float time;
 };
 
-#define TIME goldy_dyn_broadcast<TimeUniforms>(0).time
-
 [shader("vertex")]
 FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
     return vs_fullscreen_triangle(vertex_id);
 }
 
 [shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    float t = TIME;
+float4 fs_main(uniform uint uniforms_slot, FullscreenVarying input) : SV_Target {
+    float t = goldy_broadcast<TimeUniforms>(uniforms_slot).time;
     
     // Animated wave distortion
     float2 uv = input.uv;

@@ -9,16 +9,14 @@ struct QuadInstance {
     float4 color;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[instances_slot])
-#define INSTANCES goldy_dyn_scattered<QuadInstance>(0)
-
 struct VSOutput {
     float4 position : SV_Position;
     float4 color : COLOR;
 };
 
 [shader("vertex")]
-VSOutput vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+VSOutput vs_main(uniform uint instances_slot, uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+    StorageBuffer<QuadInstance> INSTANCES = goldy_scattered<QuadInstance>(instances_slot);
     VSOutput output;
     
     QuadInstance inst = INSTANCES[instance_id];

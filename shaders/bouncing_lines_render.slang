@@ -14,9 +14,6 @@ struct Line {
     uint _pad3;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[lines_slot])
-#define LINES goldy_dyn_scattered<Line>(0)
-
 struct VSOutput {
     float4 position : SV_Position;
     float4 color : COLOR;
@@ -32,7 +29,8 @@ static const float4 colors[6] = {
 };
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+VSOutput vs_main(uniform uint lines_slot, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+    StorageBuffer<Line> LINES = goldy_scattered<Line>(lines_slot);
     VSOutput output;
     
     Line line = LINES[instanceID];

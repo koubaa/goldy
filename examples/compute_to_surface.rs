@@ -42,11 +42,11 @@ struct Uniforms {
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void cs_main(uint3 tid : SV_DispatchThreadID) {
-    ReadOnlyBuffer<Uniforms> ub = goldy_dyn_buf_ro<Uniforms>(0);
+void cs_main(uniform uint uniforms_slot, uniform uint output_slot, uint3 tid : SV_DispatchThreadID) {
+    ReadOnlyBuffer<Uniforms> ub = goldy_buf_ro<Uniforms>(uniforms_slot);
     Uniforms u = ub[0];
 
-    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(1);
+    RWTexture2D<float4> output = goldy_direct_spatial<float4>(output_slot);
 
     if (tid.x >= u.width || tid.y >= u.height)
         return;
@@ -247,11 +247,10 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    // The shader accesses the uniform buffer via `goldy_dyn_buf_ro<Uniforms>(0)` which
-    // maps to `StructuredBuffer<Uniforms>` — an SRV on DX12. `bindless_srv_handle()`
-    // returns the SRV index on DX12 (distinct from the UAV index) and falls back to
-    // the unified storage-buffer index on Vulkan / Metal, so it's correct on every
-    // backend.
+    // The shader reads the uniform buffer via `goldy_buf_ro<Uniforms>(uniforms_slot)`,
+    // which maps to an SRV (read-only) on DX12. Use `bindless_srv_handle()` so the
+    // index matches the SRV heap on DX12, while on Vulkan/Metal it falls back to
+    // the unified storage-buffer index.
     let uniform_handle = state
         .uniform_buffer
         .bindless_srv_handle()

@@ -23,6 +23,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
+/// Keep vertex buffers alive until the GPU is ~2 frames ahead (matches swapchain / in-flight work).
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
@@ -34,6 +37,8 @@ struct App {
 
     start_time: Instant,
     clock_state: ClockState,
+    /// Retain dynamic vertex buffers until they are no longer referenced by in-flight submits.
+    vertex_buffers: Vec<Buffer>,
 }
 
 impl App {
@@ -48,6 +53,7 @@ impl App {
             surface: None,
             start_time: Instant::now(),
             clock_state: ClockState::default(),
+            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
@@ -120,6 +126,9 @@ impl App {
 
         // Render directly to surface
         let frame = surface.acquire()?;
+        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
+            self.vertex_buffers.remove(0);
+        }
 
         let mut encoder = CommandEncoder::new();
         {
@@ -132,6 +141,7 @@ impl App {
 
         frame.render(encoder)?;
         frame.present()?;
+        self.vertex_buffers.push(vertex_buffer);
 
         Ok(())
     }

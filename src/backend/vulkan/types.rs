@@ -386,7 +386,8 @@ pub(crate) struct BufferState {
     /// Whether this is a storage buffer (vs uniform buffer)
     #[allow(dead_code)]
     pub is_storage: bool,
-    /// Structured-buffer / uniform element stride from buffer creation (for optional validation).
+    /// Structured-buffer / uniform element stride from buffer creation (retained for future validation).
+    #[allow(dead_code)]
     pub element_stride: Option<u32>,
     /// HOST_VISIBLE staging buffer for DEVICE_LOCAL storage buffers (CPU upload/readback)
     pub staging_buffer: Option<vk::Buffer>,
@@ -426,6 +427,7 @@ pub(crate) struct ShaderState {
 }
 
 /// Graphics pipeline state.
+#[allow(dead_code)]
 pub(crate) struct PipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
@@ -433,18 +435,13 @@ pub(crate) struct PipelineState {
     /// Whether this pipeline owns its layout (false when using bindless_pipeline_layout)
     pub owns_layout: bool,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
-    #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound shader(s). Empty disables validation.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
-    /// Human-readable identifier used in category-mismatch error messages.
+    /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
+#[allow(dead_code)]
 pub(crate) struct ComputePipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
@@ -452,14 +449,8 @@ pub(crate) struct ComputePipelineState {
     /// Whether this pipeline owns its layout (false when using bindless_pipeline_layout)
     pub owns_layout: bool,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
-    #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound compute shader. Empty disables validation.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
-    /// Human-readable identifier used in category-mismatch error messages.
+    /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }
 

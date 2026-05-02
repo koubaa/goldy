@@ -657,8 +657,6 @@ fn test_render_target_bindless_buffer_read() {
     let shader_source = r#"
 import goldy_exp;
 
-#define CELLS goldy_dyn_scattered<uint>(0)
-
 static const float2 positions[3] = {
     float2(-1, -1),
     float2( 3, -1),
@@ -685,8 +683,9 @@ VSOut vs_main(uint id : SV_VertexID) {
 }
 
 [shader("fragment")]
-float4 fs_main(VSOut i) : SV_Target {
-    uint val = CELLS[0];
+float4 fs_main(uniform uint cells_slot, VSOut i) : SV_Target {
+    StorageBuffer<uint> cells = goldy_scattered<uint>(cells_slot);
+    uint val = cells[0];
     if (val == 1u) {
         return float4(0.2, 0.9, 0.3, 1.0);
     } else {

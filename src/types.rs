@@ -142,9 +142,7 @@ pub enum DataAccess {
     /// Any thread, any address, read/write. No coherence assumptions.
     ///
     /// Structured-buffer views use the buffer's recorded **element stride** (from
-    /// [`crate::Buffer::with_data`], [`crate::Buffer::with_bytes_stride`], etc.). A stride
-    /// that does not match the shader's `T` in `goldy_dyn_*<T>` can read incorrectly on
-    /// some backends without error.
+    /// [`crate::Buffer::with_data`], [`crate::Buffer::with_bytes_stride`], etc.).
     ///
     /// Maps to storage buffers (StructuredBuffer, RWStructuredBuffer in shaders).
     #[default]
@@ -168,16 +166,16 @@ pub enum DataAccess {
 /// other — see [`BindlessHandle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindlessCategory {
-    /// Storage-buffer slot. Consumed by `goldy_dyn_scattered<T>` / `goldy_dyn_buf_ro<T>`
+    /// Storage-buffer slot. Used with `goldy_scattered<T>` / `goldy_buf_ro<T>`
     /// (both shader functions index the same pool).
     Scattered,
-    /// Uniform / constant-buffer slot. Consumed by `goldy_dyn_broadcast<T>`.
+    /// Uniform / constant-buffer slot. Used with `goldy_broadcast<T>`.
     Broadcast,
-    /// Storage-image (writable texture) slot. Consumed by `goldy_dyn_direct_spatial<T>`.
+    /// Storage-image (writable texture) slot. Used with `goldy_direct_spatial<T>`.
     StorageImage,
-    /// Sampled-texture slot. Consumed by `goldy_dyn_interpolated<T>`.
+    /// Sampled-texture slot. Used with `goldy_interpolated<T>`.
     Texture,
-    /// Sampler slot. Consumed by `goldy_dyn_filter`.
+    /// Sampler slot. Used with `goldy_filter`.
     Sampler,
 }
 
@@ -227,7 +225,7 @@ impl From<SpatialAccess> for BindlessCategory {
 /// which returns one of these. Push-constant setters that accept `BindlessHandle`
 /// can be validated against the shader's reflection: a
 /// [`BindlessCategory::Broadcast`] handle bound to a slot the shader reads
-/// through `goldy_dyn_buf_ro` (`Scattered`) is a type error caught at dispatch
+/// through `goldy_buf_ro` (`Scattered`) is a type error caught at dispatch
 /// time rather than silently producing a garbage read.
 ///
 /// The raw u32 index is recoverable via [`BindlessHandle::index`] — the typed

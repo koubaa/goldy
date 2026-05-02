@@ -21,10 +21,6 @@ struct StarfieldParams {
     float _pad2;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[stars_slot, params_slot])
-#define STARS goldy_dyn_scattered<Star>(0)
-#define PARAMS goldy_dyn_broadcast<StarfieldParams>(1)
-
 static const uint NUM_STARS = 500;
 
 float hash(float p) {
@@ -33,7 +29,10 @@ float hash(float p) {
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint stars_slot, uniform uint params_slot,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Star> STARS = goldy_scattered<Star>(stars_slot);
+    StarfieldParams PARAMS = goldy_broadcast<StarfieldParams>(params_slot);
     uint idx = id.x;
     
     if (idx >= NUM_STARS) return;
@@ -49,11 +48,11 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         s.z = 1.0;
         
         float type_roll = hash(seed + 200.0);
-        if (type_roll < 0.70) {
+        if (type_roll < 0.6) {
             s.star_type = STAR_TYPE_NORMAL;
-        } else if (type_roll < 0.85) {
+        } else if (type_roll < 0.8) {
             s.star_type = STAR_TYPE_GALAXY;
-        } else if (type_roll < 0.90) {
+        } else if (type_roll < 0.95) {
             s.star_type = STAR_TYPE_QUASAR;
         } else {
             s.star_type = STAR_TYPE_WHITE_DWARF;

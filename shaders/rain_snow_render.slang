@@ -19,10 +19,6 @@ struct ParticleParams {
     float _pad2;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot, params_slot])
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-#define PARAMS goldy_dyn_broadcast<ParticleParams>(1)
-
 struct VSOutput {
     float4 position : SV_Position;
     float4 color : COLOR;
@@ -39,7 +35,10 @@ static const float2 snowQuadVerts[6] = {
 };
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+VSOutput vs_main(uniform uint particles_slot, uniform uint params_slot,
+                 uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+    StorageBuffer<Particle> PARTICLES = goldy_scattered<Particle>(particles_slot);
+    ParticleParams PARAMS = goldy_broadcast<ParticleParams>(params_slot);
     VSOutput output;
     
     Particle p = PARTICLES[instanceID];

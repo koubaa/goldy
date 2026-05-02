@@ -8,16 +8,14 @@ struct Particle {
     float2 velocity;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot])
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-
 static const float deltaTime = 0.016;
 static const float2 gravity = float2(0.0, -0.3);
 static const float damping = 0.998;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(uniform uint particles_slot, uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<Particle> PARTICLES = goldy_scattered<Particle>(particles_slot);
     uint idx = id.x;
     
     if (idx >= 65536) return;

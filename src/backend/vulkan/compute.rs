@@ -1,6 +1,5 @@
 //! Compute pipeline and dispatch logic.
 
-use super::buffer;
 use super::staging;
 use super::types::{self, BindlessIndices, ComputePipelineState, LogicalDevice};
 use super::{ComputePipelineHandle, DeviceHandle};
@@ -52,15 +51,12 @@ fn reap_signaled_fences(state: &mut super::types::VulkanState) {
 }
 
 /// Create a compute pipeline.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, LogicalDevice>,
     compute_pipelines: &mut HashMap<ComputePipelineHandle, ComputePipelineState>,
     next_compute_pipeline_handle: &mut ComputePipelineHandle,
     device_handle: DeviceHandle,
     cs_module: vk::ShaderModule,
-    push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    push_constant_buffer_strides: Vec<Option<u32>>,
     shader_debug_name: String,
 ) -> Result<ComputePipelineHandle> {
     let logical_device = devices
@@ -110,8 +106,6 @@ pub(super) fn create(
             layout: pipeline_layout,
             owns_layout,
             parameter_block_layouts: Vec::new(),
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
         },
     );
@@ -373,17 +367,6 @@ pub(super) fn submit(
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    crate::backend::validate_typed_push_constants(
-                        typed_handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                    crate::backend::validate_typed_push_constant_buffer_strides(
-                        typed_handles,
-                        &pipeline.push_constant_buffer_strides,
-                        &pipeline.shader_debug_name,
-                        |h| buffer::element_stride_for_bindless_handle(buffers, h),
-                    )?;
                     let mut indices = BindlessIndices::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
                         if i >= types::MAX_PUSH_CONSTANT_INDICES {

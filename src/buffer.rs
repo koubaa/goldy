@@ -251,10 +251,7 @@ impl Buffer {
     /// All buffers with Scattered or Broadcast access are registered.
     ///
     /// **Prefer [`Buffer::bindless_handle`]** for new code: the typed handle
-    /// captures the buffer's [`DataAccess`] category so push-constant setters
-    /// can catch category mismatches (e.g. binding a `Broadcast` buffer to a
-    /// slot read via `goldy_dyn_buf_ro`) at dispatch time instead of silently
-    /// producing garbage reads.
+    /// captures the buffer's [`DataAccess`] category alongside the raw index.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.buffer_bindless_index(self.handle)
@@ -272,7 +269,7 @@ impl Buffer {
     }
 
     /// Get this buffer's typed bindless handle for read-only structured-buffer
-    /// access (maps to `goldy_dyn_buf_ro` / `StructuredBuffer<T>`).
+    /// access (maps to `goldy_buf_ro` / `StructuredBuffer<T>`).
     ///
     /// Uses [`Self::bindless_srv_index`]: on Direct3D 12, scattered storage buffers have a
     /// separate SRV heap slot from the UAV; on Vulkan and Metal the read index matches
@@ -284,7 +281,7 @@ impl Buffer {
             .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
     }
 
-    /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_dyn_buf_ro` access.
+    /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_buf_ro` access.
     ///
     /// On DX12, scattered buffers have separate UAV (write) and SRV (read-only) descriptors at
     /// different heap indices. Use this index when the shader declares `StructuredBuffer<T>`.
@@ -431,7 +428,7 @@ impl BufferView {
     }
 
     /// Get the view's typed bindless handle for read-only structured-buffer
-    /// access (same as `goldy_dyn_buf_ro`, [`BindlessCategory::Scattered`]).
+    /// access (maps to `goldy_buf_ro`, [`BindlessCategory::Scattered`]).
     pub fn bindless_srv_handle(&self) -> Option<BindlessHandle> {
         self.bindless_srv_index()
             .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))

@@ -45,9 +45,8 @@ pub mod ffi;
 pub mod loader;
 
 pub use compiler::{
-    analyze_push_constant_categories_from_source, analyze_push_constant_stride_hints_from_source,
     layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout,
-    LayoutCheck, OwnedLayoutCheck, ParameterBlockLayout, PushConstantStrideHint, ResourceKind,
-    ShaderReflection, ShaderTarget, SlangCompiler, StructFieldLayout, StructLayout,
+    LayoutCheck, OwnedLayoutCheck, ParameterBlockLayout, ResourceKind, ShaderReflection,
+    ShaderTarget, SlangCompiler, StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;

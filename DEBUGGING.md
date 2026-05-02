@@ -101,7 +101,7 @@ Standalone reflection without shader creation remains available via **`Device::r
 
 A common footgun is uploading uniform or structured data with the wrong **element stride** (for example passing `bytemuck::bytes_of(&uniforms)` into `Buffer::with_data`, which infers `T = u8` and stride 1). That can work on Vulkan but yield silent wrong reads on Direct3D 12 structured-buffer views.
 
-`GOLDY_VALIDATE_LAYOUTS` covers this too. When enabled, Goldy validates at **dispatch / draw time** that each buffer bound via `set_push_constants_typed` has the same element stride the shader expects for `goldy_dyn_buf_ro<T>`, `goldy_dyn_scattered<T>`, `goldy_dyn_broadcast<T>`, and `goldy_dyn_byte_address` (byte stride 1).
+`GOLDY_VALIDATE_LAYOUTS` covers this too. When enabled, Goldy validates at **dispatch / draw time** that each buffer bound via `set_push_constants_typed` has the same element stride the shader expects for `goldy_buf_ro<T>`, `goldy_scattered<T>`, `goldy_broadcast<T>`, and `goldy_byte_address` (byte stride 1).
 
 ```bash
 GOLDY_VALIDATE_LAYOUTS=1 cargo run --example compute_to_surface
@@ -109,7 +109,7 @@ GOLDY_VALIDATE_LAYOUTS=1 cargo run --example compute_to_surface
 
 This is **off by default** (no per-dispatch cost). Turn it on when results look wrong after a binding or buffer upload change, or when debugging cross-backend differences.
 
-The check compares the buffer’s recorded stride (from `Buffer::with_data`, `with_bytes_stride`, `new_with_stride`, etc.) against Slang’s reflected size of `T` for each literal `goldy_dyn_*<T>(N)` slot. If reflection cannot resolve a type name, that slot is skipped with a warning in the `goldy::slang` tracing target.
+The check compares the buffer’s recorded stride (from `Buffer::with_data`, `with_bytes_stride`, `new_with_stride`, etc.) against Slang’s reflected size of `T` for each `goldy_*<T>(slot)` call. If reflection cannot resolve a type name, that slot is skipped with a warning in the `goldy::slang` tracing target.
 
 ## Inspecting Compiled Shader Assembly
 
