@@ -73,6 +73,7 @@ struct App {
     surface: Option<Surface>,
     start_time: Instant,
     vertex_buffers: Vec<Buffer>,
+    frame_count: u32,
 }
 
 impl App {
@@ -86,6 +87,7 @@ impl App {
             surface: None,
             start_time: Instant::now(),
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
+            frame_count: 0,
         })
     }
 
@@ -112,6 +114,8 @@ impl App {
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
+        self.frame_count += 1;
+
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -187,6 +191,14 @@ impl App {
     }
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 { self.frame_count as f64 / elapsed } else { 0.0 };
+        println!("GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}", self.frame_count);
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
@@ -231,7 +243,7 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))).init();
     println!("Goldy Spinning Cube Example - Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

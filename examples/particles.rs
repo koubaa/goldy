@@ -56,7 +56,7 @@ fn random() -> f32 {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))).init();
     println!("Goldy Particles Example");
     println!("  Space - Toggle rain/snow");
     println!("  Escape - Exit");
@@ -89,6 +89,7 @@ struct RenderState {
     // State
     is_snow: bool,
     frame_count: f32,
+    start_time: std::time::Instant,
 }
 
 impl RenderState {
@@ -149,6 +150,7 @@ impl RenderState {
             render_pipeline,
             is_snow: false,
             frame_count: 0.0,
+            start_time: std::time::Instant::now(),
         })
     }
 
@@ -259,6 +261,14 @@ impl RenderState {
 
         self.window.request_redraw();
         Ok(())
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 { self.frame_count as f64 / elapsed } else { 0.0 };
+        println!("GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}", self.frame_count as u64);
     }
 }
 

@@ -34,6 +34,8 @@ struct App {
     surface: Option<Surface>,
     center: [f32; 2],
     zoom: f32,
+    start_time: std::time::Instant,
+    frame_count: u32,
 }
 
 impl App {
@@ -48,6 +50,8 @@ impl App {
             surface: None,
             center: [-0.5, 0.0],
             zoom: 1.0,
+            start_time: std::time::Instant::now(),
+            frame_count: 0,
         })
     }
 
@@ -89,6 +93,8 @@ impl App {
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
+        self.frame_count += 1;
+
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -133,6 +139,14 @@ impl App {
                 let _ = surface.resize(new_size.width, new_size.height);
             }
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 { self.frame_count as f64 / elapsed } else { 0.0 };
+        println!("GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}", self.frame_count);
     }
 }
 
@@ -194,7 +208,7 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))).init();
     println!("Goldy Mandelbrot Example");
     println!("  Arrows - Pan");
     println!("  +/- - Zoom in/out");

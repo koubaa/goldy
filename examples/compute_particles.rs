@@ -32,8 +32,15 @@ struct Particle {
 }
 impl goldy::StructuredBufferElement for Particle {}
 
+/// Per-frame simulation parameters passed to the compute shader
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SimParams {
+    delta_time: f32,
+}
+
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))).init();
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
@@ -53,14 +60,13 @@ struct RenderState {
     window: Arc<Window>,
     device: Arc<goldy::Device>,
     surface: Surface,
-    // Compute resources
     compute_pipeline: ComputePipeline,
-    // Buffer
     particle_buffer: Buffer,
-    // Graphics resources
+    params_buffer: Buffer,
     render_pipeline: RenderPipeline,
-    // Frame counter for debug
     frame_count: u32,
+    start_time: std::time::Instant,
+    last_frame_time: std::time::Instant,
 }
 
 impl RenderState {
@@ -103,6 +109,13 @@ impl RenderState {
 
         let particle_buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
 
+        // Per-frame simulation params (dt written each frame before dispatch)
+        let params_buffer = Buffer::new(
+            &device,
+            std::mem::size_of::<SimParams>() as u64,
+            DataAccess::Broadcast,
+        )?;
+
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
@@ -131,22 +144,27 @@ impl RenderState {
             surface,
             compute_pipeline,
             particle_buffer,
+            params_buffer,
             render_pipeline,
             frame_count: 0,
+            start_time: std::time::Instant::now(),
+            last_frame_time: std::time::Instant::now(),
         })
     }
 
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
+        let dt = self.last_frame_time.elapsed().as_secs_f32().min(0.05);
+        self.last_frame_time = std::time::Instant::now();
+        self.params_buffer.write_data(0, &[SimParams { delta_time: dt }])?;
+
         // Run compute pass to update particles
         let mut compute_encoder = ComputeEncoder::new();
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            // Pass buffer indices via push constants
-            pass.bind_resources(&[&self.particle_buffer]);
-            // Dispatch enough workgroups to cover all particles (64 threads per group)
+            pass.bind_resources(&[&self.particle_buffer, &self.params_buffer]);
             let workgroups = NUM_PARTICLES.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
         }
@@ -181,6 +199,18 @@ impl RenderState {
         self.window.request_redraw();
 
         Ok(())
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 {
+            self.frame_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        println!("GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}", self.frame_count);
     }
 }
 

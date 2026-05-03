@@ -69,7 +69,7 @@ void cs_main(BufRO<Uniforms> uniforms_buf, DirectSpatial<float4> output, ThreadI
 "#;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))).init();
 
     println!("Goldy — Compute to Surface Example");
     println!("===================================");
@@ -97,6 +97,7 @@ struct RenderState {
     uniform_buffer: Buffer,
     start_time: std::time::Instant,
     vsync: bool,
+    frame_count: u32,
 }
 
 impl App {
@@ -142,9 +143,18 @@ impl App {
             uniform_buffer,
             start_time: std::time::Instant::now(),
             vsync: true,
+            frame_count: 0,
         });
 
         Ok(())
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 { self.frame_count as f64 / elapsed } else { 0.0 };
+        println!("GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}", self.frame_count);
     }
 }
 
@@ -216,6 +226,8 @@ impl ApplicationHandler for App {
 }
 
 fn render_frame(state: &mut RenderState) -> Result<()> {
+    state.frame_count += 1;
+
     let (width, height) = state.surface.size();
     if width == 0 || height == 0 {
         return Ok(());
