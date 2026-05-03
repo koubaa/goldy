@@ -266,7 +266,6 @@ impl Dx12Backend {
             slang_compiler,
             staging_belts: HashMap::new(),
             pending_texture_copies: Vec::new(),
-            texture_cache: HashMap::new(),
         };
 
         Ok(Self { state })
@@ -294,9 +293,6 @@ impl Dx12Backend {
                     .get(&c.texture_handle)
                     .is_none_or(|t| t.device_handle != device_handle)
             });
-
-            // Drop cached texture resources for this device.
-            self.state.texture_cache.clear();
 
             if let Some(mut belt) = self.state.staging_belts.remove(&device_handle) {
                 unsafe {

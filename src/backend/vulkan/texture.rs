@@ -968,18 +968,15 @@ pub(super) fn destroy(
                 .resource_registry
                 .unregister_texture(texture_handle);
 
-            unsafe {
-                logical_device.device.device_wait_idle().ok();
-                logical_device.device.destroy_image_view(texture.view, None);
-                logical_device.device.destroy_image(texture.image, None);
-                logical_device.device.free_memory(texture.memory, None);
-                if let Some(staging_buffer) = texture.staging_buffer {
-                    logical_device.device.destroy_buffer(staging_buffer, None);
-                }
-                if let Some(staging_memory) = texture.staging_memory {
-                    logical_device.device.free_memory(staging_memory, None);
-                }
-            }
+            logical_device
+                .deletion_queue
+                .queue(types::PendingDeletion::Texture {
+                    image: texture.image,
+                    view: texture.view,
+                    memory: texture.memory,
+                    staging_buffer: texture.staging_buffer,
+                    staging_memory: texture.staging_memory,
+                });
         }
     }
 }
