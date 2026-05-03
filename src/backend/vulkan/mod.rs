@@ -870,4 +870,13 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<bool> {
         compute::wait_fence_timeout(&mut self.state, device_handle, token, timeout_ms)
     }
+
+    fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
+        if let (Some(logical_device), Some(belt)) = (
+            self.state.devices.get(&device_handle),
+            self.state.staging_belts.get_mut(&device_handle),
+        ) {
+            unsafe { belt.trim(logical_device) };
+        }
+    }
 }

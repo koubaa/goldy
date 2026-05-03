@@ -19,6 +19,11 @@ impl BeltChunk {
     fn reset(&mut self) {
         self.offset = 0;
     }
+
+    fn destroy(self) {
+        // Explicitly unmap before the COM smart pointer releases the resource.
+        unsafe { self.resource.Unmap(0, None) };
+    }
 }
 
 pub(super) struct StagingBelt {
@@ -86,16 +91,17 @@ impl StagingBelt {
 
         let alloc_size = self.chunk_size.max(align_up(len, COPY_ALIGN));
 
-        let mut chunk = loop {
-            match self.free_chunks.pop() {
-                Some(mut c) if c.capacity >= len => {
-                    c.reset();
-                    break c;
-                }
-                Some(c) => self.free_chunks.push(c),
-                None => break allocate_chunk(logical_device, alloc_size)?,
-            }
-        };
+        // Linear scan from the back (most-recently-freed first) to avoid the
+        // push-then-immediately-pop infinite loop the old pattern had when every
+        // free chunk was smaller than `len`.
+        let mut chunk =
+            if let Some(pos) = self.free_chunks.iter().rposition(|c| c.capacity >= len) {
+                let mut c = self.free_chunks.swap_remove(pos);
+                c.reset();
+                c
+            } else {
+                allocate_chunk(logical_device, alloc_size)?
+            };
 
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -118,16 +124,32 @@ impl StagingBelt {
             .push((fence_token, std::mem::take(&mut self.active_chunks)));
     }
 
+    /// Drop all free chunks whose capacity exceeds `chunk_size`.
+    ///
+    /// Safe to call at any time: `free_chunks` only holds chunks whose GPU fence has
+    /// already signaled, so no GPU wait is needed.
+    pub fn trim(&mut self) {
+        let chunk_size = self.chunk_size;
+        let mut i = 0;
+        while i < self.free_chunks.len() {
+            if self.free_chunks[i].capacity > chunk_size {
+                self.free_chunks.swap_remove(i).destroy();
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     pub unsafe fn destroy_all(&mut self) {
         for ch in self.free_chunks.drain(..) {
-            ch.resource.Unmap(0, None);
+            ch.destroy();
         }
         for ch in self.active_chunks.drain(..) {
-            ch.resource.Unmap(0, None);
+            ch.destroy();
         }
         for (_, mut vec) in self.in_flight.drain(..) {
             for ch in vec.drain(..) {
-                ch.resource.Unmap(0, None);
+                ch.destroy();
             }
         }
     }

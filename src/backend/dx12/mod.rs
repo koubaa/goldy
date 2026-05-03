@@ -808,4 +808,10 @@ impl GpuBackend for Dx12Backend {
     ) -> Result<bool> {
         compute::wait_fence_timeout(&self.state, device_handle, token, timeout_ms)
     }
+
+    fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
+        if let Some(belt) = self.state.staging_belts.get_mut(&device_handle) {
+            belt.trim();
+        }
+    }
 }

@@ -123,23 +123,22 @@ impl StagingBelt {
 
         let alloc_size = self.chunk_size.max(align_up(len, COPY_ALIGN));
 
-        let mut chunk = loop {
-            match self.free_chunks.pop() {
-                Some(mut c) if c.capacity >= len => {
-                    c.reset();
-                    break c;
-                }
-                Some(c) => self.free_chunks.push(c),
-                None => {
-                    break allocate_chunk(
-                        instance,
-                        logical_device,
-                        logical_device.physical_device,
-                        alloc_size,
-                    )?;
-                }
-            }
-        };
+        // Linear scan from the back (most-recently-freed first) to avoid the
+        // push-then-immediately-pop infinite loop the old pattern had when every
+        // free chunk was smaller than `len`.
+        let mut chunk =
+            if let Some(pos) = self.free_chunks.iter().rposition(|c| c.capacity >= len) {
+                let mut c = self.free_chunks.swap_remove(pos);
+                c.reset();
+                c
+            } else {
+                allocate_chunk(
+                    instance,
+                    logical_device,
+                    logical_device.physical_device,
+                    alloc_size,
+                )?
+            };
 
         debug_assert!(chunk.offset == 0);
         let start = 0u64;
@@ -162,6 +161,22 @@ impl StagingBelt {
         }
         self.in_flight
             .push((fence_token, std::mem::take(&mut self.active_chunks)));
+    }
+
+    /// Drop all free chunks whose capacity exceeds `chunk_size`.
+    ///
+    /// Safe to call at any time: `free_chunks` only holds chunks whose GPU fence has
+    /// already signaled, so no GPU wait is needed.
+    pub unsafe fn trim(&mut self, device: &LogicalDevice) {
+        let chunk_size = self.chunk_size;
+        let mut i = 0;
+        while i < self.free_chunks.len() {
+            if self.free_chunks[i].capacity > chunk_size {
+                self.free_chunks.swap_remove(i).destroy(device);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     pub unsafe fn destroy_all(&mut self, device: &LogicalDevice) {
