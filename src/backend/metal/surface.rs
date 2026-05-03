@@ -51,7 +51,12 @@ pub(super) fn create(
     let (layer, width, height) = unsafe {
         let layer: id = msg_send![class!(CAMetalLayer), layer];
         let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
-        let () = msg_send![layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+        // Use RGBA8Unorm instead of BGRA8Unorm: on Apple Silicon, BGRA8Unorm
+        // does not support storage-class access (compute shader UAV writes),
+        // so writing to a BGRA swapchain drawable from a compute pass causes a
+        // GPU address fault (kIOGPUCommandBufferCallbackErrorPageFault).
+        // RGBA8Unorm supports both display and compute storage access.
+        let () = msg_send![layer, setPixelFormat: MTLPixelFormat::RGBA8Unorm];
         // Don't set framebufferOnly so the texture can be used with compute
         let () = msg_send![layer, setFramebufferOnly: NO];
 
@@ -95,7 +100,7 @@ pub(super) fn create(
             device_handle,
             width,
             height,
-            format: TextureFormat::Bgra8Unorm,
+            format: TextureFormat::Rgba8Unorm,
             depth_format,
             depth_texture,
             current_frame: 0,
