@@ -55,6 +55,7 @@ pub struct GraphNode {
     pub pipeline: ComputePipelineHandle,
     pub bindings: Vec<ResourceBinding>,
     pub resource_slots: Vec<u32>,
+    pub user_slots: Vec<u32>,
     pub dispatch: DispatchKind,
 }
 

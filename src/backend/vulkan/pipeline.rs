@@ -293,11 +293,11 @@ pub(super) fn create_with_depth(
 
     let all_layouts = vec![bindless_set_layout];
 
-    // Vulkan push constant range for resource slot indices (16 x u32 = 64 bytes)
+    // Vulkan push constant range for the packed 128-byte PushLayout
     let slot_range = vk::PushConstantRange {
         stage_flags: vk::ShaderStageFlags::ALL,
         offset: 0,
-        size: (types::MAX_RESOURCE_SLOTS * std::mem::size_of::<u32>()) as u32,
+        size: types::TOTAL_PUSH_BYTES as u32,
     };
 
     let layout_info = vk::PipelineLayoutCreateInfo::default()

@@ -1,7 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::staging;
-use super::types::{self, ResourceSlots, ComputePipelineState, LogicalDevice};
+use super::types::{self, PushLayout, ComputePipelineState, LogicalDevice};
 use super::{ComputePipelineHandle, DeviceHandle};
 use crate::backend::{ComputeCommand, FenceToken};
 use anyhow::{Context, Result};
@@ -320,15 +320,13 @@ pub(super) fn submit(
                 buffers: buffer_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut slots = ResourceSlots::default();
+                    let mut layout = PushLayout::default();
                     for (i, buffer_handle) in buffer_handles.iter().enumerate() {
-                        if i >= types::MAX_RESOURCE_SLOTS {
-                            break;
-                        }
-                        slots.indices[i] = buffers
+                        if i >= types::MAX_BINDLESS_SLOTS { break; }
+                        layout.bindless[i] = buffers
                             .get(buffer_handle)
                             .and_then(|b| b.bindless_index)
-                            .unwrap_or(0);
+                            .unwrap_or(0) as u16;
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -336,21 +334,24 @@ pub(super) fn submit(
                             pipeline.layout,
                             vk::ShaderStageFlags::ALL,
                             0,
-                            bytemuck::bytes_of(&slots),
+                            bytemuck::bytes_of(&layout),
                         );
                     }
                 }
             }
             ComputeCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut slots = ResourceSlots::default();
+                    let mut layout = PushLayout::default();
                     for (i, &idx) in raw_indices.iter().enumerate() {
-                        if i >= types::MAX_RESOURCE_SLOTS {
-                            break;
-                        }
-                        slots.indices[i] = idx;
+                        if i >= types::MAX_BINDLESS_SLOTS { break; }
+                        layout.bindless[i] = idx as u16;
+                    }
+                    for (i, &val) in raw_user.iter().enumerate() {
+                        if i >= types::MAX_USER_SLOTS { break; }
+                        layout.user[i] = val;
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -358,7 +359,7 @@ pub(super) fn submit(
                             pipeline.layout,
                             vk::ShaderStageFlags::ALL,
                             0,
-                            bytemuck::bytes_of(&slots),
+                            bytemuck::bytes_of(&layout),
                         );
                     }
                 }
@@ -367,12 +368,10 @@ pub(super) fn submit(
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut slots = ResourceSlots::default();
+                    let mut layout = PushLayout::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
-                        if i >= types::MAX_RESOURCE_SLOTS {
-                            break;
-                        }
-                        slots.indices[i] = handle.index();
+                        if i >= types::MAX_BINDLESS_SLOTS { break; }
+                        layout.bindless[i] = handle.index() as u16;
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -380,7 +379,7 @@ pub(super) fn submit(
                             pipeline.layout,
                             vk::ShaderStageFlags::ALL,
                             0,
-                            bytemuck::bytes_of(&slots),
+                            bytemuck::bytes_of(&layout),
                         );
                     }
                 }

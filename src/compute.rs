@@ -199,6 +199,17 @@ impl<'a> ComputePass<'a> {
             .commands
             .push(ComputeCommand::BindResourcesRaw {
                 indices: indices.to_vec(),
+                user: Vec::new(),
+            });
+    }
+
+    /// Bind resources with both bindless indices (region A) and user scalars (region B).
+    pub fn bind_resources_raw_with_user(&mut self, indices: &[u32], user: &[u32]) {
+        self.encoder
+            .commands
+            .push(ComputeCommand::BindResourcesRaw {
+                indices: indices.to_vec(),
+                user: user.to_vec(),
             });
     }
 

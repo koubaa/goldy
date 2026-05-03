@@ -264,52 +264,49 @@ pub(super) fn submit(
                 }
             }
             ComputeCommand::BindResources { buffers } => {
-                let mut indices = types::ResourceSlots::default();
+                let mut layout = types::PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                        break;
-                    }
+                    if i >= types::MAX_BINDLESS_SLOTS { break; }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
                         let offset = buf_state.bindless_offset.unwrap_or(0);
-                        indices.indices[i] = offset;
+                        layout.bindless[i] = offset as u16;
                         tracing::trace!(
                             "Compute resource slot [{}]: buffer {} -> UAV offset {}",
-                            i,
-                            buffer_handle,
-                            offset
+                            i, buffer_handle, offset
                         );
                     }
                 }
-
                 tracing::trace!(
-                    "Setting compute root constants: {:?}",
-                    &indices.indices[..buffers.len().min(types::MAX_ROOT_CONSTANT_INDICES)]
+                    "Setting compute root constants (bindless): {:?}",
+                    &layout.bindless[..buffers.len().min(types::MAX_BINDLESS_SLOTS)]
                 );
-
                 unsafe {
                     command_list.SetComputeRoot32BitConstants(
-                        0, // Root parameter index
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const std::ffi::c_void,
+                        0,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const std::ffi::c_void,
                         0,
                     );
                 }
             }
             ComputeCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
-                let mut indices = types::ResourceSlots::default();
+                let mut layout = types::PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                        break;
-                    }
-                    indices.indices[i] = idx;
+                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    layout.bindless[i] = idx as u16;
+                }
+                for (i, &val) in raw_user.iter().enumerate() {
+                    if i >= types::MAX_USER_SLOTS { break; }
+                    layout.user[i] = val;
                 }
                 unsafe {
                     command_list.SetComputeRoot32BitConstants(
                         0,
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const std::ffi::c_void,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const std::ffi::c_void,
                         0,
                     );
                 }
@@ -317,18 +314,16 @@ pub(super) fn submit(
             ComputeCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                let mut indices = types::ResourceSlots::default();
+                let mut layout = types::PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                        break;
-                    }
-                    indices.indices[i] = handle.index();
+                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    layout.bindless[i] = handle.index() as u16;
                 }
                 unsafe {
                     command_list.SetComputeRoot32BitConstants(
                         0,
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const std::ffi::c_void,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const std::ffi::c_void,
                         0,
                     );
                 }

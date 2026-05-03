@@ -244,9 +244,10 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             commands.push(ComputeCommand::SetPipeline(node.pipeline));
-            if !node.resource_slots.is_empty() {
+            if !node.resource_slots.is_empty() || !node.user_slots.is_empty() {
                 commands.push(ComputeCommand::BindResourcesRaw {
                     indices: node.resource_slots.clone(),
+                    user: node.user_slots.clone(),
                 });
             }
             match &node.dispatch {
@@ -293,6 +294,7 @@ mod tests {
                 .map(|(resource, access)| ResourceBinding { resource, access })
                 .collect(),
             resource_slots: Vec::new(),
+            user_slots: Vec::new(),
             dispatch: DispatchKind::Direct { x: wg, y: 1, z: 1 },
         }
     }
@@ -535,6 +537,7 @@ mod tests {
                     access: NodeAccess::Write,
                 }],
                 resource_slots: vec![42, 7],
+                user_slots: Vec::new(),
                 dispatch: DispatchKind::Direct { x: 1, y: 1, z: 1 },
             }],
         };
@@ -545,7 +548,7 @@ mod tests {
         assert_eq!(cmds.len(), 3);
         assert!(matches!(cmds[0], ComputeCommand::SetPipeline(10)));
         assert!(
-            matches!(cmds[1], ComputeCommand::BindResourcesRaw { ref indices } if indices == &[42, 7])
+            matches!(cmds[1], ComputeCommand::BindResourcesRaw { ref indices, .. } if indices == &[42, 7])
         );
         assert!(matches!(
             cmds[2],

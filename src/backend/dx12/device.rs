@@ -155,7 +155,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
                 Constants: D3D12_ROOT_CONSTANTS {
                     ShaderRegister: 0,
                     RegisterSpace: 0,
-                    Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
+                    Num32BitValues: (types::TOTAL_PUSH_BYTES / 4) as u32,
                 },
             },
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,

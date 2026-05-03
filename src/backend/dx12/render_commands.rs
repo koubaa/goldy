@@ -68,40 +68,41 @@ pub(super) fn record(
                 }
             }
             RenderCommand::BindResources { buffers } => {
-                let mut indices = types::ResourceSlots::default();
+                let mut layout = types::PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                        break;
-                    }
+                    if i >= types::MAX_BINDLESS_SLOTS { break; }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
                         let offset = buf_state.bindless_offset.unwrap_or(0);
-                        indices.indices[i] = offset;
+                        layout.bindless[i] = offset as u16;
                     }
                 }
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
-                        0, // Root parameter index for constants
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const _,
+                        0,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const _,
                         0,
                     );
                 }
             }
             RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
-                let mut indices = types::ResourceSlots::default();
+                let mut layout = types::PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                        break;
-                    }
-                    indices.indices[i] = idx;
+                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    layout.bindless[i] = idx as u16;
+                }
+                for (i, &val) in raw_user.iter().enumerate() {
+                    if i >= types::MAX_USER_SLOTS { break; }
+                    layout.user[i] = val;
                 }
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const _,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const _,
                         0,
                     );
                 }
@@ -109,18 +110,16 @@ pub(super) fn record(
             RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                let mut indices = types::ResourceSlots::default();
+                let mut layout = types::PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
-                        break;
-                    }
-                    indices.indices[i] = handle.index();
+                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    layout.bindless[i] = handle.index() as u16;
                 }
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const _,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const _,
                         0,
                     );
                 }

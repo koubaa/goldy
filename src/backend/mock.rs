@@ -1618,6 +1618,7 @@ mod tests {
             RenderCommand::Clear(Color::BLACK),
             RenderCommand::BindResourcesRaw {
                 indices: vec![0, 1, 2, 3],
+                user: vec![],
             },
         ];
 
@@ -1627,7 +1628,7 @@ mod tests {
         assert_eq!(backend.recorded_commands[0].len(), 2);
 
         match &backend.recorded_commands[0][1] {
-            RenderCommand::BindResourcesRaw { indices } => {
+            RenderCommand::BindResourcesRaw { indices, .. } => {
                 assert_eq!(*indices, vec![0, 1, 2, 3]);
             }
             _ => panic!("Expected BindResourcesRaw command"),

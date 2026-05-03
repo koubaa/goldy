@@ -1314,6 +1314,7 @@ fn test_write_buffer_reuse_across_submissions() {
         ComputeCommand::SetPipeline(ph),
         ComputeCommand::BindResourcesRaw {
             indices: vec![idx_in, idx_out_a],
+            user: vec![],
         },
         ComputeCommand::Dispatch {
             workgroups_x: 1,
@@ -1331,6 +1332,7 @@ fn test_write_buffer_reuse_across_submissions() {
         ComputeCommand::SetPipeline(ph),
         ComputeCommand::BindResourcesRaw {
             indices: vec![idx_in, idx_out_b],
+            user: vec![],
         },
         ComputeCommand::Dispatch {
             workgroups_x: 1,
@@ -1439,7 +1441,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.bind_resources_raw(&[heap_idx, EXPECTED]);
+        pass.bind_resources_raw_with_user(&[heap_idx], &[EXPECTED]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1472,7 +1474,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.bind_resources_raw(&[heap_idx, 0u32]);
+        pass.bind_resources_raw_with_user(&[heap_idx], &[0u32]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1505,7 +1507,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.bind_resources_raw(&[heap_idx, u32::MAX]);
+        pass.bind_resources_raw_with_user(&[heap_idx], &[u32::MAX]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1543,7 +1545,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.bind_resources_raw(&[heap_idx, bits]);
+        pass.bind_resources_raw_with_user(&[heap_idx], &[bits]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1584,7 +1586,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.bind_resources_raw(&[heap_idx, A, B]);
+        pass.bind_resources_raw_with_user(&[heap_idx], &[A, B]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1626,7 +1628,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
         pass.set_pipeline(&pipeline);
         let inp_idx = inp.bindless_index().unwrap();
         let out_idx = out.bindless_index().unwrap();
-        pass.bind_resources_raw(&[inp_idx, out_idx, OFFSET]);
+        pass.bind_resources_raw_with_user(&[inp_idx, out_idx], &[OFFSET]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");

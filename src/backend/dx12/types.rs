@@ -40,17 +40,33 @@ pub const MAX_BINDLESS_CBV_SRV_UAV: u32 = 16384;
 #[allow(dead_code)]
 pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
 
-/// Maximum number of resource indices in root constants
-pub const MAX_ROOT_CONSTANT_INDICES: usize = 16;
+/// Maximum number of bindless resource indices in region A.
+pub const MAX_BINDLESS_SLOTS: usize = 16;
+/// Maximum number of u32 user parameters in region B.
+pub const MAX_USER_SLOTS: usize = 8;
+/// Total root constant size in bytes.
+pub const TOTAL_PUSH_BYTES: usize = 128;
 
-/// Root constants for passing bindless resource indices to shaders.
-/// This is used to tell shaders which indices in the descriptor heaps to access.
+/// Packed 128-byte root constant layout.
+///
+/// ```text
+/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
+/// Bytes 32–63:  8  × u32  user parameters            (region B)
+/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// ```
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
-pub struct ResourceSlots {
-    /// Resource indices (buffers, textures, samplers packed sequentially)
-    pub indices: [u32; MAX_ROOT_CONSTANT_INDICES],
+pub struct PushLayout {
+    pub bindless: [u16; MAX_BINDLESS_SLOTS],
+    pub user: [u32; MAX_USER_SLOTS],
+    pub _reserved: [u32; 16],
 }
+
+const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
+
+// Safety: PushLayout is a POD type with known layout
+unsafe impl bytemuck::Pod for PushLayout {}
+unsafe impl bytemuck::Zeroable for PushLayout {}
 
 /// Registry for tracking bindless resource descriptor heap offsets.
 ///

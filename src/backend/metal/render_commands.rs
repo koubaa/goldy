@@ -5,7 +5,7 @@
 use super::super::{BufferHandle, PipelineHandle, RenderCommand};
 use super::buffer;
 use super::types::{
-    ResourceSlots, PipelineState, MAX_RESOURCE_SLOTS, RESOURCE_SLOT_BUFFER,
+    PushLayout, PipelineState, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS, TOTAL_PUSH_BYTES, RESOURCE_SLOT_BUFFER,
 };
 use super::utils::index_format_to_mtl;
 use crate::types::IndexFormat;
@@ -58,85 +58,60 @@ pub(super) fn record(
             RenderCommand::BindResources {
                 buffers: buf_handles,
             } => {
-                let mut slots = ResourceSlots::default();
+                let mut layout = PushLayout::default();
                 for (i, buffer_handle) in buf_handles.iter().enumerate() {
-                    if i >= MAX_RESOURCE_SLOTS {
-                        break;
-                    }
+                    if i >= MAX_BINDLESS_SLOTS { break; }
                     if let Some(buf) = buffers.get(buffer_handle) {
-                        slots.indices[i] = buf.arg_buffer_index;
+                        layout.bindless[i] = buf.arg_buffer_index as u16;
                     }
                 }
-                let slot_bytes: &[u8] = unsafe {
+                let layout_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(
-                        &slots as *const _ as *const u8,
-                        std::mem::size_of::<ResourceSlots>(),
+                        &layout as *const _ as *const u8,
+                        TOTAL_PUSH_BYTES,
                     )
                 };
-                encoder.set_vertex_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    slot_bytes.len() as u64,
-                    slot_bytes.as_ptr() as *const _,
-                );
-                encoder.set_fragment_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    slot_bytes.len() as u64,
-                    slot_bytes.as_ptr() as *const _,
-                );
+                encoder.set_vertex_bytes(RESOURCE_SLOT_BUFFER, layout_bytes.len() as u64, layout_bytes.as_ptr() as *const _);
+                encoder.set_fragment_bytes(RESOURCE_SLOT_BUFFER, layout_bytes.len() as u64, layout_bytes.as_ptr() as *const _);
             }
             RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
-                let mut slots = ResourceSlots::default();
+                let mut layout = PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= MAX_RESOURCE_SLOTS {
-                        break;
-                    }
-                    slots.indices[i] = idx;
+                    if i >= MAX_BINDLESS_SLOTS { break; }
+                    layout.bindless[i] = idx as u16;
                 }
-                let slot_bytes: &[u8] = unsafe {
+                for (i, &val) in raw_user.iter().enumerate() {
+                    if i >= MAX_USER_SLOTS { break; }
+                    layout.user[i] = val;
+                }
+                let layout_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(
-                        &slots as *const _ as *const u8,
-                        std::mem::size_of::<ResourceSlots>(),
+                        &layout as *const _ as *const u8,
+                        TOTAL_PUSH_BYTES,
                     )
                 };
-                encoder.set_vertex_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    slot_bytes.len() as u64,
-                    slot_bytes.as_ptr() as *const _,
-                );
-                encoder.set_fragment_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    slot_bytes.len() as u64,
-                    slot_bytes.as_ptr() as *const _,
-                );
+                encoder.set_vertex_bytes(RESOURCE_SLOT_BUFFER, layout_bytes.len() as u64, layout_bytes.as_ptr() as *const _);
+                encoder.set_fragment_bytes(RESOURCE_SLOT_BUFFER, layout_bytes.len() as u64, layout_bytes.as_ptr() as *const _);
             }
             RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                let mut slots = ResourceSlots::default();
+                let mut layout = PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= MAX_RESOURCE_SLOTS {
-                        break;
-                    }
-                    slots.indices[i] = handle.index();
+                    if i >= MAX_BINDLESS_SLOTS { break; }
+                    layout.bindless[i] = handle.index() as u16;
                 }
-                let slot_bytes: &[u8] = unsafe {
+                let layout_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(
-                        &slots as *const _ as *const u8,
-                        std::mem::size_of::<ResourceSlots>(),
+                        &layout as *const _ as *const u8,
+                        TOTAL_PUSH_BYTES,
                     )
                 };
-                encoder.set_vertex_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    slot_bytes.len() as u64,
-                    slot_bytes.as_ptr() as *const _,
-                );
-                encoder.set_fragment_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    slot_bytes.len() as u64,
-                    slot_bytes.as_ptr() as *const _,
-                );
+                encoder.set_vertex_bytes(RESOURCE_SLOT_BUFFER, layout_bytes.len() as u64, layout_bytes.as_ptr() as *const _);
+                encoder.set_fragment_bytes(RESOURCE_SLOT_BUFFER, layout_bytes.len() as u64, layout_bytes.as_ptr() as *const _);
             }
             RenderCommand::Draw {
                 vertex_count,

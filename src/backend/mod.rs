@@ -101,9 +101,12 @@ pub enum RenderCommand {
     /// Bind resource slots with raw u32 indices (fully bindless mode).
     /// Use this for textures/samplers or when you already have the indices.
     ///
+    /// `indices` go to region A (bindless, packed as u16).
+    /// `user` go to region B (user scalars, full u32).
+    ///
     /// **Prefer [`RenderCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    BindResourcesRaw { indices: Vec<u32> },
+    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
     /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
     /// each handle's [`BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.
@@ -135,9 +138,12 @@ pub enum ComputeCommand {
     BindResources { buffers: Vec<BufferHandle> },
     /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
+    /// `indices` go to region A (bindless, packed as u16).
+    /// `user` go to region B (user scalars, full u32).
+    ///
     /// **Prefer [`ComputeCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    BindResourcesRaw { indices: Vec<u32> },
+    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
     /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
     /// each handle's [`BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.

@@ -57,6 +57,7 @@ impl ComputeGraph {
                 pipeline: pipeline.handle,
                 bindings: Vec::new(),
                 resource_slots: Vec::new(),
+                user_slots: Vec::new(),
                 dispatch: DispatchKind::Direct { x: 0, y: 0, z: 0 },
             },
         }
@@ -175,9 +176,16 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    /// Set the resource slot indices for this node's dispatch.
+    /// Set the bindless resource slot indices for this node's dispatch (region A).
     pub fn bind_resources_raw(mut self, indices: &[u32]) -> Self {
         self.node.resource_slots = indices.to_vec();
+        self
+    }
+
+    /// Set user scalar parameters for this node's dispatch (region B).
+    pub fn bind_resources_raw_with_user(mut self, indices: &[u32], user: &[u32]) -> Self {
+        self.node.resource_slots = indices.to_vec();
+        self.node.user_slots = user.to_vec();
         self
     }
 

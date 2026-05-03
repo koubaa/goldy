@@ -65,23 +65,37 @@ pub mod bindless_bindings {
     pub const SAMPLERS: u32 = FILTER_CONFIG;
 }
 
-/// Maximum number of resource slot indices per dispatch/draw.
-pub const MAX_RESOURCE_SLOTS: usize = 16;
+/// Maximum number of bindless resource indices in region A.
+pub const MAX_BINDLESS_SLOTS: usize = 16;
+/// Maximum number of u32 user parameters in region B.
+pub const MAX_USER_SLOTS: usize = 8;
+/// Total push constant size in bytes.
+pub const TOTAL_PUSH_BYTES: usize = 128;
 
-/// Resource slots for passing bindless resource indices to shaders.
-/// This is used to tell shaders which indices in the global descriptor arrays to access.
+/// Packed 128-byte push constant layout.
 ///
-/// Implemented via push constants on Vulkan, root constants on DX12, buffer args on Metal.
+/// ```text
+/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
+/// Bytes 32–63:  8  × u32  user parameters            (region B)
+/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// ```
+///
+/// - Region A: bindless heap indices for `Scattered<T>`, `BufRO<T>`, textures, samplers, etc.
+/// - Region B: per-dispatch scalar user params (uint, float, int …).
+/// - Region C: zero-filled, reserved for future extension.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
-pub struct ResourceSlots {
-    /// Resource indices (buffers, textures, samplers packed sequentially)
-    pub indices: [u32; MAX_RESOURCE_SLOTS],
+pub struct PushLayout {
+    pub bindless: [u16; MAX_BINDLESS_SLOTS],
+    pub user: [u32; MAX_USER_SLOTS],
+    pub _reserved: [u32; 16],
 }
 
-// Safety: ResourceSlots is a POD type with known layout
-unsafe impl bytemuck::Pod for ResourceSlots {}
-unsafe impl bytemuck::Zeroable for ResourceSlots {}
+const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
+
+// Safety: PushLayout is a POD type with known layout
+unsafe impl bytemuck::Pod for PushLayout {}
+unsafe impl bytemuck::Zeroable for PushLayout {}
 
 /// Registry for tracking bindless resource indices.
 ///

@@ -40,21 +40,29 @@ pub const RESOURCE_SLOT_BUFFER: u64 = 1;
 /// Vertex data must use higher indices to avoid collisions.
 pub const VERTEX_BUFFER_START_SLOT: u64 = 2;
 
-/// Maximum number of resource slot indices per dispatch/draw.
-pub const MAX_RESOURCE_SLOTS: usize = 16;
+/// Maximum number of bindless resource indices in region A.
+pub const MAX_BINDLESS_SLOTS: usize = 16;
+/// Maximum number of u32 user parameters in region B.
+pub const MAX_USER_SLOTS: usize = 8;
+/// Total set_bytes size in bytes.
+pub const TOTAL_PUSH_BYTES: usize = 128;
 
-/// Resource slots for passing bindless resource indices to shaders.
+/// Packed 128-byte buffer layout passed via Metal `set_bytes`.
 ///
-/// Matches the flat layout used by DX12 (`SetGraphicsRoot32BitConstants`) and
-/// Vulkan (`vkCmdPushConstants`). Indices are packed sequentially: the caller
-/// decides what each slot means (buffer, texture, or sampler index).
-///
-/// Implemented via push constants on Vulkan, root constants on DX12, buffer args on Metal.
+/// ```text
+/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
+/// Bytes 32–63:  8  × u32  user parameters            (region B)
+/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// ```
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct ResourceSlots {
-    pub indices: [u32; MAX_RESOURCE_SLOTS],
+pub struct PushLayout {
+    pub bindless: [u16; MAX_BINDLESS_SLOTS],
+    pub user: [u32; MAX_USER_SLOTS],
+    pub _reserved: [u32; 16],
 }
+
+const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
 
 /// Minimum primary heap size (64 MB).
 const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;

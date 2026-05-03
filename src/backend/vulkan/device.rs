@@ -282,11 +282,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         // Create a pipeline layout that includes the bindless set and resource slots
         let layouts = [descriptor_set_layout];
 
-        // Vulkan push constant range for resource slot indices (16 x u32 = 64 bytes)
+        // Vulkan push constant range for the packed 128-byte PushLayout
         let slot_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::ALL,
             offset: 0,
-            size: (types::MAX_RESOURCE_SLOTS * std::mem::size_of::<u32>()) as u32,
+            size: types::TOTAL_PUSH_BYTES as u32,
         };
 
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
