@@ -15,7 +15,6 @@ pub mod backend;
 pub mod buffer;
 pub mod common_types;
 pub mod compute;
-pub mod compute_graph;
 pub mod device;
 pub mod encoder;
 pub mod examples;
@@ -27,6 +26,7 @@ pub mod shader;
 pub mod shader_library;
 pub mod shaders;
 pub mod surface;
+pub mod task_graph;
 pub mod texture;
 pub mod types;
 
@@ -39,7 +39,11 @@ pub mod instrumentation;
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
-pub use compute_graph::{ComputeGraph, NodeAccess, NodeBuilder};
+pub use task_graph::{NodeAccess, NodeBuilder, TaskGraph};
+
+/// Deprecated: use [`TaskGraph`] instead.
+#[deprecated(since = "0.2.0", note = "use `TaskGraph` instead")]
+pub type ComputeGraph = TaskGraph;
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;

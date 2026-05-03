@@ -3,6 +3,7 @@
 //! These tests render examples to offscreen targets and compare them against
 //! reference PNG images using NVIDIA's FLIP algorithm.
 //!
+#![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 //! ## Running Tests
 //!
 //! ```bash

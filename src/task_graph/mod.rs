@@ -1,4 +1,4 @@
-//! Compute graph API for explicit GPU dispatch scheduling.
+//! Task graph API for explicit GPU scheduling with automatic barrier insertion.
 //!
 //! # Motivation
 //!
@@ -14,18 +14,21 @@
 //! overlapping.
 //!
 //! This module pairs bindless **access** with explicit **scheduling** — a
-//! compute graph that declares what each dispatch reads and writes, so Goldy
+//! task graph that declares what each node reads and writes, so Goldy
 //! can insert minimal barriers and maximize parallelism on all backends.
 //!
 //! # Usage
 //!
-//! Build a DAG of dispatch nodes with per-resource access declarations, then
+//! Build a DAG of task nodes with per-resource access declarations, then
 //! submit. Goldy analyzes the graph, inserts minimal barriers, and executes
-//! with maximum parallelism. Opt-in alongside the existing
-//! [`ComputeEncoder`](crate::ComputeEncoder).
+//! with maximum parallelism.
 //!
 //! ```rust,ignore
-//! let mut graph = ComputeGraph::new();
+//! let mut graph = TaskGraph::new();
+//!
+//! // Clears and uploads are first-class nodes — the analyzer inserts the
+//! // correct barrier between this clear and any downstream reader.
+//! graph.clear_buffer(&pool_backing, 0, pool.capacity());
 //!
 //! graph.node("pathtag_reduce", &pipeline_a)
 //!     .bind_buffer(&scene_buf, NodeAccess::Read)
@@ -40,6 +43,17 @@
 //!
 //! graph.submit(&device)?.wait()?;
 //! ```
+//!
+//! # Node kinds
+//!
+//! A [`TaskGraph`] accepts three types of nodes, all subject to the same
+//! dependency analysis:
+//!
+//! | Builder method            | GPU operation                      |
+//! |---------------------------|------------------------------------|
+//! | [`TaskGraph::node`]       | Compute dispatch (direct/indirect) |
+//! | [`TaskGraph::clear_buffer`] / [`TaskGraph::clear_buffer_view`] | GPU-side buffer zero-fill |
+//! | [`TaskGraph::write_buffer`] | CPU→GPU buffer upload              |
 //!
 //! # SWMR scheduling
 //!
@@ -67,16 +81,16 @@
 //! See `docu/research/technical_stack/abstract-gpu-compute-graph.md` for the
 //! full design rationale.
 
-mod analysis;
+pub(crate) mod analysis;
 mod graph;
 mod ir;
 
-pub use graph::{ComputeGraph, NodeBuilder};
-pub use ir::{DispatchKind, NodeAccess};
+pub use graph::{NodeBuilder, TaskGraph};
+pub use ir::NodeAccess;
 
 use crate::backend::{BufferHandle, TextureHandle};
 
-/// Identifies a GPU resource within a compute graph.
+/// Identifies a GPU resource within a task graph.
 ///
 /// Used internally by the graph IR. The public API accepts `&Buffer` /
 /// `&BufferView` / `&Texture` and extracts handles automatically.

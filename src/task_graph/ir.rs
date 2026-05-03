@@ -1,14 +1,18 @@
-//! Graph intermediate representation: nodes, bindings, and compiled schedules.
+//! Task graph intermediate representation: nodes, bindings, and compiled schedules.
 //!
-//! These types form the shared IR used by both [`ComputeGraph`](super::ComputeGraph)
-//! (Tier 1) and [`ComputeProgram`](super::ComputeProgram) (Tier 2). The
-//! [`analysis`](super::analysis) module consumes a [`GraphIR`] and produces a
+//! These types form the shared IR consumed by [`analysis`](super::analysis).
+//! The [`analysis`](super::analysis) module consumes a [`GraphIR`] and produces a
 //! [`CompiledSchedule`] of [`Wave`]s with [`BarrierSet`]s.
+//!
+//! A [`TaskNode`] may be a compute dispatch, a buffer clear, or a buffer write.
+//! The analyzer operates only on [`TaskNode::bindings`] and is node-kind-agnostic;
+//! [`emit_commands`](super::analysis::emit_commands) switches on [`NodeKind`] to
+//! produce the final [`crate::backend::ComputeCommand`] stream.
 
 use super::ResourceId;
 use crate::backend::{BufferHandle, ComputePipelineHandle, TextureHandle};
 
-/// Logical access a dispatch node has on a resource, orthogonal to the
+/// Logical access a task node has on a resource, orthogonal to the
 /// resource's physical [`DataAccess`](crate::DataAccess) /
 /// [`SpatialAccess`](crate::SpatialAccess).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,38 +35,64 @@ impl NodeAccess {
     }
 }
 
-/// A single resource binding within a graph node.
+/// A single resource binding within a task node.
 #[derive(Debug, Clone)]
 pub struct ResourceBinding {
     pub resource: ResourceId,
     pub access: NodeAccess,
 }
 
-/// How a graph node's dispatch dimensions are specified.
+/// Dispatch dimensions for a compute task node.
 #[derive(Debug, Clone)]
-pub enum DispatchKind {
+pub enum DispatchDim {
     /// Fixed workgroup counts known at graph construction time.
     Direct { x: u32, y: u32, z: u32 },
     /// Workgroup counts read from a buffer at runtime (3× `u32` at `offset`).
     Indirect { buffer: BufferHandle, offset: u64 },
 }
 
-/// A dispatch node in the graph.
+/// What a task node actually does on the GPU.
+///
+/// The analyzer only looks at [`TaskNode::bindings`]; `NodeKind` is used by
+/// [`emit_commands`](super::analysis::emit_commands) to produce the final command stream.
 #[derive(Debug, Clone)]
-pub struct GraphNode {
+pub enum NodeKind {
+    /// Execute a compute shader.
+    Dispatch {
+        pipeline: ComputePipelineHandle,
+        resource_slots: Vec<u32>,
+        user_slots: Vec<u32>,
+        dispatch: DispatchDim,
+    },
+    /// Zero-fill a buffer region (GPU-side clear).
+    ClearBuffer {
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    },
+    /// Upload CPU data into a buffer, batched with the compute submission.
+    WriteBuffer {
+        buffer: BufferHandle,
+        offset: u64,
+        data: Vec<u8>,
+    },
+}
+
+/// A single node in the task graph.
+#[derive(Debug, Clone)]
+pub struct TaskNode {
     #[allow(dead_code)]
     pub label: String,
-    pub pipeline: ComputePipelineHandle,
+    /// Resource access declarations used by the dependency analyzer.
     pub bindings: Vec<ResourceBinding>,
-    pub resource_slots: Vec<u32>,
-    pub user_slots: Vec<u32>,
-    pub dispatch: DispatchKind,
+    /// What this node actually executes.
+    pub kind: NodeKind,
 }
 
 /// The full graph before scheduling.
 #[derive(Debug, Clone, Default)]
 pub struct GraphIR {
-    pub nodes: Vec<GraphNode>,
+    pub nodes: Vec<TaskNode>,
 }
 
 /// Resources that need a barrier before a wave executes.
@@ -78,7 +108,7 @@ impl BarrierSet {
     }
 }
 
-/// A group of independent dispatch nodes that can execute concurrently.
+/// A group of independent task nodes that can execute concurrently.
 #[derive(Debug, Clone)]
 pub struct Wave {
     pub node_indices: Vec<usize>,

@@ -20,10 +20,11 @@
 //!
 //! 4. **Command emission**: waves are serialized into a flat
 //!    `Vec<ComputeCommand>` with `ResourceBarrier` commands between waves.
+//!    Each [`NodeKind`](super::ir::NodeKind) variant emits different commands.
 
 use std::collections::HashSet;
 
-use super::ir::{BarrierSet, CompiledSchedule, DispatchKind, GraphIR, ResourceBinding, Wave};
+use super::ir::{BarrierSet, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, Wave};
 // NodeAccess is used in the test module via `super::*`
 #[cfg(test)]
 use super::ir::NodeAccess;
@@ -230,6 +231,11 @@ fn compute_barriers(
 }
 
 /// Emit a flat `Vec<ComputeCommand>` from a graph IR and its compiled schedule.
+///
+/// Each [`NodeKind`] variant emits a different command sequence:
+/// - `Dispatch` → `SetPipeline` + optional `BindResourcesRaw` + `Dispatch`/`DispatchIndirect`
+/// - `ClearBuffer` → `ClearBuffer`
+/// - `WriteBuffer` → `WriteBuffer`
 pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCommand> {
     let mut commands = Vec::new();
 
@@ -243,25 +249,56 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
 
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
-            commands.push(ComputeCommand::SetPipeline(node.pipeline));
-            if !node.resource_slots.is_empty() || !node.user_slots.is_empty() {
-                commands.push(ComputeCommand::BindResourcesRaw {
-                    indices: node.resource_slots.clone(),
-                    user: node.user_slots.clone(),
-                });
-            }
-            match &node.dispatch {
-                DispatchKind::Direct { x, y, z } => {
-                    commands.push(ComputeCommand::Dispatch {
-                        workgroups_x: *x,
-                        workgroups_y: *y,
-                        workgroups_z: *z,
-                    });
+            match &node.kind {
+                NodeKind::Dispatch {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    dispatch,
+                } => {
+                    commands.push(ComputeCommand::SetPipeline(*pipeline));
+                    if !resource_slots.is_empty() || !user_slots.is_empty() {
+                        commands.push(ComputeCommand::BindResourcesRaw {
+                            indices: resource_slots.clone(),
+                            user: user_slots.clone(),
+                        });
+                    }
+                    match dispatch {
+                        super::ir::DispatchDim::Direct { x, y, z } => {
+                            commands.push(ComputeCommand::Dispatch {
+                                workgroups_x: *x,
+                                workgroups_y: *y,
+                                workgroups_z: *z,
+                            });
+                        }
+                        super::ir::DispatchDim::Indirect { buffer, offset } => {
+                            commands.push(ComputeCommand::DispatchIndirect {
+                                buffer: *buffer,
+                                offset: *offset,
+                            });
+                        }
+                    }
                 }
-                DispatchKind::Indirect { buffer, offset } => {
-                    commands.push(ComputeCommand::DispatchIndirect {
+                NodeKind::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    commands.push(ComputeCommand::ClearBuffer {
                         buffer: *buffer,
                         offset: *offset,
+                        size: *size,
+                    });
+                }
+                NodeKind::WriteBuffer {
+                    buffer,
+                    offset,
+                    data,
+                } => {
+                    commands.push(ComputeCommand::WriteBuffer {
+                        buffer: *buffer,
+                        offset: *offset,
+                        data: data.clone(),
                     });
                 }
             }
@@ -274,28 +311,73 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compute_graph::ir::{DispatchKind, GraphNode, ResourceBinding};
+    use crate::task_graph::ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 
     fn buf(id: u64) -> ResourceId {
         ResourceId::Buffer(id)
     }
 
+    /// Build a dispatch `TaskNode` — the workhorse helper for analysis tests.
+    fn dispatch_node(
+        label: &str,
+        pipeline: u64,
+        bindings: Vec<(ResourceId, NodeAccess)>,
+        wg: u32,
+    ) -> TaskNode {
+        TaskNode {
+            label: label.to_string(),
+            bindings: bindings
+                .into_iter()
+                .map(|(resource, access)| ResourceBinding { resource, access })
+                .collect(),
+            kind: NodeKind::Dispatch {
+                pipeline,
+                resource_slots: Vec::new(),
+                user_slots: Vec::new(),
+                dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
+            },
+        }
+    }
+
+    /// Short alias used by the bulk of tests.
     fn node(
         label: &str,
         pipeline: u64,
         bindings: Vec<(ResourceId, NodeAccess)>,
         wg: u32,
-    ) -> GraphNode {
-        GraphNode {
+    ) -> TaskNode {
+        dispatch_node(label, pipeline, bindings, wg)
+    }
+
+    /// Build a `ClearBuffer` `TaskNode`.
+    fn clear_node(label: &str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+        TaskNode {
             label: label.to_string(),
-            pipeline,
-            bindings: bindings
-                .into_iter()
-                .map(|(resource, access)| ResourceBinding { resource, access })
-                .collect(),
-            resource_slots: Vec::new(),
-            user_slots: Vec::new(),
-            dispatch: DispatchKind::Direct { x: wg, y: 1, z: 1 },
+            bindings: vec![ResourceBinding {
+                resource: buffer,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::ClearBuffer {
+                buffer: buf_handle,
+                offset: 0,
+                size: 256,
+            },
+        }
+    }
+
+    /// Build a `WriteBuffer` `TaskNode`.
+    fn write_node(label: &str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+        TaskNode {
+            label: label.to_string(),
+            bindings: vec![ResourceBinding {
+                resource: buffer,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer: buf_handle,
+                offset: 0,
+                data: vec![0u8; 4],
+            },
         }
     }
 
@@ -529,16 +611,18 @@ mod tests {
     #[test]
     fn command_emission_with_resource_slots() {
         let ir = GraphIR {
-            nodes: vec![GraphNode {
+            nodes: vec![TaskNode {
                 label: "A".to_string(),
-                pipeline: 10,
                 bindings: vec![ResourceBinding {
                     resource: buf(0),
                     access: NodeAccess::Write,
                 }],
-                resource_slots: vec![42, 7],
-                user_slots: Vec::new(),
-                dispatch: DispatchKind::Direct { x: 1, y: 1, z: 1 },
+                kind: NodeKind::Dispatch {
+                    pipeline: 10,
+                    resource_slots: vec![42, 7],
+                    user_slots: Vec::new(),
+                    dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+                },
             }],
         };
         let edges = build_edges(&ir);
@@ -557,6 +641,194 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -------------------------------------------------------------------------
+    // ClearBuffer and WriteBuffer node emission tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn clear_node_emits_clear_buffer_command() {
+        // A single ClearBuffer node should emit exactly one ClearBuffer command.
+        let ir = GraphIR {
+            nodes: vec![clear_node("clear", buf(0), 0)],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let cmds = emit_commands(&ir, &schedule);
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+    }
+
+    #[test]
+    fn write_node_emits_write_buffer_command() {
+        let ir = GraphIR {
+            nodes: vec![write_node("write", buf(0), 0)],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let cmds = emit_commands(&ir, &schedule);
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], ComputeCommand::WriteBuffer { .. }));
+    }
+
+    #[test]
+    fn clear_then_read_produces_barrier() {
+        // ClearBuffer buf0 → dispatch reads buf0: two waves, one barrier
+        let ir = GraphIR {
+            nodes: vec![
+                clear_node("clear", buf(0), 0),
+                node("read", 1, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 2);
+
+        let cmds = emit_commands(&ir, &schedule);
+        // ClearBuffer, ResourceBarrier, SetPipeline, Dispatch
+        assert_eq!(cmds.len(), 4);
+        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+        assert!(matches!(cmds[1], ComputeCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[2], ComputeCommand::SetPipeline(_)));
+        assert!(matches!(cmds[3], ComputeCommand::Dispatch { .. }));
+    }
+
+    #[test]
+    fn clear_and_independent_dispatch_same_wave() {
+        // ClearBuffer buf0, dispatch writes buf1 → independent → wave 0, no barrier
+        let ir = GraphIR {
+            nodes: vec![
+                clear_node("clear", buf(0), 0),
+                node("write", 1, vec![(buf(1), NodeAccess::Write)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert!(edges.is_empty());
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 1);
+
+        let cmds = emit_commands(&ir, &schedule);
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::ClearBuffer { .. })));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::Dispatch { .. })));
+    }
+
+    #[test]
+    fn write_buffer_then_dispatch_produces_barrier() {
+        // WriteBuffer buf0 → dispatch reads buf0: two waves, one barrier
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("write", buf(0), 0),
+                node("read", 1, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 2);
+
+        let cmds = emit_commands(&ir, &schedule);
+        assert!(matches!(cmds[0], ComputeCommand::WriteBuffer { .. }));
+        assert!(matches!(cmds[1], ComputeCommand::ResourceBarrier { .. }));
+    }
+
+    #[test]
+    fn write_buffer_and_independent_dispatch_same_wave() {
+        // WriteBuffer buf0, dispatch writes buf1 → independent → no barrier
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("write", buf(0), 0),
+                node("write_b", 1, vec![(buf(1), NodeAccess::Write)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert!(edges.is_empty());
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 1);
+
+        let cmds = emit_commands(&ir, &schedule);
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+    }
+
+    #[test]
+    fn multiple_clears_independent_same_wave() {
+        // Two clears on different buffers → independent → wave 0, no barrier
+        let ir = GraphIR {
+            nodes: vec![
+                clear_node("clear_a", buf(0), 0),
+                clear_node("clear_b", buf(1), 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert!(edges.is_empty());
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 1);
+        assert_eq!(schedule.waves[0].node_indices.len(), 2);
+    }
+
+    #[test]
+    fn diamond_with_clear_at_root() {
+        // ClearBuffer buf0 (root), two dispatches read buf0 + write y/z,
+        // final dispatch reads y+z. Same DAG shape as compile_diamond but
+        // root is a clear instead of a dispatch.
+        let ir = GraphIR {
+            nodes: vec![
+                clear_node("clear_x", buf(0), 0),
+                node(
+                    "B",
+                    2,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "C",
+                    3,
+                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "D",
+                    4,
+                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
+                    1,
+                ),
+            ],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+
+        // 3 waves: [clear_x], [B, C], [D]
+        assert_eq!(schedule.waves.len(), 3);
+        assert_eq!(schedule.waves[0].node_indices, vec![0]);
+        let mut w1 = schedule.waves[1].node_indices.clone();
+        w1.sort();
+        assert_eq!(w1, vec![1, 2]);
+        assert_eq!(schedule.waves[2].node_indices, vec![3]);
+
+        // Two barriers: before wave 1 (clear→B,C) and before wave 2 (B,C→D)
+        let barrier_count = schedule
+            .waves
+            .iter()
+            .filter(|w| !w.barriers_before.is_empty())
+            .count();
+        assert_eq!(barrier_count, 2);
     }
 
     // -------------------------------------------------------------------------
@@ -790,7 +1062,7 @@ mod tests {
     #[test]
     fn edges_n_disjoint_views_all_writing_no_edges() {
         // 6 nodes, each writing a non-overlapping 256-byte region of parent 0
-        let nodes: Vec<GraphNode> = (0..6)
+        let nodes: Vec<TaskNode> = (0..6)
             .map(|i| {
                 node(
                     "dispatch",
@@ -883,7 +1155,7 @@ mod tests {
     #[test]
     fn waves_8_disjoint_views_independent_writes_one_wave() {
         // 8 nodes, each writing a distinct 128-byte window of parent 0 — all independent
-        let nodes: Vec<GraphNode> = (0..8)
+        let nodes: Vec<TaskNode> = (0..8)
             .map(|i| {
                 node(
                     "write",
@@ -1010,7 +1282,7 @@ mod tests {
     #[test]
     fn waves_all_overlapping_views_degrades_to_chain() {
         // 4 nodes all writing the same region — must be fully serialized
-        let nodes: Vec<GraphNode> = (0..4)
+        let nodes: Vec<TaskNode> = (0..4)
             .map(|i| node("w", i, vec![(range(0, 0, 512), NodeAccess::Write)], 1))
             .collect();
         let ir = GraphIR { nodes };

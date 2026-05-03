@@ -1,7 +1,7 @@
-//! `ComputeGraph` — Tier 1: interpreted, dynamic compute graph.
+//! `TaskGraph` — analyzed GPU task graph with automatic barrier insertion.
 
 use super::analysis;
-use super::ir::{DispatchKind, GraphIR, GraphNode, NodeAccess, ResourceBinding};
+use super::ir::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use super::ResourceId;
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
@@ -9,17 +9,23 @@ use crate::device::Device;
 use crate::gpu_future::GpuFuture;
 use crate::texture::Texture;
 use anyhow::Result;
-/// A dynamic compute graph that analyzes dependencies at submit time.
+
+/// A task graph that analyzes dependencies at submit time.
 ///
-/// Build a DAG of dispatch nodes with per-resource access declarations,
-/// then submit. Goldy analyzes the graph, inserts minimal barriers, and
-/// executes with maximum parallelism.
+/// Build a DAG of task nodes — compute dispatches, buffer clears, and buffer
+/// writes — with per-resource access declarations, then submit. Goldy analyzes
+/// the graph, inserts minimal barriers, and executes with maximum parallelism.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// let mut graph = ComputeGraph::new();
+/// let mut graph = TaskGraph::new();
 ///
+/// // Zero-fill the pool buffer (analyzed as a Write on the pool buffer)
+/// graph.clear_buffer(&pool_backing, 0, pool.capacity());
+///
+/// // Dispatch nodes declare what they read/write so the analyzer can insert
+/// // barriers automatically.
 /// graph.node("write_data", &pipeline_a)
 ///     .bind_buffer(&buf, NodeAccess::Write)
 ///     .bind_resources_raw(&[buf_idx])
@@ -32,38 +38,105 @@ use anyhow::Result;
 ///
 /// graph.submit(&device)?.wait()?;
 /// ```
-pub struct ComputeGraph {
+pub struct TaskGraph {
     ir: GraphIR,
-    /// Prepend arbitrary compute commands **before** the analyzed graph (e.g. pool /
-    /// buffer clears) so they batch into one compute submit.
-    pub prelude: Vec<crate::backend::ComputeCommand>,
 }
 
-impl ComputeGraph {
+impl TaskGraph {
     pub fn new() -> Self {
         Self {
             ir: GraphIR::default(),
-            prelude: Vec::new(),
         }
     }
 
-    /// Add a dispatch node to the graph. The returned [`NodeBuilder`] must
-    /// be finalized with [`NodeBuilder::dispatch`].
+    /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
+    /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect`].
     pub fn node<'a>(&'a mut self, label: &str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
         NodeBuilder {
             graph: self,
-            node: GraphNode {
-                label: label.to_string(),
-                pipeline: pipeline.handle,
-                bindings: Vec::new(),
-                resource_slots: Vec::new(),
-                user_slots: Vec::new(),
-                dispatch: DispatchKind::Direct { x: 0, y: 0, z: 0 },
-            },
+            label: label.to_string(),
+            pipeline: pipeline.handle,
+            bindings: Vec::new(),
+            resource_slots: Vec::new(),
+            user_slots: Vec::new(),
         }
     }
 
-    /// Analyze the graph and submit all dispatches with optimal barriers.
+    /// Add a zero-fill node for `buffer[offset..offset+size]`.
+    ///
+    /// The node is declared as `NodeAccess::Write` on the buffer so the analyzer
+    /// can insert barriers between this clear and any subsequent reader.
+    pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
+        self.ir.nodes.push(TaskNode {
+            label: "clear_buffer".to_string(),
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buffer.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::ClearBuffer {
+                buffer: buffer.gpu_buffer_handle(),
+                offset,
+                size,
+            },
+        });
+    }
+
+    /// Add a zero-fill node for a view region.
+    ///
+    /// `offset` is relative to the view's start; the absolute parent-buffer
+    /// offset is computed internally. If `size` is 0, clears from `offset`
+    /// to the end of the view.
+    ///
+    /// The node is declared as `NodeAccess::Write` on the view's `BufferRange`
+    /// so the analyzer can detect conflicts with overlapping views or the full
+    /// parent buffer while allowing independent (non-overlapping) views to run
+    /// concurrently in the same wave.
+    pub fn clear_buffer_view(&mut self, view: &BufferView, offset: u64, size: u64) {
+        let clear_size = if size == 0 {
+            view.size().saturating_sub(offset)
+        } else {
+            size
+        };
+        self.ir.nodes.push(TaskNode {
+            label: "clear_buffer_view".to_string(),
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::BufferRange {
+                    parent: view.parent_handle(),
+                    offset: view.offset(),
+                    len: view.size(),
+                },
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::ClearBuffer {
+                buffer: view.parent_handle(),
+                offset: view.offset() + offset,
+                size: clear_size,
+            },
+        });
+    }
+
+    /// Add a CPU→GPU write node for `buffer`.
+    ///
+    /// The data is uploaded to the buffer in the same GPU submission as the
+    /// surrounding dispatches. The node is declared as `NodeAccess::Write` so
+    /// the analyzer inserts the necessary barrier between this write and any
+    /// subsequent reader, and serializes it after any prior reader (WAR).
+    pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: Vec<u8>) {
+        self.ir.nodes.push(TaskNode {
+            label: "write_buffer".to_string(),
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buffer.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer: buffer.gpu_buffer_handle(),
+                offset,
+                data,
+            },
+        });
+    }
+
+    /// Analyze the graph and submit all tasks with optimal barriers.
     /// Returns a [`GpuFuture`] for non-blocking completion.
     pub fn submit(&self, device: &Device) -> Result<GpuFuture> {
         let commands = self.compile_commands();
@@ -77,71 +150,49 @@ impl ComputeGraph {
         backend.dispatch_compute(device.handle, &commands)
     }
 
-    /// Number of nodes in the graph.
+    /// Number of task nodes in the graph.
     pub fn len(&self) -> usize {
         self.ir.nodes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ir.nodes.is_empty() && self.prelude.is_empty()
+        self.ir.nodes.is_empty()
     }
 
-    /// Push a zero-fill of `buffer` at `[offset, offset+size)` into the prelude.
-    pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
-        self.prelude
-            .push(crate::backend::ComputeCommand::ClearBuffer {
-                buffer: buffer.gpu_buffer_handle(),
-                offset,
-                size,
-            });
-    }
-
-    /// Push a zero-fill of a view region into the prelude.
+    /// Compile the graph into a flat command stream.
     ///
-    /// `offset` is relative to the view's start; the absolute parent-buffer
-    /// offset is computed internally. If `size` is 0, clears from `offset`
-    /// to the end of the view.
-    pub fn clear_buffer_view(&mut self, view: &BufferView, offset: u64, size: u64) {
-        let clear_size = if size == 0 {
-            view.size().saturating_sub(offset)
-        } else {
-            size
-        };
-        self.prelude
-            .push(crate::backend::ComputeCommand::ClearBuffer {
-                buffer: view.parent_handle(),
-                offset: view.offset() + offset,
-                size: clear_size,
-            });
-    }
-
+    /// Runs the dependency analyzer, schedules waves, inserts `ResourceBarrier`
+    /// commands at wave boundaries, and emits the final `ComputeCommand` sequence.
     pub fn compile_commands(&self) -> Vec<crate::backend::ComputeCommand> {
-        let mut commands = self.prelude.clone();
         let edges = analysis::build_edges(&self.ir);
         let schedule = analysis::schedule_waves(&self.ir, &edges);
-        commands.extend(analysis::emit_commands(&self.ir, &schedule));
-        commands
+        analysis::emit_commands(&self.ir, &schedule)
     }
 }
 
-impl Default for ComputeGraph {
+impl Default for TaskGraph {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Builder for a single dispatch node within a [`ComputeGraph`].
+/// Builder for a single compute dispatch node within a [`TaskGraph`].
 ///
-/// Created by [`ComputeGraph::node`]. Must be finalized with [`dispatch`](NodeBuilder::dispatch).
+/// Created by [`TaskGraph::node`]. Must be finalized with
+/// [`dispatch`](NodeBuilder::dispatch) or [`dispatch_indirect`](NodeBuilder::dispatch_indirect).
 pub struct NodeBuilder<'a> {
-    graph: &'a mut ComputeGraph,
-    node: GraphNode,
+    graph: &'a mut TaskGraph,
+    label: String,
+    pipeline: crate::backend::ComputePipelineHandle,
+    bindings: Vec<ResourceBinding>,
+    resource_slots: Vec<u32>,
+    user_slots: Vec<u32>,
 }
 
 impl<'a> NodeBuilder<'a> {
     /// Declare that this node accesses a buffer with the given logical access.
     pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
-        self.node.bindings.push(ResourceBinding {
+        self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
         });
@@ -158,7 +209,7 @@ impl<'a> NodeBuilder<'a> {
     /// Barriers are still emitted against the parent buffer handle so backends
     /// require no changes.
     pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
-        self.node.bindings.push(ResourceBinding {
+        self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
                 offset: view.offset(),
@@ -171,7 +222,7 @@ impl<'a> NodeBuilder<'a> {
 
     /// Declare that this node accesses a texture with the given logical access.
     pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
-        self.node.bindings.push(ResourceBinding {
+        self.bindings.push(ResourceBinding {
             resource: ResourceId::Texture(tex.handle),
             access,
         });
@@ -180,30 +231,48 @@ impl<'a> NodeBuilder<'a> {
 
     /// Set the bindless resource slot indices for this node's dispatch (region A).
     pub fn bind_resources_raw(mut self, indices: &[u32]) -> Self {
-        self.node.resource_slots = indices.to_vec();
+        self.resource_slots = indices.to_vec();
         self
     }
 
     /// Set user scalar parameters for this node's dispatch (region B).
     pub fn bind_resources_raw_with_user(mut self, indices: &[u32], user: &[u32]) -> Self {
-        self.node.resource_slots = indices.to_vec();
-        self.node.user_slots = user.to_vec();
+        self.resource_slots = indices.to_vec();
+        self.user_slots = user.to_vec();
         self
     }
 
     /// Finalize the node with fixed workgroup dimensions.
-    pub fn dispatch(mut self, x: u32, y: u32, z: u32) {
-        self.node.dispatch = DispatchKind::Direct { x, y, z };
-        self.graph.ir.nodes.push(self.node);
+    pub fn dispatch(self, x: u32, y: u32, z: u32) {
+        let node = TaskNode {
+            label: self.label,
+            bindings: self.bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: self.pipeline,
+                resource_slots: self.resource_slots,
+                user_slots: self.user_slots,
+                dispatch: DispatchDim::Direct { x, y, z },
+            },
+        };
+        self.graph.ir.nodes.push(node);
     }
 
     /// Finalize the node with indirect dispatch (dimensions read from `buf` at `offset`).
-    pub fn dispatch_indirect(mut self, buf: &Buffer, offset: u64) {
-        self.node.dispatch = DispatchKind::Indirect {
-            buffer: buf.handle,
-            offset,
+    pub fn dispatch_indirect(self, buf: &Buffer, offset: u64) {
+        let node = TaskNode {
+            label: self.label,
+            bindings: self.bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: self.pipeline,
+                resource_slots: self.resource_slots,
+                user_slots: self.user_slots,
+                dispatch: DispatchDim::Indirect {
+                    buffer: buf.handle,
+                    offset,
+                },
+            },
         };
-        self.graph.ir.nodes.push(self.node);
+        self.graph.ir.nodes.push(node);
     }
 }
 
@@ -224,8 +293,8 @@ mod tests {
         ShaderModule::from_slang(device, "void main() {}").unwrap()
     }
 
-    fn mock_pipeline(device: &Device, shader: &ShaderModule) -> ComputePipeline {
-        ComputePipeline::new(device, shader).unwrap()
+    fn mock_pipeline(device: &Device, shader: &ShaderModule) -> crate::compute::ComputePipeline {
+        crate::compute::ComputePipeline::new(device, shader).unwrap()
     }
 
     #[test]
@@ -237,7 +306,7 @@ mod tests {
         let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
         let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("write", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Write)
@@ -286,7 +355,7 @@ mod tests {
         let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
         let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("write_a", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Write)
@@ -311,7 +380,7 @@ mod tests {
 
     #[test]
     fn compile_empty_graph() {
-        let graph = ComputeGraph::new();
+        let graph = TaskGraph::new();
         let cmds = graph.compile_commands();
         assert!(cmds.is_empty());
     }
@@ -323,7 +392,7 @@ mod tests {
         let pipeline = mock_pipeline(&device, &shader);
         let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
             .bind_buffer(&buf, NodeAccess::ReadWrite)
@@ -347,7 +416,7 @@ mod tests {
         let buf_y = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
         let buf_z = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         // A writes X
         graph
             .node("A", &p1)
@@ -401,7 +470,7 @@ mod tests {
         let pipeline = mock_pipeline(&device, &shader);
         let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
         assert_eq!(graph.len(), 0);
 
@@ -414,7 +483,162 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Category F: ComputeGraph + MockBackend with real BufferPool / BufferView
+    // clear_buffer and write_buffer node tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn clear_buffer_then_read_produces_barrier() {
+        // clear_buffer declares Write on buf; a read dispatch creates a RAW edge.
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.clear_buffer(&buf, 0, 256);
+        graph
+            .node("read", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+
+        // ClearBuffer, ResourceBarrier, SetPipeline, Dispatch
+        assert_eq!(cmds.len(), 4);
+        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+        assert!(matches!(cmds[1], ComputeCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[2], ComputeCommand::SetPipeline(_)));
+        assert!(matches!(cmds[3], ComputeCommand::Dispatch { .. }));
+    }
+
+    #[test]
+    fn clear_buffer_independent_of_unrelated_dispatch_same_wave() {
+        // Clear of buf_a and a dispatch writing buf_b are independent.
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.clear_buffer(&buf_a, 0, 256);
+        graph
+            .node("write_b", &pipeline)
+            .bind_buffer(&buf_b, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::ClearBuffer { .. })));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::Dispatch { .. })));
+    }
+
+    #[test]
+    fn write_buffer_then_read_produces_barrier() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.write_buffer(&buf, 0, vec![0u8; 256]);
+        graph
+            .node("read", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+
+        assert!(matches!(cmds[0], ComputeCommand::WriteBuffer { .. }));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })),
+            "expected a barrier between write_buffer and dispatch"
+        );
+    }
+
+    #[test]
+    fn write_buffer_independent_of_unrelated_dispatch_same_wave() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.write_buffer(&buf_a, 0, vec![0u8; 4]);
+        graph
+            .node("write_b", &pipeline)
+            .bind_buffer(&buf_b, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+    }
+
+    #[test]
+    fn multiple_clears_independent_same_wave() {
+        let device = mock_device();
+        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.clear_buffer(&buf_a, 0, 256);
+        graph.clear_buffer(&buf_b, 0, 256);
+
+        let cmds = graph.compile_commands();
+
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, ComputeCommand::ClearBuffer { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn is_empty_with_clear_node() {
+        let device = mock_device();
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        assert!(graph.is_empty());
+        graph.clear_buffer(&buf, 0, 256);
+        assert!(!graph.is_empty());
+        assert_eq!(graph.len(), 1);
+    }
+
+    #[test]
+    fn is_empty_with_write_node() {
+        let device = mock_device();
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        assert!(graph.is_empty());
+        graph.write_buffer(&buf, 0, vec![1, 2, 3, 4]);
+        assert!(!graph.is_empty());
+        assert_eq!(graph.len(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Category F: TaskGraph + MockBackend with real BufferPool / BufferView
     // -------------------------------------------------------------------------
 
     /// Create a pool of `total_size` bytes and return it together with
@@ -443,7 +667,7 @@ mod tests {
         let view_a = pool.alloc::<u32>(64).unwrap(); // [0, 256)
         let view_b = pool.alloc::<u32>(64).unwrap(); // [256, 512)
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("write_a", &pipeline)
             .bind_buffer_view(&view_a, NodeAccess::Write)
@@ -475,7 +699,7 @@ mod tests {
 
         let view = pool.alloc::<u32>(64).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("write", &pipeline)
             .bind_buffer_view(&view, NodeAccess::Write)
@@ -513,7 +737,7 @@ mod tests {
         let owned = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
         let view = pool.alloc::<u32>(64).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
             .bind_buffer(&owned, NodeAccess::Write)
@@ -558,7 +782,7 @@ mod tests {
         let v1 = pool.alloc::<u32>(64).unwrap();
         let v2 = pool.alloc::<u32>(64).unwrap();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
             .bind_buffer_view(&v0, NodeAccess::Write)
@@ -605,7 +829,7 @@ mod tests {
         let view = pool.alloc::<u32>(64).unwrap();
         let backing = pool.backing_buffer();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
             .bind_buffer(backing, NodeAccess::Write)
@@ -633,7 +857,7 @@ mod tests {
 
         let views: Vec<_> = (0..10).map(|_| pool.alloc::<u32>(64).unwrap()).collect();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         for view in &views {
             graph
                 .node("write", &pipeline)
@@ -667,7 +891,7 @@ mod tests {
         let view = pool.alloc::<u32>(64).unwrap();
         let parent_handle = view.parent_handle();
 
-        let mut graph = ComputeGraph::new();
+        let mut graph = TaskGraph::new();
         graph
             .node("write", &p1)
             .bind_buffer_view(&view, NodeAccess::Write)
@@ -695,24 +919,24 @@ mod tests {
     }
 
     #[test]
-    fn prelude_clear_then_pool_view_dispatch_no_spurious_barrier() {
-        // A ClearBuffer prelude on the backing buffer followed by pool-view dispatches.
-        // Two independent writes should still be in one wave.
+    fn clear_then_pool_view_dispatch_disjoint_no_spurious_barrier() {
+        // A ClearBuffer node on the backing buffer followed by pool-view dispatches.
+        // Two independent view writes should still be in one wave (after the clear wave).
         let (device, shader, _, mut pool) = make_pool_setup(1024);
         let pipeline = mock_pipeline(&device, &shader);
 
         let view_a = pool.alloc::<u32>(64).unwrap();
         let view_b = pool.alloc::<u32>(64).unwrap();
-        let backing_handle = pool.backing_buffer().gpu_buffer_handle();
 
-        let mut graph = ComputeGraph::new();
-        // Inject a clear as a prelude command (not a node)
-        graph.prelude.push(ComputeCommand::ClearBuffer {
-            buffer: backing_handle,
-            offset: 0,
-            size: 1024,
-        });
-
+        let mut graph = TaskGraph::new();
+        // Clear the whole backing buffer — writes to the whole Buffer handle
+        graph.clear_buffer(pool.backing_buffer(), 0, 1024);
+        // The two pool-view dispatches write disjoint *ranges* of the backing buffer.
+        // But clear_buffer uses ResourceId::Buffer(parent) (whole-buffer), so it
+        // aliases every range. The two view dispatches therefore depend on the clear
+        // (RAW: clear writes whole, view writes range of same parent), forming:
+        //   Wave 0: clear
+        //   Wave 1: write_a, write_b (independent of each other)
         graph
             .node("write_a", &pipeline)
             .bind_buffer_view(&view_a, NodeAccess::Write)
@@ -724,15 +948,77 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
-        // Prelude ClearBuffer comes first, then both dispatches in one wave
-        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+        // Exactly one barrier (clear → view dispatches), no barrier between the two views
         let barrier_count = cmds
             .iter()
             .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
             .count();
         assert_eq!(
-            barrier_count, 0,
-            "disjoint views should not trigger a barrier"
+            barrier_count, 1,
+            "expected exactly one barrier (clear → views)"
+        );
+
+        // ClearBuffer is the first command
+        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+
+        // Two dispatches present
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn clear_view_then_dispatch_on_same_view_produces_barrier() {
+        // clear_buffer_view on view_a, then dispatch reads view_a — must barrier
+        let (device, shader, _, mut pool) = make_pool_setup(512);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let view_a = pool.alloc::<u32>(64).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.clear_buffer_view(&view_a, 0, 0); // size=0 → clear to end of view
+        graph
+            .node("read_a", &pipeline)
+            .bind_buffer_view(&view_a, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+    }
+
+    #[test]
+    fn clear_view_and_dispatch_on_disjoint_view_same_wave_no_barrier() {
+        // clear_buffer_view on view_a, dispatch writes view_b (disjoint) — no barrier
+        let (device, shader, _, mut pool) = make_pool_setup(1024);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let view_a = pool.alloc::<u32>(64).unwrap(); // [0, 256)
+        let view_b = pool.alloc::<u32>(64).unwrap(); // [256, 512)
+
+        let mut graph = TaskGraph::new();
+        graph.clear_buffer_view(&view_a, 0, 0);
+        graph
+            .node("write_b", &pipeline)
+            .bind_buffer_view(&view_b, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })),
+            "disjoint views should produce no barrier"
         );
     }
 }

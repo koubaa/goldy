@@ -1,6 +1,8 @@
 //! Compute pipeline integration tests.
 //!
 //! These tests verify compute pipeline functionality with actual GPU backends.
+//! They are only compiled when at least one backend feature is enabled.
+#![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 mod common;
 
