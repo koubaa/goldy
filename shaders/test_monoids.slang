@@ -102,10 +102,9 @@ groupshared TagMonoid  sh_tag[WG];
 groupshared DrawMonoid sh_draw[WG];
 groupshared Bic        sh_bic[WG];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uniform uint out_slot, uint3 local_id : SV_GroupThreadID) {
-    StorageBuffer<uint> OUT = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     uint ix = local_id.x;
 
     TagMonoid t = TagMonoid.identity();

@@ -16,10 +16,9 @@ struct Line {
 
 static const uint NUM_LINES = 20;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint lines_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<Line> LINES = goldy_scattered<Line>(lines_slot);
+void cs_main(Scattered<Line> LINES, ThreadId id) {
     uint idx = id.x;
     
     if (idx >= NUM_LINES) return;

@@ -97,7 +97,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | `goldy_exp/types.slang` | Common data types: `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `Instance2D` |
 | `goldy_exp/primitives.slang` | Procedural geometry: `quad_local()`, `quad_position()`, `quad_position_rotated()`, `billboard_position()`, `fullscreen_position()`, `fullscreen_uv()` |
 | `goldy_exp/descriptor_handle.slang` | Cross-platform `DescriptorHandle<T>` support (routes by access pattern) |
-| `goldy_exp/access.slang` | Unified access functions: `goldy_broadcast<T>()`, `goldy_scattered<T>()`, etc. |
+| `goldy_exp/access.slang` | Resource type aliases (`Scattered<T>` = `StorageBuffer<T>`, `BufRO<T>`, `Interpolated<T>`, etc.) and SV types (`ThreadId`, `VertexId`, etc.). Declare any struct type directly as a parameter for implicit constant-buffer broadcast. |
 | `goldy_exp/bindless_resources.slang` | Metal Tier 2 ParameterBlock for bindless resources |
 
 ### Vertex Formats
@@ -191,7 +191,7 @@ device.register_library(ShaderLibrary::from_source("myutils", r#"
 
 | File | Description | Uses Module |
 |------|-------------|-------------|
-| `plasma.slang` | Classic demoscene plasma (uses `goldy_broadcast<T>()`) | ✓ `import goldy_exp` |
+| `plasma.slang` | Classic demoscene plasma | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
 | `gradient.slang` | Animated color gradient | ✓ `import goldy_exp` |
 | `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
@@ -301,73 +301,50 @@ Slang's `reinterpret<>` handles buffer types specially, avoiding the problematic
 
 ### Cross-Platform Resource Binding
 
-Goldy provides **unified access functions** that work across all platforms. Resources are
-addressed by **bindless slot indices** — small integers passed as `uniform uint` parameters
-directly in the entry-point signature. Slang maps these to push constants (SPIR-V), root
-constants (DX12), and argument-buffer entries (Metal) automatically.
+Goldy's bindless architecture passes resource slot indices as small `uniform uint` push
+constants. The preferred way to write bindless shaders is the **virtual main** system:
 
 ```slang
 import goldy_exp;
 
 struct TimeUniforms { float time; };
+struct Particle { float2 pos; float2 vel; };
 
-[shader("fragment")]
-float4 fs_main(uniform uint uniforms_slot, FullscreenVarying input) : SV_Target {
-    // uniforms_slot is a bindless heap index sent from Rust via set_push_constants_raw.
-    float t = goldy_broadcast<TimeUniforms>(uniforms_slot).time;
-    return float4(rainbow(t), 1.0);
+// [goldy_compute] generates the real [shader("compute")] entry point automatically.
+// Resource handles and SV types are resolved automatically. Any plain struct type
+// is treated as a constant-buffer broadcast — no wrapper needed.
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(TimeUniforms params, Scattered<Particle> particles, ThreadId id) {
+    Particle p = particles[id.x];
+    p.pos += p.vel * params.time;
+    particles[id.x] = p;
 }
 ```
 
-On the Rust side, push the heap index with:
+Rust binds resources in declaration order (left to right):
 
 ```rust
-let idx = uniform_buffer.bindless_index().unwrap();
-pass.set_push_constants_raw(&[idx]);
+pass.set_push_constants_raw(&[
+    particles_buf.bindless_index().unwrap(),
+    params_buf.bindless_index().unwrap(),
+]);
 ```
 
-#### Access Pattern Functions
-
-| Function | Access Pattern | Use For |
-|----------|----------------|---------|
-| `goldy_broadcast<T>(slot)` | All threads read same address | Uniforms, material params |
-| `goldy_scattered<T>(slot)` | Any thread, any address, read/write | Particle buffers, compute storage |
-| `goldy_buf_ro<T>(slot)` | Read-only buffer (SRV / read cache) | Input buffers |
-| `goldy_byte_address(slot)` | Untyped byte-address buffer | Raw byte access |
-| `goldy_interpolated<T>(slot)` | Hardware-filtered texture reads | Material textures |
-| `goldy_direct_spatial<T>(slot)` | Unfiltered read/write texture | Compute output, framebuffer effects |
-| `goldy_filter(slot)` | Sampler state for filtering | Texture sampling config |
-
-All functions accept a `uint slot` — the bindless heap index, received as a `uniform uint`
-entry-point parameter.
-
-#### Per-dispatch Scalars
-
-Any `uniform` parameter whose type is not a heap index (e.g. a raw offset or count) is passed
-in a subsequent push-constant slot. No `goldy_*` call is needed — just declare the parameter:
+Plain scalar params (e.g. `uint offset`) are also push constants — no wrapper needed:
 
 ```slang
-import goldy_exp;
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint data_slot, uniform uint base, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
-    data[id.x + base] += 1;
+void cs_main(Scattered<uint> data, uint offset, ThreadId id) {
+    data[id.x + offset] += 1;
 }
-```
-
-```rust
-// Rust: [heap_index, base_offset]
-pass.set_push_constants_raw(&[data_buf.bindless_index().unwrap(), base_offset]);
 ```
 
 **Platform support:**
 - **SPIR-V**: `uniform` entry-point params → push constants (std430 layout, offset 0)
 - **DX12**: `uniform` entry-point params → root constants at `b0, space0`
 - **Metal**: Slang wraps params in an `EntryPointParams` struct at `[[buffer(1)]]`
-
-**See `plasma.slang` and `test_access_functions.slang` for complete examples.**
 
 #### Alternative: Direct `DescriptorHandle<T>`
 

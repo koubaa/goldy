@@ -90,12 +90,12 @@ mod tests {
 
         for (name, source) in shaders {
             assert!(
-                source.contains("[shader(\"vertex\")]"),
+                source.contains("[goldy_vertex]"),
                 "{} missing vertex shader entry point",
                 name
             );
             assert!(
-                source.contains("[shader(\"fragment\")]"),
+                source.contains("[goldy_fragment]"),
                 "{} missing fragment shader entry point",
                 name
             );
@@ -129,8 +129,8 @@ mod tests {
     #[test]
     fn test_plasma_structure() {
         assert!(
-            PLASMA.contains("goldy_broadcast"),
-            "PLASMA should use goldy_broadcast<T>() for push-constant-based access"
+            PLASMA.contains("goldy_compute") || PLASMA.contains("goldy_fragment"),
+            "PLASMA should use a goldy_* entry point"
         );
         assert!(
             PLASMA.contains("import goldy_exp"),

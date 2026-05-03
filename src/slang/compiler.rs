@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use super::ffi::*;
 use super::loader::SlangLibrary;
+use super::virtual_main::transform_virtual_main;
 use crate::types::OptimizationLevel;
 use crate::{goldy_event, goldy_span};
 
@@ -516,6 +517,18 @@ impl SlangCompiler {
             anyhow::bail!("Failed to add translation unit");
         }
 
+        // Apply virtual-main transform: [goldy_*] entry points → [shader(...)] wrappers.
+        let transformed_source;
+        let source = if source.contains("[goldy_compute]")
+            || source.contains("[goldy_vertex]")
+            || source.contains("[goldy_fragment]")
+        {
+            transformed_source = transform_virtual_main(source);
+            &transformed_source as &str
+        } else {
+            source
+        };
+
         let source_path = CString::new("shader.slang").unwrap();
         let source_cstr = CString::new(source).context("Source contains null bytes")?;
         unsafe {
@@ -563,6 +576,18 @@ impl SlangCompiler {
             } else {
                 "Unknown compilation error".to_string()
             };
+            // #region agent log
+            {
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                let ep_names: Vec<&str> = entry_points.iter().map(|(n, _)| *n).collect();
+                let diag_escaped = diagnostic.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "");
+                let log = format!("{{\"sessionId\":\"70c2ad\",\"hypothesisId\":\"H4-H5\",\"location\":\"slang/compiler.rs:compile\",\"message\":\"Slang compile failed\",\"data\":{{\"target\":\"{:?}\",\"entry_points\":\"{:?}\",\"diagnostic\":\"{}\"}},\"timestamp\":{}}}\n",
+                    target, ep_names, diag_escaped, ts);
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("c:\\Dev\\kob3\\debug-70c2ad.log") {
+                    use std::io::Write; let _ = f.write_all(log.as_bytes());
+                }
+            }
+            // #endregion agent log
             anyhow::bail!("Slang compilation failed:\n{}", diagnostic);
         }
 
@@ -1379,20 +1404,13 @@ impl Drop for SlangCompiler {
 mod uniform_entry_point_param_binding_tests {
     use super::*;
 
-    /// A minimal compute shader with 3 uniform uint params and no gGoldyDynamic.
+    /// A minimal compute shader with typed params and no gGoldyDynamic.
     const TEST_SHADER: &str = r#"
         import goldy_exp;
 
-        [shader("compute")]
+        [goldy_compute]
         [numthreads(64, 1, 1)]
-        void cs_main(
-            uniform uint read_slot,
-            uniform uint write_slot,
-            uniform uint base,
-            uint3 id : SV_DispatchThreadID
-        ) {
-            StorageBuffer<uint> src = goldy_scattered<uint>(read_slot);
-            StorageBuffer<uint> dst = goldy_scattered<uint>(write_slot);
+        void cs_main(BufRO<uint> src, Scattered<uint> dst, uint base, ThreadId id) {
             uint ix = id.x + base;
             dst[ix] = src[ix];
         }

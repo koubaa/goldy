@@ -23,17 +23,16 @@ static const float2 uvs[3] = {
     float2(0, -1)
 };
 
-[shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID) {
+[goldy_vertex]
+VSOutput vs_main(VertexId vertexID) {
     VSOutput output;
-    output.position = float4(positions[vertexID], 0.0, 1.0);
-    output.uv = uvs[vertexID];
+    output.position = float4(positions[vertexID.value], 0.0, 1.0);
+    output.uv = uvs[vertexID.value];
     return output;
 }
 
-[shader("fragment")]
-float4 fs_main(uniform uint cells_slot, VSOutput input) : SV_Target {
-    StorageBuffer<uint> CELLS = goldy_scattered<uint>(cells_slot);
+[goldy_fragment]
+float4 fs_main(Scattered<uint> CELLS, VSOutput input) : SV_Target {
     float2 uv = input.uv;
     uv.y = 1.0 - uv.y;
     

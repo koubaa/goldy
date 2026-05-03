@@ -14,10 +14,9 @@ use goldy::{
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+void cs_main(Scattered<uint> data, ThreadId id) {
     data[id.x] = data[id.x] * 2;
 }
 "#;
@@ -26,11 +25,9 @@ void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
 const COPY_SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint input_slot, uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> input  = goldy_scattered<uint>(input_slot);
-    StorageBuffer<uint> output = goldy_scattered<uint>(output_slot);
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
     output[id.x] = input[id.x];
 }
 "#;
@@ -199,10 +196,9 @@ fn test_compute_with_srv_and_uav() {
 const INCREMENT_SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+void cs_main(Scattered<uint> data, ThreadId id) {
     data[id.x] = data[id.x] + 1;
 }
 "#;
@@ -212,17 +208,11 @@ void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
 const SIX_SLOT_SUM_SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint a_slot, uniform uint b_slot, uniform uint c_slot,
-             uniform uint d_slot, uniform uint e_slot, uniform uint out_slot,
-             uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> a   = goldy_scattered<uint>(a_slot);
-    StorageBuffer<uint> b   = goldy_scattered<uint>(b_slot);
-    StorageBuffer<uint> c   = goldy_scattered<uint>(c_slot);
-    StorageBuffer<uint> d   = goldy_scattered<uint>(d_slot);
-    StorageBuffer<uint> e   = goldy_scattered<uint>(e_slot);
-    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> a, Scattered<uint> b, Scattered<uint> c,
+             Scattered<uint> d, Scattered<uint> e, Scattered<uint> out,
+             ThreadId id) {
     uint idx = id.x;
     if (idx >= 16) return;
     out[idx] = a[idx] + b[idx] + c[idx] + d[idx] + e[idx];
@@ -581,10 +571,9 @@ struct Particle {
     float2 velocity;
 };
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint particles_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<Particle> particles = goldy_scattered<Particle>(particles_slot);
+void cs_main(Scattered<Particle> particles, ThreadId id) {
     uint idx = id.x;
     if (idx >= 4) return;
     Particle p = particles[idx];
@@ -862,10 +851,9 @@ fn test_positive_mod_correctness() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<float> out = goldy_scattered<float>(out_slot);
+void cs_main(Scattered<float> out, ThreadId id) {
     // scalar: negative dividend
     out[0] = positive_mod(-1.0, 3.0);    // 2.0
     out[1] = positive_mod(-3.0, 3.0);    // 0.0
@@ -930,10 +918,9 @@ fn test_billboard_math() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<float> out = goldy_scattered<float>(out_slot);
+void cs_main(Scattered<float> out, ThreadId id) {
     // Row-major construction. Column 0 = (m[0][0], m[1][0], m[2][0]) = (1, 5, 9).
     float4x4 m = float4x4(
         1, 0, 0, 0,
@@ -1025,11 +1012,9 @@ import goldy_exp;
 
 struct Pair { uint a; uint b; };
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint input_slot, uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
-    ReadOnlyBuffer<Pair> input   = goldy_buf_ro<Pair>(input_slot);
-    StorageBuffer<Pair>  output  = goldy_scattered<Pair>(output_slot);
+void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
     uint idx = id.x;
     if (idx >= 8) return;
     Pair p = input[idx];
@@ -1103,11 +1088,9 @@ fn test_heap_overflow_allocation() {
     const LARGE_COPY_SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint input_slot, uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> input  = goldy_scattered<uint>(input_slot);
-    StorageBuffer<uint> output = goldy_scattered<uint>(output_slot);
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
     uint idx = id.x;
     if (idx >= 2097152) return;  // 8 MB / 4 bytes = 2M elements
     output[idx] = input[idx];
@@ -1166,14 +1149,13 @@ fn test_compute_write_to_texture() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(8, 8, 1)]
-void cs_main(uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
-    RWTexture2D<float4> output = goldy_direct_spatial<float4>(output_slot);
+void cs_main(DirectSpatial<float4> output, ThreadId id) {
     uint2 dims;
     output.GetDimensions(dims.x, dims.y);
     if (id.x < dims.x && id.y < dims.y) {
-        output[id.xy] = float4(1.0, 0.0, 0.0, 1.0);
+        output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
     }
 }
 "#;
@@ -1233,10 +1215,9 @@ void cs_main(uniform uint output_slot, uint3 id : SV_DispatchThreadID) {
 const DOUBLE_SHADER_COHERENT: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+void cs_main(Scattered<uint> data, ThreadId id) {
     data[id.x] = data[id.x] * 2;
 }
 "#;
@@ -1440,10 +1421,9 @@ fn test_cpu_coherent_cpu_write_read_roundtrip() {
 fn test_uniform_param_uint_roundtrip() {
     const SHADER: &str = r#"
 import goldy_exp;
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     out[0] = value;
 }
 "#;
@@ -1475,10 +1455,9 @@ void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchTh
 fn test_uniform_param_uint_zero() {
     const SHADER: &str = r#"
 import goldy_exp;
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     out[0] = value;
 }
 "#;
@@ -1509,10 +1488,9 @@ void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchTh
 fn test_uniform_param_uint_max() {
     const SHADER: &str = r#"
 import goldy_exp;
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     out[0] = value;
 }
 "#;
@@ -1545,10 +1523,9 @@ void cs_main(uniform uint out_slot, uniform uint value, uint3 id : SV_DispatchTh
 fn test_uniform_param_float_reinterpret() {
     const SHADER: &str = r#"
 import goldy_exp;
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uniform float value, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<float> out = goldy_scattered<float>(out_slot);
+void cs_main(Scattered<float> out, float value, ThreadId id) {
     out[0] = value;
 }
 "#;
@@ -1586,11 +1563,9 @@ void cs_main(uniform uint out_slot, uniform float value, uint3 id : SV_DispatchT
 fn test_uniform_two_independent_scalar_params() {
     const SHADER: &str = r#"
 import goldy_exp;
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uniform uint a, uniform uint b,
-             uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     out[0] = a;
     out[1] = b;
 }
@@ -1627,12 +1602,9 @@ void cs_main(uniform uint out_slot, uniform uint a, uniform uint b,
 fn test_uniform_scalar_after_two_buffer_params() {
     const SHADER: &str = r#"
 import goldy_exp;
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint in_slot, uniform uint out_slot, uniform uint offset,
-             uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> inp = goldy_scattered<uint>(in_slot);
-    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id) {
     out[id.x] = inp[id.x] + offset;
 }
 "#;

@@ -27,12 +27,11 @@ static const float2 quadVerts[6] = {
     float2(-1, -1), float2( 1,  1), float2(-1,  1)
 };
 
-[shader("vertex")]
-VSOutput vs_main(uniform uint stars_slot, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
-    StorageBuffer<Star> STARS = goldy_scattered<Star>(stars_slot);
+[goldy_vertex]
+VSOutput vs_main(Scattered<Star> STARS, VertexId vertexID, InstanceId instanceID) {
     VSOutput output;
     
-    Star s = STARS[instanceID];
+    Star s = STARS[instanceID.value];
     
     float2 screenPos = float2(s.x, s.y) / max(s.z, 0.01);
     float baseSize = 0.005 + 0.02 * (1.0 - s.z);
@@ -40,8 +39,8 @@ VSOutput vs_main(uniform uint stars_slot, uint vertexID : SV_VertexID, uint inst
     float size = baseSize;
     float3 baseColor = float3(1.0, 1.0, 1.0);
     
-    float hash1 = frac(sin(float(instanceID) * 127.1) * 43758.5453);
-    float hash2 = frac(sin(float(instanceID) * 269.5) * 43758.5453);
+    float hash1 = frac(sin(float(instanceID.value) * 127.1) * 43758.5453);
+    float hash2 = frac(sin(float(instanceID.value) * 269.5) * 43758.5453);
     
     if (s.star_type == STAR_TYPE_NORMAL) {
         float temp = hash1;
@@ -92,20 +91,20 @@ VSOutput vs_main(uniform uint stars_slot, uint vertexID : SV_VertexID, uint inst
         baseColor = lerp(float3(0.85, 0.9, 1.0), float3(1.0, 1.0, 1.0), hash1);
     }
     
-    float2 localPos = quadVerts[vertexID] * size;
+    float2 localPos = quadVerts[vertexID.value] * size;
     
     output.position = float4(screenPos + localPos, 0.0, 1.0);
     
     float brightness = 1.0 - s.z;
     output.color = float4(baseColor * brightness, 1.0);
     
-    output.uv = quadVerts[vertexID];
+    output.uv = quadVerts[vertexID.value];
     output.star_type = s.star_type;
     
     return output;
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VSOutput input) : SV_Target {
     float2 uv = input.uv;
     float dist = length(uv);

@@ -6,16 +6,16 @@
 //
 // == Cross-Platform Resource Binding ==
 //
-// Declare resources as `uniform` entry-point parameters and access them
-// using Goldy's static access functions:
+// Tag your entry point with [goldy_compute], [goldy_vertex], or
+// [goldy_fragment] and declare resources as typed parameters:
 //
-//   // Uniforms (uniform buffer slot passed as push constant)
-//   float t = goldy_broadcast<TimeUniforms>(uniforms_slot).time;
+//   [goldy_compute]
+//   [numthreads(64, 1, 1)]
+//   void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
+//       data[id.x] = data[id.x] + cfg.base;
+//   }
 //
-//   // Storage buffers (slot index passed as push constant)
-//   StorageBuffer<Particle> buf = goldy_scattered<Particle>(buf_slot);
-//
-// These work on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
+// Works on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
 //
 
 module goldy_exp;

@@ -12,10 +12,9 @@ static const float deltaTime = 0.016;
 static const float2 gravity = float2(0.0, -0.3);
 static const float damping = 0.998;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint particles_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<Particle> PARTICLES = goldy_scattered<Particle>(particles_slot);
+void cs_main(Scattered<Particle> PARTICLES, ThreadId id) {
     uint idx = id.x;
     
     if (idx >= 65536) return;

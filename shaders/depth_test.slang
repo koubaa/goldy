@@ -11,7 +11,7 @@ struct VOut {
     float4 color : COLOR;
 };
 
-[shader("vertex")]
+[goldy_vertex]
 VOut vs_main(VIn v) {
     VOut o;
     o.position = float4(v.position.xy, v.position.z, 1.0);
@@ -19,7 +19,7 @@ VOut vs_main(VIn v) {
     return o;
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VOut i) : SV_Target {
     return i.color;
 }

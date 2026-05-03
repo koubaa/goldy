@@ -54,7 +54,7 @@ fn test_vulkan_render_and_readback() {
             float4 color : COLOR;
         };
 
-        [shader("vertex")]
+        [goldy_vertex]
         VertexOutput vs_main(VertexInput input) {
             VertexOutput output;
             output.position = float4(input.position, 0.0, 1.0);
@@ -62,7 +62,7 @@ fn test_vulkan_render_and_readback() {
             return output;
         }
 
-        [shader("fragment")]
+        [goldy_fragment]
         float4 fs_main(VertexOutput input) : SV_Target {
             return input.color;
         }
@@ -217,7 +217,7 @@ fn test_indexed_drawing() {
             float4 color : COLOR;
         };
 
-        [shader("vertex")]
+        [goldy_vertex]
         VertexOutput vs_main(VertexInput input) {
             VertexOutput output;
             output.position = float4(input.position, 0.0, 1.0);
@@ -225,7 +225,7 @@ fn test_indexed_drawing() {
             return output;
         }
 
-        [shader("fragment")]
+        [goldy_fragment]
         float4 fs_main(VertexOutput input) : SV_Target {
             return input.color;
         }
@@ -315,7 +315,7 @@ fn test_indexed_drawing_uint32() {
             float4 color : COLOR;
         };
 
-        [shader("vertex")]
+        [goldy_vertex]
         VertexOutput vs_main(VertexInput input) {
             VertexOutput output;
             output.position = float4(input.position, 0.0, 1.0);
@@ -323,7 +323,7 @@ fn test_indexed_drawing_uint32() {
             return output;
         }
 
-        [shader("fragment")]
+        [goldy_fragment]
         float4 fs_main(VertexOutput input) : SV_Target {
             return input.color;
         }
@@ -674,17 +674,16 @@ struct VSOut {
     float2 uv  : TEXCOORD0;
 };
 
-[shader("vertex")]
-VSOut vs_main(uint id : SV_VertexID) {
+[goldy_vertex]
+VSOut vs_main(VertexId id) {
     VSOut o;
-    o.pos = float4(positions[id], 0.0, 1.0);
-    o.uv  = uvs[id];
+    o.pos = float4(positions[id.value], 0.0, 1.0);
+    o.uv  = uvs[id.value];
     return o;
 }
 
-[shader("fragment")]
-float4 fs_main(uniform uint cells_slot, VSOut i) : SV_Target {
-    StorageBuffer<uint> cells = goldy_scattered<uint>(cells_slot);
+[goldy_fragment]
+float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
     uint val = cells[0];
     if (val == 1u) {
         return float4(0.2, 0.9, 0.3, 1.0);

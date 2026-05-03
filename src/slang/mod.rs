@@ -43,6 +43,7 @@
 pub mod compiler;
 pub mod ffi;
 pub mod loader;
+pub mod virtual_main;
 
 pub use compiler::{
     layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout,

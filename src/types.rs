@@ -147,8 +147,9 @@ pub enum DataAccess {
     /// Maps to storage buffers (StructuredBuffer, RWStructuredBuffer in shaders).
     #[default]
     Scattered,
-    /// All threads read same address. Hardware broadcast optimization.
-    /// Maps to uniform/constant buffers (ConstantBuffer in shaders).
+    /// All threads read the same address. Hardware can broadcast a single
+    /// fetch to the entire wave. Maps to uniform buffers (Vulkan/Metal) or
+    /// constant buffers (DX12/HLSL) depending on the backend.
     Broadcast,
 }
 

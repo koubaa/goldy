@@ -74,6 +74,60 @@ Every `Device` comes with the `goldy_exp` shader library pre-registered.
 > ⚠️ **Experimental**: This library's API is unstable and may change significantly
 > as we learn what abstractions work best for shader development.
 
+### Bindless Resource Access — Virtual Entry Points
+
+The primary way to write bindless shaders with `goldy_exp` is the **virtual main** system.
+Tag your entry point with `[goldy_compute]`, `[goldy_vertex]`, or `[goldy_fragment]` and
+declare resources as typed parameters. Goldy generates the GPU-level `[shader(...)]`
+entry point — with `uniform uint` push constants and `SV_*` system-value semantics — automatically.
+
+```hlsl
+import goldy_exp;
+
+struct Particle { float2 pos; float2 vel; };
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(SimParams params, Scattered<Particle> particles, ThreadId id) {
+    Particle particle = particles[id.x];
+    particle.pos += particle.vel * params.dt;
+    particles[id.x] = particle;
+}
+```
+
+**Resource types** (each resolved from a single `uint` slot push constant by the codegen):
+
+| Type | Is / Backing resource | Access |
+|------|-----------------------|--------|
+| `Scattered<T>` | = `StorageBuffer<T>` (read/write) | `buf[i]`, `buf[i].field = v` |
+| `BufRO<T>` | = `ReadOnlyBuffer<T>` (read-only) | `buf[i]` |
+| `Interpolated<T>` | = `Texture2D<T>` | `tex.Sample(samp, uv)`, `tex.Load(loc)` |
+| `DirectSpatial<T>` | = `RWTexture2D<T>` | `img[int2(x,y)]`, `img.GetDimensions(w,h)` |
+| `ByteAddress` | = `ByteAddressView` (`RWByteAddressBuffer`) | `.Load/.Store/.Interlocked*` |
+| `Filter` | = `SamplerState` | `tex.Sample(samp, uv)` |
+| `MyUniforms` (any struct) | constant buffer broadcast | `cfg.field` directly |
+
+**System-value types** (codegen maps to `SV_*` semantics automatically):
+
+| Type | Maps to | Fields |
+|------|---------|--------|
+| `ThreadId` | `SV_DispatchThreadID` | `.x .y .z` |
+| `GroupThreadId` | `SV_GroupThreadID` | `.x .y .z` |
+| `GroupId` | `SV_GroupID` | `.x .y .z` |
+| `VertexId` | `SV_VertexID` | `.value` |
+| `InstanceId` | `SV_InstanceID` | `.value` |
+| `IsFrontFace` | `SV_IsFrontFace` | `.value` |
+
+Plain scalar types (`uint`, `float`, `int`, etc.) become `uniform` push constants too:
+
+```hlsl
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, uint offset, ThreadId id) {
+    data[id.x + offset] *= 2;
+}
+```
+
 It provides:
 
 ### Math Utilities (`goldy_exp/math`)

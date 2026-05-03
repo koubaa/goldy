@@ -6,13 +6,13 @@ import goldy_exp;
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
-uint getCell(StorageBuffer<uint> state, int x, int y) {
+uint getCell(Scattered<uint> state, int x, int y) {
     x = (x + GRID_WIDTH) % GRID_WIDTH;
     y = (y + GRID_HEIGHT) % GRID_HEIGHT;
     return state[y * GRID_WIDTH + x];
 }
 
-uint countNeighbors(StorageBuffer<uint> state, int x, int y) {
+uint countNeighbors(Scattered<uint> state, int x, int y) {
     uint count = 0;
     count += getCell(state, x - 1, y - 1);
     count += getCell(state, x,     y - 1);
@@ -25,13 +25,10 @@ uint countNeighbors(StorageBuffer<uint> state, int x, int y) {
     return count;
 }
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(8, 8, 1)]
-void cs_main(uniform uint read_slot, uniform uint write_slot,
-             uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> CURRENT_STATE = goldy_scattered<uint>(read_slot);
-    StorageBuffer<uint> NEXT_STATE = goldy_scattered<uint>(write_slot);
-
+void cs_main(Scattered<uint> CURRENT_STATE, Scattered<uint> NEXT_STATE,
+             ThreadId id) {
     if (id.x >= GRID_WIDTH || id.y >= GRID_HEIGHT) return;
     
     uint idx = id.y * GRID_WIDTH + id.x;

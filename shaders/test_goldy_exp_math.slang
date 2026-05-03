@@ -8,11 +8,9 @@
 
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uniform uint out_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<float> OUT = goldy_scattered<float>(out_slot);
-
+void cs_main(Scattered<float> OUT, ThreadId id) {
     // ── positive_mod ─────────────────────────────────────────────────────────
     OUT[0] = positive_mod(-1.0, 3.0);
     OUT[1] = positive_mod(2.5, 3.0);

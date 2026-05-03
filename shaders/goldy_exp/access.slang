@@ -5,39 +5,43 @@
 // indices for descriptors, or any scalar type for immediate values. Slang maps
 // these to push constants (SPIR-V / DX12) or buffer-arg 1 (Metal) automatically.
 //
-// == Static Access (compile-time slot indices from parameter) ==
+// =========================================================================
+// == Preferred: [goldy_*] typed entry points (virtual main) ==
+// =========================================================================
 //
-//   goldy_broadcast<T>(slot)     - Uniform/constant data (all threads same address)
-//   goldy_scattered<T>(slot)     - Storage buffers (any thread, any address)
-//   goldy_buf_ro<T>(slot)        - Read-only storage buffers (hardware read cache)
-//   goldy_byte_address(slot)     - Byte-address buffer (for atomics)
-//   goldy_interpolated<T>(slot)  - Hardware-filtered textures
-//   goldy_direct_spatial<T>(slot)- Read-write 2D textures
-//   goldy_filter(slot)           - Sampler states for texture filtering
+//   [goldy_compute]  / [goldy_vertex]  / [goldy_fragment]
 //
-// == Usage ==
+//   Use the resource type aliases below as entry-point parameters. The Goldy
+//   compiler resolves the slot index to a buffer/texture handle and passes it
+//   directly — the parameter has the full native Slang type, so all built-in
+//   methods (indexing, field writes, GetDimensions, Sample, etc.) work directly.
 //
-//   import goldy_exp;
+//   Resource type aliases (= their underlying Slang type):
+//     Scattered<T>      = StorageBuffer<T>    data[i], data[i].field = v
+//     BufRO<T>          = ReadOnlyBuffer<T>   data[i]
+//     Interpolated<T>   = Texture2D<T>        tex.Sample(samp, uv)
+//     DirectSpatial<T>  = RWTexture2D<T>      img[int2(x,y)], img.GetDimensions(w,h)
+//     ByteAddress       = ByteAddressView     .Load/.Store/.Interlocked*
+//     Filter            = SamplerState        tex.Sample(samp, uv)
 //
-//   struct MyUniforms { float time; };
+//   Broadcast (constant buffer): declare the struct type directly as a parameter.
+//   The codegen recognises any non-resource, non-SV struct as a constant-buffer
+//   fetch and resolves it via goldy_broadcast<T>(slot) automatically.
 //
-//   [shader("fragment")]
-//   float4 fs_main(uniform uint uniforms_slot,
-//                  FullscreenVarying input) : SV_Target {
-//       // Rust: pass.set_push_constants_raw(&[uniforms_buf.bindless_index()])
-//       float t = goldy_broadcast<MyUniforms>(uniforms_slot).time;
-//       return float4(t, 0, 0, 1);
-//   }
+//   System-value types (codegen maps these to SV_* semantics):
+//     ThreadId          - SV_DispatchThreadID  (.x .y .z)
+//     GroupThreadId     - SV_GroupThreadID     (.x .y .z)
+//     GroupId           - SV_GroupID           (.x .y .z)
+//     VertexId          - SV_VertexID          (.value)
+//     InstanceId        - SV_InstanceID        (.value)
+//     IsFrontFace       - SV_IsFrontFace       (.value)
 //
-// == Ping-pong / Dynamic Slot Selection ==
+//   Example:
 //
-//   [shader("compute")]
-//   void cs_main(uniform uint read_slot, uniform uint write_slot,
-//                uint3 id : SV_DispatchThreadID) {
-//       // Rust: set_push_constants_raw(&[read_buf.bindless_index(), write_buf.bindless_index()])
-//       StorageBuffer<uint> current = goldy_scattered<uint>(read_slot);
-//       StorageBuffer<uint> next = goldy_scattered<uint>(write_slot);
-//       next[id.x] = current[id.x] + 1;
+//   [goldy_compute]
+//   [numthreads(64, 1, 1)]
+//   void cs_main(MyUniforms cfg, Scattered<uint> data, ThreadId id) {
+//       data[id.x] = data[id.x] + cfg.base;
 //   }
 //
 // == Platform Support ==
@@ -59,10 +63,9 @@ implementing goldy_exp;
 // Metal cannot construct RWStructuredBuffer<T> from device pointers, so these
 // aliases normalize the types across platforms.
 //
-// Usage:
-//   var buf = goldy_scattered<Particle>(slot);    // read/write
-//   var input = goldy_buf_ro<Particle>(slot);     // read-only (hardware hint)
-//   buf[idx] = input[idx] + 1;
+// The virtual-main resource type aliases below build on these:
+//   Scattered<T>  = StorageBuffer<T>   (read/write, field-level writes supported)
+//   BufRO<T>      = ReadOnlyBuffer<T>  (read-only, hardware read-cache hint)
 // =============================================================================
 
 #if defined(__METAL__)
@@ -81,45 +84,36 @@ public typealias ByteAddressView = RWByteAddressBuffer;
 // =============================================================================
 #ifdef __SPIRV__
 
-/// Access a uniform/constant buffer by slot index (SPIRV).
 public T goldy_broadcast<T>(uint slot)
 {
     return g_GoldyUniformHeap[slot].asOpaqueDescriptor<ConstantBuffer<T>>();
 }
 
-/// Get a storage buffer handle for scattered access (SPIRV).
 public StorageBuffer<T> goldy_scattered<T>(uint slot)
 {
     return g_GoldyStorageHeap[slot].asOpaqueDescriptor<RWStructuredBuffer<T>>();
 }
 
-/// Get a read-only storage buffer handle (SPIRV).
-/// Emits a NonWritable SSBO, enabling read cache optimizations.
 public ReadOnlyBuffer<T> goldy_buf_ro<T>(uint slot)
 {
     return g_GoldyStorageHeap[slot].asOpaqueDescriptor<StructuredBuffer<T>>();
 }
 
-/// Get a byte-address buffer handle (SPIRV).
-/// Use for InterlockedMin/Max or other byte-addressed atomic operations.
 public ByteAddressView goldy_byte_address(uint slot)
 {
     return g_GoldyStorageHeap[slot].asOpaqueDescriptor<RWByteAddressBuffer>();
 }
 
-/// Access a 2D texture by slot index (SPIRV).
 public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
 {
     return g_GoldyTextureHeap[slot].asOpaqueDescriptor<Texture2D<T>>();
 }
 
-/// Access a read-write 2D texture by slot index (SPIRV).
 public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 {
     return g_GoldyStorageImageHeap[slot].asOpaqueDescriptor<RWTexture2D<T>>();
 }
 
-/// Access a sampler state by slot index (SPIRV).
 public SamplerState goldy_filter(uint slot)
 {
     return g_GoldySamplerHeap[slot].asOpaqueDescriptor<SamplerState>();
@@ -131,7 +125,6 @@ public SamplerState goldy_filter(uint slot)
 // =============================================================================
 #elif defined(__DX12__)
 
-/// Access a uniform/constant buffer by slot index (DX12).
 public T goldy_broadcast<T>(uint slot)
 {
     DescriptorHandle<ConstantBuffer<T>> handle;
@@ -139,7 +132,6 @@ public T goldy_broadcast<T>(uint slot)
     return *handle;
 }
 
-/// Get a storage buffer handle for scattered access (DX12).
 public StorageBuffer<T> goldy_scattered<T>(uint slot)
 {
     DescriptorHandle<RWStructuredBuffer<T>> handle;
@@ -147,8 +139,6 @@ public StorageBuffer<T> goldy_scattered<T>(uint slot)
     return *handle;
 }
 
-/// Get a read-only storage buffer handle (DX12).
-/// Uses StructuredBuffer<T> (SRV descriptor), enabling read cache optimizations.
 public ReadOnlyBuffer<T> goldy_buf_ro<T>(uint slot)
 {
     DescriptorHandle<StructuredBuffer<T>> handle;
@@ -156,7 +146,6 @@ public ReadOnlyBuffer<T> goldy_buf_ro<T>(uint slot)
     return *handle;
 }
 
-/// Get a byte-address buffer handle (DX12).
 public ByteAddressView goldy_byte_address(uint slot)
 {
     DescriptorHandle<RWByteAddressBuffer> handle;
@@ -164,7 +153,6 @@ public ByteAddressView goldy_byte_address(uint slot)
     return *handle;
 }
 
-/// Access a 2D texture by slot index (DX12).
 public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
 {
     DescriptorHandle<Texture2D<T>> handle;
@@ -172,7 +160,6 @@ public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
     return *handle;
 }
 
-/// Access a read-write 2D texture by slot index (DX12).
 public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 {
     DescriptorHandle<RWTexture2D<T>> handle;
@@ -180,7 +167,6 @@ public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
     return *handle;
 }
 
-/// Access a sampler state by slot index (DX12).
 public SamplerState goldy_filter(uint slot)
 {
     DescriptorHandle<SamplerState> handle;
@@ -201,24 +187,18 @@ public SamplerState goldy_filter(uint slot)
 // callers can assign the result to an RWStructuredBuffer<T> local variable.
 // -----------------------------------------------------------------------------
 
-/// Access a uniform/constant buffer by slot index (Metal).
-/// Cast the device pointer to T* and index [0] to read sizeof(T) bytes.
-/// reinterpret<T>(*basePtr) is WRONG: it only reads 4 bytes (one uint) and
-/// zero-fills the rest, corrupting any T larger than 4 bytes.
 public T goldy_broadcast<T>(uint slot)
 {
     uint* basePtr = gGoldy.uniformBuffers[slot];
     return ((Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr)[0];
 }
 
-/// Static scattered access - read/write storage buffer by slot index.
 public StorageBuffer<T> goldy_scattered<T>(uint slot)
 {
     uint* basePtr = gGoldy.storageBuffers[slot];
     return (Ptr<T, Access.ReadWrite, AddressSpace.Device>)basePtr;
 }
 
-/// Static read-only scattered access - const device pointer for read cache.
 public ReadOnlyBuffer<T> goldy_buf_ro<T>(uint slot)
 {
     uint* basePtr = gGoldy.storageBuffers[slot];
@@ -267,7 +247,6 @@ public struct ByteAddressView {
     }
 };
 
-/// Static byte-address buffer access by slot index (Metal).
 public ByteAddressView goldy_byte_address(uint slot)
 {
     ByteAddressView v;
@@ -275,22 +254,124 @@ public ByteAddressView goldy_byte_address(uint slot)
     return v;
 }
 
-/// Access a 2D texture by slot index (Metal).
 public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
 {
     return reinterpret<Texture2D<T>>(gGoldy.textures[slot]);
 }
 
-/// Access a read-write 2D texture by slot index (Metal).
 public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 {
     return reinterpret<RWTexture2D<T>>(gGoldy.storageImages[slot]);
 }
 
-/// Access a sampler state by slot index (Metal).
 public SamplerState goldy_filter(uint slot)
 {
     return gGoldy.samplers[slot];
 }
 
 #endif
+
+// =============================================================================
+// Resource type aliases — for use with [goldy_*] virtual entry points.
+//
+// These are plain typealiases for the underlying Slang buffer/texture types.
+// The Goldy codegen resolves the push-constant slot index to a live handle
+// (via goldy_scattered<T>(), goldy_buf_ro<T>(), etc.) and binds it to a local
+// of the alias type before calling the user function. The user function receives
+// the handle directly — no wrapper struct, no .buf()/.raw()/.tex() needed.
+//
+// For uniform/constant data: declare the struct type directly as a parameter in
+// the virtual main signature. The codegen recognises any non-resource, non-SV
+// struct as a broadcast and calls goldy_broadcast<T>(slot) automatically.
+// =============================================================================
+
+/// Read/write storage buffer (= StorageBuffer<T> = RWStructuredBuffer<T> on SPIRV/DX12).
+/// All native indexing and field-level writes work directly: `data[i].field = v`.
+public typealias Scattered<T> = StorageBuffer<T>;
+
+/// Read-only storage buffer (= ReadOnlyBuffer<T> = StructuredBuffer<T> on SPIRV/DX12).
+/// Index with `buf[i]` for element access.
+public typealias BufRO<T> = ReadOnlyBuffer<T>;
+
+/// Hardware-filtered 2D texture (= Texture2D<T>).
+/// Use all native Texture2D methods: `.Sample(samp, uv)`, `.Load(loc)`, etc.
+public typealias Interpolated<T : ITexelElement> = Texture2D<T>;
+
+/// Read-write 2D texture (= RWTexture2D<T>).
+/// Use all native methods: `img[int2(x,y)]`, `img.GetDimensions(w,h)`, etc.
+public typealias DirectSpatial<T : ITexelElement> = RWTexture2D<T>;
+
+/// Byte-address buffer (= ByteAddressView = RWByteAddressBuffer on SPIRV/DX12).
+/// Use native methods: `.Load(addr)`, `.Store(addr, v)`, `.InterlockedMin(...)`, etc.
+public typealias ByteAddress = ByteAddressView;
+
+/// Sampler state (= SamplerState).
+/// Pass directly to texture `.Sample(filter, uv)` calls.
+public typealias Filter = SamplerState;
+
+// =============================================================================
+// System-value wrapper types — for use with [goldy_*] virtual entry points.
+//
+// Declare these as parameters in a [goldy_*] function to receive GPU-provided
+// system values. The codegen maps each type to its SV_* semantic automatically.
+// =============================================================================
+
+/// SV_DispatchThreadID: global thread index in a compute dispatch.
+/// Access individual components as `.x`, `.y`, `.z`, or swizzles `.xy`, `.xz`, `.yz`, `.xyz`.
+public struct ThreadId {
+    public uint x;
+    public uint y;
+    public uint z;
+    public __init(uint3 v) { x = v.x; y = v.y; z = v.z; }
+    public property uint2 xy { get { return uint2(x, y); } }
+    public property uint2 xz { get { return uint2(x, z); } }
+    public property uint2 yz { get { return uint2(y, z); } }
+    public property uint3 xyz { get { return uint3(x, y, z); } }
+}
+
+/// SV_GroupThreadID: thread index within the current workgroup.
+/// Access individual components as `.x`, `.y`, `.z`, or swizzles `.xy`, `.xz`, `.yz`, `.xyz`.
+public struct GroupThreadId {
+    public uint x;
+    public uint y;
+    public uint z;
+    public __init(uint3 v) { x = v.x; y = v.y; z = v.z; }
+    public property uint2 xy { get { return uint2(x, y); } }
+    public property uint2 xz { get { return uint2(x, z); } }
+    public property uint2 yz { get { return uint2(y, z); } }
+    public property uint3 xyz { get { return uint3(x, y, z); } }
+}
+
+/// SV_GroupID: workgroup index in the dispatch grid.
+/// Access individual components as `.x`, `.y`, `.z`, or swizzles `.xy`, `.xz`, `.yz`, `.xyz`.
+public struct GroupId {
+    public uint x;
+    public uint y;
+    public uint z;
+    public __init(uint3 v) { x = v.x; y = v.y; z = v.z; }
+    public property uint2 xy { get { return uint2(x, y); } }
+    public property uint2 xz { get { return uint2(x, z); } }
+    public property uint2 yz { get { return uint2(y, z); } }
+    public property uint3 xyz { get { return uint3(x, y, z); } }
+}
+
+/// SV_VertexID: index of the current vertex being processed.
+/// Read the raw index as `.value`.
+public struct VertexId {
+    public uint value;
+    public __init(uint v) { value = v; }
+}
+
+/// SV_InstanceID: index of the current instance in an instanced draw.
+/// Read the raw index as `.value`.
+public struct InstanceId {
+    public uint value;
+    public __init(uint v) { value = v; }
+}
+
+/// SV_IsFrontFace: true if the current primitive is front-facing.
+/// Read the flag as `.value`.
+public struct IsFrontFace {
+    public bool value;
+    public __init(bool v) { value = v; }
+}

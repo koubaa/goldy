@@ -28,14 +28,13 @@ static const float4 colors[6] = {
     float4(0.0, 1.0, 1.0, 1.0),  // Cyan
 };
 
-[shader("vertex")]
-VSOutput vs_main(uniform uint lines_slot, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
-    StorageBuffer<Line> LINES = goldy_scattered<Line>(lines_slot);
+[goldy_vertex]
+VSOutput vs_main(Scattered<Line> LINES, VertexId vertexID, InstanceId instanceID) {
     VSOutput output;
     
-    Line line = LINES[instanceID];
+    Line line = LINES[instanceID.value];
     
-    float2 pos = (vertexID == 0) ? line.p1 : line.p2;
+    float2 pos = (vertexID.value == 0) ? line.p1 : line.p2;
     
     output.position = float4(pos, 0.0, 1.0);
     output.color = colors[line.color_index % 6];
@@ -43,7 +42,7 @@ VSOutput vs_main(uniform uint lines_slot, uint vertexID : SV_VertexID, uint inst
     return output;
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VSOutput input) : SV_Target {
     return input.color;
 }

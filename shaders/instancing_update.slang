@@ -22,21 +22,18 @@ float3 hsv_to_rgb(float h, float s, float v) {
     return v * lerp(K.xxx, clamp(p - K.xxx, 0.0, 1.0), s);
 }
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint instances_slot, uniform uint params_slot,
-             uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<QuadInstance> INSTANCES = goldy_scattered<QuadInstance>(instances_slot);
-    AnimParams PARAMS = goldy_broadcast<AnimParams>(params_slot);
+void cs_main(Scattered<QuadInstance> INSTANCES, AnimParams params, ThreadId id) {
     uint idx = id.x;
-    if (idx >= PARAMS.total_instances) return;
+    if (idx >= params.total_instances) return;
     
     QuadInstance inst = INSTANCES[idx];
     
-    float phase = (float(idx) / float(PARAMS.total_instances)) * 6.28318;
-    inst.rotation = PARAMS.time * 2.0 + phase;
+    float phase = (float(idx) / float(params.total_instances)) * 6.28318;
+    inst.rotation = params.time * 2.0 + phase;
     
-    float hue = frac(float(idx) / float(PARAMS.total_instances) + PARAMS.time * 0.1);
+    float hue = frac(float(idx) / float(params.total_instances) + params.time * 0.1);
     inst.color = float4(hsv_to_rgb(hue, 0.8, 0.9), 1.0);
     
     INSTANCES[idx] = inst;

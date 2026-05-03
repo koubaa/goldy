@@ -9,13 +9,13 @@ struct ViewUniforms {
     float _padding;
 };
 
-[shader("vertex")]
-FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
+[goldy_vertex]
+FullscreenVarying vs_main(VertexId vertex_id) {
     FullscreenVarying output;
     
     float2 uv = float2(
-        float((vertex_id << 1u) & 2u),
-        float(vertex_id & 2u)
+        float((vertex_id.value << 1u) & 2u),
+        float(vertex_id.value & 2u)
     );
     
     output.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
@@ -24,9 +24,8 @@ FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
     return output;
 }
 
-[shader("fragment")]
-float4 fs_main(uniform uint view_slot, FullscreenVarying input) : SV_Target {
-    ViewUniforms view = goldy_broadcast<ViewUniforms>(view_slot);
+[goldy_fragment]
+float4 fs_main(ViewUniforms view, FullscreenVarying input) : SV_Target {
     float2 c = view.center + (input.uv - 0.5) * 4.0 / view.zoom;
     float2 z = float2(0.0, 0.0);
     uint i = 0;

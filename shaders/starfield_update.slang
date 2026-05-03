@@ -27,22 +27,19 @@ float hash(float p) {
     return frac(sin(p * 127.1) * 43758.5453);
 }
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint stars_slot, uniform uint params_slot,
-             uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<Star> STARS = goldy_scattered<Star>(stars_slot);
-    StarfieldParams PARAMS = goldy_broadcast<StarfieldParams>(params_slot);
+void cs_main(Scattered<Star> STARS, StarfieldParams params, ThreadId id) {
     uint idx = id.x;
     
     if (idx >= NUM_STARS) return;
     
     Star s = STARS[idx];
     
-    s.z -= PARAMS.speed;
+    s.z -= params.speed;
     
     if (s.z <= 0.01) {
-        float seed = float(idx) + PARAMS.frame * 0.01;
+        float seed = float(idx) + params.frame * 0.01;
         s.x = (hash(seed) - 0.5) * 2.0;
         s.y = (hash(seed + 100.0) - 0.5) * 2.0;
         s.z = 1.0;

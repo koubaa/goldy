@@ -13,7 +13,7 @@ struct VertexOutput {
     float time : TEXCOORD1;
 };
 
-[shader("vertex")]
+[goldy_vertex]
 VertexOutput vs_main(VertexInput input) {
     VertexOutput output;
     output.position = float4(input.position, 0.0, 1.0);
@@ -26,7 +26,7 @@ float hash(float p) {
     return frac(sin(p * 127.1) * 43758.5453);
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
     float t = input.time;

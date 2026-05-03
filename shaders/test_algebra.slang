@@ -95,10 +95,9 @@ static const uint WG_SIZE = 64;
 groupshared UintAdd sh_uint[WG_SIZE];
 groupshared Int2Min sh_int2[WG_SIZE];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint out_slot, uint3 local_id : SV_GroupThreadID) {
-    StorageBuffer<uint> OUT = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     uint ix = local_id.x;
 
     // Exercise IMonoid identity

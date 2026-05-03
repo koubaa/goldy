@@ -40,13 +40,10 @@ struct Uniforms {
     float _padding;
 };
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(8, 8, 1)]
-void cs_main(uniform uint uniforms_slot, uniform uint output_slot, uint3 tid : SV_DispatchThreadID) {
-    ReadOnlyBuffer<Uniforms> ub = goldy_buf_ro<Uniforms>(uniforms_slot);
-    Uniforms u = ub[0];
-
-    RWTexture2D<float4> output = goldy_direct_spatial<float4>(output_slot);
+void cs_main(BufRO<Uniforms> uniforms_buf, DirectSpatial<float4> output, ThreadId tid) {
+    Uniforms u = uniforms_buf[0];
 
     if (tid.x >= u.width || tid.y >= u.height)
         return;

@@ -138,10 +138,9 @@ groupshared Bbox2D     sh_bbox[WG_SIZE];
 groupshared uint       sh_uint[WG_SIZE];
 groupshared uint       sh_broadcast[1];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uniform uint out_slot, uint3 local_id : SV_GroupThreadID) {
-    StorageBuffer<uint> OUT = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     uint ix = local_id.x;
 
     // --- workgroup_reduce with TagMonoid ---
