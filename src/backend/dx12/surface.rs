@@ -369,6 +369,11 @@ pub(super) fn acquire(
         }
     }
 
+    // Process deferred deletions now that the fence wait has completed.
+    if let Some(device) = state.devices.get_mut(&device_handle) {
+        device.deletion_queue.process(&device.fence);
+    }
+
     let surface = state
         .surfaces
         .get_mut(&surface_handle)
@@ -443,6 +448,7 @@ pub(super) fn render(
     let height = surface.height;
     let render_target = &surface.render_targets[image_index as usize];
     let rtv_offset = surface.rtv_offsets[image_index as usize];
+    let depth_resource = surface.depth_texture.clone();
 
     // Reset command allocator and list
     unsafe { frame.command_allocator.Reset() }.context("Failed to reset command allocator")?;
@@ -570,6 +576,17 @@ pub(super) fn render(
         D3D12_BARRIER_LAYOUT_RENDER_TARGET,
         D3D12_BARRIER_LAYOUT_PRESENT,
     )];
+    if let Some(ref depth_res) = depth_resource {
+        end_barriers.push(barriers::texture_barrier_full(
+            depth_res,
+            D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+            D3D12_BARRIER_SYNC_NONE,
+            D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+            D3D12_BARRIER_ACCESS_NO_ACCESS,
+            D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+            D3D12_BARRIER_LAYOUT_COMMON,
+        ));
+    }
     unsafe { barriers::barrier_textures(cmd, &end_barriers) };
     unsafe { barriers::drop_texture_barriers(&mut end_barriers) };
 

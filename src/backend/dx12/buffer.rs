@@ -317,19 +317,30 @@ pub(super) fn create(
 /// Destroy a buffer, unregistering it from bindless.
 /// For views, only the descriptor is unregistered — the underlying resource belongs
 /// to the parent and is not freed.
+/// Non-view resources are deferred until the GPU finishes the last submitted command list.
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
             device.resource_registry.unregister_buffer(buffer_handle);
-        }
-        if buffer.coherent_readback_mapped.is_some() {
-            if let Some(ref rb) = buffer.coherent_readback {
-                let no_write = D3D12_RANGE { Begin: 0, End: 0 };
-                unsafe { rb.Unmap(0, Some(&no_write)) };
+
+            if !buffer.is_view {
+                if buffer.coherent_readback_mapped.is_some() {
+                    if let Some(ref rb) = buffer.coherent_readback {
+                        let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                        unsafe { rb.Unmap(0, Some(&no_write)) };
+                    }
+                }
+                let last_fence = device.fence_value.saturating_sub(1);
+                device.deletion_queue.queue(
+                    last_fence,
+                    super::types::PendingDeletion::Buffer {
+                        resource: buffer.resource,
+                        upload_buffer: buffer.upload_buffer,
+                        coherent_readback: buffer.coherent_readback,
+                    },
+                );
             }
         }
-        // Views don't own the resource — the parent does.
-        // When `is_view` is false the ID3D12Resource drops naturally via its Drop impl.
     }
 }
 
@@ -716,7 +727,7 @@ pub(super) fn write(
             &main_resource,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_ACCESS_COMMON,
             D3D12_BARRIER_ACCESS_COPY_DEST,
         )];
         let mut b_to_uav = [barriers::buffer_barrier_full(

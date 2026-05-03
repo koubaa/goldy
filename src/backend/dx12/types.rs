@@ -331,6 +331,46 @@ pub(crate) struct ComputeAllocatorSlot {
     pub fence_value: u64,
 }
 
+/// Resource pending deferred deletion.
+/// Kept alive until the GPU frame that was in-flight at queue time completes.
+#[allow(dead_code)]
+pub(crate) enum PendingDeletion {
+    Buffer {
+        resource: Direct3D12::ID3D12Resource,
+        upload_buffer: Option<Direct3D12::ID3D12Resource>,
+        coherent_readback: Option<Direct3D12::ID3D12Resource>,
+    },
+}
+
+/// Deferred deletion queue for a DX12 device.
+/// Mirrors the Vulkan backend's `DeletionQueue`.
+pub(crate) struct DeletionQueue {
+    pending: Vec<(u64, PendingDeletion)>,
+}
+
+impl DeletionQueue {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn queue(&mut self, fence_value: u64, resource: PendingDeletion) {
+        self.pending.push((fence_value, resource));
+    }
+
+    /// Drop resources whose associated fence value has been reached by the GPU.
+    pub fn process(&mut self, fence: &Direct3D12::ID3D12Fence) {
+        let completed = unsafe { fence.GetCompletedValue() };
+        self.pending.retain(|(fv, _)| *fv > completed);
+    }
+
+    /// Flush all pending deletions unconditionally (device teardown).
+    pub fn flush_all(&mut self) {
+        self.pending.clear();
+    }
+}
+
 /// A logical D3D12 device with associated resources.
 #[allow(dead_code)]
 pub(crate) struct LogicalDevice {
@@ -367,6 +407,9 @@ pub(crate) struct LogicalDevice {
     /// Used to hold a temporary R32_UINT UAV so the GPU-side descriptor matches
     /// the clear format at execution time (not just at recording time).
     pub scratch_clear_uav_offset: u32,
+    /// Deferred deletion queue — resources are dropped only after the GPU finishes
+    /// the command list that was last submitted when the resource was queued.
+    pub deletion_queue: DeletionQueue,
 }
 
 /// GPU buffer state.

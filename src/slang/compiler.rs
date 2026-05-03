@@ -576,18 +576,6 @@ impl SlangCompiler {
             } else {
                 "Unknown compilation error".to_string()
             };
-            // #region agent log
-            {
-                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-                let ep_names: Vec<&str> = entry_points.iter().map(|(n, _)| *n).collect();
-                let diag_escaped = diagnostic.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "");
-                let log = format!("{{\"sessionId\":\"70c2ad\",\"hypothesisId\":\"H4-H5\",\"location\":\"slang/compiler.rs:compile\",\"message\":\"Slang compile failed\",\"data\":{{\"target\":\"{:?}\",\"entry_points\":\"{:?}\",\"diagnostic\":\"{}\"}},\"timestamp\":{}}}\n",
-                    target, ep_names, diag_escaped, ts);
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("c:\\Dev\\kob3\\debug-70c2ad.log") {
-                    use std::io::Write; let _ = f.write_all(log.as_bytes());
-                }
-            }
-            // #endregion agent log
             anyhow::bail!("Slang compilation failed:\n{}", diagnostic);
         }
 

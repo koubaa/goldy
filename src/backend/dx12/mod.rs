@@ -283,8 +283,9 @@ impl Dx12Backend {
 
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
-        if let Some(logical_device) = self.state.devices.remove(&device_handle) {
+        if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
+            logical_device.deletion_queue.flush_all();
 
             // Drop pending texture copies for this device.
             self.state

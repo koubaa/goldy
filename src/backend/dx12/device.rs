@@ -284,6 +284,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             resource_registry,
             cpu_clear_heap,
             scratch_clear_uav_offset,
+            deletion_queue: super::types::DeletionQueue::new(),
         },
     );
 
