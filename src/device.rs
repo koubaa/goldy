@@ -390,7 +390,7 @@ impl Device {
 
     /// Submit a full compute command stream (typically [`TaskGraph::compile_commands`]).
     /// Returns [`GpuFuture`] — does not block.
-    pub fn submit_compute_commands(
+    pub(crate) fn submit_compute_commands(
         &self,
         commands: &[backend::ComputeCommand],
     ) -> Result<GpuFuture> {

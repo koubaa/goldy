@@ -1277,12 +1277,11 @@ fn test_cpu_coherent_compute_write_and_read() {
 /// staging races fixed by the compute staging belt (Vulkan/DX12).
 #[test]
 fn test_write_buffer_reuse_across_submissions() {
-    use goldy::backend::ComputeCommand;
+    use goldy::{NodeAccess, TaskGraph};
 
     let device = make_device();
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-    let ph = pipeline.gpu_pipeline_handle();
 
     const N: usize = 16;
     let mid = Buffer::new(
@@ -1311,48 +1310,24 @@ fn test_write_buffer_reuse_across_submissions() {
     let data_a: Vec<u32> = (100..100 + N as u32).collect();
     let data_b: Vec<u32> = (900..900 + N as u32).collect();
 
-    let commands1 = vec![
-        ComputeCommand::WriteBuffer {
-            buffer: mid.gpu_buffer_handle(),
-            offset: 0,
-            data: bytemuck::cast_slice(&data_a).to_vec(),
-        },
-        ComputeCommand::SetPipeline(ph),
-        ComputeCommand::BindResourcesRaw {
-            indices: vec![idx_in, idx_out_a],
-            user: vec![],
-        },
-        ComputeCommand::Dispatch {
-            workgroups_x: 1,
-            workgroups_y: 1,
-            workgroups_z: 1,
-        },
-    ];
+    let mut g1 = TaskGraph::new();
+    g1.write_buffer(&mid, 0, bytemuck::cast_slice(&data_a).to_vec());
+    g1.node("copy_a", &pipeline)
+        .bind_buffer(&mid, NodeAccess::Read)
+        .bind_buffer(&out_a, NodeAccess::Write)
+        .bind_resources_raw(&[idx_in, idx_out_a])
+        .dispatch(1, 1, 1);
 
-    let commands2 = vec![
-        ComputeCommand::WriteBuffer {
-            buffer: mid.gpu_buffer_handle(),
-            offset: 0,
-            data: bytemuck::cast_slice(&data_b).to_vec(),
-        },
-        ComputeCommand::SetPipeline(ph),
-        ComputeCommand::BindResourcesRaw {
-            indices: vec![idx_in, idx_out_b],
-            user: vec![],
-        },
-        ComputeCommand::Dispatch {
-            workgroups_x: 1,
-            workgroups_y: 1,
-            workgroups_z: 1,
-        },
-    ];
+    let mut g2 = TaskGraph::new();
+    g2.write_buffer(&mid, 0, bytemuck::cast_slice(&data_b).to_vec());
+    g2.node("copy_b", &pipeline)
+        .bind_buffer(&mid, NodeAccess::Read)
+        .bind_buffer(&out_b, NodeAccess::Write)
+        .bind_resources_raw(&[idx_in, idx_out_b])
+        .dispatch(1, 1, 1);
 
-    let mut fut1 = device
-        .submit_compute_commands(&commands1)
-        .expect("submit 1");
-    let mut fut2 = device
-        .submit_compute_commands(&commands2)
-        .expect("submit 2");
+    let mut fut1 = g1.submit(&device).expect("submit 1");
+    let mut fut2 = g2.submit(&device).expect("submit 2");
 
     fut1.wait().expect("wait 1");
     fut2.wait().expect("wait 2");

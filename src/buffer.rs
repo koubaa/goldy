@@ -55,9 +55,8 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    /// [`BufferHandle`] for backend commands (e.g. [`crate::backend::ComputeCommand::ClearBuffer`]).
     #[inline]
-    pub fn gpu_buffer_handle(&self) -> BufferHandle {
+    pub(crate) fn gpu_buffer_handle(&self) -> BufferHandle {
         self.handle
     }
 
