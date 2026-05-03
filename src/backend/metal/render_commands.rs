@@ -3,7 +3,6 @@
 //! Used by both render_target and surface to avoid code duplication.
 
 use super::super::{BufferHandle, PipelineHandle, RenderCommand};
-use super::buffer;
 use super::types::{
     PipelineState, PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS, RESOURCE_SLOT_BUFFER,
     TOTAL_PUSH_BYTES,
@@ -24,7 +23,6 @@ pub(super) fn record(
 ) -> Result<()> {
     let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
     let mut current_primitive_type = MTLPrimitiveType::Triangle;
-    let mut current_pipeline: Option<&PipelineState> = None;
 
     for cmd in commands {
         match cmd {
@@ -36,7 +34,6 @@ pub(super) fn record(
                     if let Some(ds) = &pipeline.depth_stencil {
                         encoder.set_depth_stencil_state(ds);
                     }
-                    current_pipeline = Some(pipeline);
                 }
             }
             RenderCommand::SetVertexBuffer {

@@ -61,7 +61,6 @@ pub(super) fn create(
             device_handle,
             pipeline,
             workgroup_size,
-            shader_debug_name: "cs_main".to_string(),
         },
     );
 

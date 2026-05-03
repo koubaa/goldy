@@ -729,9 +729,6 @@ pub(crate) struct BufferState {
     pub size: u64,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
-    pub access: crate::types::DataAccess,
-    /// Structured-buffer / uniform element stride from buffer creation.
-    pub element_stride: Option<u32>,
     /// Persistent `contents()` pointer when created with [`crate::types::BufferFlags::CPU_COHERENT`]
     /// (shared storage: same as a normal read for other buffers).
     /// `buffer.contents() as usize` when `CPU_COHERENT` (for `Send`/`Sync`).
@@ -767,8 +764,6 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
-    /// Human-readable identifier used in category-mismatch error messages.
-    pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
@@ -777,9 +772,6 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: MTLComputePipelineState,
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
-    /// Human-readable identifier used in category-mismatch error messages.
-    /// Defaults to `"cs_main"` for compute pipelines.
-    pub shader_debug_name: String,
 }
 
 /// GPU render target state with optional staging for CPU readback.

@@ -123,7 +123,6 @@ pub(super) fn create_with_depth(
             pipeline,
             depth_stencil: depth_stencil_state,
             primitive_type: topology_to_mtl(topology),
-            shader_debug_name: "fs_main/vs_main".to_string(),
         },
     );
 
