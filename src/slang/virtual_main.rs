@@ -593,11 +593,24 @@ fn resource_init_expr(ty: &str, slot_var: &str) -> String {
 /// - Vertex/Fragment: all `PassThrough` except the last `Single(PassThrough)` → `Broadcast`.
 ///   The last one is the vertex attribute struct or fragment varying.
 fn reclassify_passthrough(params: &mut Vec<ParamItem>, stage: Stage) {
-    // In vertex/fragment, the last Single(PassThrough) is the stage input — keep it.
+    // In vertex/fragment, the last Single(PassThrough) is the stage input — keep it,
+    // but ONLY if it's truly the final parameter.  When system-value params (VertexId,
+    // InstanceId, etc.) follow the last PassThrough, there is no stage-input struct
+    // and all PassThroughs are broadcasts.
     let preserve_idx: Option<usize> = match stage {
-        Stage::Vertex | Stage::Fragment => params.iter().rposition(|item| {
-            matches!(item, ParamItem::Single(p) if p.kind == ParamKind::PassThrough)
-        }),
+        Stage::Vertex | Stage::Fragment => {
+            let last_pt = params.iter().rposition(|item| {
+                matches!(item, ParamItem::Single(p) if p.kind == ParamKind::PassThrough)
+            });
+            if let Some(idx) = last_pt {
+                let has_sv_after = params[idx + 1..].iter().any(|item| {
+                    matches!(item, ParamItem::Single(p) if matches!(p.kind, ParamKind::SystemValue(_)))
+                });
+                if has_sv_after { None } else { Some(idx) }
+            } else {
+                None
+            }
+        }
         Stage::Compute => None,
     };
 
