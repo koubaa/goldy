@@ -351,7 +351,7 @@ fn graph_nonblocking_submit() {
         .bind_resources_raw(&[idx])
         .dispatch(1, 1, 1);
 
-    let future = graph.submit(&device).unwrap();
+    let mut future = graph.submit(&device).unwrap();
     future.wait().unwrap();
 
     let result = readback_u32(&device, &buf, 64);

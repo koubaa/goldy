@@ -754,6 +754,32 @@ where
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
 
+    // Cross-submission memory barrier: make writes from prior compute dispatches
+    // (submitted as separate queue batches) visible to vertex/fragment shader
+    // reads.  Vulkan guarantees execution ordering between same-queue batches
+    // but NOT memory visibility — explicit synchronisation is required.
+    unsafe {
+        let mem_barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+            )
+            .src_access_mask(
+                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::VERTEX_INPUT,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_READ
+                    | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            );
+        let dep_info = vk::DependencyInfo::default()
+            .memory_barriers(std::slice::from_ref(&mem_barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+    }
+
     // Transition image to color attachment. The image is in `GENERAL` layout at this
     // point (acquire submits a prep barrier `UNDEFINED → GENERAL`), but we pass
     // `UNDEFINED` as old_layout to let the driver discard any prior contents — the
@@ -804,7 +830,8 @@ where
         barriers.push(depth_barrier);
     }
 
-    let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+    let dep_info = vk::DependencyInfo::default()
+        .image_memory_barriers(&barriers);
 
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 

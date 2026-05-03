@@ -705,9 +705,6 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
         &RenderPipelineDesc {
             // Empty vertex layout: this shader uses SV_VertexID with no vertex
             // attributes, so no vertex descriptor should be set on the pipeline.
-            // Using VertexBufferLayout::default() (Vertex2D) would set
-            // buffer_index(0) for vertex data, conflicting with the argument
-            // buffer also at slot 0.
             vertex_layout: VertexBufferLayout {
                 attributes: vec![],
                 stride: 0,

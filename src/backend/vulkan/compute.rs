@@ -235,11 +235,6 @@ pub(super) fn submit(
         return Ok(token);
     }
 
-    // Create fence for this submission
-    let fence_create_info = vk::FenceCreateInfo::default();
-    let fence = unsafe { logical_device.device.create_fence(&fence_create_info, None) }
-        .context("Failed to create fence")?;
-
     // Allocate command buffer
     let alloc_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(logical_device.command_pool)
@@ -254,11 +249,16 @@ pub(super) fn submit(
     let begin_info =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-    unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
-        .context("Failed to begin command buffer")?;
+    if let Err(e) = unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) } {
+        unsafe {
+            logical_device
+                .device
+                .free_command_buffers(logical_device.command_pool, &[cmd]);
+        }
+        return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
+    }
 
     // Cross-submission memory barrier: ensure writes from prior queue
-    // submissions (WriteBuffer copies, dispatches, texture uploads) are
     // visible to this submission's operations.  Vulkan guarantees execution
     // ordering for same-queue submissions but NOT memory visibility.
     unsafe {
@@ -334,7 +334,7 @@ pub(super) fn submit(
                         logical_device.device.cmd_push_constants(
                             cmd,
                             pipeline.layout,
-                            vk::ShaderStageFlags::COMPUTE,
+                            vk::ShaderStageFlags::ALL,
                             0,
                             bytemuck::bytes_of(&slots),
                         );
@@ -356,7 +356,7 @@ pub(super) fn submit(
                         logical_device.device.cmd_push_constants(
                             cmd,
                             pipeline.layout,
-                            vk::ShaderStageFlags::COMPUTE,
+                            vk::ShaderStageFlags::ALL,
                             0,
                             bytemuck::bytes_of(&slots),
                         );
@@ -378,7 +378,7 @@ pub(super) fn submit(
                         logical_device.device.cmd_push_constants(
                             cmd,
                             pipeline.layout,
-                            vk::ShaderStageFlags::COMPUTE,
+                            vk::ShaderStageFlags::ALL,
                             0,
                             bytemuck::bytes_of(&slots),
                         );
@@ -523,20 +523,49 @@ pub(super) fn submit(
     }
 
     // End command buffer
-    unsafe { logical_device.device.end_command_buffer(cmd) }
-        .context("Failed to end command buffer")?;
+    if let Err(e) = unsafe { logical_device.device.end_command_buffer(cmd) } {
+        unsafe {
+            logical_device
+                .device
+                .free_command_buffers(logical_device.command_pool, &[cmd]);
+        }
+        return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
+    }
+
+    // Create the fence here — after all fallible recording work — so that any
+    // early return from invalid commands (e.g. a destroyed buffer handle) does
+    // NOT leave an un-tracked VkFence behind.
+    let fence_create_info = vk::FenceCreateInfo::default();
+    let fence = unsafe { logical_device.device.create_fence(&fence_create_info, None) }
+        .map_err(|e| {
+            // Command buffer was already recorded; free it before returning.
+            unsafe {
+                logical_device
+                    .device
+                    .free_command_buffers(logical_device.command_pool, &[cmd]);
+            }
+            anyhow::anyhow!("Failed to create fence: {:?}", e)
+        })?;
 
     // Submit with fence (non-blocking)
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
 
     let token = state.next_compute_fence_token;
 
-    unsafe {
+    if let Err(e) = unsafe {
         logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], fence)
+    } {
+        // Submit failed: destroy the fence and free the command buffer.
+        unsafe {
+            logical_device.device.destroy_fence(fence, None);
+            logical_device
+                .device
+                .free_command_buffers(logical_device.command_pool, &[cmd]);
+        }
+        return Err(anyhow::anyhow!("Failed to submit command buffer: {:?}", e));
     }
-    .context("Failed to submit command buffer")?;
 
     state.next_compute_fence_token += 1;
     state
@@ -580,16 +609,18 @@ pub(super) fn wait_fence(
     _device_handle: DeviceHandle,
     token: FenceToken,
 ) -> Result<()> {
-    let (stored_device, fence, cmd_buf) = state
+    // Peek at device/fence without removing, so the entry survives a device-lost.
+    let (stored_device, fence) = state
         .compute_fence_pool
-        .remove(&token)
+        .get(&token)
+        .map(|(d, f, _)| (*d, *f))
         .context("Invalid fence token")?;
-    let logical_device = state
-        .devices
-        .get(&stored_device)
-        .context("Device for fence no longer exists")?;
 
     let wait_result = unsafe {
+        let logical_device = state
+            .devices
+            .get(&stored_device)
+            .context("Device for fence no longer exists")?;
         logical_device
             .device
             .wait_for_fences(&[fence], true, u64::MAX)
@@ -597,24 +628,26 @@ pub(super) fn wait_fence(
 
     // On ERROR_DEVICE_LOST the driver's internal bookkeeping is corrupt;
     // calling free_command_buffers / destroy_fence on a lost device is a
-    // known Windows heap-corruption trigger. vkDestroyDevice (called later
-    // from device::destroy) implicitly reclaims these objects.
+    // known Windows heap-corruption trigger. Leave the token in the pool so
+    // destroy_device's drain loop can call vkDestroyFence immediately before
+    // vkDestroyDevice (which is safe per spec and keeps the validation layer happy).
     let device_lost = matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST));
     if !device_lost {
-        if let Some(cb) = cmd_buf {
+        if let Some((_, _, cmd_buf)) = state.compute_fence_pool.remove(&token) {
+            let logical_device = state.devices.get(&stored_device).unwrap();
             unsafe {
-                logical_device
-                    .device
-                    .free_command_buffers(logical_device.command_pool, &[cb]);
+                if let Some(cb) = cmd_buf {
+                    logical_device
+                        .device
+                        .free_command_buffers(logical_device.command_pool, &[cb]);
+                }
+                logical_device.device.destroy_fence(fence, None);
             }
-        }
-        unsafe {
-            logical_device.device.destroy_fence(fence, None);
         }
     } else {
         tracing::warn!(
             %token,
-            "skipping free_command_buffers/destroy_fence on lost device (avoids driver heap corruption on some Windows drivers)"
+            "skipping free_command_buffers/destroy_fence on lost device (avoids driver heap corruption on some Windows drivers); token stays in pool for destroy_device drain"
         );
     }
 

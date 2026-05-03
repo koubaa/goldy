@@ -399,7 +399,7 @@ impl Device {
         Ok(GpuFuture {
             backend: Arc::clone(&self.backend),
             device: self.handle,
-            fence_token: token,
+            fence_token: Some(token),
         })
     }
 

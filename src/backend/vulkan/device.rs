@@ -4,7 +4,7 @@ use super::types::{self, PhysicalDeviceInfo};
 use super::{DeviceHandle, VulkanState};
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
-use ash::khr;
+use ash::{ext, khr};
 use ash::vk;
 use std::ffi::CStr;
 
@@ -88,11 +88,21 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .descriptor_binding_partially_bound(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
         .descriptor_binding_storage_buffer_update_after_bind(true)
+        .descriptor_binding_storage_image_update_after_bind(true)
         .descriptor_binding_uniform_buffer_update_after_bind(true)
         .runtime_descriptor_array(true)
         .shader_storage_buffer_array_non_uniform_indexing(true)
         .shader_sampled_image_array_non_uniform_indexing(true)
-        .shader_uniform_buffer_array_non_uniform_indexing(true);
+        .shader_uniform_buffer_array_non_uniform_indexing(true)
+        // Required for SPIR-V Float16 capability used by ekrano shaders.
+        .shader_float16(true)
+        // Required for SPIR-V Int8 capability (enabled alongside float16 in Vulkan 1.2).
+        .shader_int8(true);
+
+    // Vulkan 1.1 features: shaderDrawParameters is needed for SV_InstanceID
+    // (SPIR-V DrawParameters capability) in vertex shaders.
+    let mut vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default()
+        .shader_draw_parameters(true);
 
     // Vulkan 1.3 features: mandatory in 1.4, but must still be enabled.
     let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
@@ -104,6 +114,17 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default().pipeline_robustness(true);
 
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .features(
+            vk::PhysicalDeviceFeatures::default()
+                .vertex_pipeline_stores_and_atomics(true)
+                // Required so fragment shaders referencing the bindless storage
+                // heap (g_GoldyStorageHeap) don't need NonWritable decoration.
+                .fragment_stores_and_atomics(true)
+                // Required for SPIR-V Int16 / Int64 capabilities used by ekrano shaders.
+                .shader_int16(true)
+                .shader_int64(true),
+        )
+        .push_next(&mut vulkan_11_features)
         .push_next(&mut vulkan_13_features)
         .push_next(&mut vulkan_12_features)
         .push_next(&mut pipeline_robustness_features);
@@ -119,6 +140,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let device_extensions = [
         khr::swapchain::NAME.as_ptr(),
         khr::map_memory2::NAME.as_ptr(),
+        ext::pipeline_robustness::NAME.as_ptr(),
     ];
 
     let device_create_info = vk::DeviceCreateInfo::default()
@@ -371,6 +393,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 state
                     .samplers
                     .retain(|_, s| s.device_handle != device_handle);
+                // Discard stale compute fences without calling Vulkan.
+                state
+                    .compute_fence_pool
+                    .retain(|_, (dh, _, _)| *dh != device_handle);
                 logical_device.device.destroy_device(None);
                 return;
             }
@@ -538,6 +564,90 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             for handle in sampler_handles {
                 if let Some(sampler) = state.samplers.remove(&handle) {
                     logical_device.device.destroy_sampler(sampler.sampler, None);
+                }
+            }
+
+            // Destroy surfaces owned by this device.
+            // Surface::Drop may run after Device::Drop (Rust struct field order),
+            // so we must clean up here while the VkDevice is still alive.
+            let surface_handles: Vec<_> = state
+                .surfaces
+                .iter()
+                .filter(|(_, s)| s.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in surface_handles {
+                if let Some(tex_handle) = state
+                    .surfaces
+                    .get(&handle)
+                    .and_then(|s| s.current_texture_handle)
+                {
+                    if let Some(tex_state) = state.textures.remove(&tex_handle) {
+                        logical_device
+                            .resource_registry
+                            .unregister_texture(tex_handle);
+                        logical_device
+                            .device
+                            .destroy_image_view(tex_state.view, None);
+                    }
+                }
+                if let Some(surface_state) = state.surfaces.remove(&handle) {
+                    for frame in surface_state.frame_sync {
+                        logical_device
+                            .device
+                            .destroy_semaphore(frame.image_available_semaphore, None);
+                        logical_device
+                            .device
+                            .destroy_semaphore(frame.image_ready_semaphore, None);
+                        logical_device
+                            .device
+                            .destroy_semaphore(frame.render_finished_semaphore, None);
+                        logical_device
+                            .device
+                            .destroy_fence(frame.in_flight_fence, None);
+                    }
+
+                    for view in surface_state.swapchain_image_views {
+                        logical_device.device.destroy_image_view(view, None);
+                    }
+
+                    if let Some(depth_view) = surface_state.depth_view {
+                        logical_device.device.destroy_image_view(depth_view, None);
+                    }
+                    if let Some(depth_image) = surface_state.depth_image {
+                        logical_device.device.destroy_image(depth_image, None);
+                    }
+                    if let Some(depth_memory) = surface_state.depth_memory {
+                        logical_device.device.free_memory(depth_memory, None);
+                    }
+
+                    let swapchain_loader =
+                        khr::swapchain::Device::new(&state.instance, &logical_device.device);
+                    swapchain_loader.destroy_swapchain(surface_state.swapchain, None);
+
+                    let surface_loader =
+                        khr::surface::Instance::new(&state.entry, &state.instance);
+                    surface_loader.destroy_surface(surface_state.surface, None);
+                }
+            }
+
+            // Drain any compute fences still in the pool for this device.
+            // Tests (and async dispatch patterns) may leave signaled-but-uncollected
+            // fences in the pool; they must be destroyed before vkDestroyDevice.
+            let fence_tokens: Vec<u64> = state
+                .compute_fence_pool
+                .iter()
+                .filter(|(_, (dh, _, _))| *dh == device_handle)
+                .map(|(tok, _)| *tok)
+                .collect();
+            for tok in fence_tokens {
+                if let Some((_, fence, cmd_buf)) = state.compute_fence_pool.remove(&tok) {
+                    if let Some(cb) = cmd_buf {
+                        logical_device
+                            .device
+                            .free_command_buffers(logical_device.command_pool, &[cb]);
+                    }
+                    logical_device.device.destroy_fence(fence, None);
                 }
             }
 

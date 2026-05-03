@@ -325,7 +325,7 @@ mod tests {
             .bind_buffer(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
-        let future = graph.submit(&device).unwrap();
+        let mut future = graph.submit(&device).unwrap();
         assert!(future.is_complete());
         future.wait().unwrap();
     }

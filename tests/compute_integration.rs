@@ -1339,10 +1339,10 @@ fn test_write_buffer_reuse_across_submissions() {
         },
     ];
 
-    let fut1 = device
+    let mut fut1 = device
         .submit_compute_commands(&commands1)
         .expect("submit 1");
-    let fut2 = device
+    let mut fut2 = device
         .submit_compute_commands(&commands2)
         .expect("submit 2");
 

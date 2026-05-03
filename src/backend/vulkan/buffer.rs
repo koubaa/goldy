@@ -45,8 +45,15 @@ fn submit_copy(
         let mem_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER
+                    | vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_READ
+                    | vk::AccessFlags2::SHADER_WRITE
+                    | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            );
         let dep_info =
             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
         device.device.cmd_pipeline_barrier2(cmd, &dep_info);
@@ -89,7 +96,9 @@ pub(super) fn create(
 
     let is_storage = match access {
         DataAccess::Scattered => {
-            vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER;
+            vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::VERTEX_BUFFER
+                | vk::BufferUsageFlags::INDEX_BUFFER;
             // Indirect dispatch reads 3× u32 (12 bytes) from a storage buffer
             if size >= 12 {
                 vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
@@ -220,6 +229,7 @@ pub(super) fn create(
                 index,
                 is_storage
             );
+
         }
 
         Some(index)
@@ -321,7 +331,13 @@ pub(super) fn create_view(
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
-    let bindless_index = {
+    let bindless_index = if size == 0 {
+        // A zero-byte view has no addressable data; VkDescriptorBufferInfo.range must be > 0
+        // (VUID-VkDescriptorBufferInfo-range-00341), so skip registration entirely.
+        // bindless_handle() returns None, which is correct — zero-size views cannot
+        // be bound to shaders.
+        None
+    } else {
         let handle_for_registry = *next_buffer_handle;
         let index = logical_device
             .resource_registry
@@ -451,6 +467,11 @@ pub(super) fn write(
     offset: u64,
     data: &[u8],
 ) -> Result<()> {
+    // vkMapMemory2 and vkCmdCopyBuffer both require size > 0.
+    if data.is_empty() {
+        return Ok(());
+    }
+
     {
         let buffer = buffers
             .get(&buffer_handle)

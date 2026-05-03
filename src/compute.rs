@@ -139,7 +139,7 @@ impl ComputeEncoder {
         Ok(crate::GpuFuture {
             backend: Arc::clone(&device.backend),
             device: device.handle,
-            fence_token: token,
+            fence_token: Some(token),
         })
     }
 }
