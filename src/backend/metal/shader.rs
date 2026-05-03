@@ -60,12 +60,11 @@ pub(super) fn patch_vertex_msl_entry_point_params(msl: &str) -> String {
         let prefix = &patched[..arrow_pos];
         if let Some(amp_pos) = prefix.rfind("(&") {
             let kctx_name = &prefix[amp_pos + 2..]; // from after `(&` to arrow_pos
-            // Find the end of the assignment statement (the semicolon).
+                                                    // Find the end of the assignment statement (the semicolon).
             let after_arrow = &patched[arrow_pos + ASSIGN_NEEDLE.len()..];
             if let Some(semi_rel) = after_arrow.find(';') {
                 let semi_abs = arrow_pos + ASSIGN_NEEDLE.len() + semi_rel;
-                let injection =
-                    format!("\n    (&{})->entryPointParams_0 = _goldy_ep;", kctx_name);
+                let injection = format!("\n    (&{})->entryPointParams_0 = _goldy_ep;", kctx_name);
                 let mut result = String::with_capacity(patched.len() + injection.len());
                 result.push_str(&patched[..=semi_abs]);
                 result.push_str(&injection);
@@ -161,7 +160,10 @@ fn compile_stage_with_reflection(
     let msl_source = if stage == SlangStage::Vertex {
         let patched = patch_vertex_msl_entry_point_params(&raw_msl);
         if patched != raw_msl {
-            tracing::debug!("Applied vertex EntryPointParams [[buffer(1)]] patch for {}", entry_point);
+            tracing::debug!(
+                "Applied vertex EntryPointParams [[buffer(1)]] patch for {}",
+                entry_point
+            );
         }
         patched
     } else {

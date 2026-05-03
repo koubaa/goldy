@@ -88,11 +88,12 @@ impl ComputeGraph {
 
     /// Push a zero-fill of `buffer` at `[offset, offset+size)` into the prelude.
     pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
-        self.prelude.push(crate::backend::ComputeCommand::ClearBuffer {
-            buffer: buffer.gpu_buffer_handle(),
-            offset,
-            size,
-        });
+        self.prelude
+            .push(crate::backend::ComputeCommand::ClearBuffer {
+                buffer: buffer.gpu_buffer_handle(),
+                offset,
+                size,
+            });
     }
 
     /// Push a zero-fill of a view region into the prelude.
@@ -106,11 +107,12 @@ impl ComputeGraph {
         } else {
             size
         };
-        self.prelude.push(crate::backend::ComputeCommand::ClearBuffer {
-            buffer: view.parent_handle(),
-            offset: view.offset() + offset,
-            size: clear_size,
-        });
+        self.prelude
+            .push(crate::backend::ComputeCommand::ClearBuffer {
+                buffer: view.parent_handle(),
+                offset: view.offset() + offset,
+                size: clear_size,
+            });
     }
 
     pub fn compile_commands(&self) -> Vec<crate::backend::ComputeCommand> {
@@ -255,10 +257,7 @@ mod tests {
         // Wave 1: SetPipeline, BindResourcesRaw, Dispatch
         assert_eq!(cmds.len(), 7);
         assert!(matches!(cmds[0], ComputeCommand::SetPipeline(_)));
-        assert!(matches!(
-            cmds[1],
-            ComputeCommand::BindResourcesRaw { .. }
-        ));
+        assert!(matches!(cmds[1], ComputeCommand::BindResourcesRaw { .. }));
         assert!(matches!(
             cmds[2],
             ComputeCommand::Dispatch {
@@ -268,10 +267,7 @@ mod tests {
         ));
         assert!(matches!(cmds[3], ComputeCommand::ResourceBarrier { .. }));
         assert!(matches!(cmds[4], ComputeCommand::SetPipeline(_)));
-        assert!(matches!(
-            cmds[5],
-            ComputeCommand::BindResourcesRaw { .. }
-        ));
+        assert!(matches!(cmds[5], ComputeCommand::BindResourcesRaw { .. }));
         assert!(matches!(
             cmds[6],
             ComputeCommand::Dispatch {
@@ -425,7 +421,12 @@ mod tests {
     /// a device, shader, and pipeline for convenience.
     fn make_pool_setup(
         total_size: u64,
-    ) -> (Device, ShaderModule, crate::compute::ComputePipeline, BufferPool) {
+    ) -> (
+        Device,
+        ShaderModule,
+        crate::compute::ComputePipeline,
+        BufferPool,
+    ) {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -729,6 +730,9 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
             .count();
-        assert_eq!(barrier_count, 0, "disjoint views should not trigger a barrier");
+        assert_eq!(
+            barrier_count, 0,
+            "disjoint views should not trigger a barrier"
+        );
     }
 }

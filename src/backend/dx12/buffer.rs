@@ -585,11 +585,8 @@ pub(super) fn ensure_upload_buffer(
         )
     }
     .context("ensure_upload_buffer: create failed")?;
-    state
-        .buffers
-        .get_mut(&buffer_handle)
-        .unwrap()
-        .upload_buffer = Some(upload.context("Upload buffer is null")?);
+    state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer =
+        Some(upload.context("Upload buffer is null")?);
     Ok(())
 }
 

@@ -1283,8 +1283,12 @@ fn test_write_buffer_reuse_across_submissions() {
     let ph = pipeline.gpu_pipeline_handle();
 
     const N: usize = 16;
-    let mid = Buffer::new(&device, (N * core::mem::size_of::<u32>()) as u64, DataAccess::Scattered)
-        .expect("mid buffer");
+    let mid = Buffer::new(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        DataAccess::Scattered,
+    )
+    .expect("mid buffer");
     let out_a = Buffer::new(
         &device,
         (N * core::mem::size_of::<u32>()) as u64,
@@ -1482,7 +1486,10 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
     let result: u32 = bytemuck::pod_read_unaligned(&raw);
-    assert_eq!(result, 0, "zero should pass through uniform uint param unchanged");
+    assert_eq!(
+        result, 0,
+        "zero should pass through uniform uint param unchanged"
+    );
 }
 
 /// Maximum u32 (0xFFFF_FFFF) passes through a `uniform uint` parameter unchanged.
@@ -1515,7 +1522,11 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
     let result: u32 = bytemuck::pod_read_unaligned(&raw);
-    assert_eq!(result, u32::MAX, "u32::MAX should pass through uniform uint param unchanged");
+    assert_eq!(
+        result,
+        u32::MAX,
+        "u32::MAX should pass through uniform uint param unchanged"
+    );
 }
 
 /// A `uniform float` entry-point param reinterprets raw bits as a float.

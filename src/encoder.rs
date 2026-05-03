@@ -132,22 +132,18 @@ impl<'a> RenderPass<'a> {
     /// // In shader: GET_TEXTURE() and GET_SAMPLER() macros use these indices
     /// ```
     pub fn bind_resources_raw(&mut self, indices: &[u32]) {
-        self.encoder
-            .commands
-            .push(RenderCommand::BindResourcesRaw {
-                indices: indices.to_vec(),
-                user: Vec::new(),
-            });
+        self.encoder.commands.push(RenderCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: Vec::new(),
+        });
     }
 
     /// Bind resources with both bindless indices (region A) and user scalars (region B).
     pub fn bind_resources_raw_with_user(&mut self, indices: &[u32], user: &[u32]) {
-        self.encoder
-            .commands
-            .push(RenderCommand::BindResourcesRaw {
-                indices: indices.to_vec(),
-                user: user.to_vec(),
-            });
+        self.encoder.commands.push(RenderCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: user.to_vec(),
+        });
     }
 
     /// Bind resource slots from typed [`BindlessHandle`]s.

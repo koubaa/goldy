@@ -137,7 +137,6 @@ pub(super) fn submit(
     device_handle: DeviceHandle,
     commands: &[ComputeCommand],
 ) -> Result<FenceToken> {
-
     // Flush any deferred texture uploads so they're visible to this submission.
     super::texture::flush_pending_copies(state)?;
 
@@ -227,10 +226,9 @@ pub(super) fn submit(
                     .devices
                     .get(&buf_dev)
                     .context("WriteBuffer pre-pass: device missing")?;
-                let belt_entry = state
-                    .staging_belts
-                    .entry(buf_dev)
-                    .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE));
+                let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
+                    staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
+                });
                 let (res, off) = belt_entry.write(ld, data.as_slice())?;
                 belt_slices.push((res, off));
             }
@@ -266,13 +264,17 @@ pub(super) fn submit(
             ComputeCommand::BindResources { buffers } => {
                 let mut layout = types::PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    if i >= types::MAX_BINDLESS_SLOTS {
+                        break;
+                    }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
                         let offset = buf_state.bindless_offset.unwrap_or(0);
                         layout.bindless[i] = offset as u16;
                         tracing::trace!(
                             "Compute resource slot [{}]: buffer {} -> UAV offset {}",
-                            i, buffer_handle, offset
+                            i,
+                            buffer_handle,
+                            offset
                         );
                     }
                 }
@@ -295,11 +297,15 @@ pub(super) fn submit(
             } => {
                 let mut layout = types::PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    if i >= types::MAX_BINDLESS_SLOTS {
+                        break;
+                    }
                     layout.bindless[i] = idx as u16;
                 }
                 for (i, &val) in raw_user.iter().enumerate() {
-                    if i >= types::MAX_USER_SLOTS { break; }
+                    if i >= types::MAX_USER_SLOTS {
+                        break;
+                    }
                     layout.user[i] = val;
                 }
                 unsafe {
@@ -316,7 +322,9 @@ pub(super) fn submit(
             } => {
                 let mut layout = types::PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    if i >= types::MAX_BINDLESS_SLOTS {
+                        break;
+                    }
                     layout.bindless[i] = handle.index() as u16;
                 }
                 unsafe {
@@ -539,9 +547,9 @@ pub(super) fn submit(
                     unsafe { buf_state.resource.Unmap(0, Some(&written_range)) };
                 } else {
                     // DEFAULT heap: copy from staging belt slice (prepended in pre-pass).
-                    let belt_entry = belt_slices.get(belt_idx).context(
-                        "WriteBuffer: belt slice missing (internal)",
-                    )?;
+                    let belt_entry = belt_slices
+                        .get(belt_idx)
+                        .context("WriteBuffer: belt slice missing (internal)")?;
                     belt_idx += 1;
                     let upload_src = belt_entry.0.clone();
                     let upload_off = belt_entry.1;

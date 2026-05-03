@@ -70,7 +70,9 @@ pub(super) fn record(
             RenderCommand::BindResources { buffers } => {
                 let mut layout = types::PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    if i >= types::MAX_BINDLESS_SLOTS {
+                        break;
+                    }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
                         let offset = buf_state.bindless_offset.unwrap_or(0);
                         layout.bindless[i] = offset as u16;
@@ -91,11 +93,15 @@ pub(super) fn record(
             } => {
                 let mut layout = types::PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    if i >= types::MAX_BINDLESS_SLOTS {
+                        break;
+                    }
                     layout.bindless[i] = idx as u16;
                 }
                 for (i, &val) in raw_user.iter().enumerate() {
-                    if i >= types::MAX_USER_SLOTS { break; }
+                    if i >= types::MAX_USER_SLOTS {
+                        break;
+                    }
                     layout.user[i] = val;
                 }
                 unsafe {
@@ -112,7 +118,9 @@ pub(super) fn record(
             } => {
                 let mut layout = types::PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS { break; }
+                    if i >= types::MAX_BINDLESS_SLOTS {
+                        break;
+                    }
                     layout.bindless[i] = handle.index() as u16;
                 }
                 unsafe {

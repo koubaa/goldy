@@ -74,7 +74,9 @@ pub(super) fn record(
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
                     for (i, buffer_handle) in buf_handles.iter().enumerate() {
-                        if i >= MAX_BINDLESS_SLOTS { break; }
+                        if i >= MAX_BINDLESS_SLOTS {
+                            break;
+                        }
                         layout.bindless[i] = buffers
                             .get(buffer_handle)
                             .and_then(|b| b.bindless_index)
@@ -98,11 +100,15 @@ pub(super) fn record(
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
                     for (i, &idx) in raw_indices.iter().enumerate() {
-                        if i >= MAX_BINDLESS_SLOTS { break; }
+                        if i >= MAX_BINDLESS_SLOTS {
+                            break;
+                        }
                         layout.bindless[i] = idx as u16;
                     }
                     for (i, &val) in raw_user.iter().enumerate() {
-                        if i >= MAX_USER_SLOTS { break; }
+                        if i >= MAX_USER_SLOTS {
+                            break;
+                        }
                         layout.user[i] = val;
                     }
                     unsafe {
@@ -122,7 +128,9 @@ pub(super) fn record(
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
-                        if i >= MAX_BINDLESS_SLOTS { break; }
+                        if i >= MAX_BINDLESS_SLOTS {
+                            break;
+                        }
                         layout.bindless[i] = handle.index() as u16;
                     }
                     unsafe {

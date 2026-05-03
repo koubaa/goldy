@@ -763,20 +763,17 @@ where
             .src_stage_mask(
                 vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
             )
-            .src_access_mask(
-                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
-            )
+            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(
                 vk::PipelineStageFlags2::VERTEX_SHADER
                     | vk::PipelineStageFlags2::FRAGMENT_SHADER
                     | vk::PipelineStageFlags2::VERTEX_INPUT,
             )
             .dst_access_mask(
-                vk::AccessFlags2::SHADER_READ
-                    | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
             );
-        let dep_info = vk::DependencyInfo::default()
-            .memory_barriers(std::slice::from_ref(&mem_barrier));
+        let dep_info =
+            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
     }
 
@@ -830,8 +827,7 @@ where
         barriers.push(depth_barrier);
     }
 
-    let dep_info = vk::DependencyInfo::default()
-        .image_memory_barriers(&barriers);
+    let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
 
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 

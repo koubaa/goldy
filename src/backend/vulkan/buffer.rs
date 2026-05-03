@@ -229,7 +229,6 @@ pub(super) fn create(
                 index,
                 is_storage
             );
-
         }
 
         Some(index)

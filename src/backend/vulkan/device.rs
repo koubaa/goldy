@@ -4,8 +4,8 @@ use super::types::{self, PhysicalDeviceInfo};
 use super::{DeviceHandle, VulkanState};
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
-use ash::{ext, khr};
 use ash::vk;
+use ash::{ext, khr};
 use std::ffi::CStr;
 
 /// Enumerate available physical devices/adapters.
@@ -101,8 +101,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     // Vulkan 1.1 features: shaderDrawParameters is needed for SV_InstanceID
     // (SPIR-V DrawParameters capability) in vertex shaders.
-    let mut vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default()
-        .shader_draw_parameters(true);
+    let mut vulkan_11_features =
+        vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
     // Vulkan 1.3 features: mandatory in 1.4, but must still be enabled.
     let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
@@ -625,8 +625,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                         khr::swapchain::Device::new(&state.instance, &logical_device.device);
                     swapchain_loader.destroy_swapchain(surface_state.swapchain, None);
 
-                    let surface_loader =
-                        khr::surface::Instance::new(&state.entry, &state.instance);
+                    let surface_loader = khr::surface::Instance::new(&state.entry, &state.instance);
                     surface_loader.destroy_surface(surface_state.surface, None);
                 }
             }

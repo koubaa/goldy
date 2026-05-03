@@ -618,7 +618,11 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn range(parent: u64, offset: u64, len: u64) -> ResourceId {
-        ResourceId::BufferRange { parent, offset, len }
+        ResourceId::BufferRange {
+            parent,
+            offset,
+            len,
+        }
     }
 
     fn tex(id: u64) -> ResourceId {

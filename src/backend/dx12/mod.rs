@@ -288,14 +288,12 @@ impl Dx12Backend {
             logical_device.deletion_queue.flush_all();
 
             // Drop pending texture copies for this device.
-            self.state
-                .pending_texture_copies
-                .retain(|c| {
-                    self.state
-                        .textures
-                        .get(&c.texture_handle)
-                        .map_or(true, |t| t.device_handle != device_handle)
-                });
+            self.state.pending_texture_copies.retain(|c| {
+                self.state
+                    .textures
+                    .get(&c.texture_handle)
+                    .is_none_or(|t| t.device_handle != device_handle)
+            });
 
             // Drop cached texture resources for this device.
             self.state.texture_cache.clear();

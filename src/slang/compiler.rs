@@ -82,7 +82,6 @@ pub struct ParameterBlockLayout {
     pub fields: Vec<FieldLayout>,
 }
 
-
 /// Complete reflection information for a compiled shader
 #[derive(Debug, Clone, Default)]
 pub struct ShaderReflection {
@@ -1097,7 +1096,6 @@ impl SlangCompiler {
             }
         }
     }
-
 }
 
 #[cfg(test)]

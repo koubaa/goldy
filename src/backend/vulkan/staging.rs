@@ -124,19 +124,21 @@ impl StagingBelt {
         let alloc_size = self.chunk_size.max(align_up(len, COPY_ALIGN));
 
         let mut chunk = loop {
-            if let Some(mut c) = self.free_chunks.pop() {
-                if c.capacity >= len {
+            match self.free_chunks.pop() {
+                Some(mut c) if c.capacity >= len => {
                     c.reset();
                     break c;
                 }
-                self.free_chunks.push(c);
+                Some(c) => self.free_chunks.push(c),
+                None => {
+                    break allocate_chunk(
+                        instance,
+                        logical_device,
+                        logical_device.physical_device,
+                        alloc_size,
+                    )?;
+                }
             }
-            break allocate_chunk(
-                instance,
-                logical_device,
-                logical_device.physical_device,
-                alloc_size,
-            )?;
         };
 
         debug_assert!(chunk.offset == 0);
@@ -181,7 +183,7 @@ impl StagingBelt {
 }
 
 fn align_up(x: u64, a: u64) -> u64 {
-    (x + a - 1) / a * a
+    x.div_ceil(a) * a
 }
 
 fn allocate_chunk(

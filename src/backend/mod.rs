@@ -645,4 +645,3 @@ pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> 
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
     }
 }
-

@@ -1,7 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::staging;
-use super::types::{self, PushLayout, ComputePipelineState, LogicalDevice};
+use super::types::{self, ComputePipelineState, LogicalDevice, PushLayout};
 use super::{ComputePipelineHandle, DeviceHandle};
 use crate::backend::{ComputeCommand, FenceToken};
 use anyhow::{Context, Result};
@@ -196,14 +196,10 @@ pub(super) fn submit(
                     .devices
                     .get(&buf_device)
                     .context("WriteBuffer: device invalid")?;
-                let belt_entry = state
-                    .staging_belts
-                    .entry(buf_device)
-                    .or_insert_with(|| {
-                        staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                    });
-                let (stg_buf, stg_off) =
-                    belt_entry.write(&state.instance, dev, data.as_slice())?;
+                let belt_entry = state.staging_belts.entry(buf_device).or_insert_with(|| {
+                    staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
+                });
+                let (stg_buf, stg_off) = belt_entry.write(&state.instance, dev, data.as_slice())?;
                 belt_slices.push((stg_buf, stg_off));
             }
         }
@@ -266,9 +262,7 @@ pub(super) fn submit(
             .src_stage_mask(
                 vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
             )
-            .src_access_mask(
-                vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_WRITE,
-            )
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_WRITE)
             .dst_stage_mask(
                 vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
             )
@@ -278,8 +272,7 @@ pub(super) fn submit(
                     | vk::AccessFlags2::SHADER_READ
                     | vk::AccessFlags2::SHADER_WRITE,
             );
-        let dep = vk::DependencyInfo::default()
-            .memory_barriers(std::slice::from_ref(&acquire));
+        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&acquire));
         logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
     }
 
@@ -322,7 +315,9 @@ pub(super) fn submit(
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
                     for (i, buffer_handle) in buffer_handles.iter().enumerate() {
-                        if i >= types::MAX_BINDLESS_SLOTS { break; }
+                        if i >= types::MAX_BINDLESS_SLOTS {
+                            break;
+                        }
                         layout.bindless[i] = buffers
                             .get(buffer_handle)
                             .and_then(|b| b.bindless_index)
@@ -346,11 +341,15 @@ pub(super) fn submit(
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
                     for (i, &idx) in raw_indices.iter().enumerate() {
-                        if i >= types::MAX_BINDLESS_SLOTS { break; }
+                        if i >= types::MAX_BINDLESS_SLOTS {
+                            break;
+                        }
                         layout.bindless[i] = idx as u16;
                     }
                     for (i, &val) in raw_user.iter().enumerate() {
-                        if i >= types::MAX_USER_SLOTS { break; }
+                        if i >= types::MAX_USER_SLOTS {
+                            break;
+                        }
                         layout.user[i] = val;
                     }
                     unsafe {
@@ -370,7 +369,9 @@ pub(super) fn submit(
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
-                        if i >= types::MAX_BINDLESS_SLOTS { break; }
+                        if i >= types::MAX_BINDLESS_SLOTS {
+                            break;
+                        }
                         layout.bindless[i] = handle.index() as u16;
                     }
                     unsafe {
@@ -535,8 +536,8 @@ pub(super) fn submit(
     // early return from invalid commands (e.g. a destroyed buffer handle) does
     // NOT leave an un-tracked VkFence behind.
     let fence_create_info = vk::FenceCreateInfo::default();
-    let fence = unsafe { logical_device.device.create_fence(&fence_create_info, None) }
-        .map_err(|e| {
+    let fence =
+        unsafe { logical_device.device.create_fence(&fence_create_info, None) }.map_err(|e| {
             // Command buffer was already recorded; free it before returning.
             unsafe {
                 logical_device

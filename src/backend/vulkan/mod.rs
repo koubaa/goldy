@@ -436,8 +436,7 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let shader_debug_name =
-            format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
+        let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
         pipeline::create(
             &self.state.devices,
@@ -665,8 +664,7 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let shader_debug_name =
-            format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
+        let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
         pipeline::create_with_depth(
             &self.state.devices,

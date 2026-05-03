@@ -468,7 +468,12 @@ impl BufferView {
             );
         }
         let mut backend = self.backend.lock().unwrap();
-        backend.clear_buffer(device.handle, self.parent_handle, self.offset + offset, clear_size)
+        backend.clear_buffer(
+            device.handle,
+            self.parent_handle,
+            self.offset + offset,
+            clear_size,
+        )
     }
 
     /// Read this view's contents back to CPU memory.
@@ -490,7 +495,9 @@ impl BufferView {
         let parent_size = backend.buffer_size(self.parent_handle);
         let mut full = vec![0u8; parent_size as usize];
         backend.read_buffer_to_cpu(device.handle, self.parent_handle, &mut full)?;
-        output.copy_from_slice(&full[self.offset as usize..self.offset as usize + self.size as usize]);
+        output.copy_from_slice(
+            &full[self.offset as usize..self.offset as usize + self.size as usize],
+        );
         Ok(())
     }
 

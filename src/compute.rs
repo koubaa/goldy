@@ -176,11 +176,9 @@ impl<'a> ComputePass<'a> {
     /// // In shader: g_UniformBuffers[getBufferIndex(1)] for params
     /// ```
     pub fn bind_resources(&mut self, buffers: &[&Buffer]) {
-        self.encoder
-            .commands
-            .push(ComputeCommand::BindResources {
-                buffers: buffers.iter().map(|b| b.handle).collect(),
-            });
+        self.encoder.commands.push(ComputeCommand::BindResources {
+            buffers: buffers.iter().map(|b| b.handle).collect(),
+        });
     }
 
     /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).

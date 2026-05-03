@@ -264,10 +264,10 @@ pub(super) fn create(
             current_image_index: None,
             frame_sync,
             current_texture_handle: None,
-        compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
-        present_mode: crate::types::PresentMode::Fifo,
-        frame_latency_waitable,
-    },
+            compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
+            present_mode: crate::types::PresentMode::Fifo,
+            frame_latency_waitable,
+        },
     );
 
     tracing::info!("Created surface {}x{}", width, height);

@@ -40,7 +40,12 @@ struct SimParams {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
@@ -157,7 +162,8 @@ impl RenderState {
 
         let dt = self.last_frame_time.elapsed().as_secs_f32().min(0.05);
         self.last_frame_time = std::time::Instant::now();
-        self.params_buffer.write_data(0, &[SimParams { delta_time: dt }])?;
+        self.params_buffer
+            .write_data(0, &[SimParams { delta_time: dt }])?;
 
         // Run compute pass to update particles
         let mut compute_encoder = ComputeEncoder::new();
@@ -210,7 +216,10 @@ impl Drop for RenderState {
         } else {
             0.0
         };
-        println!("GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}", self.frame_count);
+        println!(
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            self.frame_count
+        );
     }
 }
 

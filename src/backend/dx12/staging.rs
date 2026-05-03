@@ -41,7 +41,7 @@ impl StagingBelt {
 
     /// Call at the beginning of [`super::compute::submit`].
     pub fn reclaim(&mut self, fence: &ID3D12Fence) -> Result<()> {
-        let completed = unsafe { fence.GetCompletedValue() } as u64;
+        let completed = unsafe { fence.GetCompletedValue() };
         let mut i = 0;
         while i < self.in_flight.len() {
             let token = self.in_flight[i].0;
@@ -87,14 +87,14 @@ impl StagingBelt {
         let alloc_size = self.chunk_size.max(align_up(len, COPY_ALIGN));
 
         let mut chunk = loop {
-            if let Some(mut c) = self.free_chunks.pop() {
-                if c.capacity >= len {
+            match self.free_chunks.pop() {
+                Some(mut c) if c.capacity >= len => {
                     c.reset();
                     break c;
                 }
-                self.free_chunks.push(c);
+                Some(c) => self.free_chunks.push(c),
+                None => break allocate_chunk(logical_device, alloc_size)?,
             }
-            break allocate_chunk(logical_device, alloc_size)?;
         };
 
         unsafe {
@@ -120,21 +120,21 @@ impl StagingBelt {
 
     pub unsafe fn destroy_all(&mut self) {
         for ch in self.free_chunks.drain(..) {
-            let _ = ch.resource.Unmap(0, None);
+            ch.resource.Unmap(0, None);
         }
         for ch in self.active_chunks.drain(..) {
-            let _ = ch.resource.Unmap(0, None);
+            ch.resource.Unmap(0, None);
         }
         for (_, mut vec) in self.in_flight.drain(..) {
             for ch in vec.drain(..) {
-                let _ = ch.resource.Unmap(0, None);
+                ch.resource.Unmap(0, None);
             }
         }
     }
 }
 
 fn align_up(x: u64, a: u64) -> u64 {
-    (x + a - 1) / a * a
+    x.div_ceil(a) * a
 }
 
 fn allocate_chunk(logical_device: &LogicalDevice, size: u64) -> Result<BeltChunk> {
