@@ -170,17 +170,17 @@ static class GameOfLife
             var computeEncoder = new ComputeEncoder();
             computeEncoder.SetPipeline(_computePipeline);
 
-            // Pass buffer indices via push constants
+            // Bind resource slots
             // Order matters: [current_state, next_state] matching shader slots
             if (_useBufferA)
             {
                 // A -> B: read from A, write to B
-                computeEncoder.SetPushConstants(_bufferA, _bufferB);
+                computeEncoder.BindResources(_bufferA, _bufferB);
             }
             else
             {
                 // B -> A: read from B, write to A
-                computeEncoder.SetPushConstants(_bufferB, _bufferA);
+                computeEncoder.BindResources(_bufferB, _bufferA);
             }
 
             // Dispatch workgroups (8x8 threads per group)
@@ -205,9 +205,9 @@ static class GameOfLife
             // Read from the buffer that is now "current"
             // After the swap, _useBufferA points to the newly computed buffer
             if (_useBufferA)
-                encoder.SetPushConstants(_bufferA);
+                encoder.BindResources(_bufferA);
             else
-                encoder.SetPushConstants(_bufferB);
+                encoder.BindResources(_bufferB);
 
             encoder.Draw(3); // Fullscreen triangle
             frame.Render(encoder);

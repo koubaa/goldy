@@ -105,16 +105,16 @@ pub unsafe extern "C" fn goldy_encoder_set_vertex_buffer_offset(
     pass.set_vertex_buffer_offset(slot, &(*buffer).inner, offset);
 }
 
-/// Set push constants for resource binding.
+/// Bind resource slots for rendering.
 ///
-/// Pass the buffers whose indices should be pushed to the shader.
-/// The indices are pushed in order, so `buffers[0]` becomes index 0,
-/// `buffers[1]` becomes index 1, etc.
+/// Pass the buffers whose indices should be bound to shader resource slots.
+/// The indices are bound in order, so `buffers[0]` becomes slot 0,
+/// `buffers[1]` becomes slot 1, etc.
 ///
 /// # Safety
 /// All pointers must be valid. The buffers array must contain buffer_count elements.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_encoder_set_push_constants(
+pub unsafe extern "C" fn goldy_encoder_bind_resources(
     encoder: *mut GoldyCommandEncoder,
     buffers: *const *const GoldyBuffer,
     buffer_count: u32,
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn goldy_encoder_set_push_constants(
         .collect();
 
     let mut pass = (*encoder).inner.begin_render_pass();
-    pass.set_push_constants(&buffer_refs);
+    pass.bind_resources(&buffer_refs);
 }
 
 /// Set an index buffer.

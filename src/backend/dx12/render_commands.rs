@@ -67,16 +67,13 @@ pub(super) fn record(
                     unsafe { cmd.IASetIndexBuffer(Some(&view)) };
                 }
             }
-            RenderCommand::SetPushConstants { buffers } => {
-                let mut indices = types::BindlessIndices::default();
+            RenderCommand::BindResources { buffers } => {
+                let mut indices = types::ResourceSlots::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
                     if i >= types::MAX_ROOT_CONSTANT_INDICES {
                         break;
                     }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
-                        // Shaders using goldy_scattered() return RWStructuredBuffer which needs UAV.
-                        // Always use UAV offset (bindless_offset) for storage buffers.
-                        // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
                         let offset = buf_state.bindless_offset.unwrap_or(0);
                         indices.indices[i] = offset;
                     }
@@ -90,10 +87,10 @@ pub(super) fn record(
                     );
                 }
             }
-            RenderCommand::SetPushConstantsRaw {
+            RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
             } => {
-                let mut indices = types::BindlessIndices::default();
+                let mut indices = types::ResourceSlots::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
                     if i >= types::MAX_ROOT_CONSTANT_INDICES {
                         break;
@@ -109,10 +106,10 @@ pub(super) fn record(
                     );
                 }
             }
-            RenderCommand::SetPushConstantsTyped {
+            RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                let mut indices = types::BindlessIndices::default();
+                let mut indices = types::ResourceSlots::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
                     if i >= types::MAX_ROOT_CONSTANT_INDICES {
                         break;

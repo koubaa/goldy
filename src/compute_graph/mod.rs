@@ -2,7 +2,7 @@
 //!
 //! # Motivation
 //!
-//! Goldy's bindless model (heap-backed argument buffers, push-constant indices)
+//! Goldy's bindless model (heap-backed argument buffers, resource-slot indices)
 //! gives shaders flexible, low-overhead access to resources. However, it makes
 //! the GPU's automatic dependency tracking blind — Metal cannot see through
 //! argument buffer indirection to know which resources a dispatch reads or
@@ -30,12 +30,12 @@
 //! graph.node("pathtag_reduce", &pipeline_a)
 //!     .bind_buffer(&scene_buf, NodeAccess::Read)
 //!     .bind_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
-//!     .push_constants_raw(&[scene_idx, tagmonoid_idx])
+//!     .bind_resources_raw(&[scene_idx, tagmonoid_idx])
 //!     .dispatch(64, 1, 1);
 //!
 //! graph.node("bbox_clear", &pipeline_b)
 //!     .bind_buffer(&bbox_buf, NodeAccess::Write)      // independent of above
-//!     .push_constants_raw(&[bbox_idx])
+//!     .bind_resources_raw(&[bbox_idx])
 //!     .dispatch(16, 1, 1);
 //!
 //! graph.submit(&device)?.wait()?;

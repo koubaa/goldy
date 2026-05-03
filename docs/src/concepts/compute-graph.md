@@ -4,7 +4,7 @@ The compute graph API pairs Goldy's bindless resource model with explicit depend
 
 ## Why a compute graph?
 
-Goldy's bindless model (heap-backed argument buffers, push-constant indices) gives shaders flexible, low-overhead access to resources. But it makes the GPU's automatic dependency tracking blind — Metal cannot see through argument buffer indirection to know which resources a dispatch reads or writes.
+Goldy's bindless model (heap-backed argument buffers, resource-slot indices) gives shaders flexible, low-overhead access to resources. But it makes the GPU's automatic dependency tracking blind — Metal cannot see through argument buffer indirection to know which resources a dispatch reads or writes.
 
 Without the graph, each dispatch must be submitted as a separate command buffer to guarantee correct ordering. This forces total serialization with per-command-buffer overhead — worse than wgpu, which batches everything into one encoder with bind-group-based implicit hazard tracking.
 
@@ -45,19 +45,19 @@ let mut graph = ComputeGraph::new();
 graph.node("pathtag_reduce", &pipeline_a)
     .bind_buffer(&scene_buf, NodeAccess::Read)
     .bind_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
-    .push_constants_raw(&[scene_idx, tagmonoid_idx])
+    .bind_resources_raw(&[scene_idx, tagmonoid_idx])
     .dispatch(64, 1, 1);
 
 graph.node("pathtag_scan", &pipeline_b)
     .bind_buffer(&tagmonoid_buf, NodeAccess::Read)
     .bind_buffer(&reduced_buf, NodeAccess::ReadWrite)
-    .push_constants_raw(&[tagmonoid_idx, reduced_idx])
+    .bind_resources_raw(&[tagmonoid_idx, reduced_idx])
     .dispatch(32, 1, 1);
 
 // bbox_clear is independent — can overlap with both pathtag dispatches
 graph.node("bbox_clear", &pipeline_c)
     .bind_buffer(&bbox_buf, NodeAccess::Write)
-    .push_constants_raw(&[bbox_idx])
+    .bind_resources_raw(&[bbox_idx])
     .dispatch(16, 1, 1);
 
 graph.submit(&device)?.wait()?;

@@ -138,8 +138,8 @@ fn test_compute_with_uav_buffer() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // Pass buffer indices via push constants
-        pass.set_push_constants(&[&buffer]);
+        // Bind buffer resource slots
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1); // 64 threads total
     }
 
@@ -178,9 +178,9 @@ fn test_compute_with_srv_and_uav() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // Pass buffer indices via push constants
+        // Bind buffer resource slots
         // Order matches shader slots: [input (slot 0), output (slot 1)]
-        pass.set_push_constants(&[&input_buffer, &output_buffer]);
+        pass.bind_resources(&[&input_buffer, &output_buffer]);
         pass.dispatch(1, 1, 1); // 64 threads
     }
 
@@ -247,7 +247,7 @@ fn test_compute_write_and_readback() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffer]);
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1); // 64 threads, each doubles one element
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -374,7 +374,7 @@ fn test_compute_batched_clear_before_dispatch() {
         // Clear input before the copy — output should receive zeros.
         pass.clear_buffer(&input_buf, 0, 0);
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.bind_resources(&[&input_buf, &output_buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -415,13 +415,13 @@ fn test_compute_clear_between_dispatches() {
         let mut pass = encoder.begin_compute_pass();
         // Pass 1: copy 42s into output.
         pass.set_pipeline(&copy_pipeline);
-        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.bind_resources(&[&input_buf, &output_buf]);
         pass.dispatch(1, 1, 1);
         // Clear output — must happen AFTER the copy dispatch.
         pass.clear_buffer(&output_buf, 0, 0);
         // Pass 2: increment output (zeros → 1s).
         pass.set_pipeline(&inc_pipeline);
-        pass.set_push_constants(&[&output_buf]);
+        pass.bind_resources(&[&output_buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -462,7 +462,7 @@ fn test_compute_dispatch_indirect() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&data_buf]);
+        pass.bind_resources(&[&data_buf]);
         pass.dispatch_indirect(&args_buf, 0);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -500,7 +500,7 @@ fn test_dispatch_indirect_invalid_buffer() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&data_buf]);
+        pass.bind_resources(&[&data_buf]);
 
         // Record indirect dispatch with a temp buffer, then drop the buffer.
         // The encoder stores the raw handle; after drop it's stale.
@@ -518,12 +518,12 @@ fn test_dispatch_indirect_invalid_buffer() {
     );
 }
 
-// ─── Many push-constant slots (>4, exercises 16-slot expansion) ───────────────
+// ─── Many resource slots (>4, exercises 16-slot expansion) ────────────────────
 
 /// Shader using 6 bindless slots (0–5). Before the 16-slot expansion, slots 4+
 /// were mapped to garbage indices and this test would produce wrong results.
 #[test]
-fn test_compute_many_push_constant_slots() {
+fn test_compute_many_resource_slots() {
     let device = make_device();
 
     let shader = ShaderModule::from_slang(&device, SIX_SLOT_SUM_SHADER).expect("compile shader");
@@ -542,7 +542,7 @@ fn test_compute_many_push_constant_slots() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&a, &b, &c, &d, &e, &out]);
+        pass.bind_resources(&[&a, &b, &c, &d, &e, &out]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -617,7 +617,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffer]);
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1);
     }
 
@@ -665,7 +665,7 @@ fn test_buffer_view_copy_between_sub_regions() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[idx_a, idx_b]);
+        pass.bind_resources_raw(&[idx_a, idx_b]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -718,7 +718,7 @@ fn test_buffer_view_isolation() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[idx]);
+        pass.bind_resources_raw(&[idx]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -779,7 +779,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[src_idx, dst_idx]);
+        pass.bind_resources_raw(&[src_idx, dst_idx]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -881,7 +881,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buf]);
+        pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -968,7 +968,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buf]);
+        pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1004,7 +1004,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
 
 /// Verify `goldy_buf_ro` / `goldy_scattered` can be assigned to locals and used together.
 /// `goldy_buf_ro` returns `ReadOnlyBuffer<T>` (SRV on DX12, StorageBuffer on Vulkan/Metal).
-/// Push constants: slot 0 = read buffer (`bindless_srv_index()` on DX12), slot 1 = UAV.
+/// Resource slots: slot 0 = read buffer (`bindless_srv_index()` on DX12), slot 1 = UAV.
 #[test]
 fn test_scattered_typed_variable_assignment() {
     const SHADER: &str = r#"
@@ -1050,7 +1050,7 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[
+        pass.bind_resources_raw(&[
             input_buf.bindless_srv_index().expect("srv"),
             output_buf.bindless_index().expect("uav"),
         ]);
@@ -1124,7 +1124,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]);
+        pass.bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]);
         pass.dispatch(workgroups, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1188,7 +1188,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[texture.bindless_index().expect("tex bindless")]);
+        pass.bind_resources_raw(&[texture.bindless_index().expect("tex bindless")]);
         pass.dispatch(wg_x, wg_y, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1251,7 +1251,7 @@ fn test_cpu_coherent_compute_write_and_read() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffer]);
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1312,7 +1312,7 @@ fn test_write_buffer_reuse_across_submissions() {
             data: bytemuck::cast_slice(&data_a).to_vec(),
         },
         ComputeCommand::SetPipeline(ph),
-        ComputeCommand::SetPushConstantsRaw {
+        ComputeCommand::BindResourcesRaw {
             indices: vec![idx_in, idx_out_a],
         },
         ComputeCommand::Dispatch {
@@ -1329,7 +1329,7 @@ fn test_write_buffer_reuse_across_submissions() {
             data: bytemuck::cast_slice(&data_b).to_vec(),
         },
         ComputeCommand::SetPipeline(ph),
-        ComputeCommand::SetPushConstantsRaw {
+        ComputeCommand::BindResourcesRaw {
             indices: vec![idx_in, idx_out_b],
         },
         ComputeCommand::Dispatch {
@@ -1406,7 +1406,7 @@ fn test_cpu_coherent_cpu_write_read_roundtrip() {
 
 // ── uniform entry-point parameter tests ──────────────────────────────────────
 //
-// `uniform T param` in a `cs_main` signature maps directly to a push-constant
+// `uniform T param` in a `cs_main` signature maps directly to a resource
 // slot. The tests below exercise:
 //
 //  • uint round-trip (basic sanity)
@@ -1439,7 +1439,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.set_push_constants_raw(&[heap_idx, EXPECTED]);
+        pass.bind_resources_raw(&[heap_idx, EXPECTED]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1472,7 +1472,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.set_push_constants_raw(&[heap_idx, 0u32]);
+        pass.bind_resources_raw(&[heap_idx, 0u32]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1505,7 +1505,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.set_push_constants_raw(&[heap_idx, u32::MAX]);
+        pass.bind_resources_raw(&[heap_idx, u32::MAX]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1543,7 +1543,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.set_push_constants_raw(&[heap_idx, bits]);
+        pass.bind_resources_raw(&[heap_idx, bits]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1584,7 +1584,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         let heap_idx = out.bindless_index().unwrap();
-        pass.set_push_constants_raw(&[heap_idx, A, B]);
+        pass.bind_resources_raw(&[heap_idx, A, B]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1597,7 +1597,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
 }
 
 /// A scalar `uniform uint` param after two buffer-slot params correctly
-/// retrieves its value from the third push-constant slot.
+/// retrieves its value from the third resource slot.
 #[test]
 fn test_uniform_scalar_after_two_buffer_params() {
     const SHADER: &str = r#"
@@ -1626,7 +1626,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
         pass.set_pipeline(&pipeline);
         let inp_idx = inp.bindless_index().unwrap();
         let out_idx = out.bindless_index().unwrap();
-        pass.set_push_constants_raw(&[inp_idx, out_idx, OFFSET]);
+        pass.bind_resources_raw(&[inp_idx, out_idx, OFFSET]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");

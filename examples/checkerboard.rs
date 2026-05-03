@@ -115,7 +115,7 @@ impl App {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(pipeline);
-            pass.set_push_constants(&[uniform_buffer]);
+            pass.bind_resources(&[uniform_buffer]);
             // No vertex buffer needed - shader uses SV_VertexID
             pass.draw_fullscreen();
         }

@@ -66,28 +66,23 @@ let sampler = Sampler::new(&device, &SamplerDesc {
 
 ## Using Textures in Shaders
 
-Textures and samplers are bound via **bindless** descriptors. Each texture has a `bindless_index()` that you pass to the shader through push constants:
+Textures and samplers are bound via **bindless** descriptors. Each texture has a `bindless_index()` that you pass to the shader through resource bindings:
 
 ```rust
 let tex_idx = texture.bindless_index().unwrap();
 let smp_idx = sampler.bindless_index().unwrap();
 
 // In a render pass:
-pass.set_push_constants_raw(&[tex_idx, smp_idx]);
+pass.bind_resources_raw(&[tex_idx, smp_idx]);
 ```
 
-In the Slang shader:
+In the Slang shader, use `[goldy_fragment]` with typed resource parameters:
 
 ```slang
-import goldy;
+import goldy_exp;
 
-struct PushConstants { uint tex_idx; uint smp_idx; };
-[[vk::push_constant]] PushConstants pc;
-
-[shader("fragment")]
-float4 fs_main(float2 uv : TEXCOORD) : SV_Target {
-    Texture2D<float4> tex = g_Textures[pc.tex_idx];
-    SamplerState smp = g_Samplers[pc.smp_idx];
+[goldy_fragment]
+float4 fs_main(Interpolated<float4> tex, Filter smp, float2 uv : TEXCOORD) {
     return tex.Sample(smp, uv);
 }
 ```

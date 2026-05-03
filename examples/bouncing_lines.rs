@@ -150,7 +150,7 @@ impl RenderState {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
             // Pass buffer indices via push constants
-            pass.set_push_constants(&[&self.line_buffer]);
+            pass.bind_resources(&[&self.line_buffer]);
             // Only 20 lines, but dispatch at least 1 workgroup
             let workgroups = NUM_LINES.div_ceil(64);
             pass.dispatch(workgroups.max(1), 1, 1);
@@ -173,7 +173,7 @@ impl RenderState {
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
             // Pass buffer indices via push constants
-            pass.set_push_constants(&[&self.line_buffer]);
+            pass.bind_resources(&[&self.line_buffer]);
             // Draw 2 vertices (line) per instance
             pass.draw(0..2, 0..NUM_LINES);
         }

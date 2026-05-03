@@ -134,7 +134,7 @@ impl Sampler {
     /// Returns `None` otherwise.
     ///
     /// **Prefer [`Sampler::bindless_handle`]** for new code; the typed handle
-    /// lets push-constant setters validate that a slot expected to be a sampler
+    /// lets resource-slot setters validate that a slot expected to be a sampler
     /// (via `goldy_filter`) is actually bound to a `Sampler`.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();

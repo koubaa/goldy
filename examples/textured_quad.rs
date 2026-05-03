@@ -241,7 +241,7 @@ impl App {
             });
             pass.set_pipeline(pipeline);
             // Pass texture and sampler indices via push constants
-            pass.set_push_constants_typed(&[tex_handle, samp_handle]);
+            pass.bind_resources_typed(&[tex_handle, samp_handle]);
             pass.set_vertex_buffer(0, vertex_buffer);
             pass.draw(0..6, 0..1);
         }

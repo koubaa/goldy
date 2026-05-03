@@ -1,7 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::staging;
-use super::types::{self, BindlessIndices, ComputePipelineState, LogicalDevice};
+use super::types::{self, ResourceSlots, ComputePipelineState, LogicalDevice};
 use super::{ComputePipelineHandle, DeviceHandle};
 use crate::backend::{ComputeCommand, FenceToken};
 use anyhow::{Context, Result};
@@ -283,7 +283,7 @@ pub(super) fn submit(
         logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
     }
 
-    // Track current pipeline for push constants
+    // Track current pipeline for resource slot binding
     let mut current_pipeline: Option<ComputePipelineHandle> = None;
     let mut belt_idx = 0usize;
 
@@ -316,16 +316,16 @@ pub(super) fn submit(
                     current_pipeline = Some(*handle);
                 }
             }
-            ComputeCommand::SetPushConstants {
+            ComputeCommand::BindResources {
                 buffers: buffer_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut indices = BindlessIndices::default();
+                    let mut slots = ResourceSlots::default();
                     for (i, buffer_handle) in buffer_handles.iter().enumerate() {
-                        if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                        if i >= types::MAX_RESOURCE_SLOTS {
                             break;
                         }
-                        indices.indices[i] = buffers
+                        slots.indices[i] = buffers
                             .get(buffer_handle)
                             .and_then(|b| b.bindless_index)
                             .unwrap_or(0);
@@ -336,21 +336,21 @@ pub(super) fn submit(
                             pipeline.layout,
                             vk::ShaderStageFlags::COMPUTE,
                             0,
-                            bytemuck::bytes_of(&indices),
+                            bytemuck::bytes_of(&slots),
                         );
                     }
                 }
             }
-            ComputeCommand::SetPushConstantsRaw {
+            ComputeCommand::BindResourcesRaw {
                 indices: raw_indices,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut indices = BindlessIndices::default();
+                    let mut slots = ResourceSlots::default();
                     for (i, &idx) in raw_indices.iter().enumerate() {
-                        if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                        if i >= types::MAX_RESOURCE_SLOTS {
                             break;
                         }
-                        indices.indices[i] = idx;
+                        slots.indices[i] = idx;
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -358,21 +358,21 @@ pub(super) fn submit(
                             pipeline.layout,
                             vk::ShaderStageFlags::COMPUTE,
                             0,
-                            bytemuck::bytes_of(&indices),
+                            bytemuck::bytes_of(&slots),
                         );
                     }
                 }
             }
-            ComputeCommand::SetPushConstantsTyped {
+            ComputeCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut indices = BindlessIndices::default();
+                    let mut slots = ResourceSlots::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
-                        if i >= types::MAX_PUSH_CONSTANT_INDICES {
+                        if i >= types::MAX_RESOURCE_SLOTS {
                             break;
                         }
-                        indices.indices[i] = handle.index();
+                        slots.indices[i] = handle.index();
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -380,7 +380,7 @@ pub(super) fn submit(
                             pipeline.layout,
                             vk::ShaderStageFlags::COMPUTE,
                             0,
-                            bytemuck::bytes_of(&indices),
+                            bytemuck::bytes_of(&slots),
                         );
                     }
                 }

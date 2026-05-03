@@ -22,12 +22,12 @@ use anyhow::Result;
 ///
 /// graph.node("write_data", &pipeline_a)
 ///     .bind_buffer(&buf, NodeAccess::Write)
-///     .push_constants_raw(&[buf_idx])
+///     .bind_resources_raw(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// graph.node("read_data", &pipeline_b)
 ///     .bind_buffer(&buf, NodeAccess::Read)
-///     .push_constants_raw(&[buf_idx])
+///     .bind_resources_raw(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// graph.submit(&device)?.wait()?;
@@ -56,7 +56,7 @@ impl ComputeGraph {
                 label: label.to_string(),
                 pipeline: pipeline.handle,
                 bindings: Vec::new(),
-                push_constants: Vec::new(),
+                resource_slots: Vec::new(),
                 dispatch: DispatchKind::Direct { x: 0, y: 0, z: 0 },
             },
         }
@@ -175,9 +175,9 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    /// Set the push constant indices for this node's dispatch.
-    pub fn push_constants_raw(mut self, indices: &[u32]) -> Self {
-        self.node.push_constants = indices.to_vec();
+    /// Set the resource slot indices for this node's dispatch.
+    pub fn bind_resources_raw(mut self, indices: &[u32]) -> Self {
+        self.node.resource_slots = indices.to_vec();
         self
     }
 
@@ -231,25 +231,25 @@ mod tests {
         graph
             .node("write", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Write)
-            .push_constants_raw(&[42])
+            .bind_resources_raw(&[42])
             .dispatch(8, 1, 1);
         graph
             .node("read_write", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Read)
             .bind_buffer(&buf_b, NodeAccess::Write)
-            .push_constants_raw(&[43])
+            .bind_resources_raw(&[43])
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();
 
-        // Wave 0: SetPipeline, SetPushConstantsRaw, Dispatch
+        // Wave 0: SetPipeline, BindResourcesRaw, Dispatch
         // ResourceBarrier
-        // Wave 1: SetPipeline, SetPushConstantsRaw, Dispatch
+        // Wave 1: SetPipeline, BindResourcesRaw, Dispatch
         assert_eq!(cmds.len(), 7);
         assert!(matches!(cmds[0], ComputeCommand::SetPipeline(_)));
         assert!(matches!(
             cmds[1],
-            ComputeCommand::SetPushConstantsRaw { .. }
+            ComputeCommand::BindResourcesRaw { .. }
         ));
         assert!(matches!(
             cmds[2],
@@ -262,7 +262,7 @@ mod tests {
         assert!(matches!(cmds[4], ComputeCommand::SetPipeline(_)));
         assert!(matches!(
             cmds[5],
-            ComputeCommand::SetPushConstantsRaw { .. }
+            ComputeCommand::BindResourcesRaw { .. }
         ));
         assert!(matches!(
             cmds[6],

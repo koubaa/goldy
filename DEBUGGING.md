@@ -4,15 +4,15 @@
 
 ### Shader Compiles but Uniforms Don't Update (Static Animation)
 
-If using `set_push_constants()` with a Metal shader that uses `ParameterBlock`:
+If using `bind_resources()` with a Metal shader that uses `ParameterBlock`:
 
 1. **Check pipeline has ParameterBlock layouts**: The Metal backend needs reflection data to populate the argument buffer. Enable debug logging:
    ```bash
    RUST_LOG=goldy::backend::metal=trace cargo run --example myexample
    ```
-   Look for: `"Allocated bindless argument buffer"` and `"SetPushConstants: Wrote GPU address"`.
+   Look for: `"Allocated bindless argument buffer"` and `"BindResources: Wrote GPU address"`.
 
-2. **Verify argument buffer binding**: Check logs for `"SetPushConstants: Bound ParameterBlock argument buffer at slot X"`. If missing, the buffer isn't being bound to the shader.
+2. **Verify argument buffer binding**: Check logs for `"BindResources: Bound ParameterBlock argument buffer at slot X"`. If missing, the buffer isn't being bound to the shader.
 
 3. **Ensure buffer is heap-allocated**: Bindless buffers must be allocated from the Metal heap. Check for `"Encoded buffer N at arg buffer offset"` during buffer creation.
 
@@ -20,7 +20,7 @@ If using `set_push_constants()` with a Metal shader that uses `ParameterBlock`:
 
 ### Bindless Buffers Show Wrong Data (All Zeros, Garbage)
 
-When using `set_push_constants()` with storage buffers on DX12, the shader may read incorrect data. This is often caused by SRV/UAV descriptor mismatch:
+When using `bind_resources()` with storage buffers on DX12, the shader may read incorrect data. This is often caused by SRV/UAV descriptor mismatch:
 
 **Background**: DX12 requires different descriptor types for read vs write access:
 - `StructuredBuffer<T>` (read-only) → needs **SRV** (Shader Resource View)
@@ -30,7 +30,7 @@ Goldy creates both SRV and UAV descriptors for storage buffers, stored as:
 - `bindless_offset` → UAV index
 - `bindless_srv_offset` → SRV index
 
-**Current behavior for `set_push_constants()`**:
+**Current behavior for `bind_resources()`**:
 - **Render shaders**: Always use SRV offsets (render shaders only read)
 - **Compute shaders**: First buffer uses SRV (read input), subsequent buffers use UAV (write outputs)
 
@@ -101,7 +101,7 @@ Standalone reflection without shader creation remains available via **`Device::r
 
 A common footgun is uploading uniform or structured data with the wrong **element stride** (for example passing `bytemuck::bytes_of(&uniforms)` into `Buffer::with_data`, which infers `T = u8` and stride 1). That can work on Vulkan but yield silent wrong reads on Direct3D 12 structured-buffer views.
 
-`GOLDY_VALIDATE_LAYOUTS` covers this too. When enabled, Goldy validates at **dispatch / draw time** that each buffer bound via `set_push_constants_typed` has the same element stride the shader expects for `goldy_buf_ro<T>`, `goldy_scattered<T>`, `goldy_broadcast<T>`, and `goldy_byte_address` (byte stride 1).
+`GOLDY_VALIDATE_LAYOUTS` covers this too. When enabled, Goldy validates at **dispatch / draw time** that each buffer bound via `bind_resources_typed` has the same element stride the shader expects for `goldy_buf_ro<T>`, `goldy_scattered<T>`, `goldy_broadcast<T>`, and `goldy_byte_address` (byte stride 1).
 
 ```bash
 GOLDY_VALIDATE_LAYOUTS=1 cargo run --example compute_to_surface

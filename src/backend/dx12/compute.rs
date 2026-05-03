@@ -263,22 +263,17 @@ pub(super) fn submit(
                     }
                 }
             }
-            ComputeCommand::SetPushConstants { buffers } => {
-                // Push buffer indices directly (no bind groups)
-                let mut indices = types::BindlessIndices::default();
+            ComputeCommand::BindResources { buffers } => {
+                let mut indices = types::ResourceSlots::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
                     if i >= types::MAX_ROOT_CONSTANT_INDICES {
                         break;
                     }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
-                        // Compute shaders use goldy_scattered() which returns RWStructuredBuffer.
-                        // RWStructuredBuffer requires UAV descriptors, not SRV.
-                        // Always use bindless_offset (UAV) for storage buffers in compute shaders.
-                        // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
                         let offset = buf_state.bindless_offset.unwrap_or(0);
                         indices.indices[i] = offset;
                         tracing::trace!(
-                            "Compute push constant [{}]: buffer {} -> UAV offset {}",
+                            "Compute resource slot [{}]: buffer {} -> UAV offset {}",
                             i,
                             buffer_handle,
                             offset
@@ -300,10 +295,10 @@ pub(super) fn submit(
                     );
                 }
             }
-            ComputeCommand::SetPushConstantsRaw {
+            ComputeCommand::BindResourcesRaw {
                 indices: raw_indices,
             } => {
-                let mut indices = types::BindlessIndices::default();
+                let mut indices = types::ResourceSlots::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
                     if i >= types::MAX_ROOT_CONSTANT_INDICES {
                         break;
@@ -319,10 +314,10 @@ pub(super) fn submit(
                     );
                 }
             }
-            ComputeCommand::SetPushConstantsTyped {
+            ComputeCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                let mut indices = types::BindlessIndices::default();
+                let mut indices = types::ResourceSlots::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
                     if i >= types::MAX_ROOT_CONSTANT_INDICES {
                         break;

@@ -272,23 +272,23 @@ pub(super) fn create_with_depth(
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-    // Pipeline layout - always use bindless with push constants
+    // Pipeline layout - always use bindless with resource slots
     let bindless_set_layout = logical_device
         .bindless_descriptor_set_layout
         .context("Bindless descriptor set layout required")?;
 
     let all_layouts = vec![bindless_set_layout];
 
-    // Push constant range for resource indices (16 x u32 = 64 bytes)
-    let push_constant_range = vk::PushConstantRange {
+    // Vulkan push constant range for resource slot indices (16 x u32 = 64 bytes)
+    let slot_range = vk::PushConstantRange {
         stage_flags: vk::ShaderStageFlags::ALL,
         offset: 0,
-        size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+        size: (types::MAX_RESOURCE_SLOTS * std::mem::size_of::<u32>()) as u32,
     };
 
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&all_layouts)
-        .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+        .push_constant_ranges(std::slice::from_ref(&slot_range));
 
     let layout = unsafe {
         logical_device

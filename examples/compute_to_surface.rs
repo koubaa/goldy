@@ -260,7 +260,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&state.compute_pipeline);
-        pass.set_push_constants_typed(&[uniform_handle, texture_handle]);
+        pass.bind_resources_typed(&[uniform_handle, texture_handle]);
         pass.dispatch(wg_x, wg_y, 1);
     }
     encoder.submit(&state.device)?.wait()?;

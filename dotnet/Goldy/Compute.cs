@@ -61,12 +61,12 @@ public sealed class ComputeEncoder
     }
 
     /// <summary>
-    /// Set push constants for compute resource binding.
-    /// The indices are pushed in order, so buffers[0] becomes index 0,
-    /// buffers[1] becomes index 1, etc.
+    /// Bind resource slots for compute.
+    /// The indices are bound in order, so buffers[0] becomes slot 0,
+    /// buffers[1] becomes slot 1, etc.
     /// </summary>
-    /// <param name="buffers">Buffers to pass to the shader via push constants.</param>
-    public void SetPushConstants(params Buffer[] buffers)
+    /// <param name="buffers">Buffers to bind to shader resource slots.</param>
+    public void BindResources(params Buffer[] buffers)
     {
         EnsureNotExecuted();
         if (buffers.Length == 0)
@@ -81,7 +81,7 @@ public sealed class ComputeEncoder
         {
             fixed (nint* ptr = handles)
             {
-                NativeMethods.ComputeEncoderSetPushConstants(_handle, (nint)ptr, (uint)buffers.Length);
+                NativeMethods.ComputeEncoderBindResources(_handle, (nint)ptr, (uint)buffers.Length);
             }
         }
     }

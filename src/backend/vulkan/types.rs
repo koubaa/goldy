@@ -65,21 +65,23 @@ pub mod bindless_bindings {
     pub const SAMPLERS: u32 = FILTER_CONFIG;
 }
 
-/// Maximum number of resource indices in push constants
-pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
+/// Maximum number of resource slot indices per dispatch/draw.
+pub const MAX_RESOURCE_SLOTS: usize = 16;
 
-/// Push constants for passing bindless resource indices to shaders.
+/// Resource slots for passing bindless resource indices to shaders.
 /// This is used to tell shaders which indices in the global descriptor arrays to access.
+///
+/// Implemented via push constants on Vulkan, root constants on DX12, buffer args on Metal.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
-pub struct BindlessIndices {
+pub struct ResourceSlots {
     /// Resource indices (buffers, textures, samplers packed sequentially)
-    pub indices: [u32; MAX_PUSH_CONSTANT_INDICES],
+    pub indices: [u32; MAX_RESOURCE_SLOTS],
 }
 
-// Safety: BindlessIndices is a POD type with known layout
-unsafe impl bytemuck::Pod for BindlessIndices {}
-unsafe impl bytemuck::Zeroable for BindlessIndices {}
+// Safety: ResourceSlots is a POD type with known layout
+unsafe impl bytemuck::Pod for ResourceSlots {}
+unsafe impl bytemuck::Zeroable for ResourceSlots {}
 
 /// Registry for tracking bindless resource indices.
 ///

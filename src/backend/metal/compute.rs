@@ -2,10 +2,10 @@
 
 use super::super::{ComputeCommand, ComputePipelineHandle, DeviceHandle, FenceToken, ShaderHandle};
 use super::shader::parse_numthreads;
-use super::types::PUSH_CONSTANTS_SLOT;
+use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{
-    BindlessIndices, ComputePipelineState, FenceEntry, FenceSignal, MetalState,
-    MAX_PUSH_CONSTANT_INDICES,
+    ResourceSlots, ComputePipelineState, FenceEntry, FenceSignal, MetalState,
+    MAX_RESOURCE_SLOTS,
 };
 use crate::slang::SlangStage;
 use ::metal as mtl;
@@ -166,71 +166,71 @@ fn record_commands_to_buffer(
                     current_pipeline = Some(pipeline);
                 }
             }
-            ComputeCommand::SetPushConstants { buffers } => {
+            ComputeCommand::BindResources { buffers } => {
                 ensure_compute!();
-                let mut indices = BindlessIndices::default();
+                let mut slots = ResourceSlots::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_RESOURCE_SLOTS {
                         break;
                     }
                     if let Some(buf) = state.buffers.get(buffer_handle) {
-                        indices.indices[i] = buf.arg_buffer_index;
+                        slots.indices[i] = buf.arg_buffer_index;
                     }
                 }
-                let indices_bytes: &[u8] = unsafe {
+                let slot_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
+                        &slots as *const _ as *const u8,
+                        std::mem::size_of::<ResourceSlots>(),
                     )
                 };
                 encoder.unwrap().set_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    slot_bytes.len() as u64,
+                    slot_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::SetPushConstantsRaw {
+            ComputeCommand::BindResourcesRaw {
                 indices: raw_indices,
             } => {
                 ensure_compute!();
-                let mut indices = BindlessIndices::default();
+                let mut slots = ResourceSlots::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_RESOURCE_SLOTS {
                         break;
                     }
-                    indices.indices[i] = idx;
+                    slots.indices[i] = idx;
                 }
-                let indices_bytes: &[u8] = unsafe {
+                let slot_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
+                        &slots as *const _ as *const u8,
+                        std::mem::size_of::<ResourceSlots>(),
                     )
                 };
                 encoder.unwrap().set_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    slot_bytes.len() as u64,
+                    slot_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::SetPushConstantsTyped { handles } => {
+            ComputeCommand::BindResourcesTyped { handles } => {
                 ensure_compute!();
-                let mut indices = BindlessIndices::default();
+                let mut slots = ResourceSlots::default();
                 for (i, handle) in handles.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_RESOURCE_SLOTS {
                         break;
                     }
-                    indices.indices[i] = handle.index();
+                    slots.indices[i] = handle.index();
                 }
-                let indices_bytes: &[u8] = unsafe {
+                let slot_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
+                        &slots as *const _ as *const u8,
+                        std::mem::size_of::<ResourceSlots>(),
                     )
                 };
                 encoder.unwrap().set_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    slot_bytes.len() as u64,
+                    slot_bytes.as_ptr() as *const _,
                 );
             }
             ComputeCommand::Dispatch {

@@ -320,7 +320,7 @@ impl Buffer {
     ///
     /// The view gets its own bindless descriptor index, so shaders see a zero-based
     /// buffer starting at `offset`. Multiple views of the same buffer can be bound
-    /// simultaneously to different push constant slots.
+    /// simultaneously to different resource slots.
     ///
     /// `element_stride` sets the structured buffer stride for the view's descriptor.
     /// If `None`, defaults to 4 bytes (u32).
@@ -393,7 +393,7 @@ impl BufferSource for Buffer {
 /// as a zero-based buffer.
 ///
 /// This enables buffer pooling: allocate one large buffer and create views for
-/// each logical sub-allocation. Each view can be independently bound via push constants.
+/// each logical sub-allocation. Each view can be independently bound via resource slots.
 ///
 /// Dropping a `BufferView` unregisters its descriptor but does not free the parent's memory.
 pub struct BufferView {

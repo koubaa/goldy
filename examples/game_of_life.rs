@@ -231,7 +231,7 @@ impl RenderState {
                         self.view_a.bindless_handle().unwrap(),
                     )
                 };
-                pass.set_push_constants_typed(&[read_handle, write_handle]);
+                pass.bind_resources_typed(&[read_handle, write_handle]);
 
                 // Dispatch workgroups (8x8 threads per group)
                 let workgroups_x = GRID_WIDTH.div_ceil(8);
@@ -260,7 +260,7 @@ impl RenderState {
             } else {
                 self.view_b.bindless_handle().unwrap()
             };
-            pass.set_push_constants_typed(&[current_handle]);
+            pass.bind_resources_typed(&[current_handle]);
 
             // Draw fullscreen triangle
             pass.draw(0..3, 0..1);

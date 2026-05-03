@@ -47,7 +47,7 @@ pub const MAX_ROOT_CONSTANT_INDICES: usize = 16;
 /// This is used to tell shaders which indices in the descriptor heaps to access.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
-pub struct BindlessIndices {
+pub struct ResourceSlots {
     /// Resource indices (buffers, textures, samplers packed sequentially)
     pub indices: [u32; MAX_ROOT_CONSTANT_INDICES],
 }

@@ -1382,11 +1382,11 @@ impl Drop for SlangCompiler {
 
 /// Verify that `uniform` entry-point parameters (the replacement for
 /// `gGoldyDynamic`) compile correctly for all three backends, and that
-/// the resulting code accesses the expected push-constant / argument-buffer
+/// the resulting code accesses the expected resource-slot / argument-buffer
 /// locations.
 ///
-/// SPIR-V: `uniform` params → push constants at offset 0 (std430).
-/// DXIL:   `uniform` params → root constants at b0/space0.
+/// SPIR-V: `uniform` params → implemented via push constants at offset 0 (std430).
+/// DXIL:   `uniform` params → implemented via root constants at b0/space0.
 /// Metal:  Slang wraps them in an `EntryPointParams` struct at buffer index 1.
 #[cfg(test)]
 mod uniform_entry_point_param_binding_tests {
@@ -1433,7 +1433,7 @@ mod uniform_entry_point_param_binding_tests {
         assert_eq!(words[0], 0x07230203, "SPIR-V magic number mismatch");
 
         // StorageClass::PushConstant == 9. This value should appear as a word in
-        // the SPIR-V binary when uniform entry-point params are mapped to push constants.
+        // the SPIR-V binary when uniform entry-point params are mapped to resource slots.
         assert!(
             words.iter().any(|&w| w == 9),
             "Expected PushConstant storage class (9) in SPIR-V for uniform params"

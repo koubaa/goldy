@@ -173,7 +173,7 @@ impl RenderState {
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            pass.set_push_constants(&[&self.instance_buffer, &self.params_buffer]);
+            pass.bind_resources(&[&self.instance_buffer, &self.params_buffer]);
             // Dispatch enough workgroups for all instances (64 threads per group)
             let workgroups = NUM_QUADS.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
@@ -195,7 +195,7 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            pass.set_push_constants(&[&self.instance_buffer]);
+            pass.bind_resources(&[&self.instance_buffer]);
             // Draw 6 vertices (quad) per instance - no vertex buffer!
             pass.draw_quads(NUM_QUADS);
         }

@@ -95,19 +95,19 @@ pub enum RenderCommand {
         offset: u64,
         format: IndexFormat,
     },
-    /// Set push constants directly with buffer handles (fully bindless mode).
-    /// The backend will look up each buffer's bindless index and push them.
-    SetPushConstants { buffers: Vec<BufferHandle> },
-    /// Set push constants with raw u32 indices (fully bindless mode).
+    /// Bind resource slots directly with buffer handles (fully bindless mode).
+    /// The backend will look up each buffer's bindless index and bind them.
+    BindResources { buffers: Vec<BufferHandle> },
+    /// Bind resource slots with raw u32 indices (fully bindless mode).
     /// Use this for textures/samplers or when you already have the indices.
     ///
-    /// **Prefer [`RenderCommand::SetPushConstantsTyped`]** — the raw form
+    /// **Prefer [`RenderCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    SetPushConstantsRaw { indices: Vec<u32> },
-    /// Set push constants with typed [`BindlessHandle`]s. Backends validate
+    BindResourcesRaw { indices: Vec<u32> },
+    /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
     /// each handle's [`BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.
-    SetPushConstantsTyped { handles: Vec<BindlessHandle> },
+    BindResourcesTyped { handles: Vec<BindlessHandle> },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -131,17 +131,17 @@ pub enum RenderCommand {
 pub enum ComputeCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
-    /// Set push constants (fully bindless mode - buffer indices passed directly).
-    SetPushConstants { buffers: Vec<BufferHandle> },
-    /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
+    /// Bind resource slots (fully bindless mode - buffer indices passed directly).
+    BindResources { buffers: Vec<BufferHandle> },
+    /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
-    /// **Prefer [`ComputeCommand::SetPushConstantsTyped`]** — the raw form
+    /// **Prefer [`ComputeCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    SetPushConstantsRaw { indices: Vec<u32> },
-    /// Set push constants with typed [`BindlessHandle`]s. Backends validate
+    BindResourcesRaw { indices: Vec<u32> },
+    /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
     /// each handle's [`BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.
-    SetPushConstantsTyped { handles: Vec<BindlessHandle> },
+    BindResourcesTyped { handles: Vec<BindlessHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,

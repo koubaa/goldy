@@ -22,17 +22,12 @@ use std::sync::{Arc, Mutex};
 /// let device = instance.create_device(DeviceType::DiscreteGpu)?;
 ///
 /// let shader = ShaderModule::from_slang(&device, r#"
-///     #include "goldy_exp.slang"
+///     import goldy_exp;
 ///
-///     struct PushConstants { uint buffer_idx; };
-///     [[vk::push_constant]] PushConstants pc;
-///
-///     [shader("compute")]
+///     [goldy_compute]
 ///     [numthreads(64, 1, 1)]
-///     void cs_main(uint3 id : SV_DispatchThreadID) {
-///         // Access buffer via index
-///         float val = asfloat(g_StorageBuffers[pc.buffer_idx].Load(id.x * 4));
-///         g_StorageBuffers[pc.buffer_idx].Store(id.x * 4, asuint(val * 2.0));
+///     void cs_main(Scattered<float> data, ThreadId id) {
+///         data[id.x] = data[id.x] * 2.0;
 ///     }
 /// "#)?;
 ///
@@ -92,7 +87,7 @@ impl Drop for ComputePipeline {
 /// let mut encoder = ComputeEncoder::new();
 /// let mut pass = encoder.begin_compute_pass();
 /// // pass.set_pipeline(&pipeline);
-/// // pass.set_push_constants(&[&buffer]);
+/// // pass.bind_resources(&[&buffer]);
 /// // pass.dispatch(1, 1, 1);
 /// drop(pass);
 ///
@@ -168,45 +163,46 @@ impl<'a> ComputePass<'a> {
             .push(ComputeCommand::SetPipeline(pipeline.handle));
     }
 
-    /// Set push constants for resource binding (compute shaders).
+    /// Bind resource slots for a compute dispatch.
     ///
-    /// Buffer indices are passed via push/root constants. The shader accesses
-    /// resources through global descriptor arrays indexed by these values.
+    /// Buffer indices are passed to the shader as entry-point parameters.
+    /// The shader accesses resources through global descriptor arrays indexed
+    /// by these values.
     ///
     /// # Example
     /// ```ignore
-    /// pass.set_push_constants(&[&particle_buffer, &params_buffer]);
+    /// pass.bind_resources(&[&particle_buffer, &params_buffer]);
     /// // In shader: g_StorageBuffers[getBufferIndex(0)] for particles
     /// // In shader: g_UniformBuffers[getBufferIndex(1)] for params
     /// ```
-    pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
+    pub fn bind_resources(&mut self, buffers: &[&Buffer]) {
         self.encoder
             .commands
-            .push(ComputeCommand::SetPushConstants {
+            .push(ComputeCommand::BindResources {
                 buffers: buffers.iter().map(|b| b.handle).collect(),
             });
     }
 
-    /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
+    /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
     /// Use this when you need to pass texture or sampler slot indices, or when
-    /// constructing push constants manually. The indices must match the order of
+    /// constructing resource bindings manually. The indices must match the order of
     /// `uniform uint` parameters declared in the shader's entry point.
     ///
     /// # Example
     /// ```ignore
     /// let tex_idx = texture.bindless_index().unwrap();
-    /// pass.set_push_constants_raw(&[buf_idx_0, buf_idx_1, tex_idx]);
+    /// pass.bind_resources_raw(&[buf_idx_0, buf_idx_1, tex_idx]);
     /// ```
-    pub fn set_push_constants_raw(&mut self, indices: &[u32]) {
+    pub fn bind_resources_raw(&mut self, indices: &[u32]) {
         self.encoder
             .commands
-            .push(ComputeCommand::SetPushConstantsRaw {
+            .push(ComputeCommand::BindResourcesRaw {
                 indices: indices.to_vec(),
             });
     }
 
-    /// Set push constants from typed [`BindlessHandle`]s.
+    /// Bind resource slots from typed [`BindlessHandle`]s.
     ///
     /// Each handle carries both the raw index and the resource's
     /// [`crate::types::BindlessCategory`]. The indices are extracted in order and
@@ -217,12 +213,12 @@ impl<'a> ComputePass<'a> {
     /// ```ignore
     /// let uniforms = uniform_buf.bindless_handle().unwrap();    // Broadcast
     /// let output  = output_tex.bindless_handle().unwrap();      // StorageImage
-    /// pass.set_push_constants_typed(&[uniforms, output]);
+    /// pass.bind_resources_typed(&[uniforms, output]);
     /// ```
-    pub fn set_push_constants_typed(&mut self, handles: &[BindlessHandle]) {
+    pub fn bind_resources_typed(&mut self, handles: &[BindlessHandle]) {
         self.encoder
             .commands
-            .push(ComputeCommand::SetPushConstantsTyped {
+            .push(ComputeCommand::BindResourcesTyped {
                 handles: handles.to_vec(),
             });
     }

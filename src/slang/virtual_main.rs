@@ -4,8 +4,8 @@
 //! `[goldy_vertex]`, or `[goldy_fragment]` using ergonomic typed parameters
 //! (`Scattered<T>`, `ThreadId`, etc.).  This module transforms those into
 //! standard `[shader("...")]` entry points that the Slang compiler accepts,
-//! with `uniform uint` push constants and `SV_*`-annotated system-value
-//! parameters generated automatically.
+//! with `uniform uint` entry-point parameters (resource slots) and
+//! `SV_*`-annotated system-value parameters generated automatically.
 //!
 //! # Before / After (compute example)
 //!
@@ -93,9 +93,9 @@ impl Stage {
 /// Classification of a single parameter in a `[goldy_*]` entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParamKind {
-    /// A Goldy resource handle type → becomes `uniform uint` push constant resolved via goldy_*.
+    /// A Goldy resource handle type → becomes `uniform uint` resource slot resolved via goldy_*.
     Resource,
-    /// A user-defined struct → becomes `uniform uint` push constant resolved via goldy_broadcast.
+    /// A user-defined struct → becomes `uniform uint` resource slot resolved via goldy_broadcast.
     ///
     /// In compute shaders every unrecognised struct is a broadcast (constant buffer).
     /// In vertex/fragment shaders every unrecognised struct *except the last* is a broadcast;
@@ -103,7 +103,7 @@ pub enum ParamKind {
     Broadcast,
     /// A Goldy SV wrapper type → becomes an `SV_*`-annotated parameter.
     SystemValue(SvKind),
-    /// A plain scalar type (uint, float, int, …) → becomes `uniform T` push constant.
+    /// A plain scalar type (uint, float, int, …) → becomes `uniform T` entry-point parameter.
     Scalar,
     /// Stage input varying / vertex-attribute struct → passed through unchanged.
     PassThrough,
@@ -545,7 +545,7 @@ fn parse_single_param(s: &str) -> Option<Param> {
 ///
 /// Resource type aliases (`Scattered<T>`, `BufRO<T>`, etc.) are plain typealiases
 /// for the underlying buffer/texture handle types. The generated wrapper calls the
-/// corresponding `goldy_*` free function to resolve the push-constant slot index to
+/// corresponding `goldy_*` free function to resolve the resource slot index to
 /// a live handle. Broadcast (constant-buffer) params are handled by their own
 /// `ParamKind::Broadcast` arm — only handle types appear here.
 fn resource_init_expr(ty: &str, slot_var: &str) -> String {
@@ -656,7 +656,7 @@ fn classify_type(ty: &str) -> ParamKind {
     if ty == "InstanceId" { return ParamKind::SystemValue(SvKind::InstanceId); }
     if ty == "IsFrontFace" { return ParamKind::SystemValue(SvKind::IsFrontFace); }
 
-    // Plain scalars → uniform push constants.
+    // Plain scalars → uniform entry-point parameters.
     if matches!(
         ty,
         "uint" | "int" | "float" | "bool" | "half" | "double"
@@ -764,7 +764,7 @@ impl WrapperBuilder {
                 let gn = format!("_p{}", *push_idx);
                 *push_idx += 1;
                 self.push_sig(&format!("uniform {} {}", param.ty, gn));
-                // Scalar push constants are forwarded directly; no wrapper construction.
+                // Scalar entry-point params are forwarded directly; no wrapper construction.
                 self.push_call(&gn);
             }
             ParamKind::PassThrough => {
@@ -1374,7 +1374,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         // Wrapper must be present.
         assert!(result.contains("[shader(\"compute\")]"), "Missing [shader(\"compute\")]");
         assert!(result.contains("[numthreads(64, 1, 1)]"), "Missing [numthreads]");
-        assert!(result.contains("uniform uint _p0"), "Missing push constant param");
+        assert!(result.contains("uniform uint _p0"), "Missing resource slot param");
         assert!(result.contains("SV_DispatchThreadID"), "Missing SV_DispatchThreadID");
         assert!(result.contains("Scattered<uint> data = goldy_scattered<uint>(_p0)"), "Missing init");
         assert!(result.contains("ThreadId id = ThreadId(_sv0)"), "Missing SV init");
@@ -1386,7 +1386,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     }
 
     #[test]
-    fn compute_scalar_push_constant() {
+    fn compute_scalar_resource_slot() {
         let src = r#"import goldy_exp;
 
 [goldy_compute]
@@ -1583,7 +1583,7 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
 "#;
         let result = transform_virtual_main(src);
         assert!(result.contains("[shader(\"compute\")]"), "Missing compute attr");
-        // Both struct and resource become uniform uint push constants.
+        // Both struct and resource become uniform uint resource slots.
         assert!(result.contains("uniform uint _p0"), "Missing _p0 (TimeUniforms)");
         assert!(result.contains("uniform uint _p1"), "Missing _p1 (Scattered)");
         // Struct resolved via goldy_broadcast.
@@ -1604,11 +1604,11 @@ float4 fs_main(TimeUniforms cfg, FullscreenVarying input) : SV_Target {
 }
 "#;
         let result = transform_virtual_main(src);
-        // cfg becomes broadcast (uniform uint push constant).
+        // cfg becomes broadcast (uniform uint resource slot).
         assert!(result.contains("uniform uint _p0"), "Missing _p0 (TimeUniforms)");
         assert!(result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(_p0)"), "Missing broadcast init");
-        // input is the stage varying (PassThrough) — no push constant for it.
-        assert!(!result.contains("uniform uint _p1"), "FullscreenVarying must not get a push constant");
+        // input is the stage varying (PassThrough) — no resource slot for it.
+        assert!(!result.contains("uniform uint _p1"), "FullscreenVarying must not get a resource slot");
         assert!(result.contains("FullscreenVarying _pt0"), "Missing passthrough param");
     }
 
@@ -1633,7 +1633,7 @@ VSOutput vs_main(TimeUniforms cfg, VIn input) {
 
     #[test]
     fn filter_and_interpolated_resource_types() {
-        // Filter → uniform uint push constant; Interpolated<T> → uniform uint push constant.
+        // Filter → uniform uint resource slot; Interpolated<T> → uniform uint resource slot.
         let src = r#"import goldy_exp;
 
 [goldy_compute]
@@ -1644,7 +1644,7 @@ void cs_main(Interpolated<float4> src_tex, Filter samp, Scattered<float4> dst, T
 }
 "#;
         let result = transform_virtual_main(src);
-        // All three resource params become uniform uint push constants.
+        // All three resource params become uniform uint resource slots.
         assert!(result.contains("uniform uint _p0"), "Missing _p0 (Interpolated)");
         assert!(result.contains("uniform uint _p1"), "Missing _p1 (Filter)");
         assert!(result.contains("uniform uint _p2"), "Missing _p2 (Scattered)");

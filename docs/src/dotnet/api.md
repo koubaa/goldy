@@ -195,8 +195,8 @@ public sealed class ComputeEncoder
 {
     public ComputeEncoder();
     public void SetPipeline(ComputePipeline pipeline);
-    public void SetPushConstants(params Buffer[] buffers);
-    public void SetPushConstantsRaw(uint[] indices);
+    public void BindResources(params Buffer[] buffers);
+    public void BindResourcesRaw(uint[] indices);
     public void Dispatch(uint x, uint y, uint z);
     public void DispatchIndirect(Buffer buffer, ulong offset);
     public void ClearBuffer(Buffer buffer, ulong offset, ulong size);

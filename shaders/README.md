@@ -58,7 +58,7 @@ render_pass.draw_quads(num_instances);  // 6 vertices per quad
 
 Goldy's bindless architecture treats all GPU data as indexed buffers:
 
-- **Uniforms**: `ConstantBuffer<T>` arrays with push constants for indices
+- **Uniforms**: `ConstantBuffer<T>` arrays with resource bindings for indices
 - **Instance data**: `StructuredBuffer<T>` indexed by `SV_InstanceID`
 - **Geometry**: Generated from `SV_VertexID` + `quad_position()` helpers
 
@@ -301,8 +301,8 @@ Slang's `reinterpret<>` handles buffer types specially, avoiding the problematic
 
 ### Cross-Platform Resource Binding
 
-Goldy's bindless architecture passes resource slot indices as small `uniform uint` push
-constants. The preferred way to write bindless shaders is the **virtual main** system:
+Goldy's bindless architecture passes resource slot indices as small `uniform uint` resource
+bindings. The preferred way to write bindless shaders is the **virtual main** system:
 
 ```slang
 import goldy_exp;
@@ -325,13 +325,13 @@ void cs_main(TimeUniforms params, Scattered<Particle> particles, ThreadId id) {
 Rust binds resources in declaration order (left to right):
 
 ```rust
-pass.set_push_constants_raw(&[
+pass.bind_resources_raw(&[
     particles_buf.bindless_index().unwrap(),
     params_buf.bindless_index().unwrap(),
 ]);
 ```
 
-Plain scalar params (e.g. `uint offset`) are also push constants — no wrapper needed:
+Plain scalar params (e.g. `uint offset`) are also resource bindings — no wrapper needed:
 
 ```slang
 [goldy_compute]
@@ -342,7 +342,7 @@ void cs_main(Scattered<uint> data, uint offset, ThreadId id) {
 ```
 
 **Platform support:**
-- **SPIR-V**: `uniform` entry-point params → push constants (std430 layout, offset 0)
+- **SPIR-V**: `uniform` entry-point params → push constants / resource bindings (std430 layout, offset 0)
 - **DX12**: `uniform` entry-point params → root constants at `b0, space0`
 - **Metal**: Slang wraps params in an `EntryPointParams` struct at `[[buffer(1)]]`
 
@@ -401,10 +401,10 @@ This is transparent to shader code — just `import goldy_exp` and use `Descript
    - Use functions instead of macros (functions export, macros don't)
    - Don't use guards in modules that are only imported when needed
 
-2. **Push constants** are expressed as `uniform` entry-point parameters — no manual
+2. **Resource bindings** are expressed as `uniform` entry-point parameters — no manual
    `[[vk::push_constant]]` declaration is needed:
    ```slang
-   // Preferred: Slang maps uniform params to push constants on all backends
+   // Preferred: Slang maps uniform params to resource bindings on all backends
    void cs_main(uniform uint slot, uint3 id : SV_DispatchThreadID) { ... }
    ```
 
@@ -442,7 +442,7 @@ This is transparent to shader code — just `import goldy_exp` and use `Descript
    ParameterBlock<GoldyBindlessResources> gGoldy;
    ```
    
-   The Goldy backend uses `ArgumentEncoder.setBuffer()` to write native device pointers to the argument buffer. When using `set_push_constants()` in Rust with a Metal ParameterBlock shader, the backend automatically handles this translation.
+   The Goldy backend uses `ArgumentEncoder.setBuffer()` to write native device pointers to the argument buffer. When using `bind_resources()` in Rust with a Metal ParameterBlock shader, the backend automatically handles this translation.
 
 ## Module System
 

@@ -92,8 +92,8 @@ and accessed directly in shaders via bindless descriptors:
 // Store vertex data in a scattered buffer
 let vertices = Buffer::with_data(&device, &vertex_data, DataAccess::Scattered)?;
 
-// In shader: access via bindless index
-// StructuredBuffer<Vertex> vertices = getBuffer(push_constants.vertex_buffer_index);
+// In shader: access via bindless index passed as a resource binding
+// StructuredBuffer<Vertex> vertices = getBuffer(resource_slots.vertex_buffer_index);
 ```
 
 ### Built-in Vertex2D

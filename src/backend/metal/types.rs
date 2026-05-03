@@ -31,27 +31,29 @@ use mtl::{
 /// Maximum size of the argument buffer (supports up to 16K resources)
 pub const ARGUMENT_BUFFER_SIZE: u64 = 16 * 1024 * 8; // 8 bytes per resource ID
 
-/// Buffer slot for push constants (resource indices) in shaders.
+/// Buffer slot for resource binding indices in shaders.
 /// Slang assigns uniform entry-point params to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
-pub const PUSH_CONSTANTS_SLOT: u64 = 1;
+pub const RESOURCE_SLOT_BUFFER: u64 = 1;
 
 /// Starting Metal buffer index for vertex attributes.
-/// Slots 0 and 1 are reserved for the argument buffer (gGoldy) and push constants.
+/// Slots 0 and 1 are reserved for the argument buffer (gGoldy) and resource slots.
 /// Vertex data must use higher indices to avoid collisions.
 pub const VERTEX_BUFFER_START_SLOT: u64 = 2;
 
-/// Maximum number of resource indices in push constants
-pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
+/// Maximum number of resource slot indices per dispatch/draw.
+pub const MAX_RESOURCE_SLOTS: usize = 16;
 
-/// Push constants structure for passing bindless resource indices to shaders.
+/// Resource slots for passing bindless resource indices to shaders.
 ///
 /// Matches the flat layout used by DX12 (`SetGraphicsRoot32BitConstants`) and
 /// Vulkan (`vkCmdPushConstants`). Indices are packed sequentially: the caller
 /// decides what each slot means (buffer, texture, or sampler index).
+///
+/// Implemented via push constants on Vulkan, root constants on DX12, buffer args on Metal.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct BindlessIndices {
-    pub indices: [u32; MAX_PUSH_CONSTANT_INDICES],
+pub struct ResourceSlots {
+    pub indices: [u32; MAX_RESOURCE_SLOTS],
 }
 
 /// Minimum primary heap size (64 MB).
@@ -507,7 +509,7 @@ impl ResourceRegistry {
 
     /// Register a uniform buffer (Broadcast access) - local indices 0-63 (shader slot),
     /// global indices 64-127 (argument buffer encoding offset).
-    /// Returns the LOCAL index so push constants pass 0-63 to the shader
+    /// Returns the LOCAL index so resource slots pass 0-63 to the shader
     /// (which indexes into uniformBuffers[0..63]).
     ///
     /// Reuses a freed slot if available (see `unregister_buffer`).
@@ -634,7 +636,7 @@ impl ResourceRegistry {
         local_index + 3 * MAX_RESOURCES_PER_CATEGORY
     }
 
-    /// Register a sampler — returns the LOCAL index (0-63) for push constants.
+    /// Register a sampler — returns the LOCAL index (0-63) for resource slots.
     /// Use `sampler_global_index()` to get the argument buffer encoding offset.
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
         let global_index = self.next_sampler_index;

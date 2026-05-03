@@ -12,16 +12,12 @@ using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
 
 // Shader doubles every float in a buffer
 var source = """
-    #include "goldy_exp.slang"
+    import goldy_exp;
 
-    struct PushConstants { uint buffer_idx; };
-    [[vk::push_constant]] PushConstants pc;
-
-    [shader("compute")]
+    [goldy_compute]
     [numthreads(64, 1, 1)]
-    void cs_main(uint3 id : SV_DispatchThreadID) {
-        float val = asfloat(g_StorageBuffers[pc.buffer_idx].Load(id.x * 4));
-        g_StorageBuffers[pc.buffer_idx].Store(id.x * 4, asuint(val * 2.0));
+    void cs_main(Scattered<float> data, ThreadId id) {
+        data[id.x] = data[id.x] * 2.0;
     }
     """;
 
@@ -35,7 +31,7 @@ using var buffer = Buffer.WithData(device, data, DataAccess.Scattered);
 // Record and dispatch
 var encoder = new ComputeEncoder();
 encoder.SetPipeline(pipeline);
-encoder.SetPushConstants(buffer);
+encoder.BindResources(buffer);
 encoder.Dispatch(16, 1, 1); // 16 * 64 = 1024 threads
 
 encoder.Dispatch(device); // blocking
@@ -76,7 +72,7 @@ for (int step = 0; step < iterations; step++)
 
     var encoder = new ComputeEncoder();
     encoder.SetPipeline(pipeline);
-    encoder.SetPushConstants(src, dst);
+    encoder.BindResources(src, dst);
     encoder.Dispatch(workgroups, 1, 1);
     encoder.Dispatch(device);
 }

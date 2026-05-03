@@ -145,7 +145,7 @@ impl RenderState {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
             // Pass buffer indices via push constants
-            pass.set_push_constants(&[&self.particle_buffer]);
+            pass.bind_resources(&[&self.particle_buffer]);
             // Dispatch enough workgroups to cover all particles (64 threads per group)
             let workgroups = NUM_PARTICLES.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
@@ -169,7 +169,7 @@ impl RenderState {
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
             // Pass buffer indices via push constants
-            pass.set_push_constants(&[&self.particle_buffer]);
+            pass.bind_resources(&[&self.particle_buffer]);
             // Draw 6 vertices (quad) per particle instance
             pass.draw(0..6, 0..NUM_PARTICLES);
         }

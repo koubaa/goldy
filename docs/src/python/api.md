@@ -120,7 +120,7 @@ Active render pass for recording draw commands.
 - `set_pipeline(pipeline)` - Bind render pipeline
 - `set_vertex_buffer(slot, buffer)` - Bind vertex buffer
 - `set_index_buffer(buffer, format)` - Bind index buffer
-- `set_push_constants(buffers)` - Pass buffer indices to shaders
+- `bind_resources(buffers)` - Pass buffer indices to shaders
 - `draw(vertices, instances=range(1))` - Draw vertices
 - `draw_indexed(indices, base_vertex, instances)` - Draw indexed
 
@@ -142,7 +142,7 @@ Records compute commands.
 encoder = goldy.ComputeEncoder()
 with encoder.begin_compute_pass() as cp:
     cp.set_pipeline(pipeline)
-    cp.set_push_constants([buffer])
+    cp.bind_resources([buffer])
     cp.dispatch(workgroups_x, workgroups_y, workgroups_z)
 encoder.dispatch(device)
 ```

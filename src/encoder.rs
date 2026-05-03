@@ -102,44 +102,44 @@ impl<'a> RenderPass<'a> {
         });
     }
 
-    /// Set push constants for resource binding.
+    /// Bind resource slots for a draw call.
     ///
-    /// Pass the buffers whose indices should be pushed to the shader.
-    /// The indices are pushed in order, so `buffers[0]` becomes index 0,
-    /// `buffers[1]` becomes index 1, etc.
+    /// Pass the buffers whose indices should be bound to the shader.
+    /// The indices are bound in order, so `buffers[0]` becomes slot 0,
+    /// `buffers[1]` becomes slot 1, etc.
     ///
     /// # Example
     /// ```ignore
-    /// pass.set_push_constants(&[&uniform_buffer]);
+    /// pass.bind_resources(&[&uniform_buffer]);
     /// // In shader: g_UniformBuffers[getBufferIndex(0)].time
     /// ```
-    pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
-        self.encoder.commands.push(RenderCommand::SetPushConstants {
+    pub fn bind_resources(&mut self, buffers: &[&Buffer]) {
+        self.encoder.commands.push(RenderCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
     }
 
-    /// Set push constants with raw u32 indices.
+    /// Bind resource slots with raw u32 indices.
     ///
-    /// **Prefer [`RenderPass::set_push_constants_typed`]** for new code — the
+    /// **Prefer [`RenderPass::bind_resources_typed`]** for new code — the
     /// raw form bypasses per-slot category validation.
     ///
     /// # Example
     /// ```ignore
     /// let tex_idx = texture.bindless_index().unwrap();
     /// let samp_idx = sampler.bindless_index().unwrap();
-    /// pass.set_push_constants_raw(&[tex_idx, samp_idx]);
+    /// pass.bind_resources_raw(&[tex_idx, samp_idx]);
     /// // In shader: GET_TEXTURE() and GET_SAMPLER() macros use these indices
     /// ```
-    pub fn set_push_constants_raw(&mut self, indices: &[u32]) {
+    pub fn bind_resources_raw(&mut self, indices: &[u32]) {
         self.encoder
             .commands
-            .push(RenderCommand::SetPushConstantsRaw {
+            .push(RenderCommand::BindResourcesRaw {
                 indices: indices.to_vec(),
             });
     }
 
-    /// Set push constants from typed [`BindlessHandle`]s.
+    /// Bind resource slots from typed [`BindlessHandle`]s.
     ///
     /// Each handle carries both the raw index and the
     /// [`crate::types::BindlessCategory`] implied by the
@@ -150,12 +150,12 @@ impl<'a> RenderPass<'a> {
     /// ```ignore
     /// let tex = texture.bindless_handle().unwrap();  // Texture
     /// let samp = sampler.bindless_handle().unwrap(); // Sampler
-    /// pass.set_push_constants_typed(&[tex, samp]);
+    /// pass.bind_resources_typed(&[tex, samp]);
     /// ```
-    pub fn set_push_constants_typed(&mut self, handles: &[BindlessHandle]) {
+    pub fn bind_resources_typed(&mut self, handles: &[BindlessHandle]) {
         self.encoder
             .commands
-            .push(RenderCommand::SetPushConstantsTyped {
+            .push(RenderCommand::BindResourcesTyped {
                 handles: handles.to_vec(),
             });
     }
@@ -236,7 +236,7 @@ impl<'a> RenderPass<'a> {
     /// ```rust,ignore
     /// // Shader uses: vs_fullscreen_triangle(SV_VertexID)
     /// pass.set_pipeline(&fullscreen_pipeline);
-    /// pass.set_push_constants(&[&uniform_buffer]);
+    /// pass.bind_resources(&[&uniform_buffer]);
     /// pass.draw_fullscreen();  // No vertex buffer needed!
     /// ```
     pub fn draw_fullscreen(&mut self) {
@@ -254,7 +254,7 @@ impl<'a> RenderPass<'a> {
     /// // Shader reads from buffer: instances[SV_InstanceID]
     /// // Uses: quad_position(SV_VertexID, instance.position, instance.size)
     /// pass.set_pipeline(&instanced_pipeline);
-    /// pass.set_push_constants(&[&instance_buffer]);
+    /// pass.bind_resources(&[&instance_buffer]);
     /// pass.draw_quads(400);  // Draw 400 quads
     /// ```
     pub fn draw_quads(&mut self, count: u32) {

@@ -155,14 +155,14 @@ def main():
             with compute_encoder.begin_compute_pass() as cp:
                 cp.set_pipeline(compute_pipeline)
 
-                # Pass buffer indices via push constants
+                # Bind resource slots
                 # Order matters: [current_state, next_state] matching shader slots
                 if use_buffer_a:
                     # A -> B: read from A, write to B
-                    cp.set_push_constants([buffer_a, buffer_b])
+                    cp.bind_resources([buffer_a, buffer_b])
                 else:
                     # B -> A: read from B, write to A
-                    cp.set_push_constants([buffer_b, buffer_a])
+                    cp.bind_resources([buffer_b, buffer_a])
 
                 # Dispatch workgroups (8x8 threads per group)
                 workgroups_x = (GRID_WIDTH + 7) // 8
@@ -184,9 +184,9 @@ def main():
 
             # Read from the buffer that is now "current"
             if use_buffer_a:
-                rp.set_push_constants([buffer_a])
+                rp.bind_resources([buffer_a])
             else:
-                rp.set_push_constants([buffer_b])
+                rp.bind_resources([buffer_b])
 
             # Draw fullscreen triangle
             rp.draw(range(3))

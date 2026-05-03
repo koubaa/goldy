@@ -194,7 +194,7 @@ impl RenderState {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
             // Pass buffer indices via push constants
-            pass.set_push_constants(&[&self.star_buffer, &self.params_buffer]);
+            pass.bind_resources(&[&self.star_buffer, &self.params_buffer]);
             let workgroups = NUM_STARS.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
         }
@@ -210,7 +210,7 @@ impl RenderState {
             pass.set_pipeline(&self.render_pipeline);
             // Pass buffer indices via push constants
             // Render shader only needs the star buffer (read-only)
-            pass.set_push_constants(&[&self.star_buffer]);
+            pass.bind_resources(&[&self.star_buffer]);
             // Draw 6 vertices (quad) per star instance
             pass.draw(0..6, 0..NUM_STARS);
         }

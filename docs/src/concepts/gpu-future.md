@@ -13,7 +13,7 @@ let mut encoder = ComputeEncoder::new();
 {
     let mut pass = encoder.begin_compute_pass();
     pass.set_pipeline(&pipeline);
-    pass.set_push_constants(&[&buffer]);
+    pass.bind_resources(&[&buffer]);
     pass.dispatch(groups, 1, 1);
 }
 

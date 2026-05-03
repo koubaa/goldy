@@ -137,26 +137,26 @@ impl PyRenderPass {
         });
     }
 
-    /// Set push constants for resource binding.
+    /// Bind resource slots for rendering.
     ///
-    /// Pass the buffers whose indices should be pushed to the shader.
-    /// The indices are pushed in order, so `buffers[0]` becomes index 0,
-    /// `buffers[1]` becomes index 1, etc.
+    /// Pass the buffers whose indices should be bound to shader resource slots.
+    /// The indices are bound in order, so `buffers[0]` becomes slot 0,
+    /// `buffers[1]` becomes slot 1, etc.
     ///
     /// Args:
-    ///     buffers: List of buffers to pass to the shader via push constants.
+    ///     buffers: List of buffers to bind to shader resource slots.
     ///
     /// Example:
-    ///     >>> rp.set_push_constants([uniform_buffer])
+    ///     >>> rp.bind_resources([uniform_buffer])
     ///     # In shader: g_UniformBuffers[getBufferIndex(0)].time
-    fn set_push_constants(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
+    fn bind_resources(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
         self.encoder.borrow(py).with_encoder(|enc| {
             // Collect buffer references - deref the Arc to get &Buffer
             let buffer_refs: Vec<&goldy::Buffer> =
                 buffers.iter().map(|b| b.inner.as_ref()).collect();
 
             let mut pass = enc.begin_render_pass();
-            pass.set_push_constants(&buffer_refs);
+            pass.bind_resources(&buffer_refs);
         });
     }
 

@@ -118,13 +118,13 @@ fn graph_linear_chain() {
         .node("double", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&dst, NodeAccess::Write)
-        .push_constants_raw(&[src_idx, dst_idx])
+        .bind_resources_raw(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
 
     graph
         .node("add_ten", &add_pipe)
         .bind_buffer(&dst, NodeAccess::ReadWrite)
-        .push_constants_raw(&[dst_idx])
+        .bind_resources_raw(&[dst_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -157,12 +157,12 @@ fn graph_independent_dispatches() {
     graph
         .node("fill_a", &pipe_42)
         .bind_buffer(&buf_a, NodeAccess::Write)
-        .push_constants_raw(&[idx_a])
+        .bind_resources_raw(&[idx_a])
         .dispatch(1, 1, 1);
     graph
         .node("fill_b", &pipe_99)
         .bind_buffer(&buf_b, NodeAccess::Write)
-        .push_constants_raw(&[idx_b])
+        .bind_resources_raw(&[idx_b])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -224,7 +224,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     graph
         .node("fill_src", &fill_pipe)
         .bind_buffer(&src, NodeAccess::Write)
-        .push_constants_raw(&[src_idx])
+        .bind_resources_raw(&[src_idx])
         .dispatch(1, 1, 1);
 
     // B: double src -> y
@@ -232,7 +232,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .node("double_to_y", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&y, NodeAccess::Write)
-        .push_constants_raw(&[src_idx, y_idx])
+        .bind_resources_raw(&[src_idx, y_idx])
         .dispatch(1, 1, 1);
 
     // C: double src -> z
@@ -240,7 +240,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .node("double_to_z", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&z, NodeAccess::Write)
-        .push_constants_raw(&[src_idx, z_idx])
+        .bind_resources_raw(&[src_idx, z_idx])
         .dispatch(1, 1, 1);
 
     // D: sum y + z -> out
@@ -249,7 +249,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .bind_buffer(&y, NodeAccess::Read)
         .bind_buffer(&z, NodeAccess::Read)
         .bind_buffer(&out, NodeAccess::Write)
-        .push_constants_raw(&[y_idx, z_idx, out_idx])
+        .bind_resources_raw(&[y_idx, z_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -285,7 +285,7 @@ fn graph_matches_encoder() {
         {
             let mut pass = encoder.begin_compute_pass();
             pass.set_pipeline(&double_pipe);
-            pass.set_push_constants_raw(&[src_enc_idx, dst_enc_idx]);
+            pass.bind_resources_raw(&[src_enc_idx, dst_enc_idx]);
             pass.dispatch(1, 1, 1);
         }
         encoder.dispatch(&device).unwrap();
@@ -295,7 +295,7 @@ fn graph_matches_encoder() {
         {
             let mut pass = encoder.begin_compute_pass();
             pass.set_pipeline(&add_pipe);
-            pass.set_push_constants_raw(&[dst_enc_idx]);
+            pass.bind_resources_raw(&[dst_enc_idx]);
             pass.dispatch(1, 1, 1);
         }
         encoder.dispatch(&device).unwrap();
@@ -315,12 +315,12 @@ fn graph_matches_encoder() {
         .node("double", &double_pipe)
         .bind_buffer(&src_graph, NodeAccess::Read)
         .bind_buffer(&dst_graph, NodeAccess::Write)
-        .push_constants_raw(&[src_graph_idx, dst_graph_idx])
+        .bind_resources_raw(&[src_graph_idx, dst_graph_idx])
         .dispatch(1, 1, 1);
     graph
         .node("add_ten", &add_pipe)
         .bind_buffer(&dst_graph, NodeAccess::ReadWrite)
-        .push_constants_raw(&[dst_graph_idx])
+        .bind_resources_raw(&[dst_graph_idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&device).unwrap();
 
@@ -348,7 +348,7 @@ fn graph_nonblocking_submit() {
     graph
         .node("fill", &pipe)
         .bind_buffer(&buf, NodeAccess::Write)
-        .push_constants_raw(&[idx])
+        .bind_resources_raw(&[idx])
         .dispatch(1, 1, 1);
 
     let future = graph.submit(&device).unwrap();

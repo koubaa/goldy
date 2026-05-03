@@ -19,10 +19,9 @@ use goldy::{ComputePipeline, ShaderModule};
 let shader = ShaderModule::from_slang(&device, r#"
     import goldy_exp;
 
-    [shader("compute")]
+    [goldy_compute]
     [numthreads(64, 1, 1)]
-    void cs_main(uniform uint data_slot, uint3 id : SV_DispatchThreadID) {
-        StorageBuffer<float> data = goldy_scattered<float>(data_slot);
+    void cs_main(Scattered<float> data, ThreadId id) {
         data[id.x] = data[id.x] * 2.0;
     }
 "#)?;
@@ -42,7 +41,7 @@ let mut encoder = ComputeEncoder::new();
 {
     let mut pass = encoder.begin_compute_pass();
     pass.set_pipeline(&pipeline);
-    pass.set_push_constants_raw(&[buffer.bindless_index().unwrap()]);
+    pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
     pass.dispatch(16, 1, 1); // 16 workgroups × 64 threads = 1024 threads
 }
 
@@ -86,7 +85,7 @@ Unlike `Buffer::clear()` which submits immediately, `ComputePass::clear_buffer` 
 let mut pass = encoder.begin_compute_pass();
 pass.clear_buffer(&buffer, 0, 0); // size=0 means "to end of buffer"
 pass.set_pipeline(&pipeline);
-pass.set_push_constants_raw(&[buffer.bindless_index().unwrap()]);
+pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
 pass.dispatch(groups, 1, 1);
 ```
 
@@ -108,25 +107,23 @@ See [GpuFuture](./gpu-future.md) for polling and timeout details.
 
 ## Resource Access in Shaders
 
-Buffers are accessed via **bindless indices** passed as `uniform uint` entry-point
-parameters in the shader. Slang maps these directly to push constants (SPIR-V), root
-constants (DX12), and argument-buffer entries (Metal).
+Buffers are accessed via **resource bindings** — shader entry-point parameters that
+Goldy resolves to resource handles. The `[goldy_compute]` virtual entry point generates
+the underlying `uniform uint` resource slots automatically.
 
 ```slang
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint in_slot, uniform uint out_slot, uint3 id : SV_DispatchThreadID) {
-    StorageBuffer<uint> inp = goldy_scattered<uint>(in_slot);
-    StorageBuffer<uint> out = goldy_scattered<uint>(out_slot);
+void cs_main(Scattered<uint> inp, Scattered<uint> out, ThreadId id) {
     out[id.x] = inp[id.x] * inp[id.x];
 }
 ```
 
 ```rust
 // Rust side: pass the heap indices in declaration order
-pass.set_push_constants_raw(&[
+pass.bind_resources_raw(&[
     input_buf.bindless_index().unwrap(),
     output_buf.bindless_index().unwrap(),
 ]);
@@ -136,8 +133,33 @@ pass.dispatch(16, 1, 1);
 ### Per-dispatch Scalar Parameters
 
 Parameters that are not heap indices — thread base offsets, element counts, flags —
-are declared as `uniform` entry-point parameters of the appropriate type. No helper
-function is needed; the raw push-constant slot *is* the value:
+are declared as typed entry-point parameters. No helper function is needed; the raw
+resource slot *is* the value:
+
+```slang
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, uint offset, uint stride, ThreadId id) {
+    data[id.x * stride + offset] += 1;
+}
+```
+
+```rust
+// Rust: [heap_index, offset, stride]
+pass.bind_resources_raw(&[data_buf.bindless_index().unwrap(), offset, stride]);
+```
+
+Scalar parameters support any type ≤ 4 bytes (`uint`, `int`, `float`, `bool`).
+
+> **Tip:** The total resource slot budget is 64 bytes (16 `u32` slots) on all
+> supported backends. Goldy's `ResourceSlots` layout uses this full budget.
+
+### Advanced: Manual Entry Points
+
+For fine-grained control, you can write `[shader("compute")]` entry points with
+explicit `uniform uint` slots instead of using `[goldy_compute]`:
 
 ```slang
 import goldy_exp;
@@ -151,15 +173,8 @@ void cs_main(uniform uint data_slot, uniform uint base, uniform uint stride,
 }
 ```
 
-```rust
-// Rust: [heap_index, base, stride]
-pass.set_push_constants_raw(&[data_buf.bindless_index().unwrap(), base, stride]);
-```
-
-`uniform` parameters support any scalar type ≤ 4 bytes (`uint`, `int`, `float`, `bool`).
-
-> **Tip:** The total push-constant budget is 64 bytes (16 `u32` slots) on all
-> supported backends. Goldy's `BindlessIndices` layout uses this full budget.
+This is equivalent to what `[goldy_compute]` generates, but requires manual resource
+resolution. Prefer `[goldy_compute]` for most use cases.
 
 ## Compute Graph
 

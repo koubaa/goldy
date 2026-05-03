@@ -24,18 +24,17 @@ A minimal fullscreen fragment effect using the built-in library:
 ```slang
 import goldy;
 
-struct PushConstants { float time; };
-[[vk::push_constant]] PushConstants pc;
+struct TimeUniforms { float time; };
 
-[shader("vertex")]
+[goldy_vertex]
 FullscreenVarying vs_main(FullscreenVertex input) {
     return vs_fullscreen(input);
 }
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(TimeUniforms uniforms, FullscreenVarying input) {
     float2 uv = input.uv;
-    return float4(uv, sin(pc.time) * 0.5 + 0.5, 1.0);
+    return float4(uv, sin(uniforms.time) * 0.5 + 0.5, 1.0);
 }
 ```
 

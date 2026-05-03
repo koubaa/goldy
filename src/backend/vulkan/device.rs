@@ -257,26 +257,26 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
         let descriptor_set = descriptor_sets[0];
 
-        // Create a pipeline layout that includes the bindless set and push constants
+        // Create a pipeline layout that includes the bindless set and resource slots
         let layouts = [descriptor_set_layout];
 
-        // Push constant range for resource indices (16 x u32 = 64 bytes)
-        let push_constant_range = vk::PushConstantRange {
+        // Vulkan push constant range for resource slot indices (16 x u32 = 64 bytes)
+        let slot_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::ALL,
             offset: 0,
-            size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+            size: (types::MAX_RESOURCE_SLOTS * std::mem::size_of::<u32>()) as u32,
         };
 
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
-            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+            .push_constant_ranges(std::slice::from_ref(&slot_range));
 
         let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
             .context("Failed to create bindless pipeline layout")?;
 
         tracing::info!(
-            "Pipeline layout includes {} bytes of push constants for resource indices",
-            push_constant_range.size
+            "Pipeline layout includes {} bytes of push constants for resource slot indices",
+            slot_range.size
         );
 
         tracing::info!("Created descriptor infrastructure: pool, layout, set, pipeline layout");

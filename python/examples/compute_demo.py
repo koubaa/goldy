@@ -57,7 +57,7 @@ def main():
     encoder = goldy.ComputeEncoder()
     with encoder.begin_compute_pass() as cp:
         cp.set_pipeline(pipeline)
-        cp.set_push_constants([buffer])
+        cp.bind_resources([buffer])
         # 256 elements / 64 threads per workgroup = 4 workgroups
         cp.dispatch(4, 1, 1)
     

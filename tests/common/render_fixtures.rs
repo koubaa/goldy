@@ -211,9 +211,9 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&compute_pipeline);
             if use_buffer_a {
-                pass.set_push_constants(&[&buffer_a, &buffer_b]);
+                pass.bind_resources(&[&buffer_a, &buffer_b]);
             } else {
-                pass.set_push_constants(&[&buffer_b, &buffer_a]);
+                pass.bind_resources(&[&buffer_b, &buffer_a]);
             }
             pass.dispatch(workgroups_x, workgroups_y, 1);
         }
@@ -237,9 +237,9 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);
         if use_buffer_a {
-            pass.set_push_constants(&[&buffer_a]);
+            pass.bind_resources(&[&buffer_a]);
         } else {
-            pass.set_push_constants(&[&buffer_b]);
+            pass.bind_resources(&[&buffer_b]);
         }
         pass.draw(0..3, 0..1);
     }

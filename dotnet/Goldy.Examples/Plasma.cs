@@ -7,7 +7,7 @@ using Silk.NET.Windowing;
 /// <summary>
 /// Classic demoscene plasma effect.
 /// Demonstrates:
-/// - Using SetPushConstants() to pass buffer indices to shaders
+/// - Using BindResources() to pass buffer indices to shaders
 /// - Time-based animation with uniform buffer updates
 /// - Vertex-less fullscreen triangle rendering (no vertex buffer needed)
 /// - Loading shaders from shared shaders directory
@@ -169,8 +169,8 @@ static class Plasma
             var encoder = new CommandEncoder();
             encoder.Clear(Color.Black);
             encoder.SetPipeline(_pipeline);
-            // Pass buffer indices via push constants
-            encoder.SetPushConstants(_uniformBuffer);
+            // Bind resource slots
+            encoder.BindResources(_uniformBuffer);
             // Vertex-less fullscreen triangle: 3 vertices, no vertex buffer
             encoder.Draw(3);
 

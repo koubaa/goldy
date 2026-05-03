@@ -356,17 +356,17 @@ enum GoldyResult goldy_compute_encoder_execute(const struct GoldyComputeEncoder 
 void goldy_compute_encoder_set_pipeline(struct GoldyComputeEncoder *encoder,
                                         const struct GoldyComputePipeline *pipeline);
 
-// Set push constants for compute resource binding.
+// Bind resource slots for compute.
 //
-// Pass the buffers whose indices should be pushed to the shader.
-// The indices are pushed in order, so `buffers[0]` becomes index 0,
-// `buffers[1]` becomes index 1, etc.
+// Pass the buffers whose indices should be bound to shader resource slots.
+// The indices are bound in order, so `buffers[0]` becomes slot 0,
+// `buffers[1]` becomes slot 1, etc.
 //
 // # Safety
 // All pointers must be valid. The buffers array must contain buffer_count elements.
-void goldy_compute_encoder_set_push_constants(struct GoldyComputeEncoder *encoder,
-                                              const struct GoldyBuffer *const *buffers,
-                                              uint32_t buffer_count);
+void goldy_compute_encoder_bind_resources(struct GoldyComputeEncoder *encoder,
+                                          const struct GoldyBuffer *const *buffers,
+                                          uint32_t buffer_count);
 
 // Create a new compute pipeline.
 //
@@ -464,17 +464,17 @@ void goldy_encoder_set_index_buffer(struct GoldyCommandEncoder *encoder,
 void goldy_encoder_set_pipeline(struct GoldyCommandEncoder *encoder,
                                 const struct GoldyRenderPipeline *pipeline);
 
-// Set push constants for resource binding.
+// Bind resource slots for rendering.
 //
-// Pass the buffers whose indices should be pushed to the shader.
-// The indices are pushed in order, so `buffers[0]` becomes index 0,
-// `buffers[1]` becomes index 1, etc.
+// Pass the buffers whose indices should be bound to shader resource slots.
+// The indices are bound in order, so `buffers[0]` becomes slot 0,
+// `buffers[1]` becomes slot 1, etc.
 //
 // # Safety
 // All pointers must be valid. The buffers array must contain buffer_count elements.
-void goldy_encoder_set_push_constants(struct GoldyCommandEncoder *encoder,
-                                      const struct GoldyBuffer *const *buffers,
-                                      uint32_t buffer_count);
+void goldy_encoder_bind_resources(struct GoldyCommandEncoder *encoder,
+                                  const struct GoldyBuffer *const *buffers,
+                                  uint32_t buffer_count);
 
 // Set a vertex buffer.
 //
