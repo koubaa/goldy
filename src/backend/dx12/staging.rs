@@ -107,14 +107,14 @@ impl StagingBelt {
         // Linear scan from the back (most-recently-freed first) to avoid the
         // push-then-immediately-pop infinite loop the old pattern had when every
         // free chunk was smaller than `len`.
-        let mut chunk =
-            if let Some(pos) = self.free_chunks.iter().rposition(|c| c.capacity >= len) {
-                let mut c = self.free_chunks.swap_remove(pos);
-                c.reset();
-                c
-            } else {
-                allocate_chunk(logical_device, alloc_size)?
-            };
+        let mut chunk = if let Some(pos) = self.free_chunks.iter().rposition(|c| c.capacity >= len)
+        {
+            let mut c = self.free_chunks.swap_remove(pos);
+            c.reset();
+            c
+        } else {
+            allocate_chunk(logical_device, alloc_size)?
+        };
 
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -142,8 +142,7 @@ impl StagingBelt {
         if resources.is_empty() {
             return;
         }
-        self.standalone_in_flight
-            .push((fence_token, resources));
+        self.standalone_in_flight.push((fence_token, resources));
     }
 
     /// Drop all free chunks whose capacity exceeds `chunk_size`.

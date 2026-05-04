@@ -646,9 +646,7 @@ pub(super) fn submit(
             .into_iter()
             .map(|s| (s.buffer, s.memory))
             .collect();
-        state
-            .compute_texture_staging_pool
-            .insert(token, pooled);
+        state.compute_texture_staging_pool.insert(token, pooled);
     }
 
     state

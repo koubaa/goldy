@@ -1152,8 +1152,12 @@ pub(super) fn allocate_compute_texture_staging(
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_buffer_info, None) }
-        .context("compute texture staging: create_buffer")?;
+    let staging_buffer = unsafe {
+        logical_device
+            .device
+            .create_buffer(&staging_buffer_info, None)
+    }
+    .context("compute texture staging: create_buffer")?;
 
     let staging_mem_reqs = unsafe {
         logical_device
@@ -1170,11 +1174,19 @@ pub(super) fn allocate_compute_texture_staging(
         .allocation_size(staging_mem_reqs.size)
         .memory_type_index(staging_memory_type);
 
-    let staging_memory = unsafe { logical_device.device.allocate_memory(&staging_alloc_info, None) }
-        .context("compute texture staging: allocate_memory")?;
+    let staging_memory = unsafe {
+        logical_device
+            .device
+            .allocate_memory(&staging_alloc_info, None)
+    }
+    .context("compute texture staging: allocate_memory")?;
 
-    unsafe { logical_device.device.bind_buffer_memory(staging_buffer, staging_memory, 0) }
-        .context("compute texture staging: bind_buffer_memory")?;
+    unsafe {
+        logical_device
+            .device
+            .bind_buffer_memory(staging_buffer, staging_memory, 0)
+    }
+    .context("compute texture staging: bind_buffer_memory")?;
 
     unsafe {
         let ptr = logical_device

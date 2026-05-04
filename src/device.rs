@@ -7,7 +7,7 @@
 //! - **Command Recording**: [`CommandEncoder`](crate::CommandEncoder) is completely lock-free.
 //!   You can create and record commands on any thread without any synchronization.
 //!   
-//! - **Resource Creation**: Creating resources ([`Buffer`],
+//! - **Resource Creation**: Creating resources ([`crate::Buffer`],
 //!   [`RenderPipeline`](crate::RenderPipeline), etc.) acquires the backend lock.
 //!   These operations are safe from any thread but serialize internally.
 //!

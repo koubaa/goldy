@@ -54,7 +54,6 @@ impl ComputePipeline {
             handle,
         })
     }
-
 }
 
 impl Drop for ComputePipeline {
@@ -187,22 +186,18 @@ impl<'a> ComputePass<'a> {
     /// pass.bind_resources_raw(&[buf_idx_0, buf_idx_1, tex_idx]);
     /// ```
     pub fn bind_resources_raw(&mut self, indices: &[u32]) {
-        self.encoder
-            .commands
-            .push(GpuCommand::BindResourcesRaw {
-                indices: indices.to_vec(),
-                user: Vec::new(),
-            });
+        self.encoder.commands.push(GpuCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: Vec::new(),
+        });
     }
 
     /// Bind resources with both bindless indices (region A) and user scalars (region B).
     pub fn bind_resources_raw_with_user(&mut self, indices: &[u32], user: &[u32]) {
-        self.encoder
-            .commands
-            .push(GpuCommand::BindResourcesRaw {
-                indices: indices.to_vec(),
-                user: user.to_vec(),
-            });
+        self.encoder.commands.push(GpuCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: user.to_vec(),
+        });
     }
 
     /// Bind resource slots from typed [`BindlessHandle`]s.
@@ -219,11 +214,9 @@ impl<'a> ComputePass<'a> {
     /// pass.bind_resources_typed(&[uniforms, output]);
     /// ```
     pub fn bind_resources_typed(&mut self, handles: &[BindlessHandle]) {
-        self.encoder
-            .commands
-            .push(GpuCommand::BindResourcesTyped {
-                handles: handles.to_vec(),
-            });
+        self.encoder.commands.push(GpuCommand::BindResourcesTyped {
+            handles: handles.to_vec(),
+        });
     }
 
     /// Dispatch compute workgroups.
@@ -251,12 +244,10 @@ impl<'a> ComputePass<'a> {
     /// byte offset. This allows the GPU to determine dispatch size from a prior
     /// compute pass (e.g. a setup shader that writes the counts).
     pub fn dispatch_indirect(&mut self, buffer: &Buffer, offset: u64) {
-        self.encoder
-            .commands
-            .push(GpuCommand::DispatchIndirect {
-                buffer: buffer.handle,
-                offset,
-            });
+        self.encoder.commands.push(GpuCommand::DispatchIndirect {
+            buffer: buffer.handle,
+            offset,
+        });
     }
 
     /// Insert a memory barrier between compute dispatches.

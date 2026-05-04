@@ -1,6 +1,8 @@
 //! Compute pipeline and dispatch logic.
 
-use super::super::{ComputePipelineHandle, DeviceHandle, FenceToken, GpuCommand, TextureHandle, ShaderHandle};
+use super::super::{
+    ComputePipelineHandle, DeviceHandle, FenceToken, GpuCommand, ShaderHandle, TextureHandle,
+};
 use super::shader::parse_numthreads;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{
@@ -429,11 +431,7 @@ fn record_commands_to_buffer(
                     &tex_state.texture,
                     0,
                     0,
-                    MTLOrigin {
-                        x: 0,
-                        y: 0,
-                        z: 0,
-                    },
+                    MTLOrigin { x: 0, y: 0, z: 0 },
                     mtl::MTLBlitOption::empty(),
                 );
                 blit.end_encoding();

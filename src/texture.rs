@@ -79,7 +79,7 @@ impl Texture {
             owned: true,
         })
     }
-    
+
     /// Create a texture initialized with data.
     ///
     /// The data must be in the correct format for the texture's pixel format.

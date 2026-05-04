@@ -691,9 +691,7 @@ mod tests {
         .unwrap();
 
         let mut graph = TaskGraph::new();
-        graph
-            .write_texture(&tex, vec![0u8; 4 * 4 * 4])
-            .unwrap();
+        graph.write_texture(&tex, vec![0u8; 4 * 4 * 4]).unwrap();
         graph
             .node("read_tex", &pipeline)
             .bind_texture(&tex, NodeAccess::Read)

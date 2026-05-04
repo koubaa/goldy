@@ -126,19 +126,19 @@ impl StagingBelt {
         // Linear scan from the back (most-recently-freed first) to avoid the
         // push-then-immediately-pop infinite loop the old pattern had when every
         // free chunk was smaller than `len`.
-        let mut chunk =
-            if let Some(pos) = self.free_chunks.iter().rposition(|c| c.capacity >= len) {
-                let mut c = self.free_chunks.swap_remove(pos);
-                c.reset();
-                c
-            } else {
-                allocate_chunk(
-                    instance,
-                    logical_device,
-                    logical_device.physical_device,
-                    alloc_size,
-                )?
-            };
+        let mut chunk = if let Some(pos) = self.free_chunks.iter().rposition(|c| c.capacity >= len)
+        {
+            let mut c = self.free_chunks.swap_remove(pos);
+            c.reset();
+            c
+        } else {
+            allocate_chunk(
+                instance,
+                logical_device,
+                logical_device.physical_device,
+                alloc_size,
+            )?
+        };
 
         debug_assert!(chunk.offset == 0);
         let start = 0u64;

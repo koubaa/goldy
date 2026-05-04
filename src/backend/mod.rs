@@ -108,7 +108,7 @@ pub enum RenderCommand {
     /// bypasses per-slot category validation.
     BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
     /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
-    /// each handle's [`BindlessCategory`]
+    /// each handle's [`crate::types::BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.
     BindResourcesTyped { handles: Vec<BindlessHandle> },
     /// Draw primitives (non-indexed).
@@ -148,7 +148,7 @@ pub enum GpuCommand {
     /// bypasses per-slot category validation.
     BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
     /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
-    /// each handle's [`BindlessCategory`]
+    /// each handle's [`crate::types::BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.
     BindResourcesTyped { handles: Vec<BindlessHandle> },
     /// Dispatch compute workgroups.
@@ -502,11 +502,7 @@ pub trait GpuBackend: Send + Sync {
 
     /// Execute compute commands.
     /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(
-        &mut self,
-        device: DeviceHandle,
-        commands: &[GpuCommand],
-    ) -> Result<()> {
+    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[GpuCommand]) -> Result<()> {
         let token = self.submit_compute(device, commands)?;
         self.wait_fence(device, token)
     }
