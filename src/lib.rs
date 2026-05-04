@@ -28,6 +28,7 @@ pub mod shaders;
 pub mod surface;
 pub mod task_graph;
 pub mod texture;
+pub mod texture_pool;
 pub mod types;
 
 pub mod slang;
@@ -57,6 +58,7 @@ pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Surface, SurfaceFrame};
 pub use texture::Texture;
+pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};
 

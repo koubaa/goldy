@@ -24,6 +24,8 @@ pub struct Texture {
     /// Access pattern chosen at creation time. Determines the bindless category
     /// (`Interpolated` → `Texture`, `Direct` → `StorageImage`).
     access: SpatialAccess,
+    /// Creation flags ([`TextureFlags`]) passed to `create_texture`.
+    flags: TextureFlags,
     /// Whether this texture owns the underlying GPU resource.
     /// Borrowed textures (e.g. surface frame drawables) skip destroy on drop.
     owned: bool,
@@ -76,6 +78,7 @@ impl Texture {
             height,
             format,
             access,
+            flags,
             owned: true,
         })
     }
@@ -286,6 +289,20 @@ impl Texture {
         self.access
     }
 
+    /// Creation flags ([`TextureFlags`]) used when this texture was allocated.
+    ///
+    /// Borrowed textures created via [`Self::borrowed`] report [`TextureFlags::empty()`].
+    pub fn flags(&self) -> TextureFlags {
+        self.flags
+    }
+
+    /// Whether dropping this texture destroys the GPU resource (`true`) or not (`false`).
+    ///
+    /// Borrowed textures ([`Self::borrow`], [`Self::borrowed`]) return `false`.
+    pub fn is_owned(&self) -> bool {
+        self.owned
+    }
+
     /// Create a non-owning view of this texture.
     ///
     /// The returned `Texture` shares the same GPU resource and handle but does
@@ -302,6 +319,7 @@ impl Texture {
             height: self.height,
             format: self.format,
             access: self.access,
+            flags: self.flags,
             owned: false,
         }
     }
@@ -328,6 +346,7 @@ impl Texture {
             height,
             format,
             access: SpatialAccess::Direct,
+            flags: TextureFlags::empty(),
             owned: false,
         }
     }
