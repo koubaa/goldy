@@ -1,4 +1,4 @@
-//! Per-device staging buffers for deferred `ComputeCommand::WriteBuffer` uploads on DX12.
+//! Per-device staging buffers for deferred `GpuCommand::WriteBuffer` uploads on DX12.
 
 use super::types::LogicalDevice;
 use anyhow::{Context, Result};
@@ -31,6 +31,8 @@ pub(super) struct StagingBelt {
     active_chunks: Vec<BeltChunk>,
     /// Chunks in use until `fence.CompletedValue >= token`.
     in_flight: Vec<(u64, Vec<BeltChunk>)>,
+    /// Standalone UPLOAD resources (e.g. texture copy staging) until fence completes.
+    standalone_in_flight: Vec<(u64, Vec<ID3D12Resource>)>,
     chunk_size: u64,
 }
 
@@ -40,6 +42,7 @@ impl StagingBelt {
             free_chunks: Vec::new(),
             active_chunks: Vec::new(),
             in_flight: Vec::new(),
+            standalone_in_flight: Vec::new(),
             chunk_size,
         }
     }
@@ -58,6 +61,16 @@ impl StagingBelt {
                 self.free_chunks.extend(chunks);
             } else {
                 i += 1;
+            }
+        }
+        let mut j = 0;
+        while j < self.standalone_in_flight.len() {
+            let token = self.standalone_in_flight[j].0;
+            if completed >= token {
+                self.standalone_in_flight.remove(j);
+                // Resources dropped here; GPU has finished the submission that used them.
+            } else {
+                j += 1;
             }
         }
         Ok(())
@@ -124,6 +137,15 @@ impl StagingBelt {
             .push((fence_token, std::mem::take(&mut self.active_chunks)));
     }
 
+    /// Retain standalone upload buffers (texture staging, etc.) until `fence_token` completes.
+    pub fn defer_standalone_resources(&mut self, fence_token: u64, resources: Vec<ID3D12Resource>) {
+        if resources.is_empty() {
+            return;
+        }
+        self.standalone_in_flight
+            .push((fence_token, resources));
+    }
+
     /// Drop all free chunks whose capacity exceeds `chunk_size`.
     ///
     /// Safe to call at any time: `free_chunks` only holds chunks whose GPU fence has
@@ -152,6 +174,7 @@ impl StagingBelt {
                 ch.destroy();
             }
         }
+        self.standalone_in_flight.clear();
     }
 }
 

@@ -213,6 +213,7 @@ impl VulkanBackend {
             next_sampler_handle: 1,
             slang_compiler,
             compute_fence_pool: HashMap::new(),
+            compute_texture_staging_pool: HashMap::new(),
             next_compute_fence_token: 1,
             staging_belts: HashMap::new(),
         };
@@ -849,7 +850,7 @@ impl GpuBackend for VulkanBackend {
     fn submit_compute(
         &mut self,
         device_handle: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<FenceToken> {
         compute::submit(&mut self.state, device_handle, commands)
     }

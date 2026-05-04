@@ -763,6 +763,8 @@ pub(super) struct VulkanState {
     /// Per-submission fences for non-blocking compute; token -> (device, VkFence, Option<VkCommandBuffer>).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
     pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
+    /// Texture upload staging (VkBuffer/VkDeviceMemory) freed when the matching compute fence is collected.
+    pub compute_texture_staging_pool: HashMap<u64, Vec<(vk::Buffer, vk::DeviceMemory)>>,
     pub next_compute_fence_token: u64,
     /// Per-device staging belts for batched WriteBuffer uploads.
     pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,

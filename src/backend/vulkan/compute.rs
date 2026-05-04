@@ -3,7 +3,7 @@
 use super::staging;
 use super::types::{self, ComputePipelineState, LogicalDevice, PushLayout};
 use super::{ComputePipelineHandle, DeviceHandle};
-use crate::backend::{ComputeCommand, FenceToken};
+use crate::backend::{FenceToken, GpuCommand};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -44,6 +44,11 @@ fn reap_signaled_fences(state: &mut super::types::VulkanState) {
                             .free_command_buffers(logical_device.command_pool, &[cb]);
                     }
                     logical_device.device.destroy_fence(fence, None);
+                }
+            }
+            if let Some(staging) = state.compute_texture_staging_pool.remove(&token) {
+                if let Some(logical_device) = state.devices.get(&device_handle) {
+                    super::texture::destroy_texture_staging_list(logical_device, staging);
                 }
             }
         }
@@ -142,7 +147,7 @@ pub(super) fn destroy(
 pub(super) fn submit(
     state: &mut super::types::VulkanState,
     device_handle: DeviceHandle,
-    commands: &[ComputeCommand],
+    commands: &[GpuCommand],
 ) -> Result<FenceToken> {
     // Reap any previously-submitted fences that have already signaled. Keeps
     // the pool bounded when callers (ekrano) don't wait on every GpuFuture.
@@ -158,7 +163,7 @@ pub(super) fn submit(
     // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable buffer
     // access before we borrow state immutably for the command loop).
     for command in commands {
-        if let ComputeCommand::WriteBuffer {
+        if let GpuCommand::WriteBuffer {
             buffer: buf_handle,
             offset,
             data,
@@ -254,6 +259,51 @@ pub(super) fn submit(
         return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
     }
 
+    let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
+    for command in commands {
+        match command {
+            GpuCommand::WriteTexture {
+                texture,
+                data,
+                width,
+                height,
+            } => {
+                texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                    &state.instance,
+                    &state.devices,
+                    &state.textures,
+                    *texture,
+                    data.as_slice(),
+                    0,
+                    0,
+                    *width,
+                    *height,
+                )?);
+            }
+            GpuCommand::WriteTextureRegion {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                data,
+            } => {
+                texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                    &state.instance,
+                    &state.devices,
+                    &state.textures,
+                    *texture,
+                    data.as_slice(),
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                )?);
+            }
+            _ => {}
+        }
+    }
+
     // Cross-submission memory barrier: ensure writes from prior queue
     // visible to this submission's operations.  Vulkan guarantees execution
     // ordering for same-queue submissions but NOT memory visibility.
@@ -279,11 +329,12 @@ pub(super) fn submit(
     // Track current pipeline for resource slot binding
     let mut current_pipeline: Option<ComputePipelineHandle> = None;
     let mut belt_idx = 0usize;
+    let mut texture_upload_idx = 0usize;
 
     // Process commands (same logic as dispatch)
     for command in commands {
         match command {
-            ComputeCommand::SetPipeline(handle) => {
+            GpuCommand::SetPipeline(handle) => {
                 if let Some(pipeline_state) = compute_pipelines.get(handle) {
                     unsafe {
                         logical_device.device.cmd_bind_pipeline(
@@ -309,7 +360,7 @@ pub(super) fn submit(
                     current_pipeline = Some(*handle);
                 }
             }
-            ComputeCommand::BindResources {
+            GpuCommand::BindResources {
                 buffers: buffer_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
@@ -334,7 +385,7 @@ pub(super) fn submit(
                     }
                 }
             }
-            ComputeCommand::BindResourcesRaw {
+            GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
             } => {
@@ -363,7 +414,7 @@ pub(super) fn submit(
                     }
                 }
             }
-            ComputeCommand::BindResourcesTyped {
+            GpuCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
@@ -385,7 +436,7 @@ pub(super) fn submit(
                     }
                 }
             }
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -408,7 +459,7 @@ pub(super) fn submit(
                     *workgroups_z,
                 );
             },
-            ComputeCommand::DispatchIndirect { buffer, offset } => {
+            GpuCommand::DispatchIndirect { buffer, offset } => {
                 let buf_state = buffers
                     .get(buffer)
                     .context("DispatchIndirect: invalid buffer handle")?;
@@ -434,15 +485,15 @@ pub(super) fn submit(
                         .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
                 }
             }
-            ComputeCommand::Barrier => {
+            GpuCommand::Barrier => {
                 // No-op: Vulkan already emits pipeline barriers before each dispatch.
             }
-            ComputeCommand::ResourceBarrier { .. } => {
+            GpuCommand::ResourceBarrier { .. } => {
                 // Falls back to global barrier behavior. Vulkan already inserts a
                 // compute→compute pipeline barrier before each dispatch, so this
                 // is a no-op. Per-resource VkBufferMemoryBarrier is a future optimization.
             }
-            ComputeCommand::ClearBuffer {
+            GpuCommand::ClearBuffer {
                 buffer,
                 offset,
                 size,
@@ -478,7 +529,7 @@ pub(super) fn submit(
                     }
                 }
             }
-            ComputeCommand::WriteBuffer {
+            GpuCommand::WriteBuffer {
                 buffer: buf_handle,
                 offset,
                 data,
@@ -519,8 +570,26 @@ pub(super) fn submit(
                     }
                 }
             }
+            GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                let scratch = texture_upload_scratch
+                    .get(texture_upload_idx)
+                    .context("WriteTexture: scratch missing (internal)")?;
+                texture_upload_idx += 1;
+                super::texture::record_compute_texture_upload(
+                    &state.devices,
+                    &mut state.textures,
+                    cmd,
+                    scratch,
+                )?;
+            }
         }
     }
+
+    debug_assert_eq!(
+        texture_upload_idx,
+        texture_upload_scratch.len(),
+        "WriteTexture commands mismatch texture scratch pre-pass"
+    );
 
     // End command buffer
     if let Err(e) = unsafe { logical_device.device.end_command_buffer(cmd) } {
@@ -571,6 +640,16 @@ pub(super) fn submit(
     state
         .compute_fence_pool
         .insert(token, (device_handle, fence, Some(cmd)));
+
+    if !texture_upload_scratch.is_empty() {
+        let pooled: Vec<(vk::Buffer, vk::DeviceMemory)> = texture_upload_scratch
+            .into_iter()
+            .map(|s| (s.buffer, s.memory))
+            .collect();
+        state
+            .compute_texture_staging_pool
+            .insert(token, pooled);
+    }
 
     state
         .staging_belts
@@ -633,8 +712,8 @@ pub(super) fn wait_fence(
     // vkDestroyDevice (which is safe per spec and keeps the validation layer happy).
     let device_lost = matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST));
     if !device_lost {
-        if let Some((_, _, cmd_buf)) = state.compute_fence_pool.remove(&token) {
-            let logical_device = state.devices.get(&stored_device).unwrap();
+        if let Some((device_handle, fence, cmd_buf)) = state.compute_fence_pool.remove(&token) {
+            let logical_device = state.devices.get(&device_handle).unwrap();
             unsafe {
                 if let Some(cb) = cmd_buf {
                     logical_device
@@ -642,6 +721,9 @@ pub(super) fn wait_fence(
                         .free_command_buffers(logical_device.command_pool, &[cb]);
                 }
                 logical_device.device.destroy_fence(fence, None);
+            }
+            if let Some(staging) = state.compute_texture_staging_pool.remove(&token) {
+                super::texture::destroy_texture_staging_list(logical_device, staging);
             }
         }
     } else {
@@ -689,7 +771,7 @@ pub(super) fn wait_fence_timeout(
 
     match result {
         Ok(()) => {
-            if let Some((_, f, cb)) = state.compute_fence_pool.remove(&token) {
+            if let Some((_dh, f, cb)) = state.compute_fence_pool.remove(&token) {
                 unsafe {
                     if let Some(c) = cb {
                         logical_device
@@ -697,6 +779,9 @@ pub(super) fn wait_fence_timeout(
                             .free_command_buffers(logical_device.command_pool, &[c]);
                     }
                     logical_device.device.destroy_fence(f, None);
+                }
+                if let Some(staging) = state.compute_texture_staging_pool.remove(&token) {
+                    super::texture::destroy_texture_staging_list(logical_device, staging);
                 }
             }
             Ok(true)
@@ -707,7 +792,7 @@ pub(super) fn wait_fence_timeout(
             // destroy calls if the device is lost (vkDestroyDevice will
             // implicitly reclaim them).
             let device_lost = matches!(e, vk::Result::ERROR_DEVICE_LOST);
-            if let Some((_, f, cb)) = state.compute_fence_pool.remove(&token) {
+            if let Some((_dh, f, cb)) = state.compute_fence_pool.remove(&token) {
                 if !device_lost {
                     unsafe {
                         if let Some(c) = cb {
@@ -716,6 +801,9 @@ pub(super) fn wait_fence_timeout(
                                 .free_command_buffers(logical_device.command_pool, &[c]);
                         }
                         logical_device.device.destroy_fence(f, None);
+                    }
+                    if let Some(staging) = state.compute_texture_staging_pool.remove(&token) {
+                        super::texture::destroy_texture_staging_list(logical_device, staging);
                     }
                 } else {
                     tracing::warn!(

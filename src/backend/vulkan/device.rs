@@ -393,10 +393,18 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 state
                     .samplers
                     .retain(|_, s| s.device_handle != device_handle);
-                // Discard stale compute fences without calling Vulkan.
+                let dropped_tokens: Vec<u64> = state
+                    .compute_fence_pool
+                    .iter()
+                    .filter(|(_, (dh, _, _))| *dh == device_handle)
+                    .map(|(t, _)| *t)
+                    .collect();
                 state
                     .compute_fence_pool
                     .retain(|_, (dh, _, _)| *dh != device_handle);
+                for t in dropped_tokens {
+                    state.compute_texture_staging_pool.remove(&t);
+                }
                 logical_device.device.destroy_device(None);
                 return;
             }
@@ -648,9 +656,11 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     }
                     logical_device.device.destroy_fence(fence, None);
                 }
+                if let Some(staging) = state.compute_texture_staging_pool.remove(&tok) {
+                    super::texture::destroy_texture_staging_list(&logical_device, staging);
+                }
             }
 
-            // Destroy bindless infrastructure
             if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {
                 logical_device
                     .device

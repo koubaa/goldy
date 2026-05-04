@@ -5,7 +5,7 @@ use super::shader;
 use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
 use super::{ComputePipelineHandle, DeviceHandle, ShaderHandle};
-use crate::backend::{ComputeCommand, FenceToken};
+use crate::backend::{FenceToken, GpuCommand};
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
@@ -135,11 +135,8 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 pub(super) fn submit(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
-    commands: &[ComputeCommand],
+    commands: &[GpuCommand],
 ) -> Result<FenceToken> {
-    // Flush any deferred texture uploads so they're visible to this submission.
-    super::texture::flush_pending_copies(state)?;
-
     let (allocator, fence_value, slot_idx) = {
         let logical_device = state
             .devices
@@ -210,7 +207,7 @@ pub(super) fn submit(
 
     // Pre-pass: memcpy into staging belt chunks for DEVICE_LOCAL WriteBuffer uploads.
     for command in commands {
-        if let ComputeCommand::WriteBuffer {
+        if let GpuCommand::WriteBuffer {
             buffer: buf_handle,
             data,
             ..
@@ -235,25 +232,66 @@ pub(super) fn submit(
         }
     }
 
-    // Bind descriptor heaps for bindless rendering
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
+    for command in commands {
+        match command {
+            GpuCommand::WriteTexture {
+                texture,
+                data,
+                width,
+                height,
+            } => {
+                staged_texture_uploads.push(super::texture::stage_texture_upload_full(
+                    state,
+                    *texture,
+                    data.as_slice(),
+                    *width,
+                    *height,
+                )?);
+            }
+            GpuCommand::WriteTextureRegion {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                data,
+            } => {
+                staged_texture_uploads.push(super::texture::stage_texture_upload_region(
+                    state,
+                    *texture,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                    data.as_slice(),
+                )?);
+            }
+            _ => {}
+        }
+    }
 
-    unsafe {
-        command_list.SetDescriptorHeaps(&[
-            Some(logical_device.cbv_srv_uav_heap.clone()),
-            Some(logical_device.sampler_heap.clone()),
-        ]);
+    {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        unsafe {
+            command_list.SetDescriptorHeaps(&[
+                Some(logical_device.cbv_srv_uav_heap.clone()),
+                Some(logical_device.sampler_heap.clone()),
+            ]);
+        }
     }
 
     let mut belt_idx = 0usize;
+    let mut texture_upload_idx = 0usize;
 
     // Process commands
     for command in commands {
         match command {
-            ComputeCommand::SetPipeline(handle) => {
+            GpuCommand::SetPipeline(handle) => {
                 if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
                     unsafe {
                         command_list.SetComputeRootSignature(&pipeline_state.root_signature);
@@ -261,7 +299,7 @@ pub(super) fn submit(
                     }
                 }
             }
-            ComputeCommand::BindResources { buffers } => {
+            GpuCommand::BindResources { buffers } => {
                 let mut layout = types::PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
                     if i >= types::MAX_BINDLESS_SLOTS {
@@ -291,7 +329,7 @@ pub(super) fn submit(
                     );
                 }
             }
-            ComputeCommand::BindResourcesRaw {
+            GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
             } => {
@@ -317,7 +355,7 @@ pub(super) fn submit(
                     );
                 }
             }
-            ComputeCommand::BindResourcesTyped {
+            GpuCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
                 let mut layout = types::PushLayout::default();
@@ -336,7 +374,7 @@ pub(super) fn submit(
                     );
                 }
             }
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -349,7 +387,11 @@ pub(super) fn submit(
                     command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
                 }
             }
-            ComputeCommand::DispatchIndirect { buffer, offset } => {
+            GpuCommand::DispatchIndirect { buffer, offset } => {
+                let logical_device = state
+                    .devices
+                    .get(&device_handle)
+                    .context("DispatchIndirect: invalid device")?;
                 let buf_state = state
                     .buffers
                     .get(buffer)
@@ -394,7 +436,7 @@ pub(super) fn submit(
                 unsafe { barriers::barrier_buffers(&command_list7, &to_uav) };
                 unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
             }
-            ComputeCommand::Barrier => {
+            GpuCommand::Barrier => {
                 let g = D3D12_GLOBAL_BARRIER {
                     SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
@@ -406,7 +448,7 @@ pub(super) fn submit(
                 };
                 unsafe { barriers::barrier_globals(&command_list7, &[g]) };
             }
-            ComputeCommand::ResourceBarrier {
+            GpuCommand::ResourceBarrier {
                 buffers: buf_handles,
                 textures: tex_handles,
             } => {
@@ -473,7 +515,7 @@ pub(super) fn submit(
                 unsafe { barriers::barrier_textures(&command_list7, &tex_barriers) };
                 unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
             }
-            ComputeCommand::ClearBuffer {
+            GpuCommand::ClearBuffer {
                 buffer,
                 offset,
                 size,
@@ -489,6 +531,10 @@ pub(super) fn submit(
                 };
                 if clear_size > 0 {
                     if buf_state.is_storage {
+                        let logical_device = state
+                            .devices
+                            .get(&device_handle)
+                            .context("ClearBuffer: invalid device")?;
                         // Storage buffer (DEFAULT heap): GPU-side UAV clear (no staging needed)
                         super::buffer::uav_clear(
                             logical_device,
@@ -518,7 +564,7 @@ pub(super) fn submit(
                     }
                 }
             }
-            ComputeCommand::WriteBuffer {
+            GpuCommand::WriteBuffer {
                 buffer: buf_handle,
                 offset,
                 data,
@@ -584,8 +630,26 @@ pub(super) fn submit(
                     }
                 }
             }
+            GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                let upload = staged_texture_uploads
+                    .get(texture_upload_idx)
+                    .context("WriteTexture: staged upload missing (internal)")?;
+                texture_upload_idx += 1;
+                super::texture::record_staged_texture_upload(
+                    &command_list,
+                    &command_list7,
+                    state,
+                    upload,
+                )?;
+            }
         }
     }
+
+    debug_assert_eq!(
+        texture_upload_idx,
+        staged_texture_uploads.len(),
+        "WriteTexture command count mismatch vs staging pre-pass"
+    );
 
     // Global barrier so compute UAV writes AND copy writes are visible to
     // subsequent graphics / CPU.  WriteBuffer records CopyBufferRegion on this
@@ -645,6 +709,18 @@ pub(super) fn submit(
         .entry(device_handle)
         .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
         .finish(fence_value);
+
+    if !staged_texture_uploads.is_empty() {
+        let resources = staged_texture_uploads
+            .into_iter()
+            .map(|u| u.staging_resource)
+            .collect::<Vec<_>>();
+        state
+            .staging_belts
+            .entry(device_handle)
+            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+            .defer_standalone_resources(fence_value, resources);
+    }
 
     debug_assert_eq!(
         belt_idx,

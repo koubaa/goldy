@@ -392,7 +392,7 @@ impl Device {
     /// Returns [`GpuFuture`] — does not block.
     pub(crate) fn submit_compute_commands(
         &self,
-        commands: &[backend::ComputeCommand],
+        commands: &[backend::GpuCommand],
     ) -> Result<GpuFuture> {
         let mut backend = self.backend.lock().unwrap();
         let token = backend.submit_compute(self.handle, commands)?;
@@ -516,13 +516,13 @@ impl Device {
         self.backend.lock().unwrap().reset_buffer_heaps(self.handle);
     }
 
-    /// Flush any deferred texture uploads to the GPU.
-    ///
-    /// This is called automatically before compute submissions and texture
-    /// readbacks, but may be called explicitly when immediate availability
-    /// is required.
+    /// No-op: texture uploads are scheduled via [`crate::task_graph::TaskGraph`].
+    #[deprecated(
+        since = "0.1.0",
+        note = "Texture uploads are batched via TaskGraph::write_texture / write_texture_region; there is nothing to flush."
+    )]
     pub fn flush_texture_uploads(&self) -> Result<()> {
-        self.backend.lock().unwrap().flush_texture_uploads()
+        Ok(())
     }
 
     /// Get search paths for shader compilation (internal use).

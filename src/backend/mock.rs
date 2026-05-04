@@ -37,7 +37,7 @@ pub struct MockBackend {
     /// Render commands recorded during render operations
     pub recorded_commands: Vec<Vec<RenderCommand>>,
     /// Compute commands recorded during dispatch operations
-    pub recorded_compute_commands: Vec<Vec<ComputeCommand>>,
+    pub recorded_compute_commands: Vec<Vec<GpuCommand>>,
     /// Targets that were created (for verification)
     pub targets_created: Vec<(u32, u32, TextureFormat)>,
     /// Targets with depth buffer that were created (for verification)
@@ -950,7 +950,7 @@ impl GpuBackend for MockBackend {
     fn submit_compute(
         &mut self,
         device: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<FenceToken> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -1660,10 +1660,10 @@ mod tests {
             .unwrap();
 
         let commands = vec![
-            ComputeCommand::BindResources {
+            GpuCommand::BindResources {
                 buffers: vec![buffer1, buffer2],
             },
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x: 8,
                 workgroups_y: 8,
                 workgroups_z: 1,
@@ -1676,7 +1676,7 @@ mod tests {
         assert_eq!(backend.recorded_compute_commands[0].len(), 2);
 
         match &backend.recorded_compute_commands[0][0] {
-            ComputeCommand::BindResources { buffers } => {
+            GpuCommand::BindResources { buffers } => {
                 assert_eq!(buffers.len(), 2);
                 assert_eq!(buffers[0], buffer1);
                 assert_eq!(buffers[1], buffer2);

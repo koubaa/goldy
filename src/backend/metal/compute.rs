@@ -1,6 +1,6 @@
 //! Compute pipeline and dispatch logic.
 
-use super::super::{ComputeCommand, ComputePipelineHandle, DeviceHandle, FenceToken, ShaderHandle};
+use super::super::{ComputePipelineHandle, DeviceHandle, FenceToken, GpuCommand, TextureHandle, ShaderHandle};
 use super::shader::parse_numthreads;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{
@@ -10,7 +10,7 @@ use super::types::{
 use crate::slang::SlangStage;
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLCommandBufferStatus, MTLSize};
+use mtl::{MTLCommandBufferStatus, MTLOrigin, MTLSize};
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -128,7 +128,7 @@ fn record_commands_to_buffer(
     command_buffer: &mtl::CommandBufferRef,
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
-    commands: &[ComputeCommand],
+    commands: &[GpuCommand],
 ) -> Result<()> {
     let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
     let mut current_pipeline: Option<&ComputePipelineState> = None;
@@ -156,7 +156,7 @@ fn record_commands_to_buffer(
 
     for cmd in commands {
         match cmd {
-            ComputeCommand::SetPipeline(handle) => {
+            GpuCommand::SetPipeline(handle) => {
                 ensure_compute!();
                 if let Some(pipeline) = state.compute_pipelines.get(handle) {
                     encoder
@@ -165,7 +165,7 @@ fn record_commands_to_buffer(
                     current_pipeline = Some(pipeline);
                 }
             }
-            ComputeCommand::BindResources { buffers } => {
+            GpuCommand::BindResources { buffers } => {
                 ensure_compute!();
                 let mut layout = PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
@@ -185,7 +185,7 @@ fn record_commands_to_buffer(
                     layout_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::BindResourcesRaw {
+            GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
             } => {
@@ -212,7 +212,7 @@ fn record_commands_to_buffer(
                     layout_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::BindResourcesTyped { handles } => {
+            GpuCommand::BindResourcesTyped { handles } => {
                 ensure_compute!();
                 let mut layout = PushLayout::default();
                 for (i, handle) in handles.iter().enumerate() {
@@ -230,7 +230,7 @@ fn record_commands_to_buffer(
                     layout_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -252,7 +252,7 @@ fn record_commands_to_buffer(
                         .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
             }
-            ComputeCommand::DispatchIndirect { buffer, offset } => {
+            GpuCommand::DispatchIndirect { buffer, offset } => {
                 ensure_compute!();
                 let buf_state = match state.buffers.get(buffer) {
                     Some(b) => b,
@@ -279,7 +279,7 @@ fn record_commands_to_buffer(
                     threads_per_group,
                 );
             }
-            ComputeCommand::Barrier => {
+            GpuCommand::Barrier => {
                 if let Some(enc) = encoder {
                     // memoryBarrierWithScope: ensures all prior writes within
                     // this encoder are visible before subsequent dispatches.
@@ -288,7 +288,7 @@ fn record_commands_to_buffer(
                     let () = unsafe { msg_send![enc, memoryBarrierWithScope: scope] };
                 }
             }
-            ComputeCommand::ResourceBarrier {
+            GpuCommand::ResourceBarrier {
                 buffers: buf_handles,
                 textures: tex_handles,
             } => {
@@ -318,7 +318,7 @@ fn record_commands_to_buffer(
                     }
                 }
             }
-            ComputeCommand::ClearBuffer {
+            GpuCommand::ClearBuffer {
                 buffer,
                 offset,
                 size,
@@ -343,7 +343,7 @@ fn record_commands_to_buffer(
                     blit.end_encoding();
                 }
             }
-            ComputeCommand::WriteBuffer {
+            GpuCommand::WriteBuffer {
                 buffer: buf_handle,
                 offset,
                 data,
@@ -376,6 +376,130 @@ fn record_commands_to_buffer(
                 blit.copy_from_buffer(&staging, 0, &buf_state.buffer, *offset, data.len() as u64);
                 blit.end_encoding();
             }
+            GpuCommand::WriteTexture {
+                texture: tex_handle,
+                data,
+                width,
+                height,
+            } => {
+                let tex_state = match state.textures.get(tex_handle) {
+                    Some(t) => t,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("WriteTexture: invalid texture handle");
+                    }
+                };
+                if *width != tex_state.width || *height != tex_state.height {
+                    end_compute!();
+                    anyhow::bail!("WriteTexture: dimension mismatch");
+                }
+                let bpp = tex_state.format.bytes_per_pixel();
+                let expected = (*width as usize) * (*height as usize) * bpp;
+                if data.len() != expected {
+                    end_compute!();
+                    anyhow::bail!(
+                        "WriteTexture: expected {} bytes for {}x{}, got {}",
+                        expected,
+                        width,
+                        height,
+                        data.len()
+                    );
+                }
+                if expected == 0 {
+                    continue;
+                }
+                end_compute!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let bytes_per_row = (*width as u64) * (bpp as u64);
+                let blit = command_buffer.new_blit_command_encoder();
+                blit.copy_from_buffer_to_texture(
+                    &staging,
+                    0,
+                    bytes_per_row,
+                    0,
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &tex_state.texture,
+                    0,
+                    0,
+                    MTLOrigin {
+                        x: 0,
+                        y: 0,
+                        z: 0,
+                    },
+                    mtl::MTLBlitOption::empty(),
+                );
+                blit.end_encoding();
+            }
+            GpuCommand::WriteTextureRegion {
+                texture: tex_handle,
+                x,
+                y,
+                width,
+                height,
+                data,
+            } => {
+                let tex_state = match state.textures.get(tex_handle) {
+                    Some(t) => t,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("WriteTextureRegion: invalid texture handle");
+                    }
+                };
+                if *x + *width > tex_state.width || *y + *height > tex_state.height {
+                    end_compute!();
+                    anyhow::bail!("WriteTextureRegion: region out of bounds");
+                }
+                let bpp = tex_state.format.bytes_per_pixel();
+                let expected = (*width as usize) * (*height as usize) * bpp;
+                if data.len() != expected {
+                    end_compute!();
+                    anyhow::bail!(
+                        "WriteTextureRegion: expected {} bytes, got {}",
+                        expected,
+                        data.len()
+                    );
+                }
+                if expected == 0 {
+                    continue;
+                }
+                end_compute!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let bytes_per_row = (*width as u64) * (bpp as u64);
+                let blit = command_buffer.new_blit_command_encoder();
+                blit.copy_from_buffer_to_texture(
+                    &staging,
+                    0,
+                    bytes_per_row,
+                    0,
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &tex_state.texture,
+                    0,
+                    0,
+                    MTLOrigin {
+                        x: *x as u64,
+                        y: *y as u64,
+                        z: 0,
+                    },
+                    mtl::MTLBlitOption::empty(),
+                );
+                blit.end_encoding();
+            }
         }
     }
 
@@ -387,7 +511,7 @@ fn record_commands_to_buffer(
 pub(super) fn submit(
     state: &mut MetalState,
     device_handle: DeviceHandle,
-    commands: &[ComputeCommand],
+    commands: &[GpuCommand],
 ) -> Result<FenceToken> {
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");

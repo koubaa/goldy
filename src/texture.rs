@@ -79,7 +79,7 @@ impl Texture {
             owned: true,
         })
     }
-
+    
     /// Create a texture initialized with data.
     ///
     /// The data must be in the correct format for the texture's pixel format.
@@ -121,6 +121,7 @@ impl Texture {
         }
 
         let texture = Self::new(device, width, height, format, access, flags)?;
+        #[allow(deprecated)]
         texture.write(data)?;
         Ok(texture)
     }
@@ -144,6 +145,11 @@ impl Texture {
     /// - Region is out of bounds
     /// - Data size doesn't match expected size
     /// - GPU upload fails
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TaskGraph::write_texture_region() for batched, non-blocking uploads. \
+                This method submits synchronously and stalls the GPU."
+    )]
     pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> Result<()> {
         if x + width > self.width || y + height > self.height {
             anyhow::bail!(
@@ -183,6 +189,11 @@ impl Texture {
     /// Returns an error if:
     /// - Data size doesn't match expected size
     /// - GPU upload fails
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TaskGraph::write_texture() for batched, non-blocking uploads. \
+                This method submits synchronously and stalls the GPU."
+    )]
     pub fn write(&self, data: &[u8]) -> Result<()> {
         let expected_size = (self.width * self.height * self.format.bytes_per_pixel()) as usize;
         if data.len() != expected_size {
@@ -340,6 +351,7 @@ impl Drop for Texture {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;

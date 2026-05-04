@@ -19,7 +19,7 @@
 //!    `BufferHandle` so backends always receive whole-buffer handles.
 //!
 //! 4. **Command emission**: waves are serialized into a flat
-//!    `Vec<ComputeCommand>` with `ResourceBarrier` commands between waves.
+//!    `Vec<GpuCommand>` with `ResourceBarrier` commands between waves.
 //!    Each [`NodeKind`](super::ir::NodeKind) variant emits different commands.
 
 use std::collections::HashSet;
@@ -29,7 +29,7 @@ use super::ir::{BarrierSet, CompiledSchedule, GraphIR, NodeKind, ResourceBinding
 #[cfg(test)]
 use super::ir::NodeAccess;
 use super::ResourceId;
-use crate::backend::ComputeCommand;
+use crate::backend::GpuCommand;
 
 /// Returns true if byte range `[o1, o1+l1)` overlaps `[o2, o2+l2)`.
 ///
@@ -230,18 +230,19 @@ fn compute_barriers(
     BarrierSet { buffers, textures }
 }
 
-/// Emit a flat `Vec<ComputeCommand>` from a graph IR and its compiled schedule.
+/// Emit a flat `Vec<GpuCommand>` from a graph IR and its compiled schedule.
 ///
 /// Each [`NodeKind`] variant emits a different command sequence:
 /// - `Dispatch` → `SetPipeline` + optional `BindResourcesRaw` + `Dispatch`/`DispatchIndirect`
 /// - `ClearBuffer` → `ClearBuffer`
 /// - `WriteBuffer` → `WriteBuffer`
-pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCommand> {
+/// - `WriteTexture` / `WriteTextureRegion` → matching `GpuCommand` variants
+pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuCommand> {
     let mut commands = Vec::new();
 
     for wave in &schedule.waves {
         if !wave.barriers_before.is_empty() {
-            commands.push(ComputeCommand::ResourceBarrier {
+            commands.push(GpuCommand::ResourceBarrier {
                 buffers: wave.barriers_before.buffers.clone(),
                 textures: wave.barriers_before.textures.clone(),
             });
@@ -256,23 +257,23 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
                     user_slots,
                     dispatch,
                 } => {
-                    commands.push(ComputeCommand::SetPipeline(*pipeline));
+                    commands.push(GpuCommand::SetPipeline(*pipeline));
                     if !resource_slots.is_empty() || !user_slots.is_empty() {
-                        commands.push(ComputeCommand::BindResourcesRaw {
+                        commands.push(GpuCommand::BindResourcesRaw {
                             indices: resource_slots.clone(),
                             user: user_slots.clone(),
                         });
                     }
                     match dispatch {
                         super::ir::DispatchDim::Direct { x, y, z } => {
-                            commands.push(ComputeCommand::Dispatch {
+                            commands.push(GpuCommand::Dispatch {
                                 workgroups_x: *x,
                                 workgroups_y: *y,
                                 workgroups_z: *z,
                             });
                         }
                         super::ir::DispatchDim::Indirect { buffer, offset } => {
-                            commands.push(ComputeCommand::DispatchIndirect {
+                            commands.push(GpuCommand::DispatchIndirect {
                                 buffer: *buffer,
                                 offset: *offset,
                             });
@@ -284,7 +285,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
                     offset,
                     size,
                 } => {
-                    commands.push(ComputeCommand::ClearBuffer {
+                    commands.push(GpuCommand::ClearBuffer {
                         buffer: *buffer,
                         offset: *offset,
                         size: *size,
@@ -295,9 +296,39 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<ComputeCo
                     offset,
                     data,
                 } => {
-                    commands.push(ComputeCommand::WriteBuffer {
+                    commands.push(GpuCommand::WriteBuffer {
                         buffer: *buffer,
                         offset: *offset,
+                        data: data.clone(),
+                    });
+                }
+                NodeKind::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
+                    commands.push(GpuCommand::WriteTexture {
+                        texture: *texture,
+                        data: data.clone(),
+                        width: *width,
+                        height: *height,
+                    });
+                }
+                NodeKind::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
+                    commands.push(GpuCommand::WriteTextureRegion {
+                        texture: *texture,
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
                         data: data.clone(),
                     });
                 }
@@ -377,6 +408,22 @@ mod tests {
                 buffer: buf_handle,
                 offset: 0,
                 data: vec![0u8; 4],
+            },
+        }
+    }
+
+    fn write_texture_node(label: &str, texture: ResourceId, tex_handle: u64) -> TaskNode {
+        TaskNode {
+            label: label.to_string(),
+            bindings: vec![ResourceBinding {
+                resource: texture,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteTexture {
+                texture: tex_handle,
+                data: vec![0u8; 4],
+                width: 1,
+                height: 1,
             },
         }
     }
@@ -570,19 +617,19 @@ mod tests {
         // ResourceBarrier([0])
         // Wave 1: SetPipeline(20), Dispatch(4,1,1)
         assert_eq!(cmds.len(), 5);
-        assert!(matches!(cmds[0], ComputeCommand::SetPipeline(10)));
+        assert!(matches!(cmds[0], GpuCommand::SetPipeline(10)));
         assert!(matches!(
             cmds[1],
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x: 8,
                 ..
             }
         ));
-        assert!(matches!(cmds[2], ComputeCommand::ResourceBarrier { .. }));
-        assert!(matches!(cmds[3], ComputeCommand::SetPipeline(20)));
+        assert!(matches!(cmds[2], GpuCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[3], GpuCommand::SetPipeline(20)));
         assert!(matches!(
             cmds[4],
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x: 4,
                 ..
             }
@@ -605,7 +652,7 @@ mod tests {
         assert_eq!(cmds.len(), 4);
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]
@@ -630,13 +677,13 @@ mod tests {
         let cmds = emit_commands(&ir, &schedule);
 
         assert_eq!(cmds.len(), 3);
-        assert!(matches!(cmds[0], ComputeCommand::SetPipeline(10)));
+        assert!(matches!(cmds[0], GpuCommand::SetPipeline(10)));
         assert!(
-            matches!(cmds[1], ComputeCommand::BindResourcesRaw { ref indices, .. } if indices == &[42, 7])
+            matches!(cmds[1], GpuCommand::BindResourcesRaw { ref indices, .. } if indices == &[42, 7])
         );
         assert!(matches!(
             cmds[2],
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x: 1,
                 ..
             }
@@ -658,7 +705,7 @@ mod tests {
         let cmds = emit_commands(&ir, &schedule);
 
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+        assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
     }
 
     #[test]
@@ -671,7 +718,7 @@ mod tests {
         let cmds = emit_commands(&ir, &schedule);
 
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(cmds[0], ComputeCommand::WriteBuffer { .. }));
+        assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
     }
 
     #[test]
@@ -692,10 +739,10 @@ mod tests {
         let cmds = emit_commands(&ir, &schedule);
         // ClearBuffer, ResourceBarrier, SetPipeline, Dispatch
         assert_eq!(cmds.len(), 4);
-        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
-        assert!(matches!(cmds[1], ComputeCommand::ResourceBarrier { .. }));
-        assert!(matches!(cmds[2], ComputeCommand::SetPipeline(_)));
-        assert!(matches!(cmds[3], ComputeCommand::Dispatch { .. }));
+        assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
+        assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[2], GpuCommand::SetPipeline(_)));
+        assert!(matches!(cmds[3], GpuCommand::Dispatch { .. }));
     }
 
     #[test]
@@ -716,13 +763,13 @@ mod tests {
         let cmds = emit_commands(&ir, &schedule);
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert!(cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ClearBuffer { .. })));
+            .any(|c| matches!(c, GpuCommand::ClearBuffer { .. })));
         assert!(cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::Dispatch { .. })));
+            .any(|c| matches!(c, GpuCommand::Dispatch { .. })));
     }
 
     #[test]
@@ -741,8 +788,8 @@ mod tests {
         assert_eq!(schedule.waves.len(), 2);
 
         let cmds = emit_commands(&ir, &schedule);
-        assert!(matches!(cmds[0], ComputeCommand::WriteBuffer { .. }));
-        assert!(matches!(cmds[1], ComputeCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
+        assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
     }
 
     #[test]
@@ -763,7 +810,59 @@ mod tests {
         let cmds = emit_commands(&ir, &schedule);
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+    }
+
+    #[test]
+    fn write_texture_node_emits_write_texture_command() {
+        let ir = GraphIR {
+            nodes: vec![write_texture_node("up", tex(0), 0)],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let cmds = emit_commands(&ir, &schedule);
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
+    }
+
+    #[test]
+    fn write_texture_then_dispatch_produces_barrier() {
+        let ir = GraphIR {
+            nodes: vec![
+                write_texture_node("up", tex(0), 0),
+                node("read", 1, vec![(tex(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 2);
+
+        let cmds = emit_commands(&ir, &schedule);
+        assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
+        assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
+    }
+
+    #[test]
+    fn write_texture_and_independent_dispatch_same_wave() {
+        let ir = GraphIR {
+            nodes: vec![
+                write_texture_node("up", tex(0), 0),
+                node("buf", 1, vec![(buf(1), NodeAccess::Write)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert!(edges.is_empty());
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 1);
+
+        let cmds = emit_commands(&ir, &schedule);
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]

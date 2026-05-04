@@ -136,6 +136,89 @@ impl TaskGraph {
         });
     }
 
+    /// Add a CPU→GPU texture upload node (full image).
+    ///
+    /// Data length must match [`Texture::byte_size`]. The upload is batched with
+    /// the same submission as surrounding graph nodes; the analyzer inserts barriers
+    /// before any node that reads the texture.
+    pub fn write_texture(&mut self, texture: &Texture, data: Vec<u8>) -> Result<()> {
+        let expected = texture.byte_size();
+        if data.len() != expected {
+            anyhow::bail!(
+                "write_texture: expected {} bytes, got {}",
+                expected,
+                data.len()
+            );
+        }
+        let width = texture.width();
+        let height = texture.height();
+        let th = texture.handle();
+        self.ir.nodes.push(TaskNode {
+            label: "write_texture".to_string(),
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(th),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteTexture {
+                texture: th,
+                data,
+                width,
+                height,
+            },
+        });
+        Ok(())
+    }
+
+    /// Add a CPU→GPU texture upload node for a subrectangle.
+    pub fn write_texture_region(
+        &mut self,
+        texture: &Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        if x + width > texture.width() || y + height > texture.height() {
+            anyhow::bail!(
+                "write_texture_region: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                texture.width(),
+                texture.height()
+            );
+        }
+        let expected = (width * height * texture.format().bytes_per_pixel()) as usize;
+        if data.len() != expected {
+            anyhow::bail!(
+                "write_texture_region: expected {} bytes for {}x{} region, got {}",
+                expected,
+                width,
+                height,
+                data.len()
+            );
+        }
+        let th = texture.handle();
+        self.ir.nodes.push(TaskNode {
+            label: "write_texture_region".to_string(),
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(th),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteTextureRegion {
+                texture: th,
+                x,
+                y,
+                width,
+                height,
+                data,
+            },
+        });
+        Ok(())
+    }
+
     /// Analyze the graph and submit all tasks with optimal barriers.
     /// Returns a [`GpuFuture`] for non-blocking completion.
     pub fn submit(&self, device: &Device) -> Result<GpuFuture> {
@@ -162,8 +245,8 @@ impl TaskGraph {
     /// Compile the graph into a flat command stream.
     ///
     /// Runs the dependency analyzer, schedules waves, inserts `ResourceBarrier`
-    /// commands at wave boundaries, and emits the final `ComputeCommand` sequence.
-    pub fn compile_commands(&self) -> Vec<crate::backend::ComputeCommand> {
+    /// commands at wave boundaries, and emits the final [`GpuCommand`](crate::backend::GpuCommand) sequence.
+    pub fn compile_commands(&self) -> Vec<crate::backend::GpuCommand> {
         let edges = analysis::build_edges(&self.ir);
         let schedule = analysis::schedule_waves(&self.ir, &edges);
         analysis::emit_commands(&self.ir, &schedule)
@@ -280,10 +363,11 @@ impl<'a> NodeBuilder<'a> {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::backend::ComputeCommand;
+    use crate::backend::GpuCommand;
     use crate::buffer::BufferPool;
     use crate::device::Device;
     use crate::shader::ShaderModule;
+    use crate::Texture;
 
     fn mock_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
@@ -325,21 +409,21 @@ mod tests {
         // ResourceBarrier
         // Wave 1: SetPipeline, BindResourcesRaw, Dispatch
         assert_eq!(cmds.len(), 7);
-        assert!(matches!(cmds[0], ComputeCommand::SetPipeline(_)));
-        assert!(matches!(cmds[1], ComputeCommand::BindResourcesRaw { .. }));
+        assert!(matches!(cmds[0], GpuCommand::SetPipeline(_)));
+        assert!(matches!(cmds[1], GpuCommand::BindResourcesRaw { .. }));
         assert!(matches!(
             cmds[2],
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x: 8,
                 ..
             }
         ));
-        assert!(matches!(cmds[3], ComputeCommand::ResourceBarrier { .. }));
-        assert!(matches!(cmds[4], ComputeCommand::SetPipeline(_)));
-        assert!(matches!(cmds[5], ComputeCommand::BindResourcesRaw { .. }));
+        assert!(matches!(cmds[3], GpuCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[4], GpuCommand::SetPipeline(_)));
+        assert!(matches!(cmds[5], GpuCommand::BindResourcesRaw { .. }));
         assert!(matches!(
             cmds[6],
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x: 4,
                 ..
             }
@@ -369,10 +453,10 @@ mod tests {
 
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+                .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
                 .count(),
             2
         );
@@ -452,13 +536,13 @@ mod tests {
 
         let barrier_count = cmds
             .iter()
-            .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+            .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
             .count();
         assert_eq!(barrier_count, 2);
 
         let dispatch_count = cmds
             .iter()
-            .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+            .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
             .count();
         assert_eq!(dispatch_count, 4);
     }
@@ -506,10 +590,10 @@ mod tests {
 
         // ClearBuffer, ResourceBarrier, SetPipeline, Dispatch
         assert_eq!(cmds.len(), 4);
-        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
-        assert!(matches!(cmds[1], ComputeCommand::ResourceBarrier { .. }));
-        assert!(matches!(cmds[2], ComputeCommand::SetPipeline(_)));
-        assert!(matches!(cmds[3], ComputeCommand::Dispatch { .. }));
+        assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
+        assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[2], GpuCommand::SetPipeline(_)));
+        assert!(matches!(cmds[3], GpuCommand::Dispatch { .. }));
     }
 
     #[test]
@@ -533,13 +617,13 @@ mod tests {
 
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert!(cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ClearBuffer { .. })));
+            .any(|c| matches!(c, GpuCommand::ClearBuffer { .. })));
         assert!(cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::Dispatch { .. })));
+            .any(|c| matches!(c, GpuCommand::Dispatch { .. })));
     }
 
     #[test]
@@ -559,10 +643,10 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
-        assert!(matches!(cmds[0], ComputeCommand::WriteBuffer { .. }));
+        assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
         assert!(
             cmds.iter()
-                .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })),
+                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "expected a barrier between write_buffer and dispatch"
         );
     }
@@ -587,7 +671,71 @@ mod tests {
 
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+    }
+
+    #[test]
+    fn write_texture_then_dispatch_produces_barrier() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let tex = Texture::new(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            crate::types::SpatialAccess::Interpolated,
+            crate::types::TextureFlags::COPY_DST,
+        )
+        .unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph
+            .write_texture(&tex, vec![0u8; 4 * 4 * 4])
+            .unwrap();
+        graph
+            .node("read_tex", &pipeline)
+            .bind_texture(&tex, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+        assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            "expected a barrier between write_texture and dispatch"
+        );
+    }
+
+    #[test]
+    fn write_texture_independent_of_unrelated_dispatch_same_wave() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let tex = Texture::new(
+            &device,
+            2,
+            2,
+            crate::types::TextureFormat::Rgba8Unorm,
+            crate::types::SpatialAccess::Interpolated,
+            crate::types::TextureFlags::COPY_DST,
+        )
+        .unwrap();
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.write_texture(&tex, vec![0u8; 16]).unwrap();
+        graph
+            .node("writes_buf", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let cmds = graph.compile_commands();
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]
@@ -604,10 +752,10 @@ mod tests {
 
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::ClearBuffer { .. }))
+                .filter(|c| matches!(c, GpuCommand::ClearBuffer { .. }))
                 .count(),
             2
         );
@@ -682,10 +830,10 @@ mod tests {
         // No barrier — independent regions
         assert!(!cmds
             .iter()
-            .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })));
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+                .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
                 .count(),
             2
         );
@@ -713,13 +861,13 @@ mod tests {
 
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+                .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
                 .count(),
             1
         );
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+                .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
                 .count(),
             2
         );
@@ -757,13 +905,13 @@ mod tests {
         // Wave 0: A+B (independent); Wave 1: C — one barrier between them
         let barrier_count = cmds
             .iter()
-            .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+            .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
             .count();
         assert_eq!(barrier_count, 1);
 
         let dispatch_count = cmds
             .iter()
-            .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+            .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
             .count();
         assert_eq!(dispatch_count, 3);
     }
@@ -808,13 +956,13 @@ mod tests {
         // 3 waves: [A], [B+C], [D] — 2 barriers
         let barrier_count = cmds
             .iter()
-            .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+            .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
             .count();
         assert_eq!(barrier_count, 2);
 
         let dispatch_count = cmds
             .iter()
-            .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+            .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
             .count();
         assert_eq!(dispatch_count, 4);
     }
@@ -843,7 +991,7 @@ mod tests {
 
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+                .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
                 .count(),
             1
         );
@@ -870,12 +1018,12 @@ mod tests {
         assert!(
             !cmds
                 .iter()
-                .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })),
+                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "10 independent pool views should produce zero barriers"
         );
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+                .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
                 .count(),
             10
         );
@@ -905,10 +1053,10 @@ mod tests {
 
         let barrier = cmds
             .iter()
-            .find(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+            .find(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
             .expect("expected a barrier");
 
-        if let ComputeCommand::ResourceBarrier { buffers, .. } = barrier {
+        if let GpuCommand::ResourceBarrier { buffers, .. } = barrier {
             assert!(
                 buffers.contains(&parent_handle),
                 "barrier should reference the parent buffer handle {}, got {:?}",
@@ -951,7 +1099,7 @@ mod tests {
         // Exactly one barrier (clear → view dispatches), no barrier between the two views
         let barrier_count = cmds
             .iter()
-            .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+            .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
             .count();
         assert_eq!(
             barrier_count, 1,
@@ -959,12 +1107,12 @@ mod tests {
         );
 
         // ClearBuffer is the first command
-        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+        assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
 
         // Two dispatches present
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::Dispatch { .. }))
+                .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
                 .count(),
             2
         );
@@ -989,11 +1137,11 @@ mod tests {
 
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, ComputeCommand::ResourceBarrier { .. }))
+                .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
                 .count(),
             1
         );
-        assert!(matches!(cmds[0], ComputeCommand::ClearBuffer { .. }));
+        assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
     }
 
     #[test]
@@ -1017,7 +1165,7 @@ mod tests {
         assert!(
             !cmds
                 .iter()
-                .any(|c| matches!(c, ComputeCommand::ResourceBarrier { .. })),
+                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "disjoint views should produce no barrier"
         );
     }

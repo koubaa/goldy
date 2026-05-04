@@ -7,7 +7,7 @@
 //! A [`TaskNode`] may be a compute dispatch, a buffer clear, or a buffer write.
 //! The analyzer operates only on [`TaskNode::bindings`] and is node-kind-agnostic;
 //! [`emit_commands`](super::analysis::emit_commands) switches on [`NodeKind`] to
-//! produce the final [`crate::backend::ComputeCommand`] stream.
+//! produce the final [`crate::backend::GpuCommand`] stream.
 
 use super::ResourceId;
 use crate::backend::{BufferHandle, ComputePipelineHandle, TextureHandle};
@@ -74,6 +74,22 @@ pub enum NodeKind {
     WriteBuffer {
         buffer: BufferHandle,
         offset: u64,
+        data: Vec<u8>,
+    },
+    /// Upload CPU pixel data into a texture (full image), batched with the same GPU submission.
+    WriteTexture {
+        texture: TextureHandle,
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    /// Upload a subrectangle of a texture.
+    WriteTextureRegion {
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
         data: Vec<u8>,
     },
 }

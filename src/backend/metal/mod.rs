@@ -585,7 +585,7 @@ impl GpuBackend for MetalBackend {
     fn submit_compute(
         &mut self,
         device: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<super::FenceToken> {
         compute::submit(&mut self.state, device, commands)
     }

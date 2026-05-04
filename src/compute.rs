@@ -1,6 +1,6 @@
 //! Compute pipeline and pass management.
 
-use crate::backend::{ComputeCommand, ComputePipelineHandle, GpuBackend};
+use crate::backend::{ComputePipelineHandle, GpuBackend, GpuCommand};
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::shader::ShaderModule;
@@ -89,7 +89,7 @@ impl Drop for ComputePipeline {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct ComputeEncoder {
-    pub(crate) commands: Vec<ComputeCommand>,
+    pub(crate) commands: Vec<GpuCommand>,
 }
 
 impl ComputeEncoder {
@@ -106,7 +106,7 @@ impl ComputeEncoder {
     }
 
     /// Get the recorded commands.
-    pub fn finish(self) -> Vec<ComputeCommand> {
+    pub fn finish(self) -> Vec<GpuCommand> {
         self.commands
     }
 
@@ -154,7 +154,7 @@ impl<'a> ComputePass<'a> {
     pub fn set_pipeline(&mut self, pipeline: &ComputePipeline) {
         self.encoder
             .commands
-            .push(ComputeCommand::SetPipeline(pipeline.handle));
+            .push(GpuCommand::SetPipeline(pipeline.handle));
     }
 
     /// Bind resource slots for a compute dispatch.
@@ -170,7 +170,7 @@ impl<'a> ComputePass<'a> {
     /// // In shader: g_UniformBuffers[getBufferIndex(1)] for params
     /// ```
     pub fn bind_resources(&mut self, buffers: &[&Buffer]) {
-        self.encoder.commands.push(ComputeCommand::BindResources {
+        self.encoder.commands.push(GpuCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
     }
@@ -189,7 +189,7 @@ impl<'a> ComputePass<'a> {
     pub fn bind_resources_raw(&mut self, indices: &[u32]) {
         self.encoder
             .commands
-            .push(ComputeCommand::BindResourcesRaw {
+            .push(GpuCommand::BindResourcesRaw {
                 indices: indices.to_vec(),
                 user: Vec::new(),
             });
@@ -199,7 +199,7 @@ impl<'a> ComputePass<'a> {
     pub fn bind_resources_raw_with_user(&mut self, indices: &[u32], user: &[u32]) {
         self.encoder
             .commands
-            .push(ComputeCommand::BindResourcesRaw {
+            .push(GpuCommand::BindResourcesRaw {
                 indices: indices.to_vec(),
                 user: user.to_vec(),
             });
@@ -221,7 +221,7 @@ impl<'a> ComputePass<'a> {
     pub fn bind_resources_typed(&mut self, handles: &[BindlessHandle]) {
         self.encoder
             .commands
-            .push(ComputeCommand::BindResourcesTyped {
+            .push(GpuCommand::BindResourcesTyped {
                 handles: handles.to_vec(),
             });
     }
@@ -238,7 +238,7 @@ impl<'a> ComputePass<'a> {
     /// - `dispatch(16, 1, 1)` runs 16 * 64 = 1024 threads
     /// - `dispatch(256, 1, 1)` runs 256 * 64 = 16384 threads
     pub fn dispatch(&mut self, workgroups_x: u32, workgroups_y: u32, workgroups_z: u32) {
-        self.encoder.commands.push(ComputeCommand::Dispatch {
+        self.encoder.commands.push(GpuCommand::Dispatch {
             workgroups_x,
             workgroups_y,
             workgroups_z,
@@ -253,7 +253,7 @@ impl<'a> ComputePass<'a> {
     pub fn dispatch_indirect(&mut self, buffer: &Buffer, offset: u64) {
         self.encoder
             .commands
-            .push(ComputeCommand::DispatchIndirect {
+            .push(GpuCommand::DispatchIndirect {
                 buffer: buffer.handle,
                 offset,
             });
@@ -264,7 +264,7 @@ impl<'a> ComputePass<'a> {
     /// Ensures all prior shader writes complete and are visible before
     /// any subsequent shader reads or writes execute.
     pub fn barrier(&mut self) {
-        self.encoder.commands.push(ComputeCommand::Barrier);
+        self.encoder.commands.push(GpuCommand::Barrier);
     }
 
     /// Fill a buffer region with zeros, batched into the compute command stream.
@@ -273,7 +273,7 @@ impl<'a> ComputePass<'a> {
     /// into the encoder so it's submitted alongside dispatches in a single batch.
     /// If `size` is 0, clears from `offset` to end of buffer.
     pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
-        self.encoder.commands.push(ComputeCommand::ClearBuffer {
+        self.encoder.commands.push(GpuCommand::ClearBuffer {
             buffer: buffer.handle,
             offset,
             size,
@@ -308,7 +308,7 @@ mod tests {
 
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -333,8 +333,8 @@ mod tests {
         let commands = encoder.finish();
 
         assert_eq!(commands.len(), 3);
-        assert!(matches!(&commands[0], ComputeCommand::Dispatch { .. }));
-        assert!(matches!(&commands[1], ComputeCommand::Dispatch { .. }));
-        assert!(matches!(&commands[2], ComputeCommand::Dispatch { .. }));
+        assert!(matches!(&commands[0], GpuCommand::Dispatch { .. }));
+        assert!(matches!(&commands[1], GpuCommand::Dispatch { .. }));
+        assert!(matches!(&commands[2], GpuCommand::Dispatch { .. }));
     }
 }

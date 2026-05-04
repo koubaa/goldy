@@ -129,9 +129,12 @@ pub enum RenderCommand {
     },
 }
 
-/// Compute command for compute pass recording.
+/// GPU command recorded into a command buffer / task-graph submission.
+///
+/// Includes compute dispatches, buffer upload/clear, texture uploads, and
+/// scheduling barriers — not compute-only despite historical naming in call sites.
 #[derive(Debug, Clone)]
-pub enum ComputeCommand {
+pub enum GpuCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
     /// Bind resource slots (fully bindless mode - buffer indices passed directly).
@@ -141,7 +144,7 @@ pub enum ComputeCommand {
     /// `indices` go to region A (bindless, packed as u16).
     /// `user` go to region B (user scalars, full u32).
     ///
-    /// **Prefer [`ComputeCommand::BindResourcesTyped`]** — the raw form
+    /// **Prefer [`GpuCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
     BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
     /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
@@ -173,6 +176,23 @@ pub enum ComputeCommand {
         offset: u64,
         data: Vec<u8>,
     },
+    /// Upload CPU pixel data into a texture (full image), batched with the same submission
+    /// as surrounding GPU work.
+    WriteTexture {
+        texture: TextureHandle,
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    /// Upload a subrectangle of a texture from CPU data.
+    WriteTextureRegion {
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
     /// Memory barrier between compute dispatches.
     /// Ensures all prior shader writes are visible to subsequent reads.
     Barrier,
@@ -183,6 +203,10 @@ pub enum ComputeCommand {
         textures: Vec<TextureHandle>,
     },
 }
+
+/// Deprecated alias for [`GpuCommand`].
+#[deprecated(since = "0.1.0", note = "renamed to GpuCommand")]
+pub type ComputeCommand = GpuCommand;
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 pub trait GpuBackend: Send + Sync {
@@ -389,17 +413,6 @@ pub trait GpuBackend: Send + Sync {
     /// Returns None if the texture is not registered.
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
 
-    /// Flush any pending (deferred) texture uploads to the GPU.
-    ///
-    /// Backends that batch texture writes should submit all pending copies
-    /// in a single command list here. Called automatically before compute
-    /// submissions and texture readbacks; callers may also invoke explicitly.
-    ///
-    /// Default: no-op.
-    fn flush_texture_uploads(&mut self) -> Result<()> {
-        Ok(())
-    }
-
     // Sampler management
     fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc)
         -> Result<SamplerHandle>;
@@ -492,7 +505,7 @@ pub trait GpuBackend: Send + Sync {
     fn dispatch_compute(
         &mut self,
         device: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<()> {
         let token = self.submit_compute(device, commands)?;
         self.wait_fence(device, token)
@@ -502,7 +515,7 @@ pub trait GpuBackend: Send + Sync {
     fn submit_compute(
         &mut self,
         device: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<FenceToken>;
 
     /// Check if the fence for the given token has signaled (work complete).

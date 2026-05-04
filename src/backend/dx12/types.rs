@@ -642,8 +642,6 @@ pub(super) struct Dx12State {
     pub next_dsv_offset: u32,
     /// Per-backend Slang compiler instance
     pub slang_compiler: crate::slang::SlangCompiler,
-    /// Per-device upload belts for `ComputeCommand::WriteBuffer`.
+    /// Per-device upload belts for `GpuCommand::WriteBuffer`.
     pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
-    /// Pending texture copies awaiting batch submission via [`super::texture::flush_pending_copies`].
-    pub(super) pending_texture_copies: Vec<super::texture::PendingTextureCopy>,
 }

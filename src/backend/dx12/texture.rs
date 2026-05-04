@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
-/// A staged texture copy awaiting batch submission.
-pub(super) struct PendingTextureCopy {
+/// Staged texture upload (CPU-filled staging + copy footprint) before GPU copy.
+pub(super) struct StagedTextureUpload {
     pub staging_resource: ID3D12Resource,
     pub footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
     pub texture_handle: TextureHandle,
@@ -271,18 +271,15 @@ pub(super) fn create(
     Ok(handle)
 }
 
-/// Write data to a texture.
-///
-/// Stages the upload into [`PendingTextureCopy`]; actual GPU work is deferred
-/// until [`flush_pending_copies`] (called automatically before compute submit
-/// and texture readback).
-pub(super) fn write(
-    state: &mut Dx12State,
+/// Build a staged full-texture upload (caller runs GPU copy via task graph or
+/// [`execute_staged_uploads_sync`]).
+pub(super) fn stage_texture_upload_full(
+    state: &Dx12State,
     texture_handle: TextureHandle,
     data: &[u8],
     width: u32,
     height: u32,
-) -> Result<()> {
+) -> Result<StagedTextureUpload> {
     let texture = state
         .textures
         .get(&texture_handle)
@@ -347,32 +344,26 @@ pub(super) fn write(
 
     let layout_before = texture.last_layout;
 
-    state.pending_texture_copies.push(PendingTextureCopy {
+    Ok(StagedTextureUpload {
         staging_resource: staging,
         footprint,
         texture_handle,
         dst_x: 0,
         dst_y: 0,
         layout_before,
-    });
-
-    tracing::debug!("Staged {}x{} texture write (pending flush)", width, height);
-    Ok(())
+    })
 }
 
-/// Write data to a subregion of a texture.
-///
-/// Stages the upload into [`PendingTextureCopy`]; actual GPU work is deferred
-/// until [`flush_pending_copies`].
-pub(super) fn write_region(
-    state: &mut Dx12State,
+/// Build a staged subregion texture upload.
+pub(super) fn stage_texture_upload_region(
+    state: &Dx12State,
     texture_handle: TextureHandle,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
     data: &[u8],
-) -> Result<()> {
+) -> Result<StagedTextureUpload> {
     let texture = state
         .textures
         .get(&texture_handle)
@@ -468,17 +459,118 @@ pub(super) fn write_region(
 
     let layout_before = texture.last_layout;
 
-    state.pending_texture_copies.push(PendingTextureCopy {
+    Ok(StagedTextureUpload {
         staging_resource: staging,
         footprint,
         texture_handle,
         dst_x: x,
         dst_y: y,
         layout_before,
-    });
+    })
+}
 
+/// Record one staged texture upload on an open command list (task graph / compute submit).
+pub(super) fn record_staged_texture_upload(
+    command_list: &ID3D12GraphicsCommandList,
+    command_list7: &ID3D12GraphicsCommandList7,
+    state: &mut Dx12State,
+    upload: &StagedTextureUpload,
+) -> Result<()> {
+    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+    let texture = state
+        .textures
+        .get(&upload.texture_handle)
+        .context("record_staged_texture_upload: invalid texture")?;
+    let layout_before = upload.layout_before;
+
+    let mut b_to_copy = [barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_SYNC_COPY,
+        access_for_layout(layout_before),
+        D3D12_BARRIER_ACCESS_COPY_DEST,
+        layout_before,
+        D3D12_BARRIER_LAYOUT_COPY_DEST,
+    )];
+    unsafe { barriers::barrier_textures(command_list7, &b_to_copy) };
+    unsafe { barriers::drop_texture_barriers(&mut b_to_copy) };
+
+    let src_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&upload.staging_resource) },
+        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                Offset: upload.footprint.Offset,
+                Footprint: upload.footprint.Footprint,
+            },
+        },
+    };
+
+    let dst_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            SubresourceIndex: 0,
+        },
+    };
+
+    unsafe {
+        command_list.CopyTextureRegion(
+            &dst_location,
+            upload.dst_x,
+            upload.dst_y,
+            0,
+            &src_location,
+            None,
+        );
+    }
+
+    let mut b_to_shader = [barriers::texture_barrier_full(
+        &texture.resource,
+        D3D12_BARRIER_SYNC_COPY,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_ACCESS_COPY_DEST,
+        D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+        D3D12_BARRIER_LAYOUT_COPY_DEST,
+        after_layout,
+    )];
+    unsafe { barriers::barrier_textures(command_list7, &b_to_shader) };
+    unsafe { barriers::drop_texture_barriers(&mut b_to_shader) };
+
+    if let Some(tex) = state.textures.get_mut(&upload.texture_handle) {
+        tex.last_layout = after_layout;
+    }
+    Ok(())
+}
+
+/// Write data to a texture (synchronous: submits immediately and waits).
+pub(super) fn write(
+    state: &mut Dx12State,
+    texture_handle: TextureHandle,
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let staged = stage_texture_upload_full(state, texture_handle, data, width, height)?;
+    execute_staged_uploads_sync(state, vec![staged])?;
+    tracing::debug!("Wrote {}x{} texture (sync upload)", width, height);
+    Ok(())
+}
+
+/// Write data to a subregion of a texture (synchronous).
+pub(super) fn write_region(
+    state: &mut Dx12State,
+    texture_handle: TextureHandle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Result<()> {
+    let staged = stage_texture_upload_region(state, texture_handle, x, y, width, height, data)?;
+    execute_staged_uploads_sync(state, vec![staged])?;
     tracing::debug!(
-        "Staged {}x{} texture region at ({},{}) (pending flush)",
+        "Wrote {}x{} texture region at ({},{}) (sync upload)",
         width,
         height,
         x,
@@ -526,17 +618,16 @@ fn create_upload_staging(device: &ID3D12Device10, size: u64) -> Result<ID3D12Res
     resource.context("CreateCommittedResource returned null")
 }
 
-/// Flush all pending texture copies in a single command list submission.
-///
-/// Groups copies by texture so each texture gets one barrier pair
-/// (old layout → COPY_DEST, then COPY_DEST → SHADER_RESOURCE) around
-/// all of its pending copies.
-pub(super) fn flush_pending_copies(state: &mut Dx12State) -> Result<()> {
-    if state.pending_texture_copies.is_empty() {
+/// Execute staged texture uploads on a dedicated command list and wait (sync path).
+pub(super) fn execute_staged_uploads_sync(
+    state: &mut Dx12State,
+    uploads: Vec<StagedTextureUpload>,
+) -> Result<()> {
+    if uploads.is_empty() {
         return Ok(());
     }
 
-    let copies = std::mem::take(&mut state.pending_texture_copies);
+    let copies = uploads;
     let count = copies.len();
 
     let first_tex = state
@@ -692,9 +783,6 @@ pub(super) fn read_to_cpu(
     texture_handle: TextureHandle,
     output: &mut [u8],
 ) -> Result<()> {
-    // Flush any pending texture writes so the data is on the GPU.
-    flush_pending_copies(state)?;
-
     use windows::Win32::Graphics::Direct3D12::*;
 
     let texture = state
