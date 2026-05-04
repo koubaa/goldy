@@ -1259,7 +1259,7 @@ mod tests {
                 node(
                     "write",
                     i,
-                    vec![(range(0, i as u64 * 128, 128), NodeAccess::Write)],
+                    vec![(range(0, i * 128, 128), NodeAccess::Write)],
                     1,
                 )
             })

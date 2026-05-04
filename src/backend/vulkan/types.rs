@@ -410,9 +410,9 @@ pub(crate) struct BufferState {
     pub staging_memory: Option<vk::DeviceMemory>,
     /// If true, this is a view into another buffer — don't free the VkBuffer/memory on destroy.
     pub is_view: bool,
-    /// Set when the buffer was created with [`crate::types::BufferFlags::CPU_COHERENT`]:
+    /// Set when the buffer was created with [`crate::types::BufferFlags::CPU_READABLE`]:
     /// persistent host mapping of the entire buffer for CPU read/write.
-    /// Opaque address of the persistent `map_memory2` region for `CPU_COHERENT` storage.
+    /// Opaque address of the persistent `map_memory2` region for `CPU_READABLE` storage.
     /// Stored as [`usize`] so `BufferState` is `Send`/`Sync` for `GpuBackend` (raw pointers and
     /// `NonNull` are not in this environment).
     pub host_mapped: Option<usize>,

@@ -449,7 +449,7 @@ pub(crate) struct BufferState {
     pub element_stride: Option<u32>,
     /// If true, this is a view into another buffer — don't free the resource on destroy.
     pub is_view: bool,
-    /// Direct3D 12: paired READBACK resource for [`crate::types::BufferFlags::CPU_COHERENT`]
+    /// Direct3D 12: paired READBACK resource for [`crate::types::BufferFlags::CPU_READABLE`]
     /// storage buffers. Copied UAV → READBACK by [`super::buffer::read_to_cpu`].
     pub coherent_readback: Option<Direct3D12::ID3D12Resource>,
     /// Persistent map of `coherent_readback` (see above).

@@ -1210,7 +1210,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     assert_eq!(output[3], 255, "A channel should be 255");
 }
 
-// ─── CPU_COHERENT buffer tests ────────────────────────────────────────────────
+// ─── CPU_READABLE buffer tests ────────────────────────────────────────────────
 
 /// A compute shader that doubles each element (same as `DOUBLE_SHADER`). Used by the
 /// coherent tests to avoid a dependency on the module-level constant's exact binding layout.
@@ -1224,14 +1224,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 }
 "#;
 
-/// Create a `CPU_COHERENT` storage buffer, run a GPU compute pass that doubles every
-/// element, then read back via `Buffer::read_coherent`.
-///
-/// Create a `CPU_COHERENT` storage buffer, run a GPU compute pass that doubles every
-/// element, then read back via `Buffer::read_to_cpu` (which handles the DX12
-/// UAV → READBACK copy transparently).
+/// Create a [`BufferFlags::CPU_READABLE`] storage buffer, run a GPU compute pass that doubles every
+/// element, then read back via [`Buffer::read_to_cpu`] (handles DX12 UAV → READBACK internally).
 #[test]
-fn test_cpu_coherent_compute_write_and_read() {
+fn test_cpu_readable_compute_write_and_read() {
     let device = make_device();
 
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER_COHERENT).expect("compile shader");
@@ -1245,9 +1241,9 @@ fn test_cpu_coherent_compute_write_and_read() {
         bytemuck::cast_slice(&initial),
         DataAccess::Scattered,
         size_of::<u32>() as u32,
-        BufferFlags::CPU_COHERENT,
+        BufferFlags::CPU_READABLE,
     )
-    .expect("create CPU_COHERENT buffer");
+    .expect("create CPU_READABLE buffer");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1344,16 +1340,15 @@ fn test_write_buffer_reuse_across_submissions() {
     assert_eq!(got_b, data_b, "output B wrong");
 }
 
-/// CPU writes to a `CPU_COHERENT` buffer are reflected in reads.
+/// CPU writes to a [`BufferFlags::CPU_READABLE`] buffer are reflected in reads.
 ///
 /// On Vulkan and Metal the buffer lives in host-visible/shared memory, so a plain
-/// `buffer.write()` followed immediately by `buffer.read_coherent()` round-trips
-/// without any GPU involvement.
+/// `buffer.write()` followed immediately by `buffer.read_to_cpu()` round-trips.
 ///
 /// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so
-/// `read_to_cpu` is used — it copies UAV → READBACK internally.
+/// `read_to_cpu` copies UAV → READBACK internally.
 #[test]
-fn test_cpu_coherent_cpu_write_read_roundtrip() {
+fn test_cpu_readable_cpu_write_read_roundtrip() {
     let device = make_device();
 
     const N: usize = 16;
@@ -1364,9 +1359,9 @@ fn test_cpu_coherent_cpu_write_read_roundtrip() {
         bytemuck::cast_slice(&initial),
         DataAccess::Scattered,
         size_of::<u32>() as u32,
-        BufferFlags::CPU_COHERENT,
+        BufferFlags::CPU_READABLE,
     )
-    .expect("create CPU_COHERENT buffer");
+    .expect("create CPU_READABLE buffer");
 
     let new_values: Vec<u32> = (100..100 + N as u32).collect();
     buffer

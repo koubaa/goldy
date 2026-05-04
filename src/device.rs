@@ -202,6 +202,13 @@ pub struct DeviceCapabilities {
 
     /// Formats supported for render targets.
     pub supported_render_target_formats: Vec<TextureFormat>,
+
+    /// Whether [`crate::types::BufferFlags::CPU_READABLE`] scattered buffers can be read from CPU
+    /// without a GPU copy.
+    ///
+    /// `true` on Vulkan (`HOST_VISIBLE` storage) and Metal (Shared storage). `false` on Direct3D 12
+    /// (requires GPU copy to a READBACK heap).
+    pub has_zero_copy_storage_readback: bool,
 }
 
 impl Default for DeviceCapabilities {
@@ -221,6 +228,7 @@ impl Default for DeviceCapabilities {
                 TextureFormat::Rgba16Float,
                 TextureFormat::Rgba32Float,
             ],
+            has_zero_copy_storage_readback: true,
         }
     }
 }
@@ -420,12 +428,12 @@ impl Device {
     ///
     /// println!("Surface format: {:?}", caps.preferred_surface_format);
     /// println!("RenderTarget format: {:?}", caps.preferred_render_target_format);
+    /// println!("Zero-copy CPU storage readback: {}", caps.has_zero_copy_storage_readback);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn capabilities(&self) -> DeviceCapabilities {
-        // For now, return sensible defaults
-        // Future: query actual device limits and capabilities
-        DeviceCapabilities::default()
+        let backend = self.backend.lock().unwrap();
+        backend.device_capabilities(self.handle)
     }
 
     // --- Shader Library Management ---

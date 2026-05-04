@@ -239,20 +239,10 @@ pub trait GpuBackend: Send + Sync {
         buffer: BufferHandle,
         output: &mut [u8],
     ) -> Result<()>;
-    /// Copy bytes from a buffer created with [`BufferFlags::CPU_COHERENT`] into `output`
-    /// without a staging readback. Caller must have completed GPU work that wrote the buffer.
-    ///
-    /// On Vulkan / Metal, reads directly from the host-visible mapping. On Direct3D 12,
-    /// reads from the READBACK heap (caller must ensure it was synced — prefer
-    /// [`GpuBackend::read_buffer_to_cpu`] which handles the copy transparently).
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        let _ = (buffer, offset, output);
-        anyhow::bail!("read_buffer_coherent: buffer is not CPU_COHERENT or not supported")
+    /// Capability snapshot for `device` (surface formats, [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`], …).
+    fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
+        let _ = device;
+        crate::device::DeviceCapabilities::default()
     }
     /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
     fn clear_buffer(

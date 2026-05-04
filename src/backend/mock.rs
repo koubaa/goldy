@@ -352,28 +352,6 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        let buf = self
-            .buffers
-            .get(&buffer)
-            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
-        if !buf.flags.contains(BufferFlags::CPU_COHERENT) {
-            anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
-        }
-        let start = offset as usize;
-        let end = start.saturating_add(output.len());
-        if end > buf.data.len() {
-            anyhow::bail!("read_coherent would exceed buffer bounds");
-        }
-        output.copy_from_slice(&buf.data[start..end]);
-        Ok(())
-    }
-
     fn clear_buffer(
         &mut self,
         _device: DeviceHandle,

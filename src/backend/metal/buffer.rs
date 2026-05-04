@@ -18,11 +18,11 @@ pub(super) fn create(
     _element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
-    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let is_storage = access == DataAccess::Scattered;
-    if cpu_coherent && !is_storage {
+    if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
         );
     }
     let logical_device = state
@@ -78,10 +78,10 @@ pub(super) fn create(
         );
     }
 
-    let host_mapped = if cpu_coherent && is_storage {
+    let host_mapped = if cpu_readable && is_storage {
         let ptr = buffer.contents() as *mut u8;
         if ptr.is_null() {
-            anyhow::bail!("Metal buffer contents() returned null for CPU_COHERENT");
+            anyhow::bail!("Metal buffer contents() returned null for CPU_READABLE");
         }
         Some(ptr as usize)
     } else {
@@ -168,36 +168,6 @@ pub(super) fn create_view(
     );
 
     Ok(handle)
-}
-
-/// Read from a `CPU_COHERENT` host mapping (same physical memory as the GPU on shared storage).
-pub(super) fn read_coherent(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-    offset: u64,
-    output: &mut [u8],
-) -> Result<()> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
-        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
-    }
-    let base = buffer
-        .host_mapped
-        .context("CPU_COHERENT buffer has no host mapping")?;
-    if offset + output.len() as u64 > buffer.size {
-        anyhow::bail!("read_coherent would exceed buffer bounds");
-    }
-    let p = base as *mut u8;
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            p.add(offset as usize) as *const u8,
-            output.as_mut_ptr(),
-            output.len(),
-        );
-    }
-    Ok(())
 }
 
 /// Destroy a buffer, unregistering it from the bindless registry.

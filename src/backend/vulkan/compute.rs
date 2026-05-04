@@ -537,7 +537,7 @@ pub(super) fn submit(
                 let buf_state = buffers
                     .get(buf_handle)
                     .context("WriteBuffer: invalid buffer handle")?;
-                // HOST_VISIBLE / CPU_COHERENT paths were handled in the pre-pass;
+                // HOST_VISIBLE / CPU_READABLE paths were handled in the pre-pass;
                 // DEVICE_LOCAL storage uses the staging belt (see pre-pass).
                 if buf_state.is_storage && buf_state.host_mapped.is_none() {
                     let (stg, stg_off) = belt_slices

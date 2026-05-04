@@ -239,7 +239,7 @@ impl Buffer {
         self.access
     }
 
-    /// Creation flags (e.g. [`BufferFlags::CPU_COHERENT`]).
+    /// Creation flags (e.g. [`BufferFlags::CPU_READABLE`]).
     pub fn flags(&self) -> BufferFlags {
         self.flags
     }
@@ -293,20 +293,14 @@ impl Buffer {
     /// Read buffer contents back to CPU memory.
     ///
     /// The `output` slice must be at least `size` bytes. Reads from offset 0.
+    ///
+    /// For buffers created with [`BufferFlags::CPU_READABLE`], cost differs by backend:
+    /// Vulkan / Metal typically copy directly from host-visible memory (see
+    /// [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`]). Direct3D 12 performs a
+    /// GPU copy into a READBACK heap and waits — query capabilities to branch on behavior.
     pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
         backend.read_buffer_to_cpu(device.handle, self.handle, output)
-    }
-
-    /// Read from a [`BufferFlags::CPU_COHERENT`] buffer without staging.
-    ///
-    /// On Vulkan / Metal the buffer is host-visible, so this is a direct `memcpy`.
-    /// On Direct3D 12 this reads from the READBACK heap — use
-    /// [`Buffer::read_to_cpu`] instead, which handles the UAV → READBACK copy
-    /// transparently.
-    pub fn read_coherent(&self, offset: u64, output: &mut [u8]) -> Result<()> {
-        let backend = self.backend.lock().unwrap();
-        backend.read_buffer_coherent(self.handle, offset, output)
     }
 
     /// Clear the buffer (fill with zeros) from offset for size bytes.

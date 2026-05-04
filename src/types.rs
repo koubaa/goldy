@@ -305,8 +305,16 @@ bitflags! {
         const COPY_SRC = 1 << 0;
         /// Can be used as a copy destination.
         const COPY_DST = 1 << 1;
-        /// Can be read by the CPU.
-        const CPU_COHERENT = 1 << 2;
+        /// Optimize this buffer for CPU readback.
+        ///
+        /// On backends with shared storage memory (Vulkan `HOST_VISIBLE`, Metal Shared),
+        /// [`crate::buffer::Buffer::read_to_cpu`] is a direct `memcpy` with no GPU involvement.
+        /// On Direct3D 12, storage buffers live on GPU-local memory; `read_to_cpu` performs a
+        /// GPU copy to a pre-allocated READBACK heap and waits for completion.
+        ///
+        /// Query [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`] to distinguish
+        /// these at runtime.
+        const CPU_READABLE = 1 << 2;
     }
 }
 

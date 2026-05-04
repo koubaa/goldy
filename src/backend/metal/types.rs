@@ -729,9 +729,9 @@ pub(crate) struct BufferState {
     pub size: u64,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
-    /// Persistent `contents()` pointer when created with [`crate::types::BufferFlags::CPU_COHERENT`]
+    /// Persistent `contents()` pointer when created with [`crate::types::BufferFlags::CPU_READABLE`]
     /// (shared storage: same as a normal read for other buffers).
-    /// `buffer.contents() as usize` when `CPU_COHERENT` (for `Send`/`Sync`).
+    /// `buffer.contents() as usize` when `CPU_READABLE` (for `Send`/`Sync`).
     pub host_mapped: Option<usize>,
     pub flags: crate::types::BufferFlags,
 }

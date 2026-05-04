@@ -324,6 +324,18 @@ enum GoldyResult goldy_buffer_write(const struct GoldyBuffer *buffer,
 // Clear the last error message.
 void goldy_clear_error(void);
 
+// Bind resource slots for compute.
+//
+// Pass the buffers whose indices should be bound to shader resource slots.
+// The indices are bound in order, so `buffers[0]` becomes slot 0,
+// `buffers[1]` becomes slot 1, etc.
+//
+// # Safety
+// All pointers must be valid. The buffers array must contain buffer_count elements.
+void goldy_compute_encoder_bind_resources(struct GoldyComputeEncoder *encoder,
+                                          const struct GoldyBuffer *const *buffers,
+                                          uint32_t buffer_count);
+
 // Create a new compute encoder.
 struct GoldyComputeEncoder *goldy_compute_encoder_create(void);
 
@@ -355,18 +367,6 @@ enum GoldyResult goldy_compute_encoder_execute(const struct GoldyComputeEncoder 
 // Both pointers must be valid.
 void goldy_compute_encoder_set_pipeline(struct GoldyComputeEncoder *encoder,
                                         const struct GoldyComputePipeline *pipeline);
-
-// Bind resource slots for compute.
-//
-// Pass the buffers whose indices should be bound to shader resource slots.
-// The indices are bound in order, so `buffers[0]` becomes slot 0,
-// `buffers[1]` becomes slot 1, etc.
-//
-// # Safety
-// All pointers must be valid. The buffers array must contain buffer_count elements.
-void goldy_compute_encoder_bind_resources(struct GoldyComputeEncoder *encoder,
-                                          const struct GoldyBuffer *const *buffers,
-                                          uint32_t buffer_count);
 
 // Create a new compute pipeline.
 //
@@ -406,6 +406,18 @@ bool goldy_device_has_library(const struct GoldyDevice *device, const char *name
 // # Safety
 // The device pointer must be valid.
 bool goldy_device_is_valid(const struct GoldyDevice *device);
+
+// Bind resource slots for rendering.
+//
+// Pass the buffers whose indices should be bound to shader resource slots.
+// The indices are bound in order, so `buffers[0]` becomes slot 0,
+// `buffers[1]` becomes slot 1, etc.
+//
+// # Safety
+// All pointers must be valid. The buffers array must contain buffer_count elements.
+void goldy_encoder_bind_resources(struct GoldyCommandEncoder *encoder,
+                                  const struct GoldyBuffer *const *buffers,
+                                  uint32_t buffer_count);
 
 // Clear the color render target.
 //
@@ -463,18 +475,6 @@ void goldy_encoder_set_index_buffer(struct GoldyCommandEncoder *encoder,
 // Both pointers must be valid.
 void goldy_encoder_set_pipeline(struct GoldyCommandEncoder *encoder,
                                 const struct GoldyRenderPipeline *pipeline);
-
-// Bind resource slots for rendering.
-//
-// Pass the buffers whose indices should be bound to shader resource slots.
-// The indices are bound in order, so `buffers[0]` becomes slot 0,
-// `buffers[1]` becomes slot 1, etc.
-//
-// # Safety
-// All pointers must be valid. The buffers array must contain buffer_count elements.
-void goldy_encoder_bind_resources(struct GoldyCommandEncoder *encoder,
-                                  const struct GoldyBuffer *const *buffers,
-                                  uint32_t buffer_count);
 
 // Set a vertex buffer.
 //

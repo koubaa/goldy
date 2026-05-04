@@ -282,15 +282,6 @@ impl GpuBackend for MetalBackend {
         buffer::read_to_cpu(&self.state, device, buffer, output)
     }
 
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        buffer::read_coherent(&self.state.buffers, buffer, offset, output)
-    }
-
     fn clear_buffer(
         &mut self,
         device: DeviceHandle,

@@ -111,10 +111,10 @@ pub(super) fn create(
         }
     };
 
-    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
-    if cpu_coherent && !is_storage {
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
         );
     }
 
@@ -130,11 +130,11 @@ pub(super) fn create(
 
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };
 
-    // Storage buffers → DEVICE_LOCAL for GPU compute performance, unless CPU_COHERENT
+    // Storage buffers → DEVICE_LOCAL for GPU compute performance, unless CPU_READABLE
     // (host-visible storage for persistent map + stable UAV bindless use).
     // Uniform buffers → HOST_VISIBLE|HOST_COHERENT for frequent CPU writes.
     let desired_flags = if is_storage {
-        if cpu_coherent {
+        if cpu_readable {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
         } else {
             vk::MemoryPropertyFlags::DEVICE_LOCAL
@@ -166,15 +166,15 @@ pub(super) fn create(
     // Clear uses vkCmdFillBuffer (GPU-side) so staging isn't needed for that.
     let (staging_buffer, staging_memory) = (None, None);
 
-    let host_mapped: Option<usize> = if cpu_coherent && is_storage {
+    let host_mapped: Option<usize> = if cpu_readable && is_storage {
         let device = devices
             .get(&device_handle)
             .context("Buffer's device is invalid for host map")?;
         let ptr = unsafe { device.map_memory2(memory, 0, size) }
-            .context("Failed to map CPU_COHERENT buffer memory")?;
+            .context("Failed to map CPU_READABLE buffer memory")?;
         let p = ptr as *mut u8;
         if p.is_null() {
-            anyhow::bail!("map_memory2 returned null for CPU_COHERENT buffer");
+            anyhow::bail!("map_memory2 returned null for CPU_READABLE buffer");
         }
         Some(p as usize)
     } else {
@@ -273,7 +273,7 @@ pub(super) fn destroy(
                     if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
                         tracing::warn!(
                             ?e,
-                            "unmap_memory2 failed for CPU_COHERENT buffer on destroy"
+                            "unmap_memory2 failed for CPU_READABLE buffer on destroy"
                         );
                     }
                 }
@@ -410,7 +410,7 @@ pub(super) fn ensure_staging(
         .context("Invalid buffer handle")?;
     if !buffer.is_storage
         || buffer.staging_buffer.is_some()
-        || buffer.flags.contains(BufferFlags::CPU_COHERENT)
+        || buffer.flags.contains(BufferFlags::CPU_READABLE)
     {
         return Ok(());
     }
@@ -537,36 +537,6 @@ pub(super) fn write(
         }
     }
 
-    Ok(())
-}
-
-/// Copy from a `CPU_COHERENT` host mapping (no staging, no map/unmap per call).
-pub(super) fn read_coherent(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-    offset: u64,
-    output: &mut [u8],
-) -> Result<()> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
-        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
-    }
-    let Some(base) = buffer.host_mapped else {
-        anyhow::bail!("CPU_COHERENT buffer has no host mapping");
-    };
-    if offset + output.len() as u64 > buffer.size {
-        anyhow::bail!("read_coherent would exceed buffer bounds");
-    }
-    let p = base as *mut u8;
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            p.add(offset as usize) as *const u8,
-            output.as_mut_ptr(),
-            output.len(),
-        );
-    }
     Ok(())
 }
 

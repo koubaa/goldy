@@ -352,15 +352,6 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn read_buffer_coherent(
-        &self,
-        buffer_handle: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        buffer::read_coherent(&self.state.buffers, buffer_handle, offset, output)
-    }
-
     fn clear_buffer(
         &mut self,
         device_handle: DeviceHandle,

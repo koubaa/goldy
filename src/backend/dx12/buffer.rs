@@ -19,7 +19,7 @@ pub(super) fn create(
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
-    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     // First pass: create the resource (immutable borrow of device)
     let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
         let logical_device = state
@@ -30,8 +30,8 @@ pub(super) fn create(
         // Scattered access -> storage buffer (UAV), Broadcast access -> uniform buffer (CBV)
         let is_storage = access == DataAccess::Scattered;
 
-        if cpu_coherent && !is_storage {
-            anyhow::bail!("BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers");
+        if cpu_readable && !is_storage {
+            anyhow::bail!("BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers");
         }
 
         // Storage buffers need DEFAULT heap for UAV support (bindless)
@@ -95,8 +95,8 @@ pub(super) fn create(
         // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
         let upload_buffer = None;
 
-        // CPU_COHERENT storage: pair DEFAULT UAV with a READBACK heap for `read_coherent`.
-        let (coherent_readback, coherent_readback_mapped) = if cpu_coherent && is_storage {
+        // CPU_READABLE storage: pair DEFAULT UAV with a READBACK heap for `read_coherent`.
+        let (coherent_readback, coherent_readback_mapped) = if cpu_readable && is_storage {
             let readback_heap = D3D12_HEAP_PROPERTIES {
                 Type: D3D12_HEAP_TYPE_READBACK,
                 CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
@@ -130,15 +130,15 @@ pub(super) fn create(
                     &mut rb,
                 )
             }
-            .context("Failed to create CPU_COHERENT readback buffer")?;
+            .context("Failed to create CPU_READABLE readback buffer")?;
             let rb = rb.context("CreateCommittedResource readback returned null")?;
             let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
             let no_read = D3D12_RANGE { Begin: 0, End: 0 };
             unsafe { rb.Map(0, Some(&no_read), Some(&mut mapped)) }
-                .context("Failed to map CPU_COHERENT readback buffer")?;
+                .context("Failed to map CPU_READABLE readback buffer")?;
             let p = mapped as *mut u8;
             if p.is_null() {
-                anyhow::bail!("Map returned null for CPU_COHERENT readback");
+                anyhow::bail!("Map returned null for CPU_READABLE readback");
             }
             (Some(rb), Some(p as usize))
         } else {
@@ -786,7 +786,7 @@ pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle)
         .and_then(|b| b.bindless_srv_offset.or(b.bindless_offset))
 }
 
-/// Record DEFAULT → READBACK copy for a `CPU_COHERENT` buffer on an already-open command list.
+/// Record DEFAULT → READBACK copy for a `CPU_READABLE` buffer on an already-open command list.
 /// Does not submit.
 pub(super) fn emit_copy_coherent_readback_on_command_list(
     state: &Dx12State,
@@ -801,13 +801,13 @@ pub(super) fn emit_copy_coherent_readback_on_command_list(
             .buffers
             .get(&buffer_handle)
             .context("Invalid buffer handle")?;
-        if !buffer.flags.contains(BufferFlags::CPU_COHERENT) || !buffer.is_storage {
+        if !buffer.flags.contains(BufferFlags::CPU_READABLE) || !buffer.is_storage {
             return Ok(());
         }
         let readback = buffer
             .coherent_readback
             .as_ref()
-            .context("CPU_COHERENT buffer missing readback resource")?;
+            .context("CPU_READABLE buffer missing readback resource")?;
         (buffer.resource.clone(), readback.clone(), buffer.size)
     };
 
@@ -835,7 +835,7 @@ pub(super) fn emit_copy_coherent_readback_on_command_list(
     Ok(())
 }
 
-/// Standalone GPU copy + wait for `read_to_cpu` on `CPU_COHERENT` buffers.
+/// Standalone GPU copy + wait for `read_to_cpu` on `CPU_READABLE` buffers.
 /// Creates a one-shot command list to copy the UAV to the paired READBACK heap.
 fn standalone_copy_coherent_readback(
     state: &mut Dx12State,
@@ -895,12 +895,12 @@ pub(super) fn read_coherent(
     let buffer = buffers
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
-        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
+    if !buffer.flags.contains(BufferFlags::CPU_READABLE) {
+        anyhow::bail!("read_coherent requires BufferFlags::CPU_READABLE");
     }
     let base = buffer
         .coherent_readback_mapped
-        .context("CPU_COHERENT buffer not mapped for readback")?;
+        .context("CPU_READABLE buffer not mapped for readback")?;
     if offset + output.len() as u64 > buffer.size {
         anyhow::bail!("read_coherent would exceed buffer bounds");
     }
@@ -938,7 +938,7 @@ pub(super) fn read_to_cpu(
     }
 
     if buffer.is_storage
-        && buffer.flags.contains(BufferFlags::CPU_COHERENT)
+        && buffer.flags.contains(BufferFlags::CPU_READABLE)
         && buffer.coherent_readback.is_some()
     {
         standalone_copy_coherent_readback(state, device_handle, buffer_handle)?;

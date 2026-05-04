@@ -467,13 +467,12 @@ impl GpuBackend for Dx12Backend {
         buffer::read_to_cpu(&mut self.state, device, buffer, output)
     }
 
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        buffer::read_coherent(&self.state.buffers, buffer, offset, output)
+    fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
+        let _ = device;
+        crate::device::DeviceCapabilities {
+            has_zero_copy_storage_readback: false,
+            ..Default::default()
+        }
     }
 
     fn clear_buffer(
