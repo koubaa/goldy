@@ -1166,7 +1166,7 @@ mod tests {
                 node(
                     "dispatch",
                     i,
-                    vec![(range(0, i as u64 * 256, 256), NodeAccess::Write)],
+                    vec![(range(0, i * 256, 256), NodeAccess::Write)],
                     1,
                 )
             })

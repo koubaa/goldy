@@ -1433,7 +1433,7 @@ mod uniform_entry_point_param_binding_tests {
         // StorageClass::PushConstant == 9. This value should appear as a word in
         // the SPIR-V binary when uniform entry-point params are mapped to resource slots.
         assert!(
-            words.iter().any(|&w| w == 9),
+            words.contains(&9),
             "Expected PushConstant storage class (9) in SPIR-V for uniform params"
         );
     }
