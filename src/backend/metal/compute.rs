@@ -396,8 +396,7 @@ fn record_commands_to_buffer(
                     anyhow::bail!("WriteTexture: dimension mismatch");
                 }
                 let bpp = tex_state.format.bytes_per_pixel();
-                let expected =
-                    (*width as usize) * (*height as usize) * (bpp as usize);
+                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
                 if data.len() != expected {
                     end_compute!();
                     anyhow::bail!(
@@ -457,8 +456,7 @@ fn record_commands_to_buffer(
                     anyhow::bail!("WriteTextureRegion: region out of bounds");
                 }
                 let bpp = tex_state.format.bytes_per_pixel();
-                let expected =
-                    (*width as usize) * (*height as usize) * (bpp as usize);
+                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
                 if data.len() != expected {
                     end_compute!();
                     anyhow::bail!(

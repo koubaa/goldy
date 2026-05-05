@@ -204,7 +204,11 @@ mod tests {
         assert_eq!(pool.stats().entries, 1);
 
         let _tex2 = pool.acquire(&device, 8, 8, fmt, acc, flags).unwrap();
-        assert_eq!(pool.stats().entries, 0, "slot should be empty after re-acquire");
+        assert_eq!(
+            pool.stats().entries,
+            0,
+            "slot should be empty after re-acquire"
+        );
     }
 
     // -----------------------------------------------------------------------

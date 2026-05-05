@@ -291,14 +291,17 @@ impl Texture {
 
     /// Creation flags ([`TextureFlags`]) used when this texture was allocated.
     ///
-    /// Borrowed textures created via [`Self::borrowed`] report [`TextureFlags::empty()`].
+    /// Views from [`Self::borrow`] keep the parent's flags. Non-owning textures
+    /// that wrap externally owned GPU images (such as swapchain drawables)
+    /// report [`TextureFlags::empty()`].
     pub fn flags(&self) -> TextureFlags {
         self.flags
     }
 
     /// Whether dropping this texture destroys the GPU resource (`true`) or not (`false`).
     ///
-    /// Borrowed textures ([`Self::borrow`], [`Self::borrowed`]) return `false`.
+    /// Borrowed textures ([`Self::borrow`]) and other non-owning views of
+    /// externally managed resources return `false`.
     pub fn is_owned(&self) -> bool {
         self.owned
     }
