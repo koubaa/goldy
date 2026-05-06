@@ -636,10 +636,9 @@ pub(super) fn submit(
     if has_active_surface {
         state.next_compute_fence_token += 1;
         state.deferred_pending_tokens.insert(token, None);
-        state.deferred_compute.push(super::types::DeferredCompute {
-            cmd,
-            token,
-        });
+        state
+            .deferred_compute
+            .push(super::types::DeferredCompute { cmd, token });
 
         if !texture_upload_scratch.is_empty() {
             let pooled: Vec<(vk::Buffer, vk::DeviceMemory)> = texture_upload_scratch
