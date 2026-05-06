@@ -4,12 +4,12 @@
 
 ### Runtime shader validation (`MTL_SHADER_VALIDATION`)
 
-When **GPU API validation** is on, Goldy sets **`MTL_SHADER_VALIDATION=1`** before the first Metal device is created, **only if** `MTL_SHADER_VALIDATION` is not already set. That opts into Apple’s runtime shader validation (see Apple’s Metal debugging documentation for other allowed values). GPU API validation includes **`GOLDY_VALIDATION=1`/`true`/`yes`**, tokens such as **`gpu`**, **`shader`**, **`all`**, or **`GOLDY_VALIDATE_ALL=1`**. Like Vulkan, this is applied at backend initialization; avoid touching Metal before `Instance::new()` if you rely on Goldy to set the variable.
+When **GPU API validation** is on, Goldy sets **`MTL_SHADER_VALIDATION=1`** before the first Metal device is created, **only if** `MTL_SHADER_VALIDATION` is not already set. That opts into Apple’s runtime shader validation (see Apple’s Metal debugging documentation for other allowed values). GPU API validation includes **`GOLDY_VALIDATION=1`/`true`/`yes`**, the **`api`** token, or **`all`** (see [Unified validation](#unified-validation-goldy_validation)). Like Vulkan, this is applied at backend initialization; avoid touching Metal before `Instance::new()` if you rely on Goldy to set the variable.
 
 ```bash
 GOLDY_VALIDATION=1 cargo run --example triangle
-GOLDY_VALIDATION=gpu cargo run --example triangle
-GOLDY_VALIDATE_ALL=1 cargo run --example triangle
+GOLDY_VALIDATION=api cargo run --example triangle
+GOLDY_VALIDATION=all cargo run --example triangle
 ```
 
 ### Shader Compiles but Uniforms Don't Update (Static Animation)
@@ -62,27 +62,26 @@ Python buffers automatically detect stride from numpy dtype. If using raw bytes,
 
 Vulkan API misuse is easiest to catch with the Khronos validation layer. CI clears `VK_LAYER_PATH` for speed and stability; locally, enable validation in either of these ways:
 
-1. **`GOLDY_VALIDATION`** — short form **`1`/`true`/`yes`** turns on **GPU API validation only** (Khronos layer + `VK_EXT_debug_utils` here; Metal shader validation on macOS). Token lists are also supported (see [Unified validation](#unified-validation-goldy_validation--goldy_validate_all) below). Requires validation layers on the machine (e.g. [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), or on Debian/Ubuntu often `vulkan-validationlayers`).
+1. **`GOLDY_VALIDATION`** — short form **`1`/`true`/`yes`** turns on **GPU API validation only** (Khronos layer + `VK_EXT_debug_utils` here; Metal shader validation on macOS). Token lists are also supported (see [Unified validation](#unified-validation-goldy_validation) below). Requires validation layers on the machine (e.g. [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), or on Debian/Ubuntu often `vulkan-validationlayers`).
 
    ```bash
    GOLDY_VALIDATION=1 cargo test --features vulkan
-   GOLDY_VALIDATION=gpu cargo test --features vulkan
+   GOLDY_VALIDATION=api cargo test --features vulkan
    GOLDY_VALIDATION=1 cargo run --example triangle
    ```
 
 2. **Loader-only** — set `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` (and ensure the loader can find the layer). Goldy detects that substring and enables the same instance extensions and layer list as GPU API validation.
 
-### Unified validation (`GOLDY_VALIDATION` + `GOLDY_VALIDATE_ALL`)
+### Unified validation (`GOLDY_VALIDATION`)
 
 | Input | Effect |
 |-------|--------|
-| `GOLDY_VALIDATE_ALL=1` (or `true`/`yes`) | **Layout** validation (Rust vs Slang, buffer strides) **and** **GPU API** validation (Vulkan/Metal as above). |
-| `GOLDY_VALIDATION=layout` | Layout / stride checks only (no Vulkan layer / Metal shader env unless also combined). |
-| `GOLDY_VALIDATION=layout,gpu` or `layout gpu` or `layout;gpu` | Both families (separators: comma, semicolon, or whitespace). |
-| `GOLDY_VALIDATION=all` | Same idea as `GOLDY_VALIDATE_ALL` for the `GOLDY_VALIDATION` variable only. |
+| `GOLDY_VALIDATION=layout` | Layout / stride checks only (no built-in API validation hooks unless combined). |
+| `GOLDY_VALIDATION=layout,api` or `layout api` or `layout;api` | Layout plus graphics API validation (separators: comma, semicolon, or whitespace). |
+| `GOLDY_VALIDATION=all` | Layout + API (same as `layout,api`). |
 | `GOLDY_VALIDATION=1` / `true` / `yes` | **GPU API only** — does **not** enable layout checks (keeps dispatch-time layout work off unless you opt in). |
 
-Tokens for GPU API validation (any of): `gpu`, `api`, `shader`, `vulkan`, `metal` (all map to the same “enable Khronos / Metal debug hooks” bucket). **`GOLDY_VALIDATE_LAYOUTS=1`** still works unchanged and is equivalent to enabling the layout family only.
+The **`api`** token selects Goldy’s graphics-API validation path (Vulkan validation layer + `VK_EXT_debug_utils` where built; Metal `MTL_SHADER_VALIDATION` when applicable). For Vulkan you can still set **`VK_INSTANCE_LAYERS`**, **`VK_LAYER_PATH`**, etc. yourself if you prefer the loader directly. **`GOLDY_VALIDATE_LAYOUTS=1`** still works unchanged and is equivalent to enabling the layout family only.
 
 **When these take effect:** You do not need a special “wrapper process” or argv-time setup. Variables must be set **before the first Goldy call that initializes the backend** — in practice, before `Instance::new()` (or the FFI/Python equivalent that creates the instance). That is earlier than “first device” in the abstract API sense, but it is still just “before GPU init in this process,” not necessarily before `main` if nothing touches the GPU earlier. If another crate or static initializer touches Vulkan/Metal first, set env at the very start of `main` (or in the test harness `#[init]`).
 
@@ -110,7 +109,7 @@ Wrong `#[repr(C)]` layouts for uniforms or structured-buffer types often show up
 
 ### Enabling validation
 
-Set **`GOLDY_VALIDATE_LAYOUTS`** to a truthy value, or use the unified form **`GOLDY_VALIDATION=layout`**, **`GOLDY_VALIDATION=layout,gpu`**, or **`GOLDY_VALIDATE_ALL=1`** (layout + GPU API), before creating the device or compiling shaders:
+Set **`GOLDY_VALIDATE_LAYOUTS`** to a truthy value, or use the unified form **`GOLDY_VALIDATION=layout`**, **`GOLDY_VALIDATION=layout,api`**, or **`GOLDY_VALIDATION=all`**, before creating the device or compiling shaders:
 
 | Value   | Effect        |
 |---------|---------------|
@@ -122,7 +121,7 @@ Set **`GOLDY_VALIDATE_LAYOUTS`** to a truthy value, or use the unified form **`G
 ```bash
 GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient --release
 GOLDY_VALIDATION=layout cargo run --example gradient --release
-GOLDY_VALIDATE_ALL=1 cargo run --example gradient --release
+GOLDY_VALIDATION=all cargo run --example gradient --release
 ```
 
 If a layout check fails, compilation returns an error describing size / field offset / name mismatches.

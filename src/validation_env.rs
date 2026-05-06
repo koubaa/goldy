@@ -1,20 +1,18 @@
-//! Environment-driven validation switches (`GOLDY_VALIDATION`, `GOLDY_VALIDATE_ALL`,
-//! `GOLDY_VALIDATE_LAYOUTS`).
+//! Environment-driven validation switches (`GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS`).
 //!
 //! **Semantics**
 //! - `GOLDY_VALIDATE_LAYOUTS=1|true|yes` — unchanged; enables Rust/Slang layout and buffer
 //!   stride checks (same family as before).
-//! - `GOLDY_VALIDATE_ALL=1|true|yes` — enables **layout** and **GPU API** validation (Vulkan
-//!   Khronos layer + Metal `MTL_SHADER_VALIDATION` when applicable).
 //! - `GOLDY_VALIDATION` — list of categories (comma, semicolon, or whitespace separated,
 //!   case-insensitive):
 //!   - `layout` / `layouts` — layout + stride checks
-//!   - `gpu`, `api`, `shader`, `vulkan`, `metal` — GPU API validation (Vulkan validation layer;
-//!     Metal runtime shader validation). `shader` is treated as the same bucket as `gpu` /
-//!     `api` (Metal shader validation is part of that path).
+//!   - `api` — graphics API validation (Vulkan validation layer + `VK_EXT_debug_utils` where
+//!     built; Metal `MTL_SHADER_VALIDATION` when applicable). For loader-only Vulkan layers, set
+//!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `all` — both layout and GPU API
-//! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (legacy / short form; does not
-//!   turn on layout checks, so hot-path layout validation stays opt-in).
+//! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
+//!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
+//!   or **`GOLDY_VALIDATION=layout,api`**.
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct ParsedValidation {
@@ -26,10 +24,6 @@ fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
-}
-
-fn goldy_validate_all() -> bool {
-    env_truthy("GOLDY_VALIDATE_ALL")
 }
 
 fn legacy_gpu_only_short_form(raw: &str) -> Option<bool> {
@@ -63,7 +57,7 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                     out.gpu_api = true;
                 }
                 "layout" | "layouts" => out.layout = true,
-                "gpu" | "api" | "shader" | "vulkan" | "metal" => out.gpu_api = true,
+                "api" => out.gpu_api = true,
                 _ => {}
             }
         }
@@ -83,9 +77,6 @@ pub fn layout_validation_enabled() -> bool {
     if env_truthy("GOLDY_VALIDATE_LAYOUTS") {
         return true;
     }
-    if goldy_validate_all() {
-        return true;
-    }
     from_goldy_validation_var().layout
 }
 
@@ -93,9 +84,6 @@ pub fn layout_validation_enabled() -> bool {
 #[cfg(any(feature = "vulkan", all(feature = "metal", target_os = "macos")))]
 #[must_use]
 pub(crate) fn gpu_api_validation_enabled() -> bool {
-    if goldy_validate_all() {
-        return true;
-    }
     from_goldy_validation_var().gpu_api
 }
 
@@ -105,7 +93,7 @@ mod tests {
 
     #[test]
     fn parse_list_tokens() {
-        let p = parse_validation_list("layout,gpu");
+        let p = parse_validation_list("layout,api");
         assert!(p.layout);
         assert!(p.gpu_api);
 
@@ -117,7 +105,7 @@ mod tests {
         assert!(p.layout);
         assert!(p.gpu_api);
 
-        let p = parse_validation_list("shader; vulkan");
+        let p = parse_validation_list("api; api");
         assert!(!p.layout);
         assert!(p.gpu_api);
     }
@@ -131,5 +119,12 @@ mod tests {
         let p = parse_validation_list("true");
         assert!(!p.layout);
         assert!(p.gpu_api);
+    }
+
+    #[test]
+    fn parse_unknown_tokens_do_not_enable_api() {
+        let p = parse_validation_list("gpu,vulkan,metal,shader");
+        assert!(!p.layout);
+        assert!(!p.gpu_api);
     }
 }

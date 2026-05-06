@@ -40,12 +40,12 @@ use crate::types::{
 };
 use anyhow::Result;
 
-/// When set via `GOLDY_VALIDATION` (GPU API tokens), `GOLDY_VALIDATE_ALL`, or loader
+/// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
 /// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
 /// Vulkan enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` at instance creation;
 /// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset.
 ///
-/// See the `validation_env` module for the full `GOLDY_VALIDATION` list syntax (`layout`, `gpu`, `all`, …).
+/// See the `validation_env` module for the full `GOLDY_VALIDATION` list syntax (`layout`, `api`, `all`, …).
 ///
 /// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
 /// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).

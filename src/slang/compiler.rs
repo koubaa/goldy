@@ -17,10 +17,9 @@ use crate::{goldy_event, goldy_span};
 ///
 /// This is on when:
 /// - `GOLDY_VALIDATE_LAYOUTS` is `1`, `true`, or `yes` (unchanged), or
-/// - `GOLDY_VALIDATE_ALL` is truthy, or
-/// - `GOLDY_VALIDATION` includes `layout` / `layouts` / `all`, or
-/// - `GOLDY_VALIDATION=1|true|yes` does **not** enable layout (GPU API only); use
-///   `GOLDY_VALIDATION=layout` or `GOLDY_VALIDATE_ALL=1` for layout + GPU.
+/// - `GOLDY_VALIDATION` lists `layout` / `layouts` / `all` (see `validation_env`).
+///
+/// Note: `GOLDY_VALIDATION=1|true|yes` enables **GPU API** validation only, not layout checks.
 ///
 /// Controls both struct layout checks (at compile time) and buffer element-stride
 /// checks (at dispatch time). Reads the environment on every call so that tests
