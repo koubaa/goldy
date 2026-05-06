@@ -74,8 +74,9 @@ fn render_push_constant_expectations(
     )
 }
 
-/// Khronos instance validation when `GOLDY_VALIDATION` is truthy, or when the loader
-/// forces `VK_LAYER_KHRONOS_validation` via `VK_INSTANCE_LAYERS`.
+/// Khronos instance validation when GPU API validation is requested (`GOLDY_VALIDATION=1`,
+/// `gpu`, `all`, `GOLDY_VALIDATE_ALL`, … — see `validation_env`), or when the loader forces
+/// `VK_LAYER_KHRONOS_validation` via `VK_INSTANCE_LAYERS`.
 fn vulkan_instance_validation_enabled() -> bool {
     if super::goldy_validation_enabled() {
         return true;

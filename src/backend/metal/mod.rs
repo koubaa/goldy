@@ -166,7 +166,7 @@ impl MetalBackend {
         tracing::info!("Initializing Metal backend");
 
         // Runtime Metal shader validation reads `MTL_SHADER_VALIDATION` before the first
-        // device is created; align with `GOLDY_VALIDATION` like Vulkan Khronos validation.
+        // device is created when GPU API validation is on (`GOLDY_VALIDATION=1`, `gpu`, `all`, …).
         if crate::backend::goldy_validation_enabled()
             && std::env::var_os("MTL_SHADER_VALIDATION").is_none()
         {
