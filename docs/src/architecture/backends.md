@@ -152,6 +152,18 @@ GOLDY_BACKEND=vulkan cargo run --example triangle
 GOLDY_BACKEND=dx12   cargo run --example triangle
 ```
 
+### Cross-backend validation
+
+| Variable | Values | Effect |
+|----------|--------|--------|
+| `GOLDY_VALIDATE_LAYOUTS` | `1`, `true`, `yes` | Rust vs Slang struct layout checks and dispatch-time buffer stride checks (unchanged). |
+| `GOLDY_VALIDATION` | `1`, `true`, `yes` | **GPU API only:** Vulkan Khronos validation + `VK_EXT_debug_utils`; Metal sets `MTL_SHADER_VALIDATION=1` if unset. |
+| `GOLDY_VALIDATION` | `layout`, `layouts` | Layout / stride family only. |
+| `GOLDY_VALIDATION` | `api` | Graphics API validation (same as `1`; combine with `layout` using commas, semicolons, or spaces). |
+| `GOLDY_VALIDATION` | `all` | Layout + GPU API (same as `layout,api`). |
+
+Vulkan also enables the same instance path when **`VK_INSTANCE_LAYERS`** contains `VK_LAYER_KHRONOS_validation` (loader-driven workflow). For timing notes and more examples, see **[DEBUGGING.md](https://github.com/koubaa/goldy/blob/main/DEBUGGING.md)** in the repository.
+
 ### DX12: Additional Environment Variables
 
 | Variable | Values | Purpose |

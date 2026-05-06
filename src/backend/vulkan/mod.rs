@@ -33,6 +33,18 @@ use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 
+/// Khronos instance validation when GPU API validation is requested (`GOLDY_VALIDATION=1`,
+/// `api`, `all`, … — see `validation_env`), or when the loader forces
+/// `VK_LAYER_KHRONOS_validation` via `VK_INSTANCE_LAYERS`.
+fn vulkan_instance_validation_enabled() -> bool {
+    if super::goldy_validation_enabled() {
+        return true;
+    }
+    std::env::var("VK_INSTANCE_LAYERS")
+        .map(|layers| layers.contains("VK_LAYER_KHRONOS_validation"))
+        .unwrap_or(false)
+}
+
 /// Vulkan backend.
 pub struct VulkanBackend {
     state: VulkanState,
@@ -107,10 +119,8 @@ impl VulkanBackend {
         #[cfg(target_os = "linux")]
         extensions.push(khr::wayland_surface::NAME.as_ptr());
 
-        // Enable validation layers if RAG_VALIDATION=1
-        let enable_validation = std::env::var("RAG_VALIDATION")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
+        let enable_validation = vulkan_instance_validation_enabled();
         let validation_layers: Vec<*const c_char> = if enable_validation {
             tracing::info!("Vulkan validation layers ENABLED");
             extensions.push(ash::ext::debug_utils::NAME.as_ptr());

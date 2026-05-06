@@ -132,7 +132,8 @@ impl ShaderModule {
     /// Create a shader module with full control over compilation options.
     ///
     /// `layout_checks` declares Rust struct layouts to validate against Slang reflection.
-    /// Validation only runs when `GOLDY_VALIDATE_LAYOUTS=1` is set; otherwise the checks
+    /// Validation only runs when layout validation is enabled (`GOLDY_VALIDATE_LAYOUTS`,
+    /// `GOLDY_VALIDATION=layout`, etc. — see `validation_env`); otherwise the checks
     /// are ignored (zero cost). Pass `&[]` when no validation is needed.
     ///
     /// Use `OptimizationLevel::None` to disable compiler optimizations for

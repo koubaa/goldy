@@ -14,15 +14,19 @@ use super::virtual_main::transform_virtual_main;
 use crate::types::OptimizationLevel;
 use crate::{goldy_event, goldy_span};
 
-/// Returns `true` when `GOLDY_VALIDATE_LAYOUTS=1` (or any truthy value).
+/// Returns `true` when layout validation is enabled.
+///
+/// This is on when:
+/// - `GOLDY_VALIDATE_LAYOUTS` is `1`, `true`, or `yes` (unchanged), or
+/// - `GOLDY_VALIDATION` lists `layout` / `layouts` / `all` (see `validation_env`).
+///
+/// Note: `GOLDY_VALIDATION=1|true|yes` enables **GPU API** validation only, not layout checks.
 ///
 /// Controls both struct layout checks (at compile time) and buffer element-stride
 /// checks (at dispatch time). Reads the environment on every call so that tests
 /// can toggle the flag without restarting the process.
 pub fn layout_validation_enabled() -> bool {
-    std::env::var("GOLDY_VALIDATE_LAYOUTS")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    crate::validation_env::layout_validation_enabled()
 }
 
 // ============================================================================

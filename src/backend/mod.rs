@@ -40,6 +40,151 @@ use crate::types::{
 };
 use anyhow::Result;
 
+/// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
+/// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
+/// Vulkan enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` at instance creation;
+/// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset.
+///
+/// See the `validation_env` module for the full `GOLDY_VALIDATION` list syntax (`layout`, `api`, `all`, …).
+///
+/// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
+/// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).
+#[cfg(any(feature = "vulkan", all(feature = "metal", target_os = "macos")))]
+#[must_use]
+pub(crate) fn goldy_validation_enabled() -> bool {
+    crate::validation_env::gpu_api_validation_enabled()
+}
+
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+use crate::types::BindlessCategory;
+
+/// Validate a typed push-constant array against per-slot category expectations
+/// reported by shader reflection.
+///
+/// `expectations[i]` is the category that slot `i` must have according to the
+/// shader's `goldy_dyn_*` call with literal slot index `i`. `None` means
+/// "reflection couldn't infer — skip validation for this slot" (e.g. the slot
+/// is only accessed via a dynamic index that regex analysis can't resolve).
+///
+/// Returns an error naming the offending slot(s) on mismatch. Designed to run
+/// on the dispatch hot path; allocates only on the error path.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_typed_push_constants(
+    handles: &[BindlessHandle],
+    expectations: &[Option<BindlessCategory>],
+    shader_name: &str,
+) -> Result<()> {
+    let mut mismatches: Vec<String> = Vec::new();
+    for (slot, handle) in handles.iter().enumerate() {
+        let Some(expected) = expectations.get(slot).copied().flatten() else {
+            continue;
+        };
+        if !handle.category().is_compatible_with(expected) {
+            mismatches.push(format!(
+                "slot {slot}: shader expects `{}` (via goldy_dyn_{}(_)) but got `{}` handle (index {})",
+                expected.name(),
+                expected.name(),
+                handle.category().name(),
+                handle.index()
+            ));
+        }
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "push-constant category mismatch in shader `{shader_name}`:\n  {}\n\
+             Hint: use `Buffer::bindless_handle()` / `Texture::bindless_handle()` \
+             rather than `.bindless_index()` so the resource's category flows \
+             through to the push-constant setter.",
+            mismatches.join("\n  ")
+        );
+    }
+}
+
+/// Pure stride validation — always runs, no env-var check.
+///
+/// `expected_strides[i]` is the byte stride the shader expects at slot `i`
+/// (from Slang reflection). `None` skips that slot. `resolve_stride` must return
+/// the host buffer's effective stride, or `None` if it cannot be determined.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+fn check_push_constant_buffer_strides(
+    handles: &[BindlessHandle],
+    expected_strides: &[Option<u32>],
+    shader_name: &str,
+    mut resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
+) -> Result<()> {
+    let mut mismatches: Vec<String> = Vec::new();
+    for (slot, handle) in handles.iter().enumerate() {
+        let Some(expected) = expected_strides.get(slot).copied().flatten() else {
+            continue;
+        };
+        match handle.category() {
+            BindlessCategory::Scattered | BindlessCategory::Broadcast => {}
+            _ => continue,
+        }
+        let Some(actual) = resolve_stride(*handle) else {
+            mismatches.push(format!(
+                "slot {slot}: shader expects element stride {expected} bytes but no element stride could be resolved for bindless index {} ({})",
+                handle.index(),
+                handle.category().name()
+            ));
+            continue;
+        };
+        if actual != expected {
+            mismatches.push(format!(
+                "slot {slot}: shader expects element stride {expected} bytes but bound buffer has stride {actual} (bindless index {})",
+                handle.index()
+            ));
+        }
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "push-constant buffer stride mismatch in shader `{shader_name}`:\n  {}\n\
+             Hint: match `Buffer::with_data` / `with_bytes_stride` / `new_with_stride` to the `T` in `goldy_dyn_*<T>`. \
+             See DEBUGGING.md (`GOLDY_VALIDATE_LAYOUTS`).",
+            mismatches.join("\n  ")
+        );
+    }
+}
+
+/// Hot-path wrapper: skips validation unless `GOLDY_VALIDATE_LAYOUTS=1`.
+/// Called by each backend's dispatch path.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_typed_push_constant_buffer_strides(
+    handles: &[BindlessHandle],
+    expected_strides: &[Option<u32>],
+    shader_name: &str,
+    resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
+) -> Result<()> {
+    if !crate::slang::layout_validation_enabled() {
+        return Ok(());
+    }
+    check_push_constant_buffer_strides(handles, expected_strides, shader_name, resolve_stride)
+}
+
 // Re-export raw_window_handle for Surface API users
 pub use raw_window_handle;
 

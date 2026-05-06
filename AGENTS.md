@@ -22,3 +22,7 @@ For debugging tips, see [DEBUGGING.md](DEBUGGING.md).
 For backend selection, see [Backend Architecture](docs/src/architecture/backends.md).
 
 For conditional compilation, see [Conditional Compilation](docs/src/architecture/conditional-compilation.md).
+
+## Cursor Cloud specific instructions
+
+See [.cursor/cloud-agent.md](.cursor/cloud-agent.md).
