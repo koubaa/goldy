@@ -153,7 +153,11 @@ pub(super) fn submit(
     // the pool bounded when callers (ekrano) don't wait on every GpuFuture.
     // Belt before reap: need live VkFence handles to poll completion.
     for belt in state.staging_belts.values_mut() {
-        belt.reclaim(&state.compute_fence_pool, &state.devices)?;
+        belt.reclaim(
+            &state.compute_fence_pool,
+            &state.devices,
+            &state.deferred_pending_tokens,
+        )?;
     }
     reap_signaled_fences(state);
 
@@ -591,6 +595,24 @@ pub(super) fn submit(
         "WriteTexture commands mismatch texture scratch pre-pass"
     );
 
+    // Release barrier: flush compute/transfer writes so they are available to
+    // subsequent queue submissions (e.g. the present-barrier layout transition
+    // in the surface present path).  Same-queue ordering guarantees execution
+    // order but NOT memory visibility across submits; this barrier closes the
+    // gap by making all writes from this command buffer available before the
+    // submit completes.
+    unsafe {
+        let release = vk::MemoryBarrier2::default()
+            .src_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+            )
+            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
+        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&release));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+    }
+
     // End command buffer
     if let Err(e) = unsafe { logical_device.device.end_command_buffer(cmd) } {
         unsafe {
@@ -601,13 +623,45 @@ pub(super) fn submit(
         return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
     }
 
-    // Create the fence here — after all fallible recording work — so that any
-    // early return from invalid commands (e.g. a destroyed buffer handle) does
-    // NOT leave an un-tracked VkFence behind.
+    let token = state.next_compute_fence_token;
+
+    // If a surface has an acquired image, defer this submit so present() can
+    // batch the compute CB + present-barrier CB in a single vkQueueSubmit.
+    // This eliminates the cross-submit memory visibility gap that caused the
+    // visual glitch on some drivers.
+    let has_active_surface = state
+        .surfaces
+        .values()
+        .any(|s| s.current_image_index.is_some());
+    if has_active_surface {
+        state.next_compute_fence_token += 1;
+        state.deferred_pending_tokens.insert(token, None);
+        state.deferred_compute.push(super::types::DeferredCompute {
+            cmd,
+            token,
+        });
+
+        if !texture_upload_scratch.is_empty() {
+            let pooled: Vec<(vk::Buffer, vk::DeviceMemory)> = texture_upload_scratch
+                .into_iter()
+                .map(|s| (s.buffer, s.memory))
+                .collect();
+            state.compute_texture_staging_pool.insert(token, pooled);
+        }
+
+        state
+            .staging_belts
+            .entry(device_handle)
+            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+            .finish(token);
+
+        return Ok(token);
+    }
+
+    // No active surface — submit immediately with a per-compute fence.
     let fence_create_info = vk::FenceCreateInfo::default();
     let fence =
         unsafe { logical_device.device.create_fence(&fence_create_info, None) }.map_err(|e| {
-            // Command buffer was already recorded; free it before returning.
             unsafe {
                 logical_device
                     .device
@@ -616,17 +670,13 @@ pub(super) fn submit(
             anyhow::anyhow!("Failed to create fence: {:?}", e)
         })?;
 
-    // Submit with fence (non-blocking)
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
-
-    let token = state.next_compute_fence_token;
 
     if let Err(e) = unsafe {
         logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], fence)
     } {
-        // Submit failed: destroy the fence and free the command buffer.
         unsafe {
             logical_device.device.destroy_fence(fence, None);
             logical_device
@@ -670,8 +720,21 @@ pub(super) fn is_fence_complete(
     _device_handle: DeviceHandle,
     token: FenceToken,
 ) -> bool {
+    if let Some(maybe_fence) = state.deferred_pending_tokens.get(&token) {
+        return match maybe_fence {
+            None => false,
+            Some(fence) => {
+                let dh = _device_handle;
+                state
+                    .devices
+                    .get(&dh)
+                    .map(|ld| unsafe { ld.device.get_fence_status(*fence) }.unwrap_or(false))
+                    .unwrap_or(true)
+            }
+        };
+    }
     let Some((device_handle, fence, _)) = state.compute_fence_pool.get(&token) else {
-        return true; // Unknown token, treat as complete
+        return true;
     };
     let Some(logical_device) = state.devices.get(device_handle) else {
         return true;
@@ -681,62 +744,83 @@ pub(super) fn is_fence_complete(
 
 /// Block until the fence signals, then destroy the fence, free the command buffer,
 /// and drop the pool entry.
+///
+/// Tokens that were deferred (submitted as part of the single present submit)
+/// are NOT in `compute_fence_pool`; their CBs are freed by `acquire()`.
+/// This function still cleans up any associated staging resources.
 pub(super) fn wait_fence(
     state: &mut super::types::VulkanState,
     _device_handle: DeviceHandle,
     token: FenceToken,
 ) -> Result<()> {
-    // Peek at device/fence without removing, so the entry survives a device-lost.
-    let (stored_device, fence) = state
+    let pool_entry = state
         .compute_fence_pool
         .get(&token)
-        .map(|(d, f, _)| (*d, *f))
-        .context("Invalid fence token")?;
+        .map(|(d, f, _)| (*d, *f));
 
-    let wait_result = unsafe {
+    if let Some((stored_device, fence)) = pool_entry {
+        // Token was submitted with its own fence — wait and clean up.
+        let wait_result = unsafe {
+            let logical_device = state
+                .devices
+                .get(&stored_device)
+                .context("Device for fence no longer exists")?;
+            logical_device
+                .device
+                .wait_for_fences(&[fence], true, u64::MAX)
+        };
+
+        let device_lost = matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST));
+        if !device_lost {
+            if let Some((device_handle, fence, cmd_buf)) = state.compute_fence_pool.remove(&token) {
+                let logical_device = state.devices.get(&device_handle).unwrap();
+                unsafe {
+                    if let Some(cb) = cmd_buf {
+                        logical_device
+                            .device
+                            .free_command_buffers(logical_device.command_pool, &[cb]);
+                    }
+                    logical_device.device.destroy_fence(fence, None);
+                }
+                if let Some(staging) = state.compute_texture_staging_pool.remove(&token) {
+                    super::texture::destroy_texture_staging_list(logical_device, staging);
+                }
+            }
+        } else {
+            tracing::warn!(
+                %token,
+                "skipping free_command_buffers/destroy_fence on lost device"
+            );
+        }
+
+        if let Err(e) = wait_result {
+            return Err(anyhow::anyhow!(
+                "Failed to wait for Vulkan compute fence (token={}); VkResult={:?}; often VK_ERROR_DEVICE_LOST after GPU reset or resource exhaustion",
+                token,
+                e
+            ));
+        }
+    } else if let Some(Some(fence)) = state.deferred_pending_tokens.get(&token).copied() {
+        // Deferred token — CB is freed in acquire(). Wait on the frame fence
+        // if present() has already submitted the batch.
         let logical_device = state
             .devices
-            .get(&stored_device)
-            .context("Device for fence no longer exists")?;
-        logical_device
-            .device
-            .wait_for_fences(&[fence], true, u64::MAX)
-    };
-
-    // On ERROR_DEVICE_LOST the driver's internal bookkeeping is corrupt;
-    // calling free_command_buffers / destroy_fence on a lost device is a
-    // known Windows heap-corruption trigger. Leave the token in the pool so
-    // destroy_device's drain loop can call vkDestroyFence immediately before
-    // vkDestroyDevice (which is safe per spec and keeps the validation layer happy).
-    let device_lost = matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST));
-    if !device_lost {
-        if let Some((device_handle, fence, cmd_buf)) = state.compute_fence_pool.remove(&token) {
-            let logical_device = state.devices.get(&device_handle).unwrap();
-            unsafe {
-                if let Some(cb) = cmd_buf {
-                    logical_device
-                        .device
-                        .free_command_buffers(logical_device.command_pool, &[cb]);
-                }
-                logical_device.device.destroy_fence(fence, None);
-            }
-            if let Some(staging) = state.compute_texture_staging_pool.remove(&token) {
-                super::texture::destroy_texture_staging_list(logical_device, staging);
-            }
+            .get(&_device_handle)
+            .context("Device for deferred fence no longer exists")?;
+        let wait_result = unsafe {
+            logical_device
+                .device
+                .wait_for_fences(&[fence], true, u64::MAX)
+        };
+        if let Err(e) = &wait_result {
+            tracing::warn!(%token, result = ?e, "wait_fence on deferred token's frame fence failed");
         }
+        wait_result.context("Failed to wait for deferred token's frame fence")?;
+    } else if let Some(None) = state.deferred_pending_tokens.get(&token).copied() {
+        // Deferred token, but the batch is not on the GPU yet — staging cleanup
+        // stays deferred to acquire() along with the CB.
     } else {
-        tracing::warn!(
-            %token,
-            "skipping free_command_buffers/destroy_fence on lost device (avoids driver heap corruption on some Windows drivers); token stays in pool for destroy_device drain"
-        );
-    }
-
-    if let Err(e) = wait_result {
-        return Err(anyhow::anyhow!(
-            "Failed to wait for Vulkan compute fence (token={}); VkResult={:?}; often VK_ERROR_DEVICE_LOST after GPU reset or resource exhaustion",
-            token,
-            e
-        ));
+        // Unknown token (already cleaned up). Nothing to do.
     }
     Ok(())
 }

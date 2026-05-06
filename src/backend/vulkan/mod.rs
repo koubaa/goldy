@@ -216,6 +216,8 @@ impl VulkanBackend {
             compute_texture_staging_pool: HashMap::new(),
             next_compute_fence_token: 1,
             staging_belts: HashMap::new(),
+            deferred_compute: Vec::new(),
+            deferred_pending_tokens: HashMap::new(),
         };
 
         Ok(Self { state })
@@ -538,6 +540,8 @@ impl GpuBackend for VulkanBackend {
             &mut self.state.surfaces,
             &mut self.state.textures,
             surface_handle,
+            &mut self.state.deferred_pending_tokens,
+            &mut self.state.compute_texture_staging_pool,
         );
     }
 
@@ -549,6 +553,8 @@ impl GpuBackend for VulkanBackend {
             &mut self.state.textures,
             &mut self.state.next_texture_handle,
             surface_handle,
+            &mut self.state.deferred_pending_tokens,
+            &mut self.state.compute_texture_staging_pool,
         )
     }
 
@@ -586,14 +592,7 @@ impl GpuBackend for VulkanBackend {
         surface_handle: SurfaceHandle,
         _image: SwapchainImageHandle,
     ) -> Result<()> {
-        surface::present(
-            &self.state.instance,
-            &mut self.state.devices,
-            &mut self.state.surfaces,
-            &mut self.state.textures,
-            surface_handle,
-            _image,
-        )
+        surface::present(&mut self.state, surface_handle, _image)
     }
 
     fn surface_resize(

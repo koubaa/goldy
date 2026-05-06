@@ -535,8 +535,8 @@ pub(crate) struct FrameSync {
     pub prep_command_buffer: vk::CommandBuffer,
     pub image_available_semaphore: vk::Semaphore,
     /// Signaled by the acquire-time prep submit once the swapchain image is in
-    /// `GENERAL` layout. Render and compute-only present paths wait on this instead
-    /// of `image_available_semaphore`, so the swapchain image is always in a
+    /// `GENERAL` layout. The graphics render path and the compute-only flush
+    /// submit wait on this so the swapchain image is always in a
     /// compute-writable layout by the time any downstream submit touches it.
     pub image_ready_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
@@ -544,6 +544,18 @@ pub(crate) struct FrameSync {
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
     /// presentation uses a barrier submit in `present` instead (see `surface::present`).
     pub render_pass_submitted: bool,
+    /// Deferred compute CBs submitted as part of this frame slot's single
+    /// `vkQueueSubmit`.  Freed in `acquire()` after the frame's in_flight_fence
+    /// has been waited on.
+    pub deferred_compute_cbs: Vec<vk::CommandBuffer>,
+    /// Tokens for deferred compute submits in this frame slot, so
+    /// `is_fence_complete` / `wait_fence` can treat them as complete once the
+    /// frame fence is reclaimed.
+    pub deferred_compute_tokens: Vec<u64>,
+    /// Surface texture handle whose VkImageView + bindless descriptor must stay
+    /// alive until the GPU finishes this frame slot's work.  Unregistered in
+    /// `acquire()` after `in_flight_fence` has been waited on.
+    pub pending_surface_texture: Option<super::TextureHandle>,
 }
 
 /// Surface (swapchain) state for window presentation.
@@ -556,8 +568,12 @@ pub(crate) struct SurfaceState {
     pub width: u32,
     pub height: u32,
     pub format: vk::Format,
-    /// Current swapchain present mode (vsync strategy).
+    /// Desired present mode (may differ from `swapchain_present_mode` until
+    /// the swapchain is recreated).
     pub present_mode: vk::PresentModeKHR,
+    /// Present mode the live swapchain was actually created with.  Used by
+    /// `resize()` to detect when a mode change requires swapchain recreation.
+    pub swapchain_present_mode: vk::PresentModeKHR,
     /// Depth buffer (when depth_format is Some)
     pub depth_format: Option<DepthFormat>,
     pub depth_image: Option<vk::Image>,
@@ -768,4 +784,20 @@ pub(super) struct VulkanState {
     pub next_compute_fence_token: u64,
     /// Per-device staging belts for batched WriteBuffer uploads.
     pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
+    /// Compute command buffers deferred until present() so they can be batched
+    /// into a single vkQueueSubmit with the present-barrier CB.
+    pub deferred_compute: Vec<DeferredCompute>,
+    /// Tokens whose work is deferred or in-flight as part of a frame's single
+    /// submit.  Value is `None` while the CB is recorded but not yet submitted
+    /// (between `submit_compute` and `present`), and `Some(fence)` after
+    /// `present()` submits the batch.  `wait_fence` blocks on the fence;
+    /// `is_fence_complete` returns false when `None`, checks `get_fence_status`
+    /// when `Some`.  Entries are removed in `acquire()` after the fence has been
+    /// waited on.
+    pub deferred_pending_tokens: HashMap<u64, Option<vk::Fence>>,
+}
+
+pub(super) struct DeferredCompute {
+    pub cmd: vk::CommandBuffer,
+    pub token: u64,
 }

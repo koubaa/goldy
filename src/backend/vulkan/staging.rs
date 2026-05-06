@@ -60,23 +60,28 @@ impl StagingBelt {
         &mut self,
         compute_fence_pool: &HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
         devices: &HashMap<DeviceHandle, LogicalDevice>,
+        deferred_pending_tokens: &HashMap<u64, Option<vk::Fence>>,
     ) -> Result<()> {
         let mut i = 0;
         while i < self.in_flight.len() {
             let (token, _) = &self.in_flight[i];
-            let done = match compute_fence_pool.get(token) {
-                None => true,
-                Some((device_handle, fence, _)) => {
-                    let logical_device = devices
-                        .get(device_handle)
-                        .context("StagingBelt::reclaim: device missing")?;
-                    match unsafe { logical_device.device.get_fence_status(*fence) } {
-                        Ok(true) => true,
-                        Ok(false) => false,
-                        Err(vk::Result::NOT_READY) => false,
-                        Err(e) => {
-                            tracing::warn!(?e, token, "get_fence_status during belt reclaim");
-                            false
+            let done = if deferred_pending_tokens.contains_key(token) {
+                false
+            } else {
+                match compute_fence_pool.get(token) {
+                    None => true,
+                    Some((device_handle, fence, _)) => {
+                        let logical_device = devices
+                            .get(device_handle)
+                            .context("StagingBelt::reclaim: device missing")?;
+                        match unsafe { logical_device.device.get_fence_status(*fence) } {
+                            Ok(true) => true,
+                            Ok(false) => false,
+                            Err(vk::Result::NOT_READY) => false,
+                            Err(e) => {
+                                tracing::warn!(?e, token, "get_fence_status during belt reclaim");
+                                false
+                            }
                         }
                     }
                 }

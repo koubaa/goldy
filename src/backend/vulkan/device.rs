@@ -541,6 +541,35 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 }
             }
 
+            // Remove surface textures (swapchain images) from the textures map
+            // BEFORE the generic texture destroy loop.  These images are owned by
+            // the swapchain — only the VkImageView should be destroyed, NOT the
+            // VkImage.  Handles live in current_texture_handle and in per-frame
+            // pending_surface_texture slots.
+            for surface_state in state.surfaces.values_mut() {
+                if surface_state.device_handle != device_handle {
+                    continue;
+                }
+                if let Some(th) = surface_state.current_texture_handle.take() {
+                    if let Some(tex_state) = state.textures.remove(&th) {
+                        logical_device.resource_registry.unregister_texture(th);
+                        logical_device
+                            .device
+                            .destroy_image_view(tex_state.view, None);
+                    }
+                }
+                for fs in &mut surface_state.frame_sync {
+                    if let Some(th) = fs.pending_surface_texture.take() {
+                        if let Some(tex_state) = state.textures.remove(&th) {
+                            logical_device.resource_registry.unregister_texture(th);
+                            logical_device
+                                .device
+                                .destroy_image_view(tex_state.view, None);
+                        }
+                    }
+                }
+            }
+
             // Destroy textures owned by this device
             let texture_handles: Vec<_> = state
                 .textures
@@ -585,20 +614,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 .map(|(h, _)| *h)
                 .collect();
             for handle in surface_handles {
-                if let Some(tex_handle) = state
-                    .surfaces
-                    .get(&handle)
-                    .and_then(|s| s.current_texture_handle)
-                {
-                    if let Some(tex_state) = state.textures.remove(&tex_handle) {
-                        logical_device
-                            .resource_registry
-                            .unregister_texture(tex_handle);
-                        logical_device
-                            .device
-                            .destroy_image_view(tex_state.view, None);
-                    }
-                }
                 if let Some(surface_state) = state.surfaces.remove(&handle) {
                     for frame in surface_state.frame_sync {
                         logical_device
@@ -637,6 +652,16 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     surface_loader.destroy_surface(surface_state.surface, None);
                 }
             }
+
+            // Clean up any remaining deferred compute state.  CBs are freed
+            // implicitly when the command pool is destroyed; just drain the maps
+            // so staging resources get destroyed.
+            for d in state.deferred_compute.drain(..) {
+                if let Some(staging) = state.compute_texture_staging_pool.remove(&d.token) {
+                    super::texture::destroy_texture_staging_list(&logical_device, staging);
+                }
+            }
+            state.deferred_pending_tokens.clear();
 
             // Drain any compute fences still in the pool for this device.
             // Tests (and async dispatch patterns) may leave signaled-but-uncollected
