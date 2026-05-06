@@ -165,6 +165,15 @@ impl MetalBackend {
         let _span = goldy_span!("backend.metal.init").entered();
         tracing::info!("Initializing Metal backend");
 
+        // Runtime Metal shader validation reads `MTL_SHADER_VALIDATION` before the first
+        // device is created; align with `GOLDY_VALIDATION` like Vulkan Khronos validation.
+        if crate::backend::goldy_validation_enabled()
+            && std::env::var_os("MTL_SHADER_VALIDATION").is_none()
+        {
+            std::env::set_var("MTL_SHADER_VALIDATION", "1");
+            tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION); was unset");
+        }
+
         let slang_compiler =
             crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 

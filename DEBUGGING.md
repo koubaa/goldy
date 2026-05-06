@@ -2,6 +2,14 @@
 
 ## Metal Backend Issues
 
+### Runtime shader validation (`MTL_SHADER_VALIDATION`)
+
+When **`GOLDY_VALIDATION`** is truthy (`1`, `true`, or `yes`), Goldy sets **`MTL_SHADER_VALIDATION=1`** before the first Metal device is created, **only if** `MTL_SHADER_VALIDATION` is not already set. That opts into Apple’s runtime shader validation (see Apple’s Metal debugging documentation for other allowed values).
+
+```bash
+GOLDY_VALIDATION=1 cargo run --example triangle
+```
+
 ### Shader Compiles but Uniforms Don't Update (Static Animation)
 
 If using `set_push_constants()` with a Metal shader that uses `ParameterBlock`:
@@ -47,6 +55,25 @@ If a `StructuredBuffer<uint>` reads garbage on DX12 but works on Vulkan, check t
 Python buffers automatically detect stride from numpy dtype. If using raw bytes, ensure you're not accessing them as a typed `StructuredBuffer` in the shader.
 
 ## Vulkan Backend Issues
+
+### GPU validation (Khronos validation layer)
+
+Vulkan API misuse is easiest to catch with the Khronos validation layer. CI clears `VK_LAYER_PATH` for speed and stability; locally, enable validation in either of these ways:
+
+1. **`GOLDY_VALIDATION`** (same flag as Metal; truthy: `1`, `true`, `yes`) — Goldy requests `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` when creating the instance. Requires the validation layer on your machine (e.g. [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), or on Debian/Ubuntu often `vulkan-validationlayers`).
+
+   ```bash
+   GOLDY_VALIDATION=1 cargo test --features vulkan
+   GOLDY_VALIDATION=1 cargo run --example triangle
+   ```
+
+2. **Loader-only** — set `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` (and ensure the loader can find the layer). Goldy detects that substring and enables the same instance extensions and layer list as `GOLDY_VALIDATION`.
+
+You can wrap any `cargo` command, for example:
+
+```bash
+GOLDY_VALIDATION=1 cargo test --features vulkan
+```
 
 ### Shader Not Working (Static Output, No Animation)
 

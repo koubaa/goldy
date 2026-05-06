@@ -152,6 +152,14 @@ GOLDY_BACKEND=vulkan cargo run --example triangle
 GOLDY_BACKEND=dx12   cargo run --example triangle
 ```
 
+### Cross-backend GPU validation
+
+| Variable | Values | Effect |
+|----------|--------|--------|
+| `GOLDY_VALIDATION` | `1`, `true`, `yes` | **Vulkan:** enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` at instance creation (requires validation layers installed). **Metal:** sets `MTL_SHADER_VALIDATION=1` before device creation if unset. |
+
+Vulkan also enables the same instance path when **`VK_INSTANCE_LAYERS`** contains `VK_LAYER_KHRONOS_validation` (loader-driven workflow).
+
 ### DX12: Additional Environment Variables
 
 | Variable | Values | Purpose |
