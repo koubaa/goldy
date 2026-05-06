@@ -31,6 +31,7 @@ pub mod texture;
 pub mod types;
 
 pub mod slang;
+pub mod validation_env;
 
 // Structured instrumentation for debugging and profiling
 pub mod instrumentation;
