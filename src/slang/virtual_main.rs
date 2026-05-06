@@ -630,10 +630,10 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
 
     for (i, item) in params.iter_mut().enumerate() {
         match item {
-            ParamItem::Single(p) if p.kind == ParamKind::PassThrough => {
-                if Some(i) != preserve_idx {
-                    p.kind = ParamKind::Broadcast;
-                }
+            ParamItem::Single(p)
+                if p.kind == ParamKind::PassThrough && Some(i) != preserve_idx =>
+            {
+                p.kind = ParamKind::Broadcast;
             }
             ParamItem::Conditional {
                 then_params,
@@ -1084,7 +1084,7 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
     }
 
     // Sort by start position descending, apply.
-    replacements.sort_by(|a, b| b.0.cmp(&a.0));
+    replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (start, end, replacement) in replacements {
         if start < source.len() && end <= source.len() && start <= end {
             source.replace_range(start..end, replacement);
