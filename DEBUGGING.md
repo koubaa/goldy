@@ -4,7 +4,7 @@
 
 ### Runtime shader validation (`MTL_SHADER_VALIDATION`)
 
-When **`GOLDY_VALIDATION`** is truthy (`1`, `true`, or `yes`), Goldy sets **`MTL_SHADER_VALIDATION=1`** before the first Metal device is created, **only if** `MTL_SHADER_VALIDATION` is not already set. That opts into Apple’s runtime shader validation (see Apple’s Metal debugging documentation for other allowed values).
+When **`GOLDY_VALIDATION`** is truthy (`1`, `true`, or `yes`), Goldy sets **`MTL_SHADER_VALIDATION=1`** before the first Metal device is created, **only if** `MTL_SHADER_VALIDATION` is not already set. That opts into Apple’s runtime shader validation (see Apple’s Metal debugging documentation for other allowed values). Like Vulkan, this is applied at backend initialization; avoid touching Metal before `Instance::new()` if you rely on Goldy to set the variable.
 
 ```bash
 GOLDY_VALIDATION=1 cargo run --example triangle
@@ -69,11 +69,9 @@ Vulkan API misuse is easiest to catch with the Khronos validation layer. CI clea
 
 2. **Loader-only** — set `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` (and ensure the loader can find the layer). Goldy detects that substring and enables the same instance extensions and layer list as `GOLDY_VALIDATION`.
 
-You can wrap any `cargo` command, for example:
+**When these take effect:** You do not need a special “wrapper process” or argv-time setup. Variables must be set **before the first Goldy call that initializes the backend** — in practice, before `Instance::new()` (or the FFI/Python equivalent that creates the instance). That is earlier than “first device” in the abstract API sense, but it is still just “before GPU init in this process,” not necessarily before `main` if nothing touches the GPU earlier. If another crate or static initializer touches Vulkan/Metal first, set env at the very start of `main` (or in the test harness `#[init]`).
 
-```bash
-GOLDY_VALIDATION=1 cargo test --features vulkan
-```
+**Developer experience:** Prefer the usual shell form `GOLDY_VALIDATION=1 cargo test …` / `cargo run …` (same pattern as `GOLDY_BACKEND`, `RUST_LOG`). That works for humans, copy-paste docs, and agents that already run `cargo test` per `AGENTS.md` without learning a repo-specific script.
 
 ### Shader Not Working (Static Output, No Animation)
 
