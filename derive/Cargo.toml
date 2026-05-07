@@ -2,7 +2,7 @@
 name = "goldy_derive"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "LGPL-2.1-or-later"
 description = "Derive macros for goldy (LayoutCheckable, etc.)"
 
 [lib]

@@ -42,5 +42,5 @@ byte[] pixels = target.ReadToCpu();
 
 ## License
 
-MIT License
+LGPL-2.1-or-later. A commercial license is also available; contact [koubaa on github](permament email tbd) for terms.
 

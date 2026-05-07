@@ -17,7 +17,7 @@
     <Description>Modern GPU library for .NET - Vulkan, DX12, Metal. High-performance graphics with Slang shaders.</Description>
     <PackageTags>gpu;graphics;vulkan;rendering;dx12;metal;shader;slang</PackageTags>
     <RepositoryUrl>https://github.com/koubaa/goldy</RepositoryUrl>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageLicenseExpression>LGPL-2.1-or-later</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     
     <!-- Generate package on build -->
