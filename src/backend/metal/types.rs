@@ -353,8 +353,10 @@ pub(crate) struct LogicalDevice {
     pub argument_buffer: MTLBuffer,
     /// Encoder for writing buffers to the argument buffer
     pub argument_encoder: ArgumentEncoder,
-    /// Encoder for writing textures to the argument buffer
+    /// Encoder for writing sampled textures (ReadOnly) to the argument buffer
     pub texture_encoder: ArgumentEncoder,
+    /// Encoder for writing storage images (ReadWrite) to the argument buffer
+    pub storage_image_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
 }

@@ -196,6 +196,23 @@ pub(super) fn acquire(
     let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
+    // #region agent log
+    {
+        use std::io::Write;
+        let usage_raw: u64 = texture.usage().bits() as u64;
+        let pixel_fmt: u64 = texture.pixel_format() as u64;
+        let tex_w = texture.width();
+        let tex_h = texture.height();
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        let entry = format!(
+            "{{\"sessionId\":\"a74a28\",\"runId\":\"post-fix-R\",\"timestamp\":{ts},\"hypothesisId\":\"R\",\"location\":\"surface.rs:acquire\",\"message\":\"drawable_texture_usage\",\"data\":{{\"usage_bits\":{usage_raw},\"pixel_format\":{pixel_fmt},\"width\":{tex_w},\"height\":{tex_h}}}}}\n"
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::instrumentation::debug_paths::debug_log_path()) {
+            let _ = f.write_all(entry.as_bytes());
+        }
+    }
+    // #endregion
+
     let device_handle = surface_state.device_handle;
     let width = surface_state.width;
     let height = surface_state.height;
@@ -514,16 +531,35 @@ fn register_surface_texture(
             .bind_storage_image_slot(handle, bindless_slot);
         let global = ResourceRegistry::storage_image_global_index(bindless_slot);
 
-        let encoded_length = logical_device.texture_encoder.encoded_length();
+        // Surface drawable is used as a storage image (RWTexture2D write target),
+        // so encode with the ReadWrite storage image encoder.
+        let encoded_length = logical_device.storage_image_encoder.encoded_length();
         let offset = (global as u64) * encoded_length;
         if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
             logical_device
-                .texture_encoder
+                .storage_image_encoder
                 .set_argument_buffer(&logical_device.argument_buffer, offset);
             logical_device
-                .texture_encoder
+                .storage_image_encoder
                 .set_texture(0, texture_owned.as_ref());
         }
+        // #region agent log
+        {
+            use std::io::Write;
+            let gpu_rid = texture_owned.gpu_resource_id()._impl;
+            let ab_readback = if offset + 8 <= ARGUMENT_BUFFER_SIZE {
+                unsafe { (logical_device.argument_buffer.contents().add(offset as usize) as *const u64).read() }
+            } else { 0 };
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            let entry = format!(
+                "{{\"sessionId\":\"a74a28\",\"runId\":\"post-fix-BB\",\"timestamp\":{ts},\"hypothesisId\":\"BB\",\"location\":\"surface.rs:register\",\"message\":\"drawable_encode_verify\",\"data\":{{\"bindless_slot\":{bindless_slot},\"global\":{global},\"encoded_length\":{encoded_length},\"offset\":{offset},\"gpu_resource_id\":{gpu_rid},\"ab_readback\":{ab_readback},\"match\":{}}}}}\n",
+                gpu_rid == ab_readback
+            );
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::instrumentation::debug_paths::debug_log_path()) {
+                let _ = f.write_all(entry.as_bytes());
+            }
+        }
+        // #endregion
 
         global
     };
