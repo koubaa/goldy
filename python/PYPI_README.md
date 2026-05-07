@@ -214,4 +214,4 @@ For testing before a real release, you can configure a separate Trusted Publishe
 
 ## License
 
-MIT License
+LGPL-2.1-or-later. A commercial license is also available; contact [koubaa on github](permament email tbd) for terms.
