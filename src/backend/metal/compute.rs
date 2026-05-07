@@ -63,6 +63,8 @@ pub(super) fn create(
             device_handle,
             pipeline,
             workgroup_size,
+            push_constant_categories: Vec::new(),
+            shader_debug_name: String::new(),
         },
     );
 
@@ -216,6 +218,13 @@ fn record_commands_to_buffer(
             }
             GpuCommand::BindResourcesTyped { handles } => {
                 ensure_compute!();
+                if let Some(pipeline) = current_pipeline {
+                    crate::backend::validate_typed_push_constants(
+                        handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
                 let mut layout = PushLayout::default();
                 for (i, handle) in handles.iter().enumerate() {
                     if i >= MAX_BINDLESS_SLOTS {

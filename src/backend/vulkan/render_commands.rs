@@ -126,6 +126,11 @@ pub(super) fn record(
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
                     let mut layout = PushLayout::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
                         if i >= MAX_BINDLESS_SLOTS {

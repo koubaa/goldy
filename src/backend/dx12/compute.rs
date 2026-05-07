@@ -118,6 +118,7 @@ pub(super) fn create(
             pipeline_state,
             root_signature,
             parameter_block_layouts: Vec::new(),
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );
@@ -287,11 +288,13 @@ pub(super) fn submit(
 
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
+    let mut current_compute_pipeline: Option<super::ComputePipelineHandle> = None;
 
     // Process commands
     for command in commands {
         match command {
             GpuCommand::SetPipeline(handle) => {
+                current_compute_pipeline = Some(*handle);
                 if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
                     unsafe {
                         command_list.SetComputeRootSignature(&pipeline_state.root_signature);
@@ -358,6 +361,13 @@ pub(super) fn submit(
             GpuCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
+                if let Some(pipeline) = current_compute_pipeline.and_then(|h| state.compute_pipelines.get(&h)) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
                 let mut layout = types::PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
                     if i >= types::MAX_BINDLESS_SLOTS {

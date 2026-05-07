@@ -91,8 +91,7 @@ pub(crate) fn validate_typed_push_constants(
         };
         if !handle.category().is_compatible_with(expected) {
             mismatches.push(format!(
-                "slot {slot}: shader expects `{}` (via goldy_dyn_{}(_)) but got `{}` handle (index {})",
-                expected.name(),
+                "slot {slot}: shader expects `{}` but got `{}` handle (index {})",
                 expected.name(),
                 handle.category().name(),
                 handle.index()
@@ -110,79 +109,6 @@ pub(crate) fn validate_typed_push_constants(
             mismatches.join("\n  ")
         );
     }
-}
-
-/// Pure stride validation — always runs, no env-var check.
-///
-/// `expected_strides[i]` is the byte stride the shader expects at slot `i`
-/// (from Slang reflection). `None` skips that slot. `resolve_stride` must return
-/// the host buffer's effective stride, or `None` if it cannot be determined.
-#[cfg(any(
-    test,
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
-))]
-fn check_push_constant_buffer_strides(
-    handles: &[BindlessHandle],
-    expected_strides: &[Option<u32>],
-    shader_name: &str,
-    mut resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
-) -> Result<()> {
-    let mut mismatches: Vec<String> = Vec::new();
-    for (slot, handle) in handles.iter().enumerate() {
-        let Some(expected) = expected_strides.get(slot).copied().flatten() else {
-            continue;
-        };
-        match handle.category() {
-            BindlessCategory::Scattered | BindlessCategory::Broadcast => {}
-            _ => continue,
-        }
-        let Some(actual) = resolve_stride(*handle) else {
-            mismatches.push(format!(
-                "slot {slot}: shader expects element stride {expected} bytes but no element stride could be resolved for bindless index {} ({})",
-                handle.index(),
-                handle.category().name()
-            ));
-            continue;
-        };
-        if actual != expected {
-            mismatches.push(format!(
-                "slot {slot}: shader expects element stride {expected} bytes but bound buffer has stride {actual} (bindless index {})",
-                handle.index()
-            ));
-        }
-    }
-    if mismatches.is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "push-constant buffer stride mismatch in shader `{shader_name}`:\n  {}\n\
-             Hint: match `Buffer::with_data` / `with_bytes_stride` / `new_with_stride` to the `T` in `goldy_dyn_*<T>`. \
-             See DEBUGGING.md (`GOLDY_VALIDATE_LAYOUTS`).",
-            mismatches.join("\n  ")
-        );
-    }
-}
-
-/// Hot-path wrapper: skips validation unless `GOLDY_VALIDATE_LAYOUTS=1`.
-/// Called by each backend's dispatch path.
-#[cfg(any(
-    test,
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
-))]
-pub(crate) fn validate_typed_push_constant_buffer_strides(
-    handles: &[BindlessHandle],
-    expected_strides: &[Option<u32>],
-    shader_name: &str,
-    resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
-) -> Result<()> {
-    if !crate::slang::layout_validation_enabled() {
-        return Ok(());
-    }
-    check_push_constant_buffer_strides(handles, expected_strides, shader_name, resolve_stride)
 }
 
 // Re-export raw_window_handle for Surface API users
@@ -787,5 +713,98 @@ pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> 
             Ok(Box::new(metal::MetalBackend::new()?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
+    }
+}
+
+#[cfg(test)]
+mod push_constant_validation_tests {
+    use super::validate_typed_push_constants;
+    use crate::types::{BindlessCategory, BindlessHandle};
+
+    #[test]
+    fn valid_categories_pass() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 0),
+            BindlessHandle::new(BindlessCategory::Broadcast, 1),
+        ];
+        let expectations = vec![
+            Some(BindlessCategory::Scattered),
+            Some(BindlessCategory::Broadcast),
+        ];
+        validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
+    }
+
+    #[test]
+    fn none_expectations_are_skipped() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 0),
+            BindlessHandle::new(BindlessCategory::Texture, 1),
+        ];
+        let expectations = vec![None, None];
+        validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
+    }
+
+    #[test]
+    fn empty_expectations_passes_any_handles() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 5),
+            BindlessHandle::new(BindlessCategory::Sampler, 2),
+        ];
+        validate_typed_push_constants(&handles, &[], "test_shader").unwrap();
+    }
+
+    #[test]
+    fn scattered_where_broadcast_expected_fails() {
+        let handles = vec![BindlessHandle::new(BindlessCategory::Scattered, 0)];
+        let expectations = vec![Some(BindlessCategory::Broadcast)];
+        let err = validate_typed_push_constants(&handles, &expectations, "my_shader")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slot 0"), "error should name the slot: {err}");
+        assert!(
+            err.contains("broadcast"),
+            "error should mention expected category: {err}"
+        );
+        assert!(
+            err.contains("scattered"),
+            "error should mention actual category: {err}"
+        );
+    }
+
+    #[test]
+    fn texture_where_scattered_expected_fails() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 0),
+            BindlessHandle::new(BindlessCategory::Texture, 3),
+        ];
+        let expectations = vec![
+            Some(BindlessCategory::Scattered),
+            Some(BindlessCategory::Scattered),
+        ];
+        let err = validate_typed_push_constants(&handles, &expectations, "compute_cs")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slot 1"), "error should name slot 1: {err}");
+        assert!(
+            err.contains("texture"),
+            "error should mention actual: {err}"
+        );
+    }
+
+    #[test]
+    fn multiple_mismatches_reported() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Texture, 0),
+            BindlessHandle::new(BindlessCategory::Sampler, 1),
+        ];
+        let expectations = vec![
+            Some(BindlessCategory::Scattered),
+            Some(BindlessCategory::Broadcast),
+        ];
+        let err = validate_typed_push_constants(&handles, &expectations, "sh")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slot 0"), "should report slot 0: {err}");
+        assert!(err.contains("slot 1"), "should report slot 1: {err}");
     }
 }

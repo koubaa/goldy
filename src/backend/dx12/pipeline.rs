@@ -173,6 +173,7 @@ pub(super) fn create(
             vertex_stride: vertex_layout.stride,
             topology,
             parameter_block_layouts: Vec::new(),
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );
@@ -360,6 +361,7 @@ pub(super) fn create_with_depth(
             vertex_stride: vertex_layout.stride,
             topology,
             parameter_block_layouts: Vec::new(),
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );

@@ -111,6 +111,7 @@ pub(super) fn create(
             layout: pipeline_layout,
             owns_layout,
             parameter_block_layouts: Vec::new(),
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );
@@ -422,6 +423,11 @@ pub(super) fn submit(
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
                     let mut layout = PushLayout::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
                         if i >= types::MAX_BINDLESS_SLOTS {

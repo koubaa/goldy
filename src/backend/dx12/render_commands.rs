@@ -19,6 +19,7 @@ pub(super) fn record(
     // COM: same pointer as ID3D12GraphicsCommandList for method calls.
     let cmd: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let mut current_vertex_stride = 24u32; // Default stride
+    let mut current_pipeline_handle: Option<super::PipelineHandle> = None;
     for command in commands {
         match command {
             RenderCommand::Clear(_) => {
@@ -30,6 +31,7 @@ pub(super) fn record(
             RenderCommand::SetPipeline(pipeline_handle) => {
                 if let Some(pipeline) = state.pipelines.get(pipeline_handle) {
                     current_vertex_stride = pipeline.vertex_stride;
+                    current_pipeline_handle = Some(*pipeline_handle);
                     unsafe {
                         cmd.SetGraphicsRootSignature(&pipeline.root_signature);
                         cmd.SetPipelineState(&pipeline.pipeline_state);
@@ -116,6 +118,13 @@ pub(super) fn record(
             RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
+                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
                 let mut layout = types::PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
                     if i >= types::MAX_BINDLESS_SLOTS {

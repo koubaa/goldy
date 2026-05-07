@@ -163,6 +163,7 @@ pub(super) fn create(
             layout,
             owns_layout,
             parameter_block_layouts: Vec::new(),
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );
@@ -366,6 +367,7 @@ pub(super) fn create_with_depth(
             layout,
             owns_layout,
             parameter_block_layouts: Vec::new(),
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );

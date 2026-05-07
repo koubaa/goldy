@@ -91,6 +91,11 @@ pub struct ParameterBlockLayout {
 pub struct ShaderReflection {
     /// All parameter blocks found in the shader
     pub parameter_blocks: Vec<ParameterBlockLayout>,
+    /// Per push-constant slot, the [`BindlessCategory`](crate::types::BindlessCategory)
+    /// the shader expects. Populated from `[goldy_*]` entry-point analysis at compile time.
+    /// Used by [`crate::backend::validate_typed_push_constants`] to catch category
+    /// mismatches when `BindResourcesTyped` is used.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
 }
 
 /// Byte layout of a Slang `struct` under uniform / constant-buffer rules (`SlangLayoutRules::Default`).
@@ -851,7 +856,10 @@ impl SlangCompiler {
                 .sum::<usize>()
         );
 
-        Ok(ShaderReflection { parameter_blocks })
+        Ok(ShaderReflection {
+            parameter_blocks,
+            push_constant_categories: Vec::new(),
+        })
     }
 
     /// Extract layout information for a ParameterBlock.

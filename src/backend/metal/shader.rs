@@ -257,6 +257,13 @@ pub(super) fn ensure_stage_compiled(
         _ => unreachable!("stage already validated above"),
     }
     if shader.reflection.is_none() {
+        let reflection = reflection.map(|mut r| {
+            if r.push_constant_categories.is_empty() {
+                r.push_constant_categories =
+                    crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
+            }
+            r
+        });
         shader.reflection = reflection;
     }
 

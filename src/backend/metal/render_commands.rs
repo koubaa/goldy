@@ -23,11 +23,13 @@ pub(super) fn record(
 ) -> Result<()> {
     let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
     let mut current_primitive_type = MTLPrimitiveType::Triangle;
+    let mut current_pipeline_handle: Option<PipelineHandle> = None;
 
     for cmd in commands {
         match cmd {
             RenderCommand::Clear(_) | RenderCommand::ClearDepth(_) => {}
             RenderCommand::SetPipeline(pipeline_handle) => {
+                current_pipeline_handle = Some(*pipeline_handle);
                 if let Some(pipeline) = pipelines.get(pipeline_handle) {
                     encoder.set_render_pipeline_state(&pipeline.pipeline);
                     current_primitive_type = pipeline.primitive_type;
@@ -113,6 +115,13 @@ pub(super) fn record(
             RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
+                if let Some(pipeline) = current_pipeline_handle.and_then(|h| pipelines.get(&h)) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
                 let mut layout = PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
                     if i >= MAX_BINDLESS_SLOTS {

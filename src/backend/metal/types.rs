@@ -764,6 +764,10 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
+    /// Per push-constant slot category expectations from shader analysis.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier for debugging.
+    pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
@@ -772,6 +776,10 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: MTLComputePipelineState,
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
+    /// Per push-constant slot category expectations from shader analysis.
+    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Human-readable identifier for debugging.
+    pub shader_debug_name: String,
 }
 
 /// GPU render target state with optional staging for CPU readback.

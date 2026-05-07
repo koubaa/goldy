@@ -123,6 +123,8 @@ pub(super) fn create_with_depth(
             pipeline,
             depth_stencil: depth_stencil_state,
             primitive_type: topology_to_mtl(topology),
+            push_constant_categories: Vec::new(),
+            shader_debug_name: String::new(),
         },
     );
 

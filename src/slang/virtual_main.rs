@@ -43,6 +43,113 @@ use std::ops::Range;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Extract per-bindless-slot [`BindlessCategory`] expectations from the
+/// `[goldy_*]` entry points in `source`.
+///
+/// Returns a vector indexed by bindless slot. Each element is `Some(category)`
+/// when the slot's type is unambiguous, or `None` when the source has no
+/// `[goldy_*]` annotations.  Multiple entry points (vertex + fragment) are
+/// merged: fragment takes precedence for shared slots.
+pub fn extract_push_constant_categories(
+    source: &str,
+) -> Vec<Option<crate::types::BindlessCategory>> {
+    use crate::types::BindlessCategory;
+
+    let entries = find_all_entries(source);
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    fn category_for_param(param: &Param) -> Option<BindlessCategory> {
+        match &param.kind {
+            ParamKind::Resource => {
+                let ty = param.ty.trim();
+                if ty.starts_with("Scattered<") || ty.starts_with("BufRO<") || ty == "ByteAddress"
+                {
+                    Some(BindlessCategory::Scattered)
+                } else if ty.starts_with("Interpolated<") {
+                    Some(BindlessCategory::Texture)
+                } else if ty.starts_with("DirectSpatial<") {
+                    Some(BindlessCategory::StorageImage)
+                } else if ty == "Filter" {
+                    Some(BindlessCategory::Sampler)
+                } else {
+                    None
+                }
+            }
+            ParamKind::Broadcast => Some(BindlessCategory::Broadcast),
+            _ => None,
+        }
+    }
+
+    fn extract_from_params(params: &[ParamItem]) -> Vec<Option<BindlessCategory>> {
+        let mut cats: Vec<Option<BindlessCategory>> = Vec::new();
+        for item in params {
+            match item {
+                ParamItem::Single(p) => {
+                    if matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast) {
+                        cats.push(category_for_param(p));
+                    }
+                }
+                ParamItem::Conditional {
+                    then_params,
+                    else_params,
+                    ..
+                } => {
+                    let then_count = then_params
+                        .iter()
+                        .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                        .count();
+                    let else_count = else_params
+                        .iter()
+                        .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                        .count();
+                    let max_slots = then_count.max(else_count);
+                    for i in 0..max_slots {
+                        let then_cat = then_params
+                            .iter()
+                            .filter(|p| {
+                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
+                            })
+                            .nth(i)
+                            .and_then(category_for_param);
+                        let else_cat = else_params
+                            .iter()
+                            .filter(|p| {
+                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
+                            })
+                            .nth(i)
+                            .and_then(category_for_param);
+                        if then_cat == else_cat {
+                            cats.push(then_cat);
+                        } else {
+                            cats.push(None);
+                        }
+                    }
+                }
+            }
+        }
+        cats
+    }
+
+    // Fragment shader expectations take precedence (resource binding typically lives there).
+    let mut fragment_cats: Option<Vec<Option<BindlessCategory>>> = None;
+    let mut fallback_cats: Option<Vec<Option<BindlessCategory>>> = None;
+
+    for entry in &entries {
+        let cats = extract_from_params(&entry.params);
+        if !cats.is_empty() {
+            if entry.stage == Stage::Fragment {
+                fragment_cats = Some(cats);
+            } else if fallback_cats.is_none() || entry.stage == Stage::Compute {
+                fallback_cats = Some(cats);
+            }
+        }
+    }
+
+    fragment_cats.or(fallback_cats).unwrap_or_default()
+}
+
 /// Transform a Slang source string that may contain `[goldy_*]` virtual entry
 /// points into a standard Slang source with generated `[shader(...)]` wrappers.
 ///
@@ -630,9 +737,7 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
 
     for (i, item) in params.iter_mut().enumerate() {
         match item {
-            ParamItem::Single(p)
-                if p.kind == ParamKind::PassThrough && Some(i) != preserve_idx =>
-            {
+            ParamItem::Single(p) if p.kind == ParamKind::PassThrough && Some(i) != preserve_idx => {
                 p.kind = ParamKind::Broadcast;
             }
             ParamItem::Conditional {
@@ -1877,5 +1982,78 @@ void cs_main(Interpolated<float4> src_tex, Filter samp, Scattered<float4> dst, T
             result.contains("SV_DispatchThreadID"),
             "Missing SV_DispatchThreadID"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_push_constant_categories tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn categories_compute_scattered_and_broadcast() {
+        use crate::types::BindlessCategory;
+        let source = r#"
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
+    data[id.x] = cfg.base;
+}
+"#;
+        let cats = extract_push_constant_categories(source);
+        assert_eq!(cats.len(), 2);
+        assert_eq!(cats[0], Some(BindlessCategory::Broadcast));
+        assert_eq!(cats[1], Some(BindlessCategory::Scattered));
+    }
+
+    #[test]
+    fn categories_compute_all_resource_types() {
+        use crate::types::BindlessCategory;
+        let source = r#"
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(
+    Scattered<float4> buf,
+    BufRO<uint> ro,
+    Interpolated<float4> tex,
+    DirectSpatial<float4> img,
+    Filter sampler,
+    ThreadId id
+) {}
+"#;
+        let cats = extract_push_constant_categories(source);
+        assert_eq!(cats.len(), 5);
+        assert_eq!(cats[0], Some(BindlessCategory::Scattered));
+        assert_eq!(cats[1], Some(BindlessCategory::Scattered));
+        assert_eq!(cats[2], Some(BindlessCategory::Texture));
+        assert_eq!(cats[3], Some(BindlessCategory::StorageImage));
+        assert_eq!(cats[4], Some(BindlessCategory::Sampler));
+    }
+
+    #[test]
+    fn categories_fragment_takes_precedence() {
+        use crate::types::BindlessCategory;
+        let source = r#"
+[goldy_vertex]
+void vs_main(Scattered<float4> verts, VertexId vid) {}
+
+[goldy_fragment]
+float4 fs_main(Interpolated<float4> tex, Filter samp) : SV_Target {
+    return float4(0,0,0,1);
+}
+"#;
+        let cats = extract_push_constant_categories(source);
+        assert_eq!(cats.len(), 2);
+        assert_eq!(cats[0], Some(BindlessCategory::Texture));
+        assert_eq!(cats[1], Some(BindlessCategory::Sampler));
+    }
+
+    #[test]
+    fn categories_empty_for_non_goldy_source() {
+        let source = r#"
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uniform uint _bw0) {}
+"#;
+        let cats = extract_push_constant_categories(source);
+        assert!(cats.is_empty());
     }
 }
