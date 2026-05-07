@@ -331,6 +331,51 @@ pub(super) fn submit(
         logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
     }
 
+    // #region agent log
+    {
+        use std::io::Write;
+        let mut cmd_summary: Vec<String> = Vec::new();
+        for c in commands {
+            let s = match c {
+                GpuCommand::SetPipeline(h) => format!("SetPipeline({})", h),
+                GpuCommand::BindResources { buffers } => format!("BindResources(bufs={})", buffers.len()),
+                GpuCommand::BindResourcesRaw { indices, user } => format!("BindRaw(indices={:?},user={:?})", indices, user),
+                GpuCommand::BindResourcesTyped { handles } => format!("BindTyped(n={})", handles.len()),
+                GpuCommand::Dispatch { workgroups_x, workgroups_y, workgroups_z } => format!("Dispatch({},{},{})", workgroups_x, workgroups_y, workgroups_z),
+                GpuCommand::DispatchIndirect { buffer, offset } => format!("DispatchIndirect(buf={},off={})", buffer, offset),
+                GpuCommand::Barrier => "Barrier".to_string(),
+                GpuCommand::ResourceBarrier { buffers, textures } => format!("ResourceBarrier(bufs={},texs={})", buffers.len(), textures.len()),
+                GpuCommand::ClearBuffer { buffer, offset, size } => format!("ClearBuffer(buf={},off={},sz={})", buffer, offset, size),
+                GpuCommand::WriteBuffer { buffer, offset, data } => format!("WriteBuffer(buf={},off={},len={})", buffer, offset, data.len()),
+                GpuCommand::WriteTexture { texture, width, height, .. } => format!("WriteTexture(tex={},{}x{})", texture, width, height),
+                GpuCommand::WriteTextureRegion { texture, x, y, width, height, .. } => format!("WriteTextureRegion(tex={},{}x{}@{},{})", texture, width, height, x, y),
+            };
+            cmd_summary.push(s);
+        }
+        let cmds_json = cmd_summary.iter().map(|s| format!("\"{}\"", s.replace('"', "'"))).collect::<Vec<_>>().join(",");
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        let token_val = state.next_compute_fence_token;
+        let entry = format!(
+            "{{\"sessionId\":\"a74a28\",\"runId\":\"vulkan\",\"timestamp\":{ts},\"hypothesisId\":\"Q\",\"location\":\"vulkan/compute.rs:submit\",\"message\":\"cmd_stream\",\"data\":{{\"fence\":{token_val},\"cmd_count\":{},\"cmds\":[{cmds_json}]}}}}\n",
+            commands.len()
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::instrumentation::debug_paths::debug_log_path()) {
+            let _ = f.write_all(entry.as_bytes());
+        }
+
+        let buf_entries: Vec<String> = buffers.iter().map(|(h, bs)| {
+            format!("{{\"handle\":{},\"bindless_index\":{},\"size\":{}}}", h, bs.bindless_index.unwrap_or(9999), bs.size)
+        }).collect();
+        let buf_json = buf_entries.join(",");
+        let entry2 = format!(
+            "{{\"sessionId\":\"a74a28\",\"runId\":\"vulkan\",\"timestamp\":{ts},\"hypothesisId\":\"DD\",\"location\":\"vulkan/compute.rs:submit\",\"message\":\"buffer_sizes\",\"data\":{{\"fence\":{token_val},\"buffers\":[{buf_json}]}}}}\n"
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::instrumentation::debug_paths::debug_log_path()) {
+            let _ = f.write_all(entry2.as_bytes());
+        }
+    }
+    // #endregion
+
     // Track current pipeline for resource slot binding
     let mut current_pipeline: Option<ComputePipelineHandle> = None;
     let mut belt_idx = 0usize;
