@@ -43,7 +43,7 @@ use std::ops::Range;
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Extract per-bindless-slot [`BindlessCategory`] expectations from the
+/// Extract per-bindless-slot [`BindlessCategory`](crate::types::BindlessCategory) expectations from the
 /// `[goldy_*]` entry points in `source`.
 ///
 /// Returns a vector indexed by bindless slot. Each element is `Some(category)`

@@ -93,8 +93,8 @@ pub struct ShaderReflection {
     pub parameter_blocks: Vec<ParameterBlockLayout>,
     /// Per push-constant slot, the [`BindlessCategory`](crate::types::BindlessCategory)
     /// the shader expects. Populated from `[goldy_*]` entry-point analysis at compile time.
-    /// Used by [`crate::backend::validate_typed_push_constants`] to catch category
-    /// mismatches when `BindResourcesTyped` is used.
+    /// Used by backend validation when `BindResourcesTyped` is used to catch category
+    /// mismatches against the shader's reflected expectations.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
 }
 
