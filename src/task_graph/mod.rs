@@ -41,7 +41,8 @@
 //!     .bind_resources_raw(&[bbox_idx])
 //!     .dispatch(16, 1, 1);
 //!
-//! graph.submit(&device)?.wait()?;
+//! let tv = graph.submit(&device)?;
+//! device.wait_until(tv)?;
 //! ```
 //!
 //! # Node kinds

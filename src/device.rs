@@ -12,7 +12,7 @@
 //!   These operations are safe from any thread but serialize internally.
 //!
 //! - **Command Submission**: Submitting commands via [`RenderTarget::render()`](crate::RenderTarget::render)
-//!   or [`SurfaceFrame::render()`](crate::SurfaceFrame::render) acquires the backend lock.
+//!   or [`Frame::render`](crate::surface::Frame::render) acquires the backend lock.
 //!
 //! ## Best Practices
 //!
@@ -25,8 +25,9 @@
 //! multi-queue support for parallel command submission if needed.
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
-use crate::gpu_future::GpuFuture;
 use crate::shader_library::ShaderLibrary;
+use crate::task_graph::TaskGraph;
+use crate::timeline::TimelineValue;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
 use anyhow::{Context, Result};
@@ -396,19 +397,36 @@ impl Device {
         self.backend.lock().unwrap().is_device_valid(self.handle)
     }
 
-    /// Submit a full compute command stream (typically [`TaskGraph::compile_commands`]).
-    /// Returns [`GpuFuture`] — does not block.
-    pub(crate) fn submit_compute_commands(
-        &self,
-        commands: &[backend::GpuCommand],
-    ) -> Result<GpuFuture> {
+    /// Latest GPU completion counter on this device's timeline (`wait_until(value)` is valid once
+    /// `gpu_progress() >= value`).
+    pub fn gpu_progress(&self) -> TimelineValue {
+        let backend = self.backend.lock().unwrap();
+        backend.gpu_progress(self.handle)
+    }
+
+    /// Block until the device timeline reaches at least `value`.
+    pub fn wait_until(&self, value: TimelineValue) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
-        let token = backend.submit_compute(self.handle, commands)?;
-        Ok(GpuFuture {
-            backend: Arc::clone(&self.backend),
-            device: self.handle,
-            fence_token: Some(token),
-        })
+        backend.wait_until(self.handle, value)
+    }
+
+    /// Like [`wait_until`](Self::wait_until) but returns `Ok(false)` on timeout.
+    pub fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<bool> {
+        let mut backend = self.backend.lock().unwrap();
+        backend.wait_until_timeout(self.handle, value, timeout_ms)
+    }
+
+    /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).
+    pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
+        let commands = graph.compile_commands();
+        let mut backend = self.backend.lock().unwrap();
+        backend.submit_standalone(self.handle, &commands)
+    }
+
+    /// Submit a task graph and block until it completes.
+    pub fn dispatch(&self, graph: &TaskGraph) -> Result<()> {
+        let v = self.submit(graph)?;
+        self.wait_until(v)
     }
 
     /// Get device capabilities and format preferences.

@@ -253,7 +253,7 @@ impl RenderState {
         }
 
         // Render
-        let frame = self.surface.acquire()?;
+        let frame = self.surface.begin()?;
 
         let mut encoder = CommandEncoder::new();
         {

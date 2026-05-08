@@ -26,8 +26,9 @@
 //! slot `(N-1) % 3` — the slots never alias across concurrent frames.
 
 use super::super::{
-    DeviceHandle, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle,
+    DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle,
 };
+use super::compute;
 use super::render_commands::{create_render_pass, record};
 use super::types::{
     MetalState, ResourceRegistry, SurfaceState, TextureState, ARGUMENT_BUFFER_SIZE,
@@ -37,12 +38,15 @@ use super::utils::depth_format_to_mtl;
 use crate::types::{DepthFormat, PresentMode, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
+use block::ConcreteBlock;
 use cocoa::base::{id, nil, NO, YES};
 use core_graphics_types::geometry::CGSize;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// Create a surface for window presentation.
 /// When `depth_format` is `Some`, a depth buffer is created for 3D rendering.
@@ -129,6 +133,7 @@ pub(super) fn create(
             current_texture_handle: None,
             bindless_storage_slots,
             present_mode: PresentMode::Auto,
+            frame_pending_gpu_commands: Vec::new(),
         },
     );
     tracing::info!(
@@ -341,7 +346,7 @@ pub(super) fn present(
     state: &mut MetalState,
     surface: SurfaceHandle,
     _image: SwapchainImageHandle,
-) -> Result<()> {
+) -> Result<crate::timeline::TimelineValue> {
     let surface_state = state
         .surfaces
         .get(&surface)
@@ -350,7 +355,7 @@ pub(super) fn present(
     let drawable_ptr = match surface_state.current_drawable {
         Some(d) => d,
         None => {
-            return Ok(());
+            return Ok(state.timeline_completed.load(Ordering::Acquire));
         }
     };
     let tex_handle = surface_state.current_texture_handle;
@@ -363,6 +368,19 @@ pub(super) fn present(
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
 
+    let token = state
+        .next_compute_fence_token
+        .fetch_add(1, Ordering::SeqCst);
+    let timeline = Arc::clone(&state.timeline_completed);
+    let handler = ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
+        let status = cb.status();
+        if status == mtl::MTLCommandBufferStatus::Completed {
+            timeline.fetch_max(token, Ordering::SeqCst);
+        }
+    })
+    .copy();
+    command_buffer.add_completed_handler(&handler);
+
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
     command_buffer.present_drawable(drawable_ref);
@@ -370,7 +388,7 @@ pub(super) fn present(
 
     // Release the retained drawable
     unsafe {
-        let () = msg_send![drawable, release];
+        let (): () = msg_send![drawable, release];
     }
 
     // Unregister the temporary surface texture
@@ -383,7 +401,32 @@ pub(super) fn present(
     surface_state.current_drawable = None;
     surface_state.current_texture_handle = None;
 
-    Ok(())
+    Ok(token)
+}
+
+pub(super) fn end_frame(
+    state: &mut MetalState,
+    frame: FrameToken,
+) -> Result<crate::timeline::TimelineValue> {
+    let dh = state
+        .surfaces
+        .get(&frame.surface)
+        .context("Invalid surface handle")?
+        .device_handle;
+
+    let pending = {
+        let surf = state
+            .surfaces
+            .get_mut(&frame.surface)
+            .context("Invalid surface handle")?;
+        std::mem::take(&mut surf.frame_pending_gpu_commands)
+    };
+
+    if !pending.is_empty() {
+        compute::submit(state, dh, &pending)?;
+    }
+
+    present(state, frame.surface, frame.image)
 }
 
 /// Set the present mode on the CAMetalLayer.

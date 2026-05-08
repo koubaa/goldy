@@ -38,7 +38,7 @@ use crate::types::{
     DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess,
     TextureFlags, TextureFormat, VertexBufferLayout,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 /// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
 /// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
@@ -141,9 +141,15 @@ pub type SwapchainImageHandle = u64;
 pub type TextureHandle = u64;
 pub type SamplerHandle = u64;
 
-/// Fence token for non-blocking compute submission.
-/// Backends use this to identify a specific GPU submission for polling and waiting.
-pub type FenceToken = u64;
+/// Legacy fence token for internal submissions (same numeric space as [`crate::timeline::TimelineValue`] on DX12).
+pub(crate) type FenceToken = u64;
+
+/// Opaque token tying surface work to an acquired swapchain frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FrameToken {
+    pub surface: SurfaceHandle,
+    pub image: SwapchainImageHandle,
+}
 
 /// Render command for command buffer recording.
 #[derive(Debug, Clone)]
@@ -550,6 +556,55 @@ pub trait GpuBackend: Send + Sync {
         PresentMode::Auto
     }
 
+    // --- Timeline + explicit frame bracket (preferred API) ---
+
+    /// Latest GPU completion point on this device's timeline (`value` is done when
+    /// `gpu_progress() >= value`).
+    fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
+
+    fn wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()>;
+
+    fn wait_until_timeout(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+        timeout_ms: u32,
+    ) -> Result<bool>;
+
+    /// Submit compute (and transfer) commands on the device timeline, not tied to a surface frame.
+    fn submit_standalone(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GpuCommand],
+    ) -> Result<crate::timeline::TimelineValue>;
+
+    /// Acquire the next swapchain image and begin a frame bracket.
+    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
+        let image = self.surface_acquire(surface)?;
+        let tex = self
+            .surface_frame_texture(surface)
+            .context("begin_frame: surface frame texture unavailable")?;
+        Ok((FrameToken { surface, image }, tex))
+    }
+
+    fn record_render(
+        &mut self,
+        frame: &FrameToken,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
+        self.surface_render(frame.surface, frame.image, commands)
+    }
+
+    /// Record GPU work that must be ordered with the active surface frame (e.g. compute into the swapchain).
+    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()>;
+
+    /// End the frame: submit all recorded work, present, return the timeline value when the frame completes on the GPU.
+    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue>;
+
     // Compute pipeline management
     /// Create a compute pipeline from a compute shader.
     fn create_compute_pipeline(
@@ -564,35 +619,38 @@ pub trait GpuBackend: Send + Sync {
     /// Execute compute commands.
     /// This submits compute work to the GPU and waits for completion.
     fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[GpuCommand]) -> Result<()> {
-        let token = self.submit_compute(device, commands)?;
-        self.wait_fence(device, token)
+        let v = self.submit_standalone(device, commands)?;
+        self.wait_until(device, v)
     }
 
-    /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+    /// Submit compute commands without blocking.
     fn submit_compute(
         &mut self,
         device: DeviceHandle,
         commands: &[GpuCommand],
-    ) -> Result<FenceToken>;
+    ) -> Result<FenceToken> {
+        self.submit_standalone(device, commands)
+    }
 
     /// Check if the fence for the given token has signaled (work complete).
-    fn is_fence_complete(&self, device: DeviceHandle, token: FenceToken) -> bool;
+    fn is_fence_complete(&self, device: DeviceHandle, token: FenceToken) -> bool {
+        self.gpu_progress(device) >= token
+    }
 
     /// Block until the fence signals. Returns an error if the device was lost.
-    ///
-    /// Implementations should remove and destroy the fence for `token` after waiting.
-    fn wait_fence(&mut self, device: DeviceHandle, token: FenceToken) -> Result<()>;
+    fn wait_fence(&mut self, device: DeviceHandle, token: FenceToken) -> Result<()> {
+        self.wait_until(device, token)
+    }
 
-    /// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed, Err if device lost.
-    ///
-    /// On success or unrecoverable error, implementations should remove and destroy the fence.
-    /// On timeout the fence remains valid for a later wait.
+    /// Wait with timeout.
     fn wait_fence_timeout(
         &mut self,
         device: DeviceHandle,
         token: FenceToken,
         timeout_ms: u32,
-    ) -> Result<bool>;
+    ) -> Result<bool> {
+        self.wait_until_timeout(device, token, timeout_ms)
+    }
 
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap

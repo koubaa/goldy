@@ -232,7 +232,7 @@ impl RenderState {
         compute_encoder.dispatch(&self.device)?;
 
         // Render particles
-        let frame = self.surface.acquire()?;
+        let frame = self.surface.begin()?;
 
         let bg_color = if self.is_snow {
             Color {

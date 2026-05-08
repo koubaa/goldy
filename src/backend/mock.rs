@@ -54,6 +54,8 @@ pub struct MockBackend {
     pub compute_dispatch_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
+    device_timeline_next: HashMap<DeviceHandle, u64>,
+    device_timeline_completed: HashMap<DeviceHandle, u64>,
 }
 
 #[allow(dead_code)]
@@ -124,6 +126,7 @@ struct MockSurface {
     format: TextureFormat,
     next_image: SwapchainImageHandle,
     current_texture_handle: Option<TextureHandle>,
+    pending_frame_compute: Vec<GpuCommand>,
 }
 
 impl MockBackend {
@@ -166,6 +169,8 @@ impl MockBackend {
             samplers_created: 0,
             compute_dispatch_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
+            device_timeline_next: HashMap::new(),
+            device_timeline_completed: HashMap::new(),
         }
     }
 
@@ -607,6 +612,7 @@ impl GpuBackend for MockBackend {
                 format: self.default_surface_format, // Use configured format
                 next_image: 1,
                 current_texture_handle: None,
+                pending_frame_compute: Vec::new(),
             },
         );
 
@@ -625,6 +631,7 @@ impl GpuBackend for MockBackend {
 
         let image = surf.next_image;
         surf.next_image += 1;
+        surf.pending_frame_compute.clear();
 
         // Create a mock texture for the surface frame
         let tex_handle = self.next_texture_handle;
@@ -898,6 +905,91 @@ impl GpuBackend for MockBackend {
         self.samplers.get(&sampler).map(|s| s.bindless_index)
     }
 
+    fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+        self.device_timeline_completed
+            .get(&device)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let cur = self.gpu_progress(device);
+        if value > cur {
+            self.device_timeline_completed.insert(device, value);
+        }
+        Ok(())
+    }
+
+    fn wait_until_timeout(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+        _timeout_ms: u32,
+    ) -> Result<bool> {
+        self.wait_until(device, value)?;
+        Ok(true)
+    }
+
+    fn submit_standalone(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GpuCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        self.recorded_compute_commands.push(commands.to_vec());
+        self.compute_dispatch_count += 1;
+
+        let next = self.device_timeline_next.entry(device).or_insert(0);
+        *next += 1;
+        let tv = *next;
+        self.device_timeline_completed.insert(device, tv);
+        Ok(tv)
+    }
+
+    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
+        let surf = self
+            .surfaces
+            .get_mut(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
+        surf.pending_frame_compute.extend_from_slice(commands);
+        Ok(())
+    }
+
+    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
+        let device = self
+            .surfaces
+            .get(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .device_handle;
+
+        let pending = {
+            let surf = self
+                .surfaces
+                .get_mut(&frame.surface)
+                .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
+            std::mem::take(&mut surf.pending_frame_compute)
+        };
+        if !pending.is_empty() {
+            self.recorded_compute_commands.push(pending);
+            self.compute_dispatch_count += 1;
+        }
+
+        self.surface_present(frame.surface, frame.image)?;
+
+        let next = self.device_timeline_next.entry(device).or_insert(0);
+        *next += 1;
+        let tv = *next;
+        self.device_timeline_completed.insert(device, tv);
+        Ok(tv)
+    }
+
     // Compute pipeline management
     fn create_compute_pipeline(
         &mut self,
@@ -923,39 +1015,6 @@ impl GpuBackend for MockBackend {
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
         self.compute_pipelines.remove(&pipeline);
-    }
-
-    fn submit_compute(
-        &mut self,
-        device: DeviceHandle,
-        commands: &[GpuCommand],
-    ) -> Result<FenceToken> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-
-        self.recorded_compute_commands.push(commands.to_vec());
-        self.compute_dispatch_count += 1;
-
-        // Mock completes immediately; use token 0.
-        Ok(0)
-    }
-
-    fn is_fence_complete(&self, _device: DeviceHandle, _token: FenceToken) -> bool {
-        true
-    }
-
-    fn wait_fence(&mut self, _device: DeviceHandle, _token: FenceToken) -> Result<()> {
-        Ok(())
-    }
-
-    fn wait_fence_timeout(
-        &mut self,
-        _device: DeviceHandle,
-        _token: FenceToken,
-        _timeout_ms: u32,
-    ) -> Result<bool> {
-        Ok(true)
     }
 }
 

@@ -851,6 +851,8 @@ pub(crate) struct SurfaceState {
     pub bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT],
     /// Current present mode
     pub present_mode: crate::types::PresentMode,
+    /// Frame-scoped GPU commands ([`crate::backend::GpuBackend::record_gpu_work`]).
+    pub frame_pending_gpu_commands: Vec<crate::backend::GpuCommand>,
 }
 
 // Safety: Metal objects are thread-safe when properly synchronized
@@ -889,9 +891,14 @@ pub(super) struct FenceEntry {
     pub signal: Arc<FenceSignal>,
 }
 
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
+    /// Monotonic timeline: max completed fence token (see compute `submit` / surface `present`).
+    pub timeline_completed: Arc<AtomicU64>,
     /// Pool of in-flight compute command buffers for non-blocking submit.
     /// Key: FenceToken. Removed when wait completes.
     pub compute_fence_pool: Mutex<HashMap<FenceToken, FenceEntry>>,

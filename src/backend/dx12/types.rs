@@ -612,6 +612,8 @@ pub(crate) struct SurfaceState {
     /// closed in `surface::destroy`.  `acquire()` calls `WaitForSingleObject` on this handle
     /// to block until DXGI is ready to accept a new frame, replacing the per-present CPU stall.
     pub frame_latency_waitable: Option<SendSyncHandle>,
+    /// Compute commands recorded between `begin_frame` and `end_frame` / `present`.
+    pub pending_frame_compute: Vec<crate::backend::GpuCommand>,
 }
 
 /// Consolidated DX12 backend state.

@@ -30,6 +30,8 @@ use super::*;
 use crate::{goldy_event, goldy_span};
 use ::metal as mtl;
 use anyhow::{Context, Result};
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use types::MetalState;
 
 /// Returns `true` when every command buffer we've submitted has reached
@@ -181,6 +183,7 @@ impl MetalBackend {
 
         Ok(Self {
             state: MetalState {
+                timeline_completed: Arc::new(AtomicU64::new(0)),
                 compute_fence_pool: std::sync::Mutex::new(std::collections::HashMap::new()),
                 next_compute_fence_token: std::sync::atomic::AtomicU64::new(1),
                 device_lost: std::sync::atomic::AtomicBool::new(false),
@@ -543,7 +546,7 @@ impl GpuBackend for MetalBackend {
         surface: SurfaceHandle,
         image: SwapchainImageHandle,
     ) -> Result<()> {
-        surface::present(&mut self.state, surface, image)
+        surface::present(&mut self.state, surface, image).map(|_| ())
     }
 
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
@@ -578,20 +581,87 @@ impl GpuBackend for MetalBackend {
         compute::create(&mut self.state, device, compute_shader)
     }
 
-    fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
-        compute::destroy(&mut self.state, pipeline);
+    fn gpu_progress(&self, _device: DeviceHandle) -> crate::timeline::TimelineValue {
+        self.state
+            .timeline_completed
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn submit_compute(
+    fn wait_until(
+        &mut self,
+        _device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while self.gpu_progress(_device) < value {
+            if self
+                .state
+                .device_lost
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("Metal device lost");
+            }
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!("wait_until exceeded 300s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
+    fn wait_until_timeout(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+        timeout_ms: u32,
+    ) -> Result<bool> {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
+        while self.gpu_progress(device) < value {
+            if self
+                .state
+                .device_lost
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("Metal device lost");
+            }
+            if std::time::Instant::now() > deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(true)
+    }
+
+    fn submit_standalone(
         &mut self,
         device: DeviceHandle,
         commands: &[GpuCommand],
-    ) -> Result<super::FenceToken> {
+    ) -> Result<crate::timeline::TimelineValue> {
         compute::submit(&mut self.state, device, commands)
     }
 
-    fn is_fence_complete(&self, device: DeviceHandle, token: super::FenceToken) -> bool {
-        compute::is_fence_complete(&self.state, device, token)
+    fn record_gpu_work(
+        &mut self,
+        frame: &FrameToken,
+        commands: &[GpuCommand],
+    ) -> Result<()> {
+        let surf = self
+            .state
+            .surfaces
+            .get_mut(&frame.surface)
+            .context("Invalid surface handle")?;
+        surf.frame_pending_gpu_commands
+            .extend_from_slice(commands);
+        Ok(())
+    }
+
+    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::end_frame(&mut self.state, frame)
+    }
+
+    fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
+        compute::destroy(&mut self.state, pipeline);
     }
 
     fn wait_fence(&mut self, device: DeviceHandle, token: super::FenceToken) -> Result<()> {

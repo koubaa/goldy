@@ -8,8 +8,8 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance, PresentMode,
-    ShaderModule, Surface, SurfaceConfig,
+    task_graph::NodeAccess, Buffer, ComputePipeline, DataAccess, DeviceType, Instance, PresentMode,
+    ShaderModule, Surface, SurfaceConfig, TaskGraph,
 };
 use std::sync::Arc;
 use winit::{
@@ -259,10 +259,8 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     )?;
 
     // Acquire the surface frame and get its texture
-    let frame = state.surface.acquire()?;
-    let texture = frame
-        .texture()
-        .expect("Backend does not support surface frame textures");
+    let frame = state.surface.begin()?;
+    let texture = frame.texture();
 
     // Dispatch the compute shader to write directly to the surface texture
     let wg_x = width.div_ceil(8);
@@ -280,14 +278,13 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         .bindless_handle()
         .expect("Surface texture has no bindless handle");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&state.compute_pipeline);
-        pass.bind_resources_typed(&[uniform_handle, texture_handle]);
-        pass.dispatch(wg_x, wg_y, 1);
-    }
-    encoder.submit(&state.device)?.wait()?;
+    let mut graph = TaskGraph::new();
+    graph
+        .node("compute", &state.compute_pipeline)
+        .bind_buffer(&state.uniform_buffer, NodeAccess::Read)
+        .bind_resources_raw(&[uniform_handle.index(), texture_handle.index()])
+        .dispatch(wg_x, wg_y, 1);
+    frame.submit_compute(&graph)?;
 
     // Present — the compute shader already wrote the pixels
     frame.present()?;

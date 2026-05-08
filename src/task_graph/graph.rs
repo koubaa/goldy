@@ -6,7 +6,7 @@ use super::ResourceId;
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
-use crate::gpu_future::GpuFuture;
+use crate::timeline::TimelineValue;
 use crate::texture::Texture;
 use anyhow::Result;
 
@@ -36,7 +36,8 @@ use anyhow::Result;
 ///     .bind_resources_raw(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
-/// graph.submit(&device)?.wait()?;
+/// let tv = graph.submit(&device)?;
+/// device.wait_until(tv)?;
 /// ```
 pub struct TaskGraph {
     ir: GraphIR,
@@ -220,17 +221,14 @@ impl TaskGraph {
     }
 
     /// Analyze the graph and submit all tasks with optimal barriers.
-    /// Returns a [`GpuFuture`] for non-blocking completion.
-    pub fn submit(&self, device: &Device) -> Result<GpuFuture> {
-        let commands = self.compile_commands();
-        device.submit_compute_commands(&commands)
+    /// Returns the device [`TimelineValue`] to pass to [`Device::wait_until`].
+    pub fn submit(&self, device: &Device) -> Result<TimelineValue> {
+        device.submit(self)
     }
 
     /// Analyze the graph, submit, and block until complete.
     pub fn dispatch(&self, device: &Device) -> Result<()> {
-        let commands = self.compile_commands();
-        let mut backend = device.backend.lock().unwrap();
-        backend.dispatch_compute(device.handle, &commands)
+        device.dispatch(self)
     }
 
     /// Number of task nodes in the graph.
@@ -482,9 +480,9 @@ mod tests {
             .bind_buffer(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
-        let mut future = graph.submit(&device).unwrap();
-        assert!(future.is_complete());
-        future.wait().unwrap();
+        let tv = graph.submit(&device).unwrap();
+        assert!(device.gpu_progress() >= tv);
+        device.wait_until(tv).unwrap();
     }
 
     #[test]

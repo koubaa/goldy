@@ -744,6 +744,7 @@ pub(super) fn submit(
 }
 
 /// Check if the fence for the given token has signaled.
+#[allow(dead_code, reason = "retained for deprecated fence-based paths; timeline uses fence internally")]
 pub(super) fn is_fence_complete(
     state: &Dx12State,
     device_handle: DeviceHandle,
@@ -757,6 +758,7 @@ pub(super) fn is_fence_complete(
 }
 
 /// Block until the fence signals.
+#[allow(dead_code, reason = "retained for deprecated fence-based paths")]
 pub(super) fn wait_fence(
     state: &Dx12State,
     device_handle: DeviceHandle,
@@ -778,6 +780,7 @@ pub(super) fn wait_fence(
 }
 
 /// Wait with timeout. Returns Ok(true) if signaled, Ok(false) if timeout elapsed.
+#[allow(dead_code, reason = "retained for deprecated fence-based paths")]
 pub(super) fn wait_fence_timeout(
     state: &Dx12State,
     device_handle: DeviceHandle,

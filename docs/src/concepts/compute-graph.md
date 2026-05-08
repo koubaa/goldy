@@ -60,7 +60,7 @@ graph.node("bbox_clear", &pipeline_c)
     .bind_resources_raw(&[bbox_idx])
     .dispatch(16, 1, 1);
 
-graph.submit(&device)?.wait()?;
+graph.dispatch(&device)?;
 ```
 
 **When to use:** dynamic workloads, prototyping, small graphs, cases where topology changes per frame.
@@ -101,7 +101,8 @@ exec.bind_buffer(tagmonoid, &tagmonoid_buf);
 exec.bind_buffer(reduced, &reduced_buf);
 exec.set_dim(wg_reduce, (64, 1, 1));
 
-exec.submit(&device)?.wait()?;
+let tv = exec.submit(&device)?;
+device.wait_until(tv)?;
 ```
 
 **When to use:** fixed-topology pipelines where the sequence of shaders doesn't change frame to frame — only buffer sizes and dispatch dimensions do.

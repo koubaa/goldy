@@ -37,20 +37,20 @@ encoder.Dispatch(16, 1, 1); // 16 * 64 = 1024 threads
 encoder.Dispatch(device); // blocking
 ```
 
-## Non-blocking Dispatch with GpuFuture
+## Non-blocking dispatch (`TimelineValue`)
 
 ```csharp
 // Submit without blocking
-var future = encoder.Submit(device);
+ulong tv = encoder.Submit(device);
 
 // Do CPU work while GPU runs
 DoSomeCpuWork();
 
 // Wait for completion
-future.Wait();
+device.WaitUntil(tv);
 
 // Or poll non-blocking
-while (!future.IsComplete)
+while (device.GpuProgress < tv)
 {
     Thread.Sleep(1);
 }

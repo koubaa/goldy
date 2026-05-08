@@ -356,7 +356,7 @@ impl WindowState {
         let vertex_buffer = Buffer::with_data(device, &vertices, DataAccess::Scattered)?;
 
         // Acquire frame - this waits for oldest in-flight frame
-        let frame = self.surface.acquire()?;
+        let frame = self.surface.begin()?;
 
         // Safe to drop oldest buffer now
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {

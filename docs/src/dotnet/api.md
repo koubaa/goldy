@@ -32,6 +32,15 @@ public sealed class Device : IDisposable
     /// Whether the device is still valid (not lost).
     public bool IsValid { get; }
 
+    /// Latest completed value on the device timeline (see `Submit` / `WaitUntil`).
+    public ulong GpuProgress { get; }
+
+    /// Block until the device timeline reaches at least `value`.
+    public void WaitUntil(ulong value);
+
+    /// Like `WaitUntil` but returns false if `timeoutMs` elapses first.
+    public bool WaitUntilTimeout(ulong value, uint timeoutMs);
+
     /// Check if a named shader library is registered.
     public bool HasLibrary(string name);
 }
@@ -204,26 +213,14 @@ public sealed class ComputeEncoder
     /// Dispatch and block until complete.
     public void Dispatch(Device device);
 
-    /// Submit without blocking; returns a future.
-    public GpuFuture Submit(Device device);
+    /// Submit without blocking; returns a device timeline value (`ulong`).
+    public ulong Submit(Device device);
 }
 ```
 
-## GpuFuture
+## `TimelineValue`
 
-```csharp
-public sealed class GpuFuture
-{
-    /// True if the GPU has finished the submitted work.
-    public bool IsComplete { get; }
-
-    /// Block until work is done.
-    public void Wait();
-
-    /// Wait with timeout. Returns true if completed, false if timed out.
-    public bool WaitTimeout(uint timeoutMs);
-}
-```
+Non-blocking submissions return a `ulong` device timeline counter. Use `Device.WaitUntil` or compare against `Device.GpuProgress`.
 
 ## Texture / Sampler
 

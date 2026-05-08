@@ -190,7 +190,7 @@ impl RenderState {
         compute_encoder.dispatch(&self.device)?;
 
         // Render quads from instance buffer
-        let frame = self.surface.acquire()?;
+        let frame = self.surface.begin()?;
 
         let bg_color = Color {
             r: 0.02,

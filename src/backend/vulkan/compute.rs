@@ -2,7 +2,7 @@
 
 use super::staging;
 use super::types::{self, ComputePipelineState, LogicalDevice, PushLayout};
-use super::{ComputePipelineHandle, DeviceHandle};
+use super::{ComputePipelineHandle, DeviceHandle, SurfaceHandle};
 use crate::backend::{FenceToken, GpuCommand};
 use anyhow::{Context, Result};
 use ash::vk;
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// Reap fences that have already signaled from the compute fence pool.
 ///
 /// Without this, every `submit_graph` that doesn't have a paired `wait_fence`
-/// (the common ekrano pattern: only the *last* `GpuFuture` in a recording is
+/// (the common ekrano pattern: only the *last* timeline value in a recording is
 /// waited on; the intermediate ones are silently dropped) leaks a `VkFence` +
 /// `VkCommandBuffer` into the pool. Over a few thousand frames the pool grows
 /// large enough that the driver's command-pool / fence-pool internal arenas
@@ -149,9 +149,10 @@ pub(super) fn submit(
     state: &mut super::types::VulkanState,
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
+    defer_to_present_for_surface: Option<SurfaceHandle>,
 ) -> Result<FenceToken> {
     // Reap any previously-submitted fences that have already signaled. Keeps
-    // the pool bounded when callers (ekrano) don't wait on every GpuFuture.
+    // the pool bounded when callers (ekrano) don't wait on every intermediate submit.
     // Belt before reap: need live VkFence handles to poll completion.
     for belt in state.staging_belts.values_mut() {
         belt.reclaim(
@@ -215,54 +216,39 @@ pub(super) fn submit(
         }
     }
 
-    let devices = &state.devices;
+    if commands.is_empty() {
+        let signal_value = {
+            let ld = state
+                .devices
+                .get_mut(&device_handle)
+                .context("Invalid device handle")?;
+            let v = ld.timeline_next;
+            ld.timeline_next += 1;
+            v
+        };
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        let signal_info = vk::SemaphoreSubmitInfo::default()
+            .semaphore(ld.timeline_semaphore)
+            .value(signal_value)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let submit_info2 = vk::SubmitInfo2::default()
+            .signal_semaphore_infos(std::slice::from_ref(&signal_info));
+        unsafe {
+            ld.device.queue_submit2(
+                ld.queue,
+                std::slice::from_ref(&submit_info2),
+                vk::Fence::null(),
+            )
+        }
+        .context("Failed queue_submit2 for empty compute submit")?;
+        return Ok(signal_value);
+    }
+
     let compute_pipelines = &state.compute_pipelines;
     let buffers = &state.buffers;
-
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
-
-    // The coarse pass pattern uses blocking `dispatch_compute` per command, then
-    // `submit_recording` calls `submit` on a fresh encoder (often empty). Submitting an
-    // empty primary command buffer + fence breaks on some Vulkan drivers (device lost /
-    // wait failure on the trailing fence). A pre-signaled fence matches "no GPU work"
-    // without touching the queue.
-    if commands.is_empty() {
-        let fence_create_info =
-            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let fence = unsafe { logical_device.device.create_fence(&fence_create_info, None) }
-            .context("Failed to create signaled fence for empty submit")?;
-        let token = state.next_compute_fence_token;
-        state.next_compute_fence_token += 1;
-        state
-            .compute_fence_pool
-            .insert(token, (device_handle, fence, None));
-        return Ok(token);
-    }
-
-    // Allocate command buffer
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
-    let cmd = cmd_buffers[0];
-
-    // Begin command buffer
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-    if let Err(e) = unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) } {
-        unsafe {
-            logical_device
-                .device
-                .free_command_buffers(logical_device.command_pool, &[cmd]);
-        }
-        return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
-    }
 
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
     for command in commands {
@@ -307,6 +293,35 @@ pub(super) fn submit(
             }
             _ => {}
         }
+    }
+
+    let (cmd, belt_idx, _texture_upload_idx) = {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        // Allocate command buffer
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(logical_device.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+
+    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+        .context("Failed to allocate command buffer")?;
+    let cmd = cmd_buffers[0];
+
+    // Begin command buffer
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    if let Err(e) = unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) } {
+        unsafe {
+            logical_device
+                .device
+                .free_command_buffers(logical_device.command_pool, &[cmd]);
+        }
+        return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
     }
 
     // Cross-submission memory barrier: ensure writes from prior queue
@@ -629,17 +644,20 @@ pub(super) fn submit(
         return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
     }
 
+        (cmd, belt_idx, texture_upload_idx)
+    };
+
     let token = state.next_compute_fence_token;
 
-    // If a surface has an acquired image, defer this submit so present() can
-    // batch the compute CB + present-barrier CB in a single vkQueueSubmit.
-    // This eliminates the cross-submit memory visibility gap that caused the
-    // visual glitch on some drivers.
-    let has_active_surface = state
-        .surfaces
-        .values()
-        .any(|s| s.current_image_index.is_some());
-    if has_active_surface {
+    if let Some(sid) = defer_to_present_for_surface {
+        if state
+            .surfaces
+            .get(&sid)
+            .and_then(|s| s.current_image_index)
+            .is_none()
+        {
+            anyhow::bail!("defer compute: surface has no acquired image");
+        }
         state.next_compute_fence_token += 1;
         state.deferred_pending_tokens.insert(token, None);
         state
@@ -663,52 +681,66 @@ pub(super) fn submit(
         return Ok(token);
     }
 
-    // No active surface — submit immediately with a per-compute fence.
-    let fence_create_info = vk::FenceCreateInfo::default();
-    let fence =
-        unsafe { logical_device.device.create_fence(&fence_create_info, None) }.map_err(|e| {
-            unsafe {
-                logical_device
-                    .device
-                    .free_command_buffers(logical_device.command_pool, &[cmd]);
-            }
-            anyhow::anyhow!("Failed to create fence: {:?}", e)
-        })?;
+    // Standalone submit: signal device timeline semaphore (Vulkan 1.2+).
+    let signal_value = {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let v = ld.timeline_next;
+        ld.timeline_next += 1;
+        v
+    };
 
-    let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+    let submit_device_core = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
+    let signal_info = vk::SemaphoreSubmitInfo::default()
+        .semaphore(submit_device_core.timeline_semaphore)
+        .value(signal_value)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let submit_info2 = vk::SubmitInfo2::default()
+        .command_buffer_infos(std::slice::from_ref(&cmd_info))
+        .signal_semaphore_infos(std::slice::from_ref(&signal_info));
 
     if let Err(e) = unsafe {
-        logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], fence)
+        submit_device_core.device.queue_submit2(
+            submit_device_core.queue,
+            std::slice::from_ref(&submit_info2),
+            vk::Fence::null(),
+        )
     } {
         unsafe {
-            logical_device.device.destroy_fence(fence, None);
-            logical_device
+            submit_device_core
                 .device
-                .free_command_buffers(logical_device.command_pool, &[cmd]);
+                .free_command_buffers(submit_device_core.command_pool, &[cmd]);
         }
-        return Err(anyhow::anyhow!("Failed to submit command buffer: {:?}", e));
+        return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
 
-    state.next_compute_fence_token += 1;
     state
-        .compute_fence_pool
-        .insert(token, (device_handle, fence, Some(cmd)));
+        .timeline_cmd_buffers
+        .entry(signal_value)
+        .or_default()
+        .push((device_handle, cmd));
 
     if !texture_upload_scratch.is_empty() {
         let pooled: Vec<(vk::Buffer, vk::DeviceMemory)> = texture_upload_scratch
             .into_iter()
             .map(|s| (s.buffer, s.memory))
             .collect();
-        state.compute_texture_staging_pool.insert(token, pooled);
+        state
+            .compute_texture_staging_pool
+            .insert(signal_value, pooled);
     }
 
     state
         .staging_belts
         .entry(device_handle)
         .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .finish(token);
+        .finish(signal_value);
 
     debug_assert_eq!(
         belt_idx,
@@ -716,7 +748,44 @@ pub(super) fn submit(
         "WriteBuffer DEVICE_LOCAL count must match belt pre-pass"
     );
 
-    Ok(token)
+    Ok(signal_value)
+}
+
+pub(super) fn reap_timeline_cmd_buffers_up_to(
+    state: &mut super::types::VulkanState,
+    device_handle: DeviceHandle,
+    max_completed_value: u64,
+) {
+    let keys: Vec<u64> = state
+        .timeline_cmd_buffers
+        .keys()
+        .copied()
+        .filter(|k| *k <= max_completed_value)
+        .collect();
+    for k in keys {
+        if let Some(entries) = state.timeline_cmd_buffers.remove(&k) {
+            let mut reinsert: Vec<(DeviceHandle, vk::CommandBuffer)> = Vec::new();
+            for (dh, cb) in entries {
+                if dh == device_handle {
+                    if let Some(ld) = state.devices.get(&dh) {
+                        unsafe {
+                            ld.device.free_command_buffers(ld.command_pool, &[cb]);
+                        }
+                    }
+                } else {
+                    reinsert.push((dh, cb));
+                }
+            }
+            if !reinsert.is_empty() {
+                state.timeline_cmd_buffers.insert(k, reinsert);
+            }
+        }
+        if let Some(staging) = state.compute_texture_staging_pool.remove(&k) {
+            if let Some(ld) = state.devices.get(&device_handle) {
+                super::texture::destroy_texture_staging_list(ld, staging);
+            }
+        }
+    }
 }
 
 /// Check if the fence for the given token has signaled.

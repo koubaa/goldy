@@ -311,6 +311,13 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         )
     };
 
+    let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
+        .semaphore_type(vk::SemaphoreType::TIMELINE)
+        .initial_value(0);
+    let timeline_sem_ci = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_sem_type);
+    let timeline_semaphore = unsafe { device.create_semaphore(&timeline_sem_ci, None) }
+        .context("Failed to create Vulkan timeline semaphore")?;
+
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
@@ -330,6 +337,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_pipeline_layout,
             resource_registry: types::ResourceRegistry::new(),
             deletion_queue: types::DeletionQueue::new(),
+            timeline_semaphore,
+            timeline_next: 1,
         },
     );
 
@@ -699,6 +708,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     .device
                     .destroy_descriptor_set_layout(layout, None);
             }
+
+            logical_device
+                .device
+                .destroy_semaphore(logical_device.timeline_semaphore, None);
 
             logical_device
                 .device

@@ -548,13 +548,14 @@ pub(super) fn submit(
     //     the pipeline win: a frame's GPU tail latency + 0 µs instead of
     //     tail + avg(0.5 ms) polling jitter.
     //  2. Log any non-`Completed` status so silent GPU faults on work that
-    //     nobody waits on (e.g. `submit_graph` whose `GpuFuture` was dropped
+    //     nobody waits on (e.g. intermediate submits whose timeline was dropped
     //     because a later `flush_graph` superseded it) still surface in the
     //     tracing stream rather than only manifesting as a hang on the next
     //     `wait_fence` call.
     let handler_token = token;
     let signal = Arc::new(FenceSignal::new());
     let signal_for_handler = signal.clone();
+    let timeline = Arc::clone(&state.timeline_completed);
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {
@@ -570,6 +571,9 @@ pub(super) fn submit(
         *done = Some(status);
         drop(done);
         signal_for_handler.cv.notify_all();
+        if status == MTLCommandBufferStatus::Completed {
+            timeline.fetch_max(handler_token, std::sync::atomic::Ordering::SeqCst);
+        }
     })
     .copy();
     command_buffer_ref.add_completed_handler(&handler);

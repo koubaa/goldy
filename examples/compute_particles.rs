@@ -177,7 +177,7 @@ impl RenderState {
         compute_encoder.dispatch(&self.device)?;
 
         // Render particles
-        let frame = self.surface.acquire()?;
+        let frame = self.surface.begin()?;
 
         // Dark blue-purple background
         let bg_color = Color {

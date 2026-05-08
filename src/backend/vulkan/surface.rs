@@ -251,6 +251,7 @@ pub(super) fn create(
             render_finished_semaphore,
             in_flight_fence,
             render_pass_submitted: false,
+            frame_timeline_value: None,
             deferred_compute_cbs: Vec::new(),
             deferred_compute_tokens: Vec::new(),
             pending_surface_texture: None,
@@ -346,6 +347,7 @@ pub(super) fn create(
             depth_memory,
             depth_view,
             current_texture_handle: None,
+            frame_pending_gpu_commands: Vec::new(),
         },
     );
 
@@ -456,28 +458,26 @@ pub(super) fn destroy(
 /// After acquiring, the swapchain image is registered in the bindless descriptor
 /// set as a storage image. The resulting `TextureHandle` is available via
 /// `frame_texture()` until `present()` is called.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn acquire(
-    instance: &Instance,
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
-    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
-    next_texture_handle: &mut TextureHandle,
+    state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
-    deferred_pending_tokens: &mut HashMap<u64, Option<vk::Fence>>,
-    compute_texture_staging_pool: &mut HashMap<u64, Vec<(vk::Buffer, vk::DeviceMemory)>>,
 ) -> Result<SwapchainImageHandle> {
     // Clean up any previously acquired surface texture that wasn't presented
-    if let Some(surface_state) = surfaces.get(&surface_handle) {
+    if let Some(surface_state) = state.surfaces.get(&surface_handle) {
         if let Some(tex_handle) = surface_state.current_texture_handle {
             tracing::warn!("Previous surface texture was not presented; cleaning up");
-            unregister_surface_texture(devices, textures, tex_handle);
+            unregister_surface_texture(
+                &mut state.devices,
+                &mut state.textures,
+                tex_handle,
+            );
         }
     }
 
     // Get surface state and current frame index
     let (device_handle, current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
-        let surface_state = surfaces
+        let surface_state = state
+            .surfaces
             .get(&surface_handle)
             .context("Invalid surface handle")?;
         let frame = &surface_state.frame_sync[surface_state.current_frame];
@@ -490,66 +490,78 @@ pub(super) fn acquire(
         )
     };
 
-    let logical_device = devices
+    let pending_deferred_len = state
+        .devices
         .get(&device_handle)
-        .context("Surface's device is invalid")?;
+        .map(|d| d.deletion_queue.pending.len())
+        .unwrap_or(0);
 
-    // Wait for the previous frame using this slot to finish
-    let wait_result = unsafe {
-        logical_device
-            .device
-            .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+    let wait_result = {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
+        unsafe {
+            logical_device
+                .device
+                .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+        }
     };
     if let Err(e) = &wait_result {
         tracing::warn!(
             surface_handle,
             %device_handle,
             current_frame,
-            pending_deferred = logical_device.deletion_queue.pending.len(),
+            pending_deferred = pending_deferred_len,
             result = ?e,
             "surface acquire: wait_for_fences (frame fence) failed"
         );
     }
     wait_result.context("Failed to wait for frame fence")?;
 
+    let completed = {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
+        unsafe { ld.device.get_semaphore_counter_value(ld.timeline_semaphore) }.unwrap_or(0)
+    };
+    super::compute::reap_timeline_cmd_buffers_up_to(state, device_handle, completed);
+
     {
-        let surface_state = surfaces.get_mut(&surface_handle).unwrap();
+        let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
         let cf = surface_state.current_frame;
         surface_state.frame_sync[cf].render_pass_submitted = false;
+        surface_state.frame_pending_gpu_commands.clear();
 
         // The fence guarantees all GPU work for this frame slot has completed.
         // Unregister the surface texture whose VkImageView + bindless descriptor
         // were kept alive for the deferred compute CBs.
         if let Some(tex_handle) = surface_state.frame_sync[cf].pending_surface_texture.take() {
-            unregister_surface_texture(devices, textures, tex_handle);
+            unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
         }
 
-        // Free deferred compute command buffers that were part of this frame
-        // slot's single submit.
-        let deferred_cbs = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
+        // Deferred compute command buffers are freed via timeline reap above; release
+        // per-token staging and pending maps for legacy fence/token bookkeeping.
         let deferred_tokens =
             std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_tokens);
-        if !deferred_cbs.is_empty() {
-            if let Some(ld) = devices.get(&device_handle) {
-                unsafe {
-                    ld.device
-                        .free_command_buffers(ld.command_pool, &deferred_cbs);
-                }
-                for tok in &deferred_tokens {
-                    if let Some(staging) = compute_texture_staging_pool.remove(tok) {
-                        super::texture::destroy_texture_staging_list(ld, staging);
-                    }
+        let _ = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
+        if let Some(ld) = state.devices.get(&device_handle) {
+            for tok in &deferred_tokens {
+                if let Some(staging) = state.compute_texture_staging_pool.remove(tok) {
+                    super::texture::destroy_texture_staging_list(ld, staging);
                 }
             }
         }
         for tok in deferred_tokens {
-            deferred_pending_tokens.remove(&tok);
+            state.deferred_pending_tokens.remove(&tok);
         }
     }
 
     // Process deferred deletions - resources from frames that have now completed
     {
-        let logical_device = devices
+        let logical_device = state
+            .devices
             .get_mut(&device_handle)
             .context("Surface's device is invalid")?;
         let current_frame = logical_device.deletion_queue.current_frame;
@@ -561,7 +573,8 @@ pub(super) fn acquire(
         }
     }
 
-    let logical_device = devices
+    let logical_device = state
+        .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
 
@@ -579,7 +592,7 @@ pub(super) fn acquire(
     reset_result.context("Failed to reset frame fence")?;
 
     // Acquire next swapchain image
-    let swapchain_loader = khr::swapchain::Device::new(instance, &logical_device.device);
+    let swapchain_loader = khr::swapchain::Device::new(&state.instance, &logical_device.device);
 
     let acquire_result = unsafe {
         swapchain_loader.acquire_next_image(
@@ -608,7 +621,7 @@ pub(super) fn acquire(
             // a release barrier at the end of the command buffer that makes their
             // writes available, so the present-barrier layout transition sees them.
             let (prep_cmd, image_ready_semaphore, image) = {
-                let surface_state = surfaces.get_mut(&surface_handle).unwrap();
+                let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
                 surface_state.current_image_index = Some(image_index);
                 let frame = &surface_state.frame_sync[surface_state.current_frame];
                 (
@@ -696,7 +709,7 @@ pub(super) fn acquire(
             // The image view is created for GENERAL layout so compute shaders can write
             // via RWTexture2D in bindless.
             let (width, height, vk_format) = {
-                let surface_state = surfaces.get(&surface_handle).unwrap();
+                let surface_state = state.surfaces.get(&surface_handle).unwrap();
                 (
                     surface_state.width,
                     surface_state.height,
@@ -707,9 +720,9 @@ pub(super) fn acquire(
                 super::utils::vk_to_format(vk_format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
 
             let tex_handle = register_surface_texture(
-                devices,
-                textures,
-                next_texture_handle,
+                &mut state.devices,
+                &mut state.textures,
+                &mut state.next_texture_handle,
                 device_handle,
                 image,
                 vk_format,
@@ -718,7 +731,7 @@ pub(super) fn acquire(
                 height,
             )?;
 
-            let surface_state = surfaces.get_mut(&surface_handle).unwrap();
+            let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
             surface_state.current_texture_handle = Some(tex_handle);
 
             Ok(image_index as SwapchainImageHandle)
@@ -757,7 +770,7 @@ pub(super) fn frame_texture(
 /// Render commands to the surface's current swapchain image.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render<F>(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
@@ -772,25 +785,47 @@ where
         &mut Option<PipelineHandle>,
     ) -> Result<()>,
 {
-    let surface_state = surfaces
-        .get(&surface_handle)
-        .context("Invalid surface handle")?;
-
-    let image_index = surface_state
-        .current_image_index
-        .context("No image acquired - call surface_acquire first")?;
-
-    let logical_device = devices
-        .get(&surface_state.device_handle)
-        .context("Surface's device is invalid")?;
-
-    let current_frame = surface_state.current_frame;
-    let frame = &surface_state.frame_sync[current_frame];
-    let cmd = frame.command_buffer;
-    let width = surface_state.width;
-    let height = surface_state.height;
-    let image = surface_state.swapchain_images[image_index as usize];
-    let image_view = surface_state.swapchain_image_views[image_index as usize];
+    let (
+        _image_index,
+        current_frame,
+        device_handle,
+        cmd,
+        width,
+        height,
+        image,
+        image_view,
+        depth_image,
+        depth_format,
+        depth_view,
+        image_ready_semaphore,
+        render_finished_semaphore,
+        in_flight_fence,
+    ) = {
+        let surface_state = surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        let image_index = surface_state
+            .current_image_index
+            .context("No image acquired - call surface_acquire first")?;
+        let current_frame = surface_state.current_frame;
+        let frame = &surface_state.frame_sync[current_frame];
+        (
+            image_index,
+            current_frame,
+            surface_state.device_handle,
+            frame.command_buffer,
+            surface_state.width,
+            surface_state.height,
+            surface_state.swapchain_images[image_index as usize],
+            surface_state.swapchain_image_views[image_index as usize],
+            surface_state.depth_image,
+            surface_state.depth_format,
+            surface_state.depth_view,
+            frame.image_ready_semaphore,
+            frame.render_finished_semaphore,
+            frame.in_flight_fence,
+        )
+    };
 
     // Find clear color and clear depth
     let clear_color = commands
@@ -808,7 +843,12 @@ where
         })
         .unwrap_or(1.0);
 
-    // Begin command buffer
+    {
+        let logical_device = devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
+
+        // Begin command buffer
     let begin_info =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -863,7 +903,7 @@ where
     let mut barriers = vec![color_barrier];
 
     // Add depth barrier if depth buffer exists
-    if let (Some(depth_img), Some(df)) = (surface_state.depth_image, surface_state.depth_format) {
+    if let (Some(depth_img), Some(df)) = (depth_image, depth_format) {
         let depth_barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
             .src_access_mask(vk::AccessFlags2::NONE)
@@ -905,7 +945,7 @@ where
         });
 
     // Create depth attachment if present
-    let depth_attachment = surface_state.depth_view.map(|dv| {
+    let depth_attachment = depth_view.map(|dv| {
         vk::RenderingAttachmentInfo::default()
             .image_view(dv)
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -995,38 +1035,94 @@ where
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
     // End command buffer
-    unsafe { logical_device.device.end_command_buffer(cmd) }
-        .context("Failed to end command buffer")?;
+        unsafe { logical_device.device.end_command_buffer(cmd) }
+            .context("Failed to end command buffer")?;
+    }
 
     // Get per-frame sync primitives. We wait on `image_ready_semaphore` (signaled by
     // the acquire-time prep submit) rather than `image_available_semaphore` — the
     // prep submit already consumed the latter to transition the image into `GENERAL`.
-    let frame = &surface_state.frame_sync[current_frame];
-    let wait_semaphores = [frame.image_ready_semaphore];
-    let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-    let signal_semaphores = [frame.render_finished_semaphore];
+    let signal_timeline_value = {
+        let ld = devices
+            .get_mut(&device_handle)
+            .context("Surface's device is invalid")?;
+        let v = ld.timeline_next;
+        ld.timeline_next += 1;
+        v
+    };
+    let timeline_sem = devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?
+        .timeline_semaphore;
 
-    let submit_info = vk::SubmitInfo::default()
-        .wait_semaphores(&wait_semaphores)
-        .wait_dst_stage_mask(&wait_stages)
-        .command_buffers(std::slice::from_ref(&cmd))
-        .signal_semaphores(&signal_semaphores);
+    let wait_info = vk::SemaphoreSubmitInfo::default()
+        .semaphore(image_ready_semaphore)
+        .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
+    let bin_signal = vk::SemaphoreSubmitInfo::default()
+        .semaphore(render_finished_semaphore)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let timeline_signal = vk::SemaphoreSubmitInfo::default()
+        .semaphore(timeline_sem)
+        .value(signal_timeline_value)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let signals = [bin_signal, timeline_signal];
+    let submit2 = vk::SubmitInfo2::default()
+        .wait_semaphore_infos(std::slice::from_ref(&wait_info))
+        .command_buffer_infos(std::slice::from_ref(&cmd_info))
+        .signal_semaphore_infos(&signals);
 
-    // Submit with fence for frame tracking
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
+
     unsafe {
-        logical_device.device.queue_submit(
+        logical_device.device.queue_submit2(
             logical_device.queue,
-            std::slice::from_ref(&submit_info),
-            frame.in_flight_fence,
+            std::slice::from_ref(&submit2),
+            in_flight_fence,
         )
     }
     .context("Failed to submit command buffer")?;
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
-        surface_state.frame_sync[current_frame].render_pass_submitted = true;
+        let fs = &mut surface_state.frame_sync[current_frame];
+        fs.render_pass_submitted = true;
+        fs.frame_timeline_value = Some(signal_timeline_value);
     }
 
     Ok(())
+}
+
+/// Present the rendered image to the screen.
+pub(super) fn end_frame(
+    state: &mut super::types::VulkanState,
+    frame: crate::backend::FrameToken,
+) -> Result<crate::timeline::TimelineValue> {
+    let dh = state
+        .surfaces
+        .get(&frame.surface)
+        .context("Invalid surface handle")?
+        .device_handle;
+
+    let pending = {
+        let surf = state
+            .surfaces
+            .get_mut(&frame.surface)
+            .context("Invalid surface handle")?;
+        std::mem::take(&mut surf.frame_pending_gpu_commands)
+    };
+
+    if !pending.is_empty() {
+        super::compute::submit(
+            state,
+            dh,
+            &pending,
+            Some(frame.surface),
+        )?;
+    }
+
+    present(state, frame.surface, frame.image)
 }
 
 /// Present the rendered image to the screen.
@@ -1037,72 +1133,96 @@ pub(super) fn present(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
-) -> Result<()> {
+) -> Result<crate::timeline::TimelineValue> {
     // Take the surface texture handle but do NOT unregister yet — the deferred
     // compute CBs (and the render CB in the graphics path) reference the
     // VkImageView + bindless descriptor.  Vulkan requires the image view to
     // remain valid while any pending CB uses it.  We store the handle in the
     // per-frame-slot FrameSync and unregister in acquire() after the fence
     // guarantees all GPU work is complete.
-    let surface_state = state
-        .surfaces
-        .get_mut(&surface_handle)
-        .context("Invalid surface handle")?;
-
-    let pending_tex = surface_state.current_texture_handle.take();
-
-    let image_index = surface_state
-        .current_image_index
-        .context("No image to present - call surface_render first")?;
-
-    let current_frame = surface_state.current_frame;
-    let image = surface_state.swapchain_images[image_index as usize];
-    let render_pass_submitted = surface_state.frame_sync[current_frame].render_pass_submitted;
-    let device_handle = surface_state.device_handle;
-
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
+    let (
+        pending_tex,
+        image_index,
+        current_frame,
+        image,
+        render_pass_submitted,
+        device_handle,
+        barrier_cmd,
+        image_ready_sem_present,
+        render_finished_sem_present,
+        in_flight_fence_present,
+        swapchain,
+    ) = {
+        let s = state
+            .surfaces
+            .get_mut(&surface_handle)
+            .context("Invalid surface handle")?;
+        let pending_tex = s.current_texture_handle.take();
+        let image_index = s
+            .current_image_index
+            .context("No image to present - call surface_render first")?;
+        let cf = s.current_frame;
+        let image = s.swapchain_images[image_index as usize];
+        let rp = s.frame_sync[cf].render_pass_submitted;
+        let dh = s.device_handle;
+        let fr = &s.frame_sync[cf];
+        (
+            pending_tex,
+            image_index,
+            cf,
+            image,
+            rp,
+            dh,
+            fr.command_buffer,
+            fr.image_ready_semaphore,
+            fr.render_finished_semaphore,
+            fr.in_flight_fence,
+            s.swapchain,
+        )
+    };
 
     if !render_pass_submitted {
-        let frame = &surface_state.frame_sync[current_frame];
-        let cmd = frame.command_buffer;
+        {
+            let logical_device = state
+                .devices
+                .get(&device_handle)
+                .context("Surface's device is invalid")?;
 
-        unsafe {
-            logical_device
-                .device
-                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+            unsafe {
+                logical_device
+                    .device
+                    .reset_command_buffer(barrier_cmd, vk::CommandBufferResetFlags::empty())
+            }
+            .context("Failed to reset compute-present barrier command buffer")?;
+
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            unsafe { logical_device.device.begin_command_buffer(barrier_cmd, &begin_info) }
+                .context("Failed to begin compute-present barrier command buffer")?;
+
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::MEMORY_READ)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let dep_info = vk::DependencyInfo::default()
+                .image_memory_barriers(std::slice::from_ref(&barrier));
+            unsafe { logical_device.device.cmd_pipeline_barrier2(barrier_cmd, &dep_info) };
+
+            unsafe { logical_device.device.end_command_buffer(barrier_cmd) }
+                .context("Failed to end compute-present barrier command buffer")?;
         }
-        .context("Failed to reset compute-present barrier command buffer")?;
-
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
-            .context("Failed to begin compute-present barrier command buffer")?;
-
-        let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .dst_access_mask(vk::AccessFlags2::MEMORY_READ)
-            .old_layout(vk::ImageLayout::GENERAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .image(image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-        unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
-
-        unsafe { logical_device.device.end_command_buffer(cmd) }
-            .context("Failed to end compute-present barrier command buffer")?;
 
         // Collect deferred compute CBs + the present-barrier CB into a single
         // vkQueueSubmit.  Within one submit, command buffers execute in array
@@ -1110,24 +1230,52 @@ pub(super) fn present(
         // release barrier in the compute CB makes writes visible to the layout
         // transition in the barrier CB.
         let deferred = std::mem::take(&mut state.deferred_compute);
-        let mut all_cbs: Vec<vk::CommandBuffer> = deferred.iter().map(|d| d.cmd).collect();
-        all_cbs.push(cmd);
+        let signal_timeline_value = {
+            let ld = state
+                .devices
+                .get_mut(&device_handle)
+                .context("Surface's device is invalid")?;
+            let v = ld.timeline_next;
+            ld.timeline_next += 1;
+            v
+        };
+        let timeline_sem = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?
+            .timeline_semaphore;
 
-        let frame = &surface_state.frame_sync[current_frame];
-        let wait_semaphores = [frame.image_ready_semaphore];
-        let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
-        let signal_semaphores = [frame.render_finished_semaphore];
-        let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&all_cbs)
-            .signal_semaphores(&signal_semaphores);
+        let mut cmd_infos: Vec<vk::CommandBufferSubmitInfo> = deferred
+            .iter()
+            .map(|d| vk::CommandBufferSubmitInfo::default().command_buffer(d.cmd))
+            .collect();
+        cmd_infos.push(vk::CommandBufferSubmitInfo::default().command_buffer(barrier_cmd));
 
+        let wait_info = vk::SemaphoreSubmitInfo::default()
+            .semaphore(image_ready_sem_present)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let bin_signal = vk::SemaphoreSubmitInfo::default()
+            .semaphore(render_finished_sem_present)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let timeline_signal = vk::SemaphoreSubmitInfo::default()
+            .semaphore(timeline_sem)
+            .value(signal_timeline_value)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let signals = [bin_signal, timeline_signal];
+        let submit2 = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(std::slice::from_ref(&wait_info))
+            .command_buffer_infos(&cmd_infos)
+            .signal_semaphore_infos(&signals);
+
+        let submit_ld = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
         let submit_result = unsafe {
-            logical_device.device.queue_submit(
-                logical_device.queue,
-                std::slice::from_ref(&submit_info),
-                frame.in_flight_fence,
+            submit_ld.device.queue_submit2(
+                submit_ld.queue,
+                std::slice::from_ref(&submit2),
+                in_flight_fence_present,
             )
         };
         if let Err(e) = &submit_result {
@@ -1137,16 +1285,22 @@ pub(super) fn present(
                 current_frame,
                 image_index,
                 result = ?e,
-                "single-submit compute+present queue_submit failed"
+                "single-submit compute+present queue_submit2 failed"
             );
         }
         submit_result.context("Failed to submit compute+present")?;
 
-        // Store deferred compute CBs/tokens in the frame sync slot.  They
-        // are freed in acquire() once in_flight_fence has been waited on.
-        // Upgrade deferred_pending_tokens from None → Some(fence) so
-        // wait_fence / is_fence_complete can actually block / poll.
-        let the_fence = surface_state.frame_sync[current_frame].in_flight_fence;
+        for d in &deferred {
+            state
+                .timeline_cmd_buffers
+                .entry(signal_timeline_value)
+                .or_default()
+                .push((device_handle, d.cmd));
+        }
+
+        // Tokens are still tracked so legacy `wait_fence` / staging can key off
+        // the deferred submission; command buffers are freed via timeline reap.
+        let the_fence = in_flight_fence_present;
         for d in &deferred {
             state
                 .deferred_pending_tokens
@@ -1154,8 +1308,8 @@ pub(super) fn present(
         }
         let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
         let fs = &mut surface_state_mut.frame_sync[current_frame];
+        fs.frame_timeline_value = Some(signal_timeline_value);
         for d in deferred {
-            fs.deferred_compute_cbs.push(d.cmd);
             fs.deferred_compute_tokens.push(d.token);
         }
         fs.pending_surface_texture = pending_tex;
@@ -1166,24 +1320,22 @@ pub(super) fn present(
         surface_state.frame_sync[current_frame].pending_surface_texture = Some(th);
     }
 
-    let surface_state = state
-        .surfaces
-        .get(&surface_handle)
-        .context("Invalid surface handle")?;
-    let frame = &surface_state.frame_sync[current_frame];
+    let present_ld = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
+    let swapchain_loader = khr::swapchain::Device::new(&state.instance, &present_ld.device);
 
-    let swapchain_loader = khr::swapchain::Device::new(&state.instance, &logical_device.device);
-
-    let swapchains = [surface_state.swapchain];
+    let swapchains = [swapchain];
     let image_indices = [image_index];
-    let wait_semaphores = [frame.render_finished_semaphore];
+    let wait_semaphores = [render_finished_sem_present];
 
     let present_info = vk::PresentInfoKHR::default()
         .wait_semaphores(&wait_semaphores)
         .swapchains(&swapchains)
         .image_indices(&image_indices);
 
-    let result = unsafe { swapchain_loader.queue_present(logical_device.queue, &present_info) };
+    let result = unsafe { swapchain_loader.queue_present(present_ld.queue, &present_info) };
     if let Err(e) = &result {
         tracing::warn!(
             surface_handle,
@@ -1207,8 +1359,19 @@ pub(super) fn present(
 
     // Handle suboptimal or out of date
     match result {
-        Ok(_) => Ok(()),
-        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => Ok(()),
+        Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
+            let timeline_value = {
+                let surface_state = state
+                    .surfaces
+                    .get_mut(&surface_handle)
+                    .context("Invalid surface handle")?;
+                surface_state.frame_sync[current_frame]
+                    .frame_timeline_value
+                    .take()
+                    .context("present: frame timeline value missing (internal error)")?
+            };
+            Ok(timeline_value)
+        }
         Err(e) => Err(anyhow::anyhow!("Failed to present: {:?}", e)),
     }
 }

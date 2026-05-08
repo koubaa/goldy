@@ -8,7 +8,7 @@
 //!
 //! **Semantics:** [`Texture::drop`] always destroys owned textures. Pooling is
 //! opt-in: call [`TexturePool::release`] only after GPU work using the texture
-//! has completed (e.g. after [`crate::gpu_future::GpuFuture::wait`]).
+//! has completed (e.g. after [`Device::wait_until`] with the timeline from [`TaskGraph::submit`]).
 
 use crate::device::Device;
 use crate::texture::Texture;

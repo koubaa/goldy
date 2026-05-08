@@ -8,7 +8,7 @@ use super::texture;
 use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::{depth_format_to_dxgi, dxgi_to_format};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
-use crate::backend::RenderCommand;
+use crate::backend::{FrameToken, GpuCommand, RenderCommand};
 use crate::types::{Color, DepthFormat, SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::{Context, Result};
 use raw_window_handle::RawWindowHandle;
@@ -267,6 +267,7 @@ pub(super) fn create(
             compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
             present_mode: crate::types::PresentMode::Fifo,
             frame_latency_waitable,
+            pending_frame_compute: Vec::new(),
         },
     );
 
@@ -380,6 +381,7 @@ pub(super) fn acquire(
         .context("Invalid surface handle")?;
 
     surface.frame_sync[cf].render_pass_submitted = false;
+    surface.pending_frame_compute.clear();
 
     let image_index = unsafe { surface.swapchain.GetCurrentBackBufferIndex() };
     surface.current_image_index = Some(image_index);
@@ -404,6 +406,48 @@ pub(super) fn acquire(
     surface.current_texture_handle = Some(tex_handle);
 
     Ok(image_index as SwapchainImageHandle)
+}
+
+pub(super) fn record_gpu_work(
+    state: &mut Dx12State,
+    surface_handle: SurfaceHandle,
+    commands: &[GpuCommand],
+) -> Result<()> {
+    let surf = state
+        .surfaces
+        .get_mut(&surface_handle)
+        .context("Invalid surface handle")?;
+    surf.pending_frame_compute.extend_from_slice(commands);
+    Ok(())
+}
+
+/// Flush optional frame compute, present, and return the device timeline value (fence) for this frame.
+pub(super) fn end_frame(state: &mut Dx12State, frame: FrameToken) -> Result<u64> {
+    let device_handle = state
+        .surfaces
+        .get(&frame.surface)
+        .context("Invalid surface handle")?
+        .device_handle;
+
+    let pending = {
+        let surf = state
+            .surfaces
+            .get_mut(&frame.surface)
+            .context("Invalid surface handle")?;
+        std::mem::take(&mut surf.pending_frame_compute)
+    };
+
+    if !pending.is_empty() {
+        super::compute::submit(state, device_handle, &pending)?;
+    }
+
+    present(state, frame.surface, frame.image)?;
+
+    let dev = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
+    Ok(dev.fence_value.saturating_sub(1))
 }
 
 /// Get the texture handle for the currently acquired surface frame.
