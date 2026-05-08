@@ -159,5 +159,5 @@ goldy_instance_destroy(instance);
 
 ## License
 
-MIT License - See [LICENSE](../LICENSE) for details.
+LGPL-2.1-or-later. A commercial license is also available; contact [koubaa on github](permament email tbd) for terms.
 

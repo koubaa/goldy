@@ -59,4 +59,4 @@ fn main() -> anyhow::Result<()> {
 
 ## License
 
-Goldy is MIT licensed. See [License](./license.md) for details.
+Goldy is dual-licensed under **LGPL-2.1-or-later** and a **commercial license**. See [License](./license.md) for details.
