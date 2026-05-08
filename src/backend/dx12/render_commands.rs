@@ -118,7 +118,9 @@ pub(super) fn record(
             RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
+                if let Some(pipeline) =
+                    current_pipeline_handle.and_then(|h| state.pipelines.get(&h))
+                {
                     crate::backend::validate_typed_push_constants(
                         typed_handles,
                         &pipeline.push_constant_categories,

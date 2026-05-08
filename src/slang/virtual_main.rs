@@ -64,8 +64,7 @@ pub fn extract_push_constant_categories(
         match &param.kind {
             ParamKind::Resource => {
                 let ty = param.ty.trim();
-                if ty.starts_with("Scattered<") || ty.starts_with("BufRO<") || ty == "ByteAddress"
-                {
+                if ty.starts_with("Scattered<") || ty.starts_with("BufRO<") || ty == "ByteAddress" {
                     Some(BindlessCategory::Scattered)
                 } else if ty.starts_with("Interpolated<") {
                     Some(BindlessCategory::Texture)

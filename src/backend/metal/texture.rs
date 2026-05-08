@@ -97,23 +97,6 @@ pub(super) fn create(
             is_storage_image,
         );
     }
-    // #region agent log
-    {
-        use std::io::Write;
-        let gpu_rid = texture.gpu_resource_id()._impl;
-        let ab_readback = if offset + 8 <= ARGUMENT_BUFFER_SIZE {
-            unsafe { (logical_device.argument_buffer.contents().add(offset as usize) as *const u64).read() }
-        } else { 0 };
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-        let entry = format!(
-            "{{\"sessionId\":\"a74a28\",\"runId\":\"post-fix-BB\",\"timestamp\":{ts},\"hypothesisId\":\"BB\",\"location\":\"texture.rs:create\",\"message\":\"tex_encode_verify\",\"data\":{{\"handle\":{handle},\"is_storage_image\":{is_storage_image},\"local\":{arg_buffer_index},\"global\":{encoding_index},\"encoded_length\":{encoded_length},\"offset\":{offset},\"gpu_resource_id\":{gpu_rid},\"ab_readback\":{ab_readback},\"match\":{}}}}}\n",
-            gpu_rid == ab_readback
-        );
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::instrumentation::debug_paths::debug_log_path()) {
-            let _ = f.write_all(entry.as_bytes());
-        }
-    }
-    // #endregion
 
     state.textures.insert(
         handle,

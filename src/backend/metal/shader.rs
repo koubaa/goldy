@@ -176,21 +176,6 @@ fn compile_stage_with_reflection(
         msl_source.len()
     );
 
-    // #region agent log
-    {
-        use std::io::Write;
-        // Dump ALL compiled MSL sources for layout analysis
-        static DUMP_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = DUMP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n < 30 {
-            let path = crate::instrumentation::debug_paths::shader_dump_path(&format!("msl_dump_{n}_{entry_point}.metal"));
-            if let Ok(mut f) = std::fs::File::create(&path) {
-                let _ = f.write_all(msl_source.as_bytes());
-            }
-        }
-    }
-    // #endregion
-
     let library = device
         .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
         .map_err(|e| {

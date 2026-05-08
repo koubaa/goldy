@@ -731,10 +731,6 @@ pub(crate) struct BufferState {
     pub size: u64,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
-    /// Persistent `contents()` pointer when created with [`crate::types::BufferFlags::CPU_READABLE`]
-    /// (shared storage: same as a normal read for other buffers).
-    /// `buffer.contents() as usize` when `CPU_READABLE` (for `Send`/`Sync`).
-    pub host_mapped: Option<usize>,
     pub flags: crate::types::BufferFlags,
 }
 
@@ -848,14 +844,11 @@ pub(crate) struct SurfaceState {
     pub current_drawable: Option<*mut std::ffi::c_void>,
     /// Texture handle for the current drawable's texture (registered for bindless access)
     pub current_texture_handle: Option<TextureHandle>,
-    /// Persistent bindless storage-image LOCAL index reserved at surface create
-    /// and re-encoded with the current drawable's `MTLTexture` on every `acquire`.
-    ///
-    /// This avoids leaking a fresh slot per frame (the storage-image window is
-    /// only `MAX_RESOURCES_PER_CATEGORY` = 64 slots, so a per-frame allocation
-    /// would exhaust it in ~1 second at 60 fps). Released back to the device's
-    /// `ResourceRegistry` free list when the surface is destroyed.
-    pub bindless_storage_slot: u32,
+    /// Triple-buffered storage-image LOCAL indices reserved at surface create.
+    /// Each frame uses `bindless_storage_slots[current_frame]` so the CPU never
+    /// re-encodes a slot that the GPU is still reading from a previous frame.
+    /// Released back to the device's `ResourceRegistry` free list on surface destroy.
+    pub bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT],
     /// Current present mode
     pub present_mode: crate::types::PresentMode,
 }

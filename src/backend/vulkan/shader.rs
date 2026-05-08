@@ -182,23 +182,6 @@ pub(super) fn ensure_stage_compiled(
             tracing::info!("Dumped SPIR-V bytecode to {}", path.display());
         }
     }
-    // #region agent log
-    {
-        use std::io::Write;
-        static DUMP_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = DUMP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n < 30 {
-            let path = crate::instrumentation::debug_paths::shader_dump_path(
-                &format!("spirv_dump_{n}_{entry_point_name}.spv"),
-            );
-            if let Ok(mut f) = std::fs::File::create(&path) {
-                let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
-                let _ = f.write_all(spirv_bytes);
-            }
-        }
-    }
-    // #endregion
-
     // Cache the module and reflection data
     let shader = shaders.get_mut(&shader_handle).unwrap();
     match stage {
@@ -222,8 +205,7 @@ pub(super) fn ensure_stage_compiled(
                 }
             }
             if existing.push_constant_categories.is_empty() {
-                existing.push_constant_categories =
-                    new_reflection.push_constant_categories.clone();
+                existing.push_constant_categories = new_reflection.push_constant_categories.clone();
             }
         } else {
             shader.reflection = reflection;

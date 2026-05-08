@@ -7,7 +7,6 @@ use crate::types::BufferFlags;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
-use std::collections::HashMap;
 
 /// Create a buffer with the given size and access pattern.
 pub(super) fn create(
@@ -78,15 +77,12 @@ pub(super) fn create(
         );
     }
 
-    let host_mapped = if cpu_readable && is_storage {
+    if cpu_readable && is_storage {
         let ptr = buffer.contents() as *mut u8;
         if ptr.is_null() {
             anyhow::bail!("Metal buffer contents() returned null for CPU_READABLE");
         }
-        Some(ptr as usize)
-    } else {
-        None
-    };
+    }
 
     state.buffers.insert(
         handle,
@@ -95,7 +91,6 @@ pub(super) fn create(
             buffer,
             size,
             arg_buffer_index,
-            host_mapped,
             flags,
         },
     );
@@ -162,7 +157,6 @@ pub(super) fn create_view(
             buffer: parent_mtl_buffer,
             size,
             arg_buffer_index,
-            host_mapped: None,
             flags: parent_flags,
         },
     );

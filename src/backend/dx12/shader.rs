@@ -149,22 +149,6 @@ pub(super) fn ensure_stage_compiled(
             tracing::info!("Dumped DXIL bytecode to {}", path.display());
         }
     }
-    // #region agent log
-    {
-        use std::io::Write;
-        static DUMP_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = DUMP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n < 30 {
-            let path = crate::instrumentation::debug_paths::shader_dump_path(
-                &format!("dxil_dump_{n}_{entry_point_name}.dxil"),
-            );
-            if let Ok(mut f) = std::fs::File::create(&path) {
-                let _ = f.write_all(&bytecode);
-            }
-        }
-    }
-    // #endregion
-
     // Cache the bytecode and reflection
     let shader = state.shaders.get_mut(&shader_handle).unwrap();
     match stage {

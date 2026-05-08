@@ -3,12 +3,6 @@
 //! Provides named observation points with structured context data.
 //! Zero-cost when the `instrumentation` feature is disabled.
 //!
-//! ## Debug Paths
-//!
-//! The [`debug_log_path`] and [`shader_dump_path`] functions return
-//! cross-platform paths relative to `CWD/.goldy_debug/` so that the same
-//! instrumented binary works on macOS, Windows, and Linux without edits.
-//!
 //! # Observation Points
 //!
 //! Goldy uses hierarchical dot-notation for observation point names:
@@ -48,8 +42,6 @@
 //! Use environment variables to filter instrumentation output:
 //! - `RUST_LOG=goldy=debug` - Enable all Goldy instrumentation
 //! - `RUST_LOG=goldy::render=trace` - Enable only render-related points
-
-pub mod debug_paths;
 
 #[cfg(feature = "instrumentation")]
 mod json_subscriber;
