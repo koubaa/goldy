@@ -591,11 +591,7 @@ pub trait GpuBackend: Send + Sync {
         Ok((FrameToken { surface, image }, tex))
     }
 
-    fn record_render(
-        &mut self,
-        frame: &FrameToken,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
+    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
         self.surface_render(frame.surface, frame.image, commands)
     }
 

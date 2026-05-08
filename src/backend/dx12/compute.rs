@@ -744,7 +744,10 @@ pub(super) fn submit(
 }
 
 /// Check if the fence for the given token has signaled.
-#[allow(dead_code, reason = "retained for deprecated fence-based paths; timeline uses fence internally")]
+#[allow(
+    dead_code,
+    reason = "retained for deprecated fence-based paths; timeline uses fence internally"
+)]
 pub(super) fn is_fence_complete(
     state: &Dx12State,
     device_handle: DeviceHandle,

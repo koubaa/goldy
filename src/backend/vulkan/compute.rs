@@ -234,8 +234,8 @@ pub(super) fn submit(
             .semaphore(ld.timeline_semaphore)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let submit_info2 = vk::SubmitInfo2::default()
-            .signal_semaphore_infos(std::slice::from_ref(&signal_info));
+        let submit_info2 =
+            vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
         unsafe {
             ld.device.queue_submit2(
                 ld.queue,
@@ -302,347 +302,351 @@ pub(super) fn submit(
             .context("Invalid device handle")?;
 
         // Allocate command buffer
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(logical_device.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
 
-    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
-    let cmd = cmd_buffers[0];
+        let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+            .context("Failed to allocate command buffer")?;
+        let cmd = cmd_buffers[0];
 
-    // Begin command buffer
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // Begin command buffer
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-    if let Err(e) = unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) } {
-        unsafe {
-            logical_device
-                .device
-                .free_command_buffers(logical_device.command_pool, &[cmd]);
+        if let Err(e) = unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) } {
+            unsafe {
+                logical_device
+                    .device
+                    .free_command_buffers(logical_device.command_pool, &[cmd]);
+            }
+            return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
         }
-        return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
-    }
 
-    // Cross-submission memory barrier: ensure writes from prior queue
-    // visible to this submission's operations.  Vulkan guarantees execution
-    // ordering for same-queue submissions but NOT memory visibility.
-    unsafe {
-        let acquire = vk::MemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
-            )
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
-            )
-            .dst_access_mask(
-                vk::AccessFlags2::TRANSFER_READ
-                    | vk::AccessFlags2::TRANSFER_WRITE
-                    | vk::AccessFlags2::SHADER_READ
-                    | vk::AccessFlags2::SHADER_WRITE,
-            );
-        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&acquire));
-        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
-    }
+        // Cross-submission memory barrier: ensure writes from prior queue
+        // visible to this submission's operations.  Vulkan guarantees execution
+        // ordering for same-queue submissions but NOT memory visibility.
+        unsafe {
+            let acquire = vk::MemoryBarrier2::default()
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                )
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::TRANSFER_READ
+                        | vk::AccessFlags2::TRANSFER_WRITE
+                        | vk::AccessFlags2::SHADER_READ
+                        | vk::AccessFlags2::SHADER_WRITE,
+                );
+            let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&acquire));
+            logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+        }
 
-    // Track current pipeline for resource slot binding
-    let mut current_pipeline: Option<ComputePipelineHandle> = None;
-    let mut belt_idx = 0usize;
-    let mut texture_upload_idx = 0usize;
+        // Track current pipeline for resource slot binding
+        let mut current_pipeline: Option<ComputePipelineHandle> = None;
+        let mut belt_idx = 0usize;
+        let mut texture_upload_idx = 0usize;
 
-    // Process commands (same logic as dispatch)
-    for command in commands {
-        match command {
-            GpuCommand::SetPipeline(handle) => {
-                if let Some(pipeline_state) = compute_pipelines.get(handle) {
-                    unsafe {
-                        logical_device.device.cmd_bind_pipeline(
-                            cmd,
-                            vk::PipelineBindPoint::COMPUTE,
-                            pipeline_state.pipeline,
-                        );
-
-                        if let (Some(bindless_set), Some(bindless_layout)) = (
-                            logical_device.bindless_descriptor_set,
-                            logical_device.bindless_pipeline_layout,
-                        ) {
-                            logical_device.device.cmd_bind_descriptor_sets(
+        // Process commands (same logic as dispatch)
+        for command in commands {
+            match command {
+                GpuCommand::SetPipeline(handle) => {
+                    if let Some(pipeline_state) = compute_pipelines.get(handle) {
+                        unsafe {
+                            logical_device.device.cmd_bind_pipeline(
                                 cmd,
                                 vk::PipelineBindPoint::COMPUTE,
-                                bindless_layout,
+                                pipeline_state.pipeline,
+                            );
+
+                            if let (Some(bindless_set), Some(bindless_layout)) = (
+                                logical_device.bindless_descriptor_set,
+                                logical_device.bindless_pipeline_layout,
+                            ) {
+                                logical_device.device.cmd_bind_descriptor_sets(
+                                    cmd,
+                                    vk::PipelineBindPoint::COMPUTE,
+                                    bindless_layout,
+                                    0,
+                                    std::slice::from_ref(&bindless_set),
+                                    &[],
+                                );
+                            }
+                        }
+                        current_pipeline = Some(*handle);
+                    }
+                }
+                GpuCommand::BindResources {
+                    buffers: buffer_handles,
+                } => {
+                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
+                    {
+                        let mut layout = PushLayout::default();
+                        for (i, buffer_handle) in buffer_handles.iter().enumerate() {
+                            if i >= types::MAX_BINDLESS_SLOTS {
+                                break;
+                            }
+                            layout.bindless[i] = buffers
+                                .get(buffer_handle)
+                                .and_then(|b| b.bindless_index)
+                                .unwrap_or(0)
+                                as u16;
+                        }
+                        unsafe {
+                            logical_device.device.cmd_push_constants(
+                                cmd,
+                                pipeline.layout,
+                                vk::ShaderStageFlags::ALL,
                                 0,
-                                std::slice::from_ref(&bindless_set),
-                                &[],
+                                bytemuck::bytes_of(&layout),
                             );
                         }
                     }
-                    current_pipeline = Some(*handle);
                 }
-            }
-            GpuCommand::BindResources {
-                buffers: buffer_handles,
-            } => {
-                if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut layout = PushLayout::default();
-                    for (i, buffer_handle) in buffer_handles.iter().enumerate() {
-                        if i >= types::MAX_BINDLESS_SLOTS {
-                            break;
+                GpuCommand::BindResourcesRaw {
+                    indices: raw_indices,
+                    user: raw_user,
+                } => {
+                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
+                    {
+                        let mut layout = PushLayout::default();
+                        for (i, &idx) in raw_indices.iter().enumerate() {
+                            if i >= types::MAX_BINDLESS_SLOTS {
+                                break;
+                            }
+                            layout.bindless[i] = idx as u16;
                         }
-                        layout.bindless[i] = buffers
-                            .get(buffer_handle)
-                            .and_then(|b| b.bindless_index)
-                            .unwrap_or(0) as u16;
-                    }
-                    unsafe {
-                        logical_device.device.cmd_push_constants(
-                            cmd,
-                            pipeline.layout,
-                            vk::ShaderStageFlags::ALL,
-                            0,
-                            bytemuck::bytes_of(&layout),
-                        );
-                    }
-                }
-            }
-            GpuCommand::BindResourcesRaw {
-                indices: raw_indices,
-                user: raw_user,
-            } => {
-                if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    let mut layout = PushLayout::default();
-                    for (i, &idx) in raw_indices.iter().enumerate() {
-                        if i >= types::MAX_BINDLESS_SLOTS {
-                            break;
+                        for (i, &val) in raw_user.iter().enumerate() {
+                            if i >= types::MAX_USER_SLOTS {
+                                break;
+                            }
+                            layout.user[i] = val;
                         }
-                        layout.bindless[i] = idx as u16;
-                    }
-                    for (i, &val) in raw_user.iter().enumerate() {
-                        if i >= types::MAX_USER_SLOTS {
-                            break;
+                        unsafe {
+                            logical_device.device.cmd_push_constants(
+                                cmd,
+                                pipeline.layout,
+                                vk::ShaderStageFlags::ALL,
+                                0,
+                                bytemuck::bytes_of(&layout),
+                            );
                         }
-                        layout.user[i] = val;
-                    }
-                    unsafe {
-                        logical_device.device.cmd_push_constants(
-                            cmd,
-                            pipeline.layout,
-                            vk::ShaderStageFlags::ALL,
-                            0,
-                            bytemuck::bytes_of(&layout),
-                        );
                     }
                 }
-            }
-            GpuCommand::BindResourcesTyped {
-                handles: typed_handles,
-            } => {
-                if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                    crate::backend::validate_typed_push_constants(
-                        typed_handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                    let mut layout = PushLayout::default();
-                    for (i, handle) in typed_handles.iter().enumerate() {
-                        if i >= types::MAX_BINDLESS_SLOTS {
-                            break;
+                GpuCommand::BindResourcesTyped {
+                    handles: typed_handles,
+                } => {
+                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
+                    {
+                        crate::backend::validate_typed_push_constants(
+                            typed_handles,
+                            &pipeline.push_constant_categories,
+                            &pipeline.shader_debug_name,
+                        )?;
+                        let mut layout = PushLayout::default();
+                        for (i, handle) in typed_handles.iter().enumerate() {
+                            if i >= types::MAX_BINDLESS_SLOTS {
+                                break;
+                            }
+                            layout.bindless[i] = handle.index() as u16;
                         }
-                        layout.bindless[i] = handle.index() as u16;
-                    }
-                    unsafe {
-                        logical_device.device.cmd_push_constants(
-                            cmd,
-                            pipeline.layout,
-                            vk::ShaderStageFlags::ALL,
-                            0,
-                            bytemuck::bytes_of(&layout),
-                        );
+                        unsafe {
+                            logical_device.device.cmd_push_constants(
+                                cmd,
+                                pipeline.layout,
+                                vk::ShaderStageFlags::ALL,
+                                0,
+                                bytemuck::bytes_of(&layout),
+                            );
+                        }
                     }
                 }
-            }
-            GpuCommand::Dispatch {
-                workgroups_x,
-                workgroups_y,
-                workgroups_z,
-            } => unsafe {
-                let mem_barrier = vk::MemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .dst_access_mask(
-                        vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                    );
-                let dep_info = vk::DependencyInfo::default()
-                    .memory_barriers(std::slice::from_ref(&mem_barrier));
-                logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
-
-                logical_device.device.cmd_dispatch(
-                    cmd,
-                    *workgroups_x,
-                    *workgroups_y,
-                    *workgroups_z,
-                );
-            },
-            GpuCommand::DispatchIndirect { buffer, offset } => {
-                let buf_state = buffers
-                    .get(buffer)
-                    .context("DispatchIndirect: invalid buffer handle")?;
-                unsafe {
+                GpuCommand::Dispatch {
+                    workgroups_x,
+                    workgroups_y,
+                    workgroups_z,
+                } => unsafe {
                     let mem_barrier = vk::MemoryBarrier2::default()
                         .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                         .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
-                        .dst_stage_mask(
-                            vk::PipelineStageFlags2::COMPUTE_SHADER
-                                | vk::PipelineStageFlags2::DRAW_INDIRECT,
-                        )
+                        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                         .dst_access_mask(
-                            vk::AccessFlags2::SHADER_READ
-                                | vk::AccessFlags2::SHADER_WRITE
-                                | vk::AccessFlags2::INDIRECT_COMMAND_READ,
+                            vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
                         );
                     let dep_info = vk::DependencyInfo::default()
                         .memory_barriers(std::slice::from_ref(&mem_barrier));
                     logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
-                    logical_device
-                        .device
-                        .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
-                }
-            }
-            GpuCommand::Barrier => {
-                // No-op: Vulkan already emits pipeline barriers before each dispatch.
-            }
-            GpuCommand::ResourceBarrier { .. } => {
-                // Falls back to global barrier behavior. Vulkan already inserts a
-                // compute→compute pipeline barrier before each dispatch, so this
-                // is a no-op. Per-resource VkBufferMemoryBarrier is a future optimization.
-            }
-            GpuCommand::ClearBuffer {
-                buffer,
-                offset,
-                size,
-            } => {
-                let buf_state = buffers
-                    .get(buffer)
-                    .context("ClearBuffer: invalid buffer handle")?;
-                let clear_size = if *size == 0 {
-                    buf_state.size.saturating_sub(*offset)
-                } else {
-                    *size
-                };
-                if clear_size > 0 {
+                    logical_device.device.cmd_dispatch(
+                        cmd,
+                        *workgroups_x,
+                        *workgroups_y,
+                        *workgroups_z,
+                    );
+                },
+                GpuCommand::DispatchIndirect { buffer, offset } => {
+                    let buf_state = buffers
+                        .get(buffer)
+                        .context("DispatchIndirect: invalid buffer handle")?;
                     unsafe {
-                        logical_device.device.cmd_fill_buffer(
-                            cmd,
-                            buf_state.buffer,
-                            *offset,
-                            clear_size,
-                            0,
-                        );
-
                         let mem_barrier = vk::MemoryBarrier2::default()
-                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                            .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                            .dst_stage_mask(
+                                vk::PipelineStageFlags2::COMPUTE_SHADER
+                                    | vk::PipelineStageFlags2::DRAW_INDIRECT,
+                            )
                             .dst_access_mask(
-                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+                                vk::AccessFlags2::SHADER_READ
+                                    | vk::AccessFlags2::SHADER_WRITE
+                                    | vk::AccessFlags2::INDIRECT_COMMAND_READ,
                             );
                         let dep_info = vk::DependencyInfo::default()
                             .memory_barriers(std::slice::from_ref(&mem_barrier));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
+                        logical_device
+                            .device
+                            .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
                     }
                 }
-            }
-            GpuCommand::WriteBuffer {
-                buffer: buf_handle,
-                offset,
-                data,
-            } => {
-                let buf_state = buffers
-                    .get(buf_handle)
-                    .context("WriteBuffer: invalid buffer handle")?;
-                // HOST_VISIBLE / CPU_READABLE paths were handled in the pre-pass;
-                // DEVICE_LOCAL storage uses the staging belt (see pre-pass).
-                if buf_state.is_storage && buf_state.host_mapped.is_none() {
-                    let (stg, stg_off) = belt_slices
-                        .get(belt_idx)
-                        .context("WriteBuffer: belt slice missing (internal error)")?;
-                    belt_idx += 1;
-                    let region = vk::BufferCopy {
-                        src_offset: *stg_off,
-                        dst_offset: *offset,
-                        size: data.len() as u64,
+                GpuCommand::Barrier => {
+                    // No-op: Vulkan already emits pipeline barriers before each dispatch.
+                }
+                GpuCommand::ResourceBarrier { .. } => {
+                    // Falls back to global barrier behavior. Vulkan already inserts a
+                    // compute→compute pipeline barrier before each dispatch, so this
+                    // is a no-op. Per-resource VkBufferMemoryBarrier is a future optimization.
+                }
+                GpuCommand::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    let buf_state = buffers
+                        .get(buffer)
+                        .context("ClearBuffer: invalid buffer handle")?;
+                    let clear_size = if *size == 0 {
+                        buf_state.size.saturating_sub(*offset)
+                    } else {
+                        *size
                     };
-                    unsafe {
-                        logical_device.device.cmd_copy_buffer(
-                            cmd,
-                            *stg,
-                            buf_state.buffer,
-                            std::slice::from_ref(&region),
-                        );
-
-                        let mem_barrier = vk::MemoryBarrier2::default()
-                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .dst_access_mask(
-                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+                    if clear_size > 0 {
+                        unsafe {
+                            logical_device.device.cmd_fill_buffer(
+                                cmd,
+                                buf_state.buffer,
+                                *offset,
+                                clear_size,
+                                0,
                             );
-                        let dep_info = vk::DependencyInfo::default()
-                            .memory_barriers(std::slice::from_ref(&mem_barrier));
-                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
+                            let mem_barrier = vk::MemoryBarrier2::default()
+                                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                                .dst_access_mask(
+                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+                                );
+                            let dep_info = vk::DependencyInfo::default()
+                                .memory_barriers(std::slice::from_ref(&mem_barrier));
+                            logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+                        }
                     }
                 }
-            }
-            GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
-                let scratch = texture_upload_scratch
-                    .get(texture_upload_idx)
-                    .context("WriteTexture: scratch missing (internal)")?;
-                texture_upload_idx += 1;
-                super::texture::record_compute_texture_upload(
-                    &state.devices,
-                    &mut state.textures,
-                    cmd,
-                    scratch,
-                )?;
+                GpuCommand::WriteBuffer {
+                    buffer: buf_handle,
+                    offset,
+                    data,
+                } => {
+                    let buf_state = buffers
+                        .get(buf_handle)
+                        .context("WriteBuffer: invalid buffer handle")?;
+                    // HOST_VISIBLE / CPU_READABLE paths were handled in the pre-pass;
+                    // DEVICE_LOCAL storage uses the staging belt (see pre-pass).
+                    if buf_state.is_storage && buf_state.host_mapped.is_none() {
+                        let (stg, stg_off) = belt_slices
+                            .get(belt_idx)
+                            .context("WriteBuffer: belt slice missing (internal error)")?;
+                        belt_idx += 1;
+                        let region = vk::BufferCopy {
+                            src_offset: *stg_off,
+                            dst_offset: *offset,
+                            size: data.len() as u64,
+                        };
+                        unsafe {
+                            logical_device.device.cmd_copy_buffer(
+                                cmd,
+                                *stg,
+                                buf_state.buffer,
+                                std::slice::from_ref(&region),
+                            );
+
+                            let mem_barrier = vk::MemoryBarrier2::default()
+                                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                                .dst_access_mask(
+                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+                                );
+                            let dep_info = vk::DependencyInfo::default()
+                                .memory_barriers(std::slice::from_ref(&mem_barrier));
+                            logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+                        }
+                    }
+                }
+                GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                    let scratch = texture_upload_scratch
+                        .get(texture_upload_idx)
+                        .context("WriteTexture: scratch missing (internal)")?;
+                    texture_upload_idx += 1;
+                    super::texture::record_compute_texture_upload(
+                        &state.devices,
+                        &mut state.textures,
+                        cmd,
+                        scratch,
+                    )?;
+                }
             }
         }
-    }
 
-    debug_assert_eq!(
-        texture_upload_idx,
-        texture_upload_scratch.len(),
-        "WriteTexture commands mismatch texture scratch pre-pass"
-    );
+        debug_assert_eq!(
+            texture_upload_idx,
+            texture_upload_scratch.len(),
+            "WriteTexture commands mismatch texture scratch pre-pass"
+        );
 
-    // Release barrier: flush compute/transfer writes so they are available to
-    // subsequent queue submissions (e.g. the present-barrier layout transition
-    // in the surface present path).  Same-queue ordering guarantees execution
-    // order but NOT memory visibility across submits; this barrier closes the
-    // gap by making all writes from this command buffer available before the
-    // submit completes.
-    unsafe {
-        let release = vk::MemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-            )
-            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
-        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&release));
-        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
-    }
-
-    // End command buffer
-    if let Err(e) = unsafe { logical_device.device.end_command_buffer(cmd) } {
+        // Release barrier: flush compute/transfer writes so they are available to
+        // subsequent queue submissions (e.g. the present-barrier layout transition
+        // in the surface present path).  Same-queue ordering guarantees execution
+        // order but NOT memory visibility across submits; this barrier closes the
+        // gap by making all writes from this command buffer available before the
+        // submit completes.
         unsafe {
-            logical_device
-                .device
-                .free_command_buffers(logical_device.command_pool, &[cmd]);
+            let release = vk::MemoryBarrier2::default()
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+                )
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
+            let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&release));
+            logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
         }
-        return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
-    }
+
+        // End command buffer
+        if let Err(e) = unsafe { logical_device.device.end_command_buffer(cmd) } {
+            unsafe {
+                logical_device
+                    .device
+                    .free_command_buffers(logical_device.command_pool, &[cmd]);
+            }
+            return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
+        }
 
         (cmd, belt_idx, texture_upload_idx)
     };
@@ -717,7 +721,10 @@ pub(super) fn submit(
                 .device
                 .free_command_buffers(submit_device_core.command_pool, &[cmd]);
         }
-        return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
+        return Err(anyhow::anyhow!(
+            "Failed to queue_submit2 command buffer: {:?}",
+            e
+        ));
     }
 
     state

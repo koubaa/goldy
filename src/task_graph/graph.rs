@@ -6,8 +6,8 @@ use super::ResourceId;
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
-use crate::timeline::TimelineValue;
 use crate::texture::Texture;
+use crate::timeline::TimelineValue;
 use anyhow::Result;
 
 /// A task graph that analyzes dependencies at submit time.

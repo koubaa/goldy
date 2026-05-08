@@ -891,9 +891,6 @@ pub(super) struct FenceEntry {
     pub signal: Arc<FenceSignal>,
 }
 
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {

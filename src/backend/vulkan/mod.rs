@@ -949,12 +949,7 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(
-            &mut self.state,
-            device_handle,
-            commands,
-            None,
-        )
+        compute::submit(&mut self.state, device_handle, commands, None)
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {

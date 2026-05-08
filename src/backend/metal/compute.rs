@@ -592,6 +592,10 @@ pub(super) fn submit(
 }
 
 /// Check if the fence for the given token has signaled (work complete).
+#[allow(
+    dead_code,
+    reason = "retained for deprecated fence-based paths; timeline uses fence internally"
+)]
 pub(super) fn is_fence_complete(
     state: &MetalState,
     _device: DeviceHandle,

@@ -26,9 +26,9 @@
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
 use crate::shader_library::ShaderLibrary;
+use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::task_graph::TaskGraph;
 use crate::timeline::TimelineValue;
-use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;

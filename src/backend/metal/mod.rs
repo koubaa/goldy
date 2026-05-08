@@ -641,18 +641,13 @@ impl GpuBackend for MetalBackend {
         compute::submit(&mut self.state, device, commands)
     }
 
-    fn record_gpu_work(
-        &mut self,
-        frame: &FrameToken,
-        commands: &[GpuCommand],
-    ) -> Result<()> {
+    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .state
             .surfaces
             .get_mut(&frame.surface)
             .context("Invalid surface handle")?;
-        surf.frame_pending_gpu_commands
-            .extend_from_slice(commands);
+        surf.frame_pending_gpu_commands.extend_from_slice(commands);
         Ok(())
     }
 

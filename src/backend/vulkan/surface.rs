@@ -466,11 +466,7 @@ pub(super) fn acquire(
     if let Some(surface_state) = state.surfaces.get(&surface_handle) {
         if let Some(tex_handle) = surface_state.current_texture_handle {
             tracing::warn!("Previous surface texture was not presented; cleaning up");
-            unregister_surface_texture(
-                &mut state.devices,
-                &mut state.textures,
-                tex_handle,
-            );
+            unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
         }
     }
 
@@ -849,192 +845,192 @@ where
             .context("Surface's device is invalid")?;
 
         // Begin command buffer
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-    unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
-        .context("Failed to begin command buffer")?;
+        unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
+            .context("Failed to begin command buffer")?;
 
-    // Cross-submission memory barrier: make writes from prior compute dispatches
-    // (submitted as separate queue batches) visible to vertex/fragment shader
-    // reads.  Vulkan guarantees execution ordering between same-queue batches
-    // but NOT memory visibility — explicit synchronisation is required.
-    unsafe {
-        let mem_barrier = vk::MemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-            )
-            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::VERTEX_SHADER
-                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags2::VERTEX_INPUT,
-            )
-            .dst_access_mask(
-                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
-            );
-        let dep_info =
-            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
-        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
-    }
+        // Cross-submission memory barrier: make writes from prior compute dispatches
+        // (submitted as separate queue batches) visible to vertex/fragment shader
+        // reads.  Vulkan guarantees execution ordering between same-queue batches
+        // but NOT memory visibility — explicit synchronisation is required.
+        unsafe {
+            let mem_barrier = vk::MemoryBarrier2::default()
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+                )
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::VERTEX_SHADER
+                        | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                        | vk::PipelineStageFlags2::VERTEX_INPUT,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+                );
+            let dep_info =
+                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+            logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+        }
 
-    // Transition image to color attachment. The image is in `GENERAL` layout at this
-    // point (acquire submits a prep barrier `UNDEFINED → GENERAL`), but we pass
-    // `UNDEFINED` as old_layout to let the driver discard any prior contents — the
-    // render path is expected to fully overwrite the frame (clear + draw), so we
-    // don't need to preserve compute writes here.
-    let color_barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-        .src_access_mask(vk::AccessFlags2::NONE)
-        .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-        .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .image(image)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-
-    // Prepare image barriers - color always, depth if present
-    let mut barriers = vec![color_barrier];
-
-    // Add depth barrier if depth buffer exists
-    if let (Some(depth_img), Some(df)) = (depth_image, depth_format) {
-        let depth_barrier = vk::ImageMemoryBarrier2::default()
+        // Transition image to color attachment. The image is in `GENERAL` layout at this
+        // point (acquire submits a prep barrier `UNDEFINED → GENERAL`), but we pass
+        // `UNDEFINED` as old_layout to let the driver discard any prior contents — the
+        // render path is expected to fully overwrite the frame (clear + draw), so we
+        // don't need to preserve compute writes here.
+        let color_barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
             .src_access_mask(vk::AccessFlags2::NONE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            )
-            .dst_access_mask(
-                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
-                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            )
+            .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
             .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .image(depth_img)
+            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image(image)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: depth_aspect_mask(df),
+                aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        barriers.push(depth_barrier);
-    }
 
-    let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+        // Prepare image barriers - color always, depth if present
+        let mut barriers = vec![color_barrier];
 
-    unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
+        // Add depth barrier if depth buffer exists
+        if let (Some(depth_img), Some(df)) = (depth_image, depth_format) {
+            let depth_barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::NONE)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .image(depth_img)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: depth_aspect_mask(df),
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            barriers.push(depth_barrier);
+        }
 
-    // Begin dynamic rendering
-    let color_attachment = vk::RenderingAttachmentInfo::default()
-        .image_view(image_view)
-        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .clear_value(vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [clear_color.r, clear_color.g, clear_color.b, clear_color.a],
-            },
-        });
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
 
-    // Create depth attachment if present
-    let depth_attachment = depth_view.map(|dv| {
-        vk::RenderingAttachmentInfo::default()
-            .image_view(dv)
-            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
+
+        // Begin dynamic rendering
+        let color_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(image_view)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: clear_depth,
-                    stencil: 0,
+                color: vk::ClearColorValue {
+                    float32: [clear_color.r, clear_color.g, clear_color.b, clear_color.a],
                 },
-            })
-    });
+            });
 
-    let mut rendering_info = vk::RenderingInfo::default()
-        .render_area(vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D { width, height },
-        })
-        .layer_count(1)
-        .color_attachments(std::slice::from_ref(&color_attachment));
-
-    // Add depth attachment if present
-    if let Some(ref depth_att) = depth_attachment {
-        rendering_info = rendering_info.depth_attachment(depth_att);
-    }
-
-    unsafe {
-        logical_device
-            .device
-            .cmd_begin_rendering(cmd, &rendering_info)
-    };
-
-    // Negative viewport height flips Y to match DX12 (core since Vulkan 1.1)
-    let viewport = vk::Viewport {
-        x: 0.0,
-        y: height as f32, // Start from bottom
-        width: width as f32,
-        height: -(height as f32), // Negative height flips Y
-        min_depth: 0.0,
-        max_depth: 1.0,
-    };
-    unsafe {
-        logical_device
-            .device
-            .cmd_set_viewport(cmd, 0, std::slice::from_ref(&viewport))
-    };
-
-    let scissor = vk::Rect2D {
-        offset: vk::Offset2D { x: 0, y: 0 },
-        extent: vk::Extent2D { width, height },
-    };
-    unsafe {
-        logical_device
-            .device
-            .cmd_set_scissor(cmd, 0, std::slice::from_ref(&scissor))
-    };
-
-    // Track current pipeline for bind group binding
-    let mut current_pipeline: Option<PipelineHandle> = None;
-
-    // Execute render commands using provided callback
-    record_commands_fn(cmd, commands, logical_device, &mut current_pipeline)?;
-
-    // End dynamic rendering
-    unsafe { logical_device.device.cmd_end_rendering(cmd) };
-
-    // Transition image for presentation
-    let barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-        .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-        .dst_access_mask(vk::AccessFlags2::NONE)
-        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-        .image(image)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
+        // Create depth attachment if present
+        let depth_attachment = depth_view.map(|dv| {
+            vk::RenderingAttachmentInfo::default()
+                .image_view(dv)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: clear_depth,
+                        stencil: 0,
+                    },
+                })
         });
 
-    let dep_info =
-        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        let mut rendering_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D { width, height },
+            })
+            .layer_count(1)
+            .color_attachments(std::slice::from_ref(&color_attachment));
 
-    unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
+        // Add depth attachment if present
+        if let Some(ref depth_att) = depth_attachment {
+            rendering_info = rendering_info.depth_attachment(depth_att);
+        }
 
-    // End command buffer
+        unsafe {
+            logical_device
+                .device
+                .cmd_begin_rendering(cmd, &rendering_info)
+        };
+
+        // Negative viewport height flips Y to match DX12 (core since Vulkan 1.1)
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: height as f32, // Start from bottom
+            width: width as f32,
+            height: -(height as f32), // Negative height flips Y
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        unsafe {
+            logical_device
+                .device
+                .cmd_set_viewport(cmd, 0, std::slice::from_ref(&viewport))
+        };
+
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D { width, height },
+        };
+        unsafe {
+            logical_device
+                .device
+                .cmd_set_scissor(cmd, 0, std::slice::from_ref(&scissor))
+        };
+
+        // Track current pipeline for bind group binding
+        let mut current_pipeline: Option<PipelineHandle> = None;
+
+        // Execute render commands using provided callback
+        record_commands_fn(cmd, commands, logical_device, &mut current_pipeline)?;
+
+        // End dynamic rendering
+        unsafe { logical_device.device.cmd_end_rendering(cmd) };
+
+        // Transition image for presentation
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+            .dst_access_mask(vk::AccessFlags2::NONE)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+
+        unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
+
+        // End command buffer
         unsafe { logical_device.device.end_command_buffer(cmd) }
             .context("Failed to end command buffer")?;
     }
@@ -1114,12 +1110,7 @@ pub(super) fn end_frame(
     };
 
     if !pending.is_empty() {
-        super::compute::submit(
-            state,
-            dh,
-            &pending,
-            Some(frame.surface),
-        )?;
+        super::compute::submit(state, dh, &pending, Some(frame.surface))?;
     }
 
     present(state, frame.surface, frame.image)
@@ -1197,8 +1188,12 @@ pub(super) fn present(
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe { logical_device.device.begin_command_buffer(barrier_cmd, &begin_info) }
-                .context("Failed to begin compute-present barrier command buffer")?;
+            unsafe {
+                logical_device
+                    .device
+                    .begin_command_buffer(barrier_cmd, &begin_info)
+            }
+            .context("Failed to begin compute-present barrier command buffer")?;
 
             let barrier = vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
@@ -1216,9 +1211,13 @@ pub(super) fn present(
                     layer_count: 1,
                 });
 
-            let dep_info = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&barrier));
-            unsafe { logical_device.device.cmd_pipeline_barrier2(barrier_cmd, &dep_info) };
+            let dep_info =
+                vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+            unsafe {
+                logical_device
+                    .device
+                    .cmd_pipeline_barrier2(barrier_cmd, &dep_info)
+            };
 
             unsafe { logical_device.device.end_command_buffer(barrier_cmd) }
                 .context("Failed to end compute-present barrier command buffer")?;
