@@ -154,11 +154,26 @@ pub(super) fn submit(
     // Reap any previously-submitted fences that have already signaled. Keeps
     // the pool bounded when callers (ekrano) don't wait on every intermediate submit.
     // Belt before reap: need live VkFence handles to poll completion.
+    //
+    // For timeline-keyed staging chunks (standalone-submit path) we also need the
+    // current device timeline counter so `reclaim` knows which chunks are safe to
+    // recycle without reaching into `compute_fence_pool`.
+    let completed_timeline = state
+        .devices
+        .get(&device_handle)
+        .map(|ld| unsafe {
+            ld.device
+                .get_semaphore_counter_value(ld.timeline_semaphore)
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+
     for belt in state.staging_belts.values_mut() {
         belt.reclaim(
             &state.compute_fence_pool,
             &state.devices,
             &state.deferred_pending_tokens,
+            completed_timeline,
         )?;
     }
     reap_signaled_fences(state);
