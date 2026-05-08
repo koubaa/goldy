@@ -157,7 +157,7 @@ impl App {
         let surface = self.surface.as_ref().unwrap();
         let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, DataAccess::Scattered)?;
 
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }

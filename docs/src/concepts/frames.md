@@ -63,7 +63,8 @@ loop {
         pass.bind_resources_raw(&[uniform_idx, tex_idx]);
         pass.dispatch(width / 8, height / 8, 1);
     }
-    encoder.submit(&device)?.wait()?;
+    let tv = encoder.submit(&device)?;
+    device.wait_until(tv)?;
     
     frame.present()?;
 }
@@ -224,13 +225,15 @@ Subsequent read_to_cpu():
 
 Both `frame.render()` and `target.render()` are synchronous—they wait for GPU completion. Surface uses proper frame pipelining with semaphores internally.
 
-When using `frame.texture()` with compute shaders, ensure your compute work completes before calling `frame.present()`. The `ComputeEncoder::submit().wait()` pattern handles this.
+When using `frame.texture()` with compute shaders, prefer [`Frame::submit_compute`](../../src/surface.rs) so work is bracketed with the swapchain frame; or ensure standalone compute completes with `device.wait_until(tv)` before `frame.present()`.
+
+For legacy `ComputeEncoder` paths, `let tv = encoder.submit(&device)?; device.wait_until(tv)?;` before present achieves the same synchronization.
 
 ## Error Handling
 
 ```rust
 // Surface errors
-let frame = surface.acquire()?;  // May fail if swapchain outdated
+let frame = surface.begin()?;  // May fail if swapchain outdated
 frame.present()?;                // May need resize
 
 // RenderTarget errors

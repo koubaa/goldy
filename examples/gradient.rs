@@ -113,7 +113,7 @@ impl App {
         let uniforms = TimeUniforms { time };
         uniform_buffer.write_data(0, &[uniforms])?;
 
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
 
         let mut encoder = CommandEncoder::new();
         {

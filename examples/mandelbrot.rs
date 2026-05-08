@@ -114,7 +114,7 @@ impl App {
         uniform_buffer.write_data(0, &[uniforms])?;
 
         // Acquire frame
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
 
         let mut encoder = CommandEncoder::new();
         {

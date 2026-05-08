@@ -469,8 +469,8 @@ impl ComputeEncoder {
     pub fn begin_compute_pass(&mut self) -> ComputePass<'_>;
     /// Submit and block until complete.
     pub fn dispatch(&self, device: &Device) -> Result<()>;
-    /// Submit without blocking; returns a GpuFuture.
-    pub fn submit(&self, device: &Device) -> Result<GpuFuture>;
+    /// Submit without blocking; returns a device timeline value.
+    pub fn submit(&self, device: &Device) -> Result<TimelineValue>;
 }
 
 pub struct ComputePass<'a> { /* ... */ }
@@ -489,20 +489,13 @@ impl<'a> ComputePass<'a> {
 }
 ```
 
-## GpuFuture
+## TimelineValue
 
 ```rust
-pub struct GpuFuture { /* ... */ }
-
-impl GpuFuture {
-    /// Non-blocking poll.
-    pub fn is_complete(&self) -> bool;
-    /// Block until done.
-    pub fn wait(&self) -> Result<()>;
-    /// Block with timeout. Returns Ok(true) = done, Ok(false) = timed out.
-    pub fn wait_timeout(&self, timeout_ms: u32) -> Result<bool>;
-}
+pub type TimelineValue = u64;
 ```
+
+Non-blocking submissions return a `TimelineValue`. Use [`Device::wait_until`](crate::device::Device::wait_until) or [`Device::gpu_progress`](crate::device::Device::gpu_progress) for completion (see [Device timeline](../concepts/gpu-future.md)).
 
 ## Additional Types
 
@@ -607,7 +600,8 @@ pub use render_target::*;
 pub use texture::*;
 pub use sampler::*;
 pub use compute::*;
-pub use gpu_future::*;
+pub use timeline::TimelineValue;
+pub use task_graph::{NodeAccess, NodeBuilder, TaskGraph};
 pub use common_types::*;
 ```
 

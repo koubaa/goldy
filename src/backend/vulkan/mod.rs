@@ -251,6 +251,7 @@ impl VulkanBackend {
             staging_belts: HashMap::new(),
             deferred_compute: Vec::new(),
             deferred_pending_tokens: HashMap::new(),
+            timeline_cmd_buffers: HashMap::new(),
         };
 
         Ok(Self { state })
@@ -586,16 +587,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn surface_acquire(&mut self, surface_handle: SurfaceHandle) -> Result<SwapchainImageHandle> {
-        surface::acquire(
-            &self.state.instance,
-            &mut self.state.devices,
-            &mut self.state.surfaces,
-            &mut self.state.textures,
-            &mut self.state.next_texture_handle,
-            surface_handle,
-            &mut self.state.deferred_pending_tokens,
-            &mut self.state.compute_texture_staging_pool,
-        )
+        surface::acquire(&mut self.state, surface_handle)
     }
 
     fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
@@ -609,7 +601,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[RenderCommand],
     ) -> Result<()> {
         surface::render(
-            &self.state.devices,
+            &mut self.state.devices,
             &mut self.state.surfaces,
             surface_handle,
             _image,
@@ -632,7 +624,7 @@ impl GpuBackend for VulkanBackend {
         surface_handle: SurfaceHandle,
         _image: SwapchainImageHandle,
     ) -> Result<()> {
-        surface::present(&mut self.state, surface_handle, _image)
+        surface::present(&mut self.state, surface_handle, _image).map(|_| ())
     }
 
     fn surface_resize(
@@ -898,12 +890,80 @@ impl GpuBackend for VulkanBackend {
         );
     }
 
-    fn submit_compute(
+    fn gpu_progress(&self, device_handle: DeviceHandle) -> crate::timeline::TimelineValue {
+        let Some(ld) = self.state.devices.get(&device_handle) else {
+            return 0;
+        };
+        unsafe { ld.device.get_semaphore_counter_value(ld.timeline_semaphore) }.unwrap_or(0)
+    }
+
+    fn wait_until(
+        &mut self,
+        device_handle: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let sem = self
+            .state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?
+            .timeline_semaphore;
+        let dev = &self.state.devices.get(&device_handle).unwrap().device;
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&sem))
+            .values(std::slice::from_ref(&value));
+        unsafe { dev.wait_semaphores(&wait, u64::MAX) }.context("wait_semaphores failed")?;
+        compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+        Ok(())
+    }
+
+    fn wait_until_timeout(
+        &mut self,
+        device_handle: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+        timeout_ms: u32,
+    ) -> Result<bool> {
+        let sem = self
+            .state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?
+            .timeline_semaphore;
+        let dev = &self.state.devices.get(&device_handle).unwrap().device;
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&sem))
+            .values(std::slice::from_ref(&value));
+        let timeout_ns = (timeout_ms as u64).saturating_mul(1_000_000);
+        match unsafe { dev.wait_semaphores(&wait, timeout_ns) } {
+            Ok(()) => {
+                compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+                Ok(true)
+            }
+            Err(vk::Result::TIMEOUT) => Ok(false),
+            Err(e) => Err(anyhow::anyhow!("wait_semaphores: {:?}", e)),
+        }
+    }
+
+    fn submit_standalone(
         &mut self,
         device_handle: DeviceHandle,
         commands: &[GpuCommand],
-    ) -> Result<FenceToken> {
-        compute::submit(&mut self.state, device_handle, commands)
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit(&mut self.state, device_handle, commands, None)
+    }
+
+    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
+        let surf = self
+            .state
+            .surfaces
+            .get_mut(&frame.surface)
+            .context("Invalid surface handle")?;
+        surf.frame_pending_gpu_commands.extend_from_slice(commands);
+        Ok(())
+    }
+
+    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::end_frame(&mut self.state, frame)
     }
 
     fn is_fence_complete(&self, device_handle: DeviceHandle, token: FenceToken) -> bool {

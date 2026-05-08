@@ -228,7 +228,7 @@ impl App {
         let tex_handle = texture.bindless_handle().unwrap();
         let samp_handle = sampler.bindless_handle().unwrap();
 
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
 
         let mut encoder = CommandEncoder::new();
         {

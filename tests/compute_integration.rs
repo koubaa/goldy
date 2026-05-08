@@ -1322,11 +1322,11 @@ fn test_write_buffer_reuse_across_submissions() {
         .bind_resources_raw(&[idx_in, idx_out_b])
         .dispatch(1, 1, 1);
 
-    let mut fut1 = g1.submit(&device).expect("submit 1");
-    let mut fut2 = g2.submit(&device).expect("submit 2");
+    let tv1 = g1.submit(&device).expect("submit 1");
+    let tv2 = g2.submit(&device).expect("submit 2");
 
-    fut1.wait().expect("wait 1");
-    fut2.wait().expect("wait 2");
+    device.wait_until(tv1).expect("wait 1");
+    device.wait_until(tv2).expect("wait 2");
 
     let read_u32 = |buf: &Buffer| -> Vec<u32> {
         let mut raw = vec![0u8; N * core::mem::size_of::<u32>()];

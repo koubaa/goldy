@@ -265,7 +265,7 @@ impl App {
         let index_buffer =
             Buffer::with_data(device.as_ref(), &sorted_indices, DataAccess::Scattered)?;
 
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }

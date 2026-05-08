@@ -169,7 +169,7 @@ impl App {
             )?);
         }
 
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
 
         // Drop oldest frame's buffers now that GPU is done
         if self.frame_buffers.len() >= MAX_FRAMES_IN_FLIGHT {

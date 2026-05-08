@@ -208,7 +208,7 @@ impl RenderState {
         compute_encoder.dispatch(&self.device)?;
 
         // Render stars
-        let frame = self.surface.acquire()?;
+        let frame = self.surface.begin()?;
 
         let mut encoder = CommandEncoder::new();
         {

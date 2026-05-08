@@ -20,7 +20,7 @@
 - [Compute](./concepts/compute.md)
 - [Compute Graph](./concepts/compute-graph.md)
 - [Frame Output](./concepts/frames.md)
-- [GpuFuture](./concepts/gpu-future.md)
+- [Device timeline](./concepts/gpu-future.md)
 
 # Examples
 

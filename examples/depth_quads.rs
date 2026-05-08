@@ -182,7 +182,7 @@ impl App {
             ));
         }
 
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
 
         let mut encoder = CommandEncoder::new();
         {

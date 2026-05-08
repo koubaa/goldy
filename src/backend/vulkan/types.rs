@@ -365,6 +365,10 @@ pub(crate) struct LogicalDevice {
     pub resource_registry: ResourceRegistry,
     /// Deferred deletion queue for resources that are still in-flight
     pub deletion_queue: DeletionQueue,
+    /// Device timeline semaphore for monotonic GPU progress ([`GpuBackend::gpu_progress`]).
+    pub timeline_semaphore: vk::Semaphore,
+    /// Next timeline value to signal on `timeline_semaphore`.
+    pub timeline_next: u64,
 }
 
 impl LogicalDevice {
@@ -548,6 +552,9 @@ pub(crate) struct FrameSync {
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
     /// presentation uses a barrier submit in `present` instead (see `surface::present`).
     pub render_pass_submitted: bool,
+    /// Device timeline value signaled for this frame slot's last queue submission
+    /// (render or compute+present batch). Consumed when presenting.
+    pub frame_timeline_value: Option<u64>,
     /// Deferred compute CBs submitted as part of this frame slot's single
     /// `vkQueueSubmit`.  Freed in `acquire()` after the frame's in_flight_fence
     /// has been waited on.
@@ -593,6 +600,8 @@ pub(crate) struct SurfaceState {
     /// registered in the bindless descriptor set as a storage image so compute
     /// shaders can write directly to the swapchain image.
     pub current_texture_handle: Option<super::TextureHandle>,
+    /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`]).
+    pub frame_pending_gpu_commands: Vec<super::GpuCommand>,
 }
 
 /// Pending buffer operations for command recording.
@@ -799,6 +808,9 @@ pub(super) struct VulkanState {
     /// when `Some`.  Entries are removed in `acquire()` after the fence has been
     /// waited on.
     pub deferred_pending_tokens: HashMap<u64, Option<vk::Fence>>,
+    /// Command buffers to free once the device timeline reaches the given value
+    /// (one submit may register multiple buffers at the same timeline point).
+    pub timeline_cmd_buffers: HashMap<u64, Vec<(DeviceHandle, vk::CommandBuffer)>>,
 }
 
 pub(super) struct DeferredCompute {

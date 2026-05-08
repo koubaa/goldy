@@ -9,7 +9,7 @@ Goldy's compute API lets you run general-purpose GPU programs (GPGPU) alongside 
 | `ComputePipeline` | Compiled compute shader + pipeline state |
 | `ComputeEncoder` | Records compute commands |
 | `ComputePass` | Scoped recording context inside an encoder |
-| `GpuFuture` | Handle to non-blocking submitted work |
+| `TimelineValue` | Opaque `u64` device timeline counter from non-blocking `submit` |
 
 ## Creating a Compute Pipeline
 
@@ -94,16 +94,16 @@ pass.dispatch(groups, 1, 1);
 Use `submit` to overlap CPU and GPU work:
 
 ```rust
-let future = encoder.submit(&device)?;
+let tv = encoder.submit(&device)?;
 
 // CPU work here while GPU is busy
 prepare_next_frame();
 
 // Wait when you need the result
-future.wait()?;
+device.wait_until(tv)?;
 ```
 
-See [GpuFuture](./gpu-future.md) for polling and timeout details.
+See [Device timeline](./gpu-future.md) for polling with `gpu_progress` and timeouts.
 
 ## Resource Access in Shaders
 

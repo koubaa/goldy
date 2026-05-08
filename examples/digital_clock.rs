@@ -131,7 +131,7 @@ impl App {
             Buffer::with_bytes(device.as_ref(), vertex_data, DataAccess::Scattered)?;
 
         // Render directly to surface
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }

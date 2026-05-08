@@ -645,6 +645,61 @@ impl GpuBackend for Dx12Backend {
         surface::get_present_mode(&self.state, surface_handle)
     }
 
+    fn gpu_progress(&self, device_handle: DeviceHandle) -> crate::timeline::TimelineValue {
+        self.state
+            .devices
+            .get(&device_handle)
+            .map(|d| unsafe { d.fence.GetCompletedValue() })
+            .unwrap_or(0)
+    }
+
+    fn wait_until(
+        &mut self,
+        device_handle: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let fence = self
+            .state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?
+            .fence
+            .clone();
+        utils::wait_for_fence(&fence, value)
+    }
+
+    fn wait_until_timeout(
+        &mut self,
+        device_handle: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+        timeout_ms: u32,
+    ) -> Result<bool> {
+        let fence = self
+            .state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?
+            .fence
+            .clone();
+        utils::wait_for_fence_timeout(&fence, value, timeout_ms)
+    }
+
+    fn submit_standalone(
+        &mut self,
+        device_handle: DeviceHandle,
+        commands: &[GpuCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit(&mut self.state, device_handle, commands)
+    }
+
+    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
+        surface::record_gpu_work(&mut self.state, frame.surface, commands)
+    }
+
+    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::end_frame(&mut self.state, frame)
+    }
+
     fn create_pipeline_with_depth(
         &mut self,
         device_handle: DeviceHandle,
@@ -768,31 +823,6 @@ impl GpuBackend for Dx12Backend {
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
         compute::destroy(&mut self.state, pipeline_handle);
-    }
-
-    fn submit_compute(
-        &mut self,
-        device_handle: DeviceHandle,
-        commands: &[GpuCommand],
-    ) -> Result<FenceToken> {
-        compute::submit(&mut self.state, device_handle, commands)
-    }
-
-    fn is_fence_complete(&self, device_handle: DeviceHandle, token: FenceToken) -> bool {
-        compute::is_fence_complete(&self.state, device_handle, token)
-    }
-
-    fn wait_fence(&mut self, device_handle: DeviceHandle, token: FenceToken) -> Result<()> {
-        compute::wait_fence(&self.state, device_handle, token)
-    }
-
-    fn wait_fence_timeout(
-        &mut self,
-        device_handle: DeviceHandle,
-        token: FenceToken,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        compute::wait_fence_timeout(&self.state, device_handle, token, timeout_ms)
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {

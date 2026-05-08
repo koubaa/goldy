@@ -102,7 +102,7 @@ impl App {
         };
 
         // Acquire next frame from swapchain
-        let frame = surface.acquire()?;
+        let frame = surface.begin()?;
 
         // Build render commands
         let mut encoder = CommandEncoder::new();
