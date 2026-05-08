@@ -20,7 +20,7 @@ pub struct GoldySurface {
 
 /// Opaque handle to a Goldy SurfaceFrame.
 pub struct GoldySurfaceFrame {
-    pub(crate) inner: goldy::SurfaceFrame,
+    pub(crate) inner: goldy::Frame,
 }
 
 // Note: Surface creation is complex due to platform-specific window handles.
@@ -139,7 +139,7 @@ pub unsafe extern "C" fn goldy_surface_present(
 
     let frame = Box::from_raw(frame);
     match (*surface).inner.present(frame.inner) {
-        Ok(()) => GoldyResult::Ok,
+        Ok(_) => GoldyResult::Ok,
         Err(e) => {
             set_last_error_from_anyhow(&e);
             GoldyResult::GpuError

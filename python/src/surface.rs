@@ -147,7 +147,10 @@ impl PySurface {
             .inner
             .take()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Frame already presented"))?;
-        self.inner.present(frame).into_py_result()
+        self.inner
+            .present(frame)
+            .map(|_| ())
+            .into_py_result()
     }
 
     fn __repr__(&self) -> String {
@@ -163,7 +166,7 @@ impl PySurface {
 /// A frame acquired from a surface, ready for rendering.
 #[pyclass(name = "SurfaceFrame", module = "goldy")]
 pub struct PySurfaceFrame {
-    inner: Option<goldy::SurfaceFrame>,
+    inner: Option<goldy::Frame>,
 }
 
 #[pymethods]

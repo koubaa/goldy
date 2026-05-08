@@ -10,7 +10,7 @@ use crate::types::{BindlessHandle, Color, IndexFormat};
 /// `CommandEncoder` is completely lock-free and does not interact with the GPU backend.
 /// You can create and record commands on any thread. The actual GPU operations happen
 /// when you submit the commands via [`RenderTarget::render()`](crate::RenderTarget::render)
-/// or [`SurfaceFrame::render()`](crate::SurfaceFrame::render).
+/// or [`Frame::render()`](crate::surface::Frame::render).
 ///
 /// # Example
 ///

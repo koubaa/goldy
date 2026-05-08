@@ -535,7 +535,7 @@ pub(super) fn format(state: &MetalState, surface: SurfaceHandle) -> TextureForma
 /// Register the current drawable's MTLTexture at the surface's pre-reserved
 /// bindless storage-image slot, so it's visible to compute shaders via
 /// `goldy_direct_spatial<T>(n)` and to the public API via
-/// [`SurfaceFrame::texture`].
+/// [`crate::surface::Frame::texture`].
 ///
 /// The slot (`bindless_slot`) is one of MAX_FRAMES_IN_FLIGHT rotating slots
 /// allocated in `create()` and released in `destroy()`. Only the *texture
