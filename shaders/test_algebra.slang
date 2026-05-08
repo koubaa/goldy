@@ -9,8 +9,6 @@
 
 import goldy_exp;
 
-#define OUT goldy_dyn_scattered<uint>(0)
-
 // ---------------------------------------------------------------------------
 // Test monoid: uint under addition
 // ---------------------------------------------------------------------------
@@ -97,9 +95,9 @@ static const uint WG_SIZE = 64;
 groupshared UintAdd sh_uint[WG_SIZE];
 groupshared Int2Min sh_int2[WG_SIZE];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 local_id : SV_GroupThreadID) {
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     uint ix = local_id.x;
 
     // Exercise IMonoid identity

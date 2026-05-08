@@ -3,8 +3,7 @@
 //! This module contains `record_render_commands` which is used by both
 //! `render_to_target` and `surface_render` to avoid code duplication.
 
-use super::buffer;
-use super::types::{self, BindlessIndices, MAX_PUSH_CONSTANT_INDICES};
+use super::types::{self, PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS};
 use super::utils::index_format_to_vk;
 use super::{BufferHandle, PipelineHandle, RenderCommand};
 use ash::vk;
@@ -69,19 +68,19 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::SetPushConstants {
+            RenderCommand::BindResources {
                 buffers: buf_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
-                    let mut indices = BindlessIndices::default();
+                    let mut layout = PushLayout::default();
                     for (i, buffer_handle) in buf_handles.iter().enumerate() {
-                        if i >= MAX_PUSH_CONSTANT_INDICES {
+                        if i >= MAX_BINDLESS_SLOTS {
                             break;
                         }
-                        indices.indices[i] = buffers
+                        layout.bindless[i] = buffers
                             .get(buffer_handle)
                             .and_then(|b| b.bindless_index)
-                            .unwrap_or(0);
+                            .unwrap_or(0) as u16;
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -89,21 +88,28 @@ pub(super) fn record(
                             pipeline.layout,
                             vk::ShaderStageFlags::ALL,
                             0,
-                            bytemuck::bytes_of(&indices),
+                            bytemuck::bytes_of(&layout),
                         );
                     }
                 }
             }
-            RenderCommand::SetPushConstantsRaw {
+            RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
-                    let mut indices = BindlessIndices::default();
+                    let mut layout = PushLayout::default();
                     for (i, &idx) in raw_indices.iter().enumerate() {
-                        if i >= MAX_PUSH_CONSTANT_INDICES {
+                        if i >= MAX_BINDLESS_SLOTS {
                             break;
                         }
-                        indices.indices[i] = idx;
+                        layout.bindless[i] = idx as u16;
+                    }
+                    for (i, &val) in raw_user.iter().enumerate() {
+                        if i >= MAX_USER_SLOTS {
+                            break;
+                        }
+                        layout.user[i] = val;
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -111,12 +117,12 @@ pub(super) fn record(
                             pipeline.layout,
                             vk::ShaderStageFlags::ALL,
                             0,
-                            bytemuck::bytes_of(&indices),
+                            bytemuck::bytes_of(&layout),
                         );
                     }
                 }
             }
-            RenderCommand::SetPushConstantsTyped {
+            RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
@@ -125,18 +131,12 @@ pub(super) fn record(
                         &pipeline.push_constant_categories,
                         &pipeline.shader_debug_name,
                     )?;
-                    crate::backend::validate_typed_push_constant_buffer_strides(
-                        typed_handles,
-                        &pipeline.push_constant_buffer_strides,
-                        &pipeline.shader_debug_name,
-                        |h| buffer::element_stride_for_bindless_handle(buffers, h),
-                    )?;
-                    let mut indices = BindlessIndices::default();
+                    let mut layout = PushLayout::default();
                     for (i, handle) in typed_handles.iter().enumerate() {
-                        if i >= MAX_PUSH_CONSTANT_INDICES {
+                        if i >= MAX_BINDLESS_SLOTS {
                             break;
                         }
-                        indices.indices[i] = handle.index();
+                        layout.bindless[i] = handle.index() as u16;
                     }
                     unsafe {
                         logical_device.device.cmd_push_constants(
@@ -144,7 +144,7 @@ pub(super) fn record(
                             pipeline.layout,
                             vk::ShaderStageFlags::ALL,
                             0,
-                            bytemuck::bytes_of(&indices),
+                            bytemuck::bytes_of(&layout),
                         );
                     }
                 }

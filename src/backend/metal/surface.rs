@@ -5,6 +5,25 @@
 //! - `frame_texture()` returns the registered texture handle
 //! - `render()` uses the already-acquired drawable (does NOT call `nextDrawable` again)
 //! - `present()` presents the drawable and unregisters the temporary texture
+//!
+//! # Argument-buffer race avoidance (triple-buffered bindless slots)
+//!
+//! The renderer uses a pipelined frame loop:
+//!
+//! ```text
+//! Frame N:   acquire() → render_to_texture() { wait(N-1); submit(N) } → present()
+//! Frame N+1: acquire() → render_to_texture() { wait(N);   submit(N+1) } → present()
+//! ```
+//!
+//! `acquire()` re-encodes the drawable's `MTLTexture` GPU resource ID into the
+//! global argument buffer. Because `acquire()` runs BEFORE `wait(prev_frame)`,
+//! the CPU can overwrite a bindless slot that the GPU is still reading from the
+//! previous frame's fine rasterization dispatch. On Apple Silicon this manifests
+//! as `kIOGPUCommandBufferCallbackErrorPageFault` on the last compute encoder.
+//!
+//! The fix: reserve `MAX_FRAMES_IN_FLIGHT` (3) storage-image slots per surface
+//! and rotate through them. Frame N writes to slot `N % 3` while the GPU reads
+//! slot `(N-1) % 3` — the slots never alias across concurrent frames.
 
 use super::super::{
     DeviceHandle, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle,
@@ -51,7 +70,12 @@ pub(super) fn create(
     let (layer, width, height) = unsafe {
         let layer: id = msg_send![class!(CAMetalLayer), layer];
         let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
-        let () = msg_send![layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+        // Use RGBA8Unorm instead of BGRA8Unorm: on Apple Silicon, BGRA8Unorm
+        // does not support storage-class access (compute shader UAV writes),
+        // so writing to a BGRA swapchain drawable from a compute pass causes a
+        // GPU address fault (kIOGPUCommandBufferCallbackErrorPageFault).
+        // RGBA8Unorm supports both display and compute storage access.
+        let () = msg_send![layer, setPixelFormat: MTLPixelFormat::RGBA8Unorm];
         // Don't set framebufferOnly so the texture can be used with compute
         let () = msg_send![layer, setFramebufferOnly: NO];
 
@@ -78,13 +102,14 @@ pub(super) fn create(
         logical_device.device.new_texture(&depth_desc)
     });
 
-    // Reserve a single persistent storage-image bindless slot for this surface's
-    // swapchain drawable. We re-encode the current frame's `MTLTexture` into this
-    // slot on every `acquire` rather than allocating a fresh slot per frame
-    // (which would leak the 64-slot storage-image window in ~1 second at 60 fps).
-    let bindless_storage_slot = logical_device
-        .resource_registry
-        .reserve_storage_image_slot();
+    // Reserve MAX_FRAMES_IN_FLIGHT storage-image bindless slots for this
+    // surface. Each frame uses a different slot so the CPU never re-encodes a
+    // slot that the GPU is concurrently reading (see module-level doc comment).
+    let bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|_| {
+        logical_device
+            .resource_registry
+            .reserve_storage_image_slot()
+    });
 
     let handle = state.next_surface_handle;
     state.next_surface_handle += 1;
@@ -95,30 +120,29 @@ pub(super) fn create(
             device_handle,
             width,
             height,
-            format: TextureFormat::Bgra8Unorm,
+            format: TextureFormat::Rgba8Unorm,
             depth_format,
             depth_texture,
             current_frame: 0,
             layer: layer as *mut std::ffi::c_void,
             current_drawable: None,
             current_texture_handle: None,
-            bindless_storage_slot,
+            bindless_storage_slots,
             present_mode: PresentMode::Auto,
         },
     );
     tracing::info!(
-        "Created Metal surface {} (bindless storage slot={})",
+        "Created Metal surface {} (bindless storage slots={:?})",
         handle,
-        bindless_storage_slot
+        bindless_storage_slots
     );
     Ok(handle)
 }
 
 /// Destroy a surface.
 pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
-    // Clean up any acquired drawable texture before removing the surface
-    let (device_handle, slot) = match state.surfaces.get(&surface) {
-        Some(s) => (Some(s.device_handle), Some(s.bindless_storage_slot)),
+    let (device_handle, slots) = match state.surfaces.get(&surface) {
+        Some(s) => (Some(s.device_handle), Some(s.bindless_storage_slots)),
         None => (None, None),
     };
 
@@ -128,19 +152,16 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
         }
     }
 
-    // Release the persistent bindless storage-image slot back to the device
-    // registry's free list so another surface can claim it.
-    //
-    // Surface destruction is a teardown path that callers typically only
-    // invoke after stopping rendering, so GPU-in-flight aliasing is unlikely
-    // here — but we still go through the idle check for uniformity with
-    // texture/buffer destroy.
+    // Release all persistent bindless storage-image slots back to the device
+    // registry's free list so another surface can claim them.
     let gpu_idle = super::gpu_is_idle(state);
-    if let (Some(dev), Some(local)) = (device_handle, slot) {
+    if let (Some(dev), Some(slot_arr)) = (device_handle, slots) {
         if let Some(logical_device) = state.devices.get_mut(&dev) {
-            logical_device
-                .resource_registry
-                .release_storage_image_slot(local, !gpu_idle);
+            for &local in &slot_arr {
+                logical_device
+                    .resource_registry
+                    .release_storage_image_slot(local, !gpu_idle);
+            }
         }
     }
 
@@ -195,7 +216,8 @@ pub(super) fn acquire(
     let width = surface_state.width;
     let height = surface_state.height;
     let format = surface_state.format;
-    let bindless_slot = surface_state.bindless_storage_slot;
+    // Use the frame-indexed slot to avoid overwriting a slot the GPU is still reading.
+    let bindless_slot = surface_state.bindless_storage_slots[surface_state.current_frame];
 
     let tex_handle = register_surface_texture(
         state,
@@ -340,6 +362,7 @@ pub(super) fn present(
         .context("Device no longer valid")?;
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
+
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
     command_buffer.present_drawable(drawable_ref);
@@ -468,14 +491,14 @@ pub(super) fn format(state: &MetalState, surface: SurfaceHandle) -> TextureForma
 
 /// Register the current drawable's MTLTexture at the surface's pre-reserved
 /// bindless storage-image slot, so it's visible to compute shaders via
-/// `goldy_dyn_direct_spatial<T>(n)` and to the public API via
+/// `goldy_direct_spatial<T>(n)` and to the public API via
 /// [`SurfaceFrame::texture`].
 ///
-/// The slot (`bindless_slot`) is allocated once in `create()` and released
-/// in `destroy()`, so only the *texture object* at offset
-/// `storage_image_global_index(bindless_slot) * encoded_length` is rewritten
-/// per frame. This is the "transient allocation path that doesn't leak
-/// indices" anticipated by `abstract-gpu-surface.md` (risk #2).
+/// The slot (`bindless_slot`) is one of MAX_FRAMES_IN_FLIGHT rotating slots
+/// allocated in `create()` and released in `destroy()`. Only the *texture
+/// object* at offset `storage_image_global_index(bindless_slot) * encoded_length`
+/// is rewritten per frame. This is the "transient allocation path that doesn't
+/// leak indices" anticipated by `abstract-gpu-surface.md` (risk #2).
 ///
 /// The drawable `MTLTexture` is owned via [`ForeignType::from_ptr`] after an
 /// explicit `retain` (never cast `&TextureRef` → `&Texture` and `clone()` —
@@ -509,14 +532,16 @@ fn register_surface_texture(
             .bind_storage_image_slot(handle, bindless_slot);
         let global = ResourceRegistry::storage_image_global_index(bindless_slot);
 
-        let encoded_length = logical_device.texture_encoder.encoded_length();
+        // Surface drawable is used as a storage image (RWTexture2D write target),
+        // so encode with the ReadWrite storage image encoder.
+        let encoded_length = logical_device.storage_image_encoder.encoded_length();
         let offset = (global as u64) * encoded_length;
         if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
             logical_device
-                .texture_encoder
+                .storage_image_encoder
                 .set_argument_buffer(&logical_device.argument_buffer, offset);
             logical_device
-                .texture_encoder
+                .storage_image_encoder
                 .set_texture(0, texture_owned.as_ref());
         }
 

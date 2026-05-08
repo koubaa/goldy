@@ -7,7 +7,7 @@
 //! - **Command Recording**: [`CommandEncoder`](crate::CommandEncoder) is completely lock-free.
 //!   You can create and record commands on any thread without any synchronization.
 //!   
-//! - **Resource Creation**: Creating resources ([`Buffer`],
+//! - **Resource Creation**: Creating resources ([`crate::Buffer`],
 //!   [`RenderPipeline`](crate::RenderPipeline), etc.) acquires the backend lock.
 //!   These operations are safe from any thread but serialize internally.
 //!
@@ -25,7 +25,7 @@
 //! multi-queue support for parallel command submission if needed.
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
-use crate::buffer::Buffer;
+use crate::gpu_future::GpuFuture;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
@@ -202,6 +202,13 @@ pub struct DeviceCapabilities {
 
     /// Formats supported for render targets.
     pub supported_render_target_formats: Vec<TextureFormat>,
+
+    /// Whether [`crate::types::BufferFlags::CPU_READABLE`] scattered buffers can be read from CPU
+    /// without a GPU copy.
+    ///
+    /// `true` on Vulkan (`HOST_VISIBLE` storage) and Metal (Shared storage). `false` on Direct3D 12
+    /// (requires GPU copy to a READBACK heap).
+    pub has_zero_copy_storage_readback: bool,
 }
 
 impl Default for DeviceCapabilities {
@@ -221,6 +228,7 @@ impl Default for DeviceCapabilities {
                 TextureFormat::Rgba16Float,
                 TextureFormat::Rgba32Float,
             ],
+            has_zero_copy_storage_readback: true,
         }
     }
 }
@@ -378,17 +386,29 @@ impl Device {
         self.device_type
     }
 
+    /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
+    pub fn backend_type(&self) -> BackendType {
+        self.backend.lock().unwrap().backend_type()
+    }
+
     /// Check if the device is still valid.
     pub fn is_valid(&self) -> bool {
         self.backend.lock().unwrap().is_device_valid(self.handle)
     }
 
-    /// Direct3D 12: after GPU work writes a [`Buffer`] created with [`BufferFlags::CPU_COHERENT`],
-    /// copies from the UAV resource into the persistently mapped readback buffer so
-    /// [`Buffer::read_coherent`] sees the data. No-op on Vulkan and Metal.
-    pub fn copy_to_coherent_readback(&self, buffer: &Buffer) -> Result<()> {
+    /// Submit a full compute command stream (typically [`TaskGraph::compile_commands`]).
+    /// Returns [`GpuFuture`] — does not block.
+    pub(crate) fn submit_compute_commands(
+        &self,
+        commands: &[backend::GpuCommand],
+    ) -> Result<GpuFuture> {
         let mut backend = self.backend.lock().unwrap();
-        backend.copy_to_coherent_readback(self.handle, buffer.handle)
+        let token = backend.submit_compute(self.handle, commands)?;
+        Ok(GpuFuture {
+            backend: Arc::clone(&self.backend),
+            device: self.handle,
+            fence_token: Some(token),
+        })
     }
 
     /// Get device capabilities and format preferences.
@@ -408,12 +428,12 @@ impl Device {
     ///
     /// println!("Surface format: {:?}", caps.preferred_surface_format);
     /// println!("RenderTarget format: {:?}", caps.preferred_render_target_format);
+    /// println!("Zero-copy CPU storage readback: {}", caps.has_zero_copy_storage_readback);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn capabilities(&self) -> DeviceCapabilities {
-        // For now, return sensible defaults
-        // Future: query actual device limits and capabilities
-        DeviceCapabilities::default()
+        let backend = self.backend.lock().unwrap();
+        backend.device_capabilities(self.handle)
     }
 
     // --- Shader Library Management ---
@@ -502,6 +522,15 @@ impl Device {
     /// such as a resize or scene change.
     pub fn reset_buffer_heaps(&self) {
         self.backend.lock().unwrap().reset_buffer_heaps(self.handle);
+    }
+
+    /// No-op: texture uploads are scheduled via [`crate::task_graph::TaskGraph`].
+    #[deprecated(
+        since = "0.1.0",
+        note = "Texture uploads are batched via TaskGraph::write_texture / write_texture_region; there is nothing to flush."
+    )]
+    pub fn flush_texture_uploads(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Get search paths for shader compilation (internal use).

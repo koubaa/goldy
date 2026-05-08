@@ -24,8 +24,6 @@ pub(super) fn create(
     vertex_layout: &VertexBufferLayout,
     topology: PrimitiveTopology,
     target_format: TextureFormat,
-    push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    push_constant_buffer_strides: Vec<Option<u32>>,
     shader_debug_name: String,
 ) -> Result<PipelineHandle> {
     let logical_device = devices
@@ -45,11 +43,16 @@ pub(super) fn create(
 
     let shader_stages = [vs_stage, fs_stage];
 
-    // Vertex input
-    let binding_desc = vk::VertexInputBindingDescription::default()
-        .binding(0)
-        .stride(vertex_layout.stride)
-        .input_rate(vk::VertexInputRate::VERTEX);
+    // Vertex input — only declare binding 0 when there are actual attributes
+    let binding_descs: Vec<vk::VertexInputBindingDescription> =
+        if vertex_layout.attributes.is_empty() {
+            Vec::new()
+        } else {
+            vec![vk::VertexInputBindingDescription::default()
+                .binding(0)
+                .stride(vertex_layout.stride)
+                .input_rate(vk::VertexInputRate::VERTEX)]
+        };
 
     let attribute_descs: Vec<_> = vertex_layout
         .attributes
@@ -64,7 +67,7 @@ pub(super) fn create(
         .collect();
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
+        .vertex_binding_descriptions(&binding_descs)
         .vertex_attribute_descriptions(&attribute_descs);
 
     // Input assembly
@@ -117,10 +120,14 @@ pub(super) fn create(
     let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
         .color_attachment_formats(std::slice::from_ref(&color_format));
 
-    // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero
+    // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero.
+    // vertex_inputs must be covered too; without it the spec requires every vertex
+    // attribute fetch to be strictly in-bounds, which the validation layer enforces
+    // via VUID-vkCmdDraw-None-02721.
     let mut robustness = vk::PipelineRobustnessCreateInfoEXT::default()
         .storage_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
         .uniform_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .vertex_inputs(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
         .images(vk::PipelineRobustnessImageBehaviorEXT::ROBUST_IMAGE_ACCESS_2);
 
     let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -156,8 +163,7 @@ pub(super) fn create(
             layout,
             owns_layout,
             parameter_block_layouts: Vec::new(),
-            push_constant_categories,
-            push_constant_buffer_strides,
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );
@@ -179,8 +185,6 @@ pub(super) fn create_with_depth(
     topology: PrimitiveTopology,
     target_format: TextureFormat,
     depth_stencil: Option<&DepthStencilState>,
-    push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    push_constant_buffer_strides: Vec<Option<u32>>,
     shader_debug_name: String,
 ) -> Result<PipelineHandle> {
     let logical_device = devices
@@ -200,11 +204,16 @@ pub(super) fn create_with_depth(
 
     let shader_stages = [vs_stage, fs_stage];
 
-    // Vertex input
-    let binding_desc = vk::VertexInputBindingDescription::default()
-        .binding(0)
-        .stride(vertex_layout.stride)
-        .input_rate(vk::VertexInputRate::VERTEX);
+    // Vertex input — only declare binding 0 when there are actual attributes
+    let binding_descs: Vec<vk::VertexInputBindingDescription> =
+        if vertex_layout.attributes.is_empty() {
+            Vec::new()
+        } else {
+            vec![vk::VertexInputBindingDescription::default()
+                .binding(0)
+                .stride(vertex_layout.stride)
+                .input_rate(vk::VertexInputRate::VERTEX)]
+        };
 
     let attribute_descs: Vec<_> = vertex_layout
         .attributes
@@ -219,7 +228,7 @@ pub(super) fn create_with_depth(
         .collect();
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
+        .vertex_binding_descriptions(&binding_descs)
         .vertex_attribute_descriptions(&attribute_descs);
 
     // Input assembly
@@ -278,23 +287,23 @@ pub(super) fn create_with_depth(
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-    // Pipeline layout - always use bindless with push constants
+    // Pipeline layout - always use bindless with resource slots
     let bindless_set_layout = logical_device
         .bindless_descriptor_set_layout
         .context("Bindless descriptor set layout required")?;
 
     let all_layouts = vec![bindless_set_layout];
 
-    // Push constant range for resource indices (16 x u32 = 64 bytes)
-    let push_constant_range = vk::PushConstantRange {
+    // Vulkan push constant range for the packed 128-byte PushLayout
+    let slot_range = vk::PushConstantRange {
         stage_flags: vk::ShaderStageFlags::ALL,
         offset: 0,
-        size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+        size: types::TOTAL_PUSH_BYTES as u32,
     };
 
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&all_layouts)
-        .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+        .push_constant_ranges(std::slice::from_ref(&slot_range));
 
     let layout = unsafe {
         logical_device
@@ -314,10 +323,14 @@ pub(super) fn create_with_depth(
         .color_attachment_formats(std::slice::from_ref(&color_format))
         .depth_attachment_format(depth_format_vk);
 
-    // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero
+    // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero.
+    // vertex_inputs must be covered too; without it the spec requires every vertex
+    // attribute fetch to be strictly in-bounds, which the validation layer enforces
+    // via VUID-vkCmdDraw-None-02721.
     let mut robustness = vk::PipelineRobustnessCreateInfoEXT::default()
         .storage_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
         .uniform_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .vertex_inputs(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
         .images(vk::PipelineRobustnessImageBehaviorEXT::ROBUST_IMAGE_ACCESS_2);
 
     let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -354,8 +367,7 @@ pub(super) fn create_with_depth(
             layout,
             owns_layout,
             parameter_block_layouts: Vec::new(),
-            push_constant_categories,
-            push_constant_buffer_strides,
+            push_constant_categories: Vec::new(),
             shader_debug_name,
         },
     );

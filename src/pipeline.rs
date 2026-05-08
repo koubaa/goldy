@@ -44,8 +44,17 @@ pub struct RenderPipelineDesc {
 }
 
 impl Default for VertexBufferLayout {
+    /// Returns an empty layout (no vertex attributes, stride 0).
+    ///
+    /// Use this for passes whose vertex shader generates geometry from `SV_VertexID`
+    /// / `VertexId` without reading a vertex buffer (fullscreen quads, procedural
+    /// triangles, etc.). For typed vertex input use `Vertex2D::layout()` or
+    /// `VertexBufferLayout::from_formats::<T>(&[…])` explicitly.
     fn default() -> Self {
-        Vertex2D::layout()
+        Self {
+            stride: 0,
+            attributes: Vec::new(),
+        }
     }
 }
 

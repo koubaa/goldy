@@ -113,35 +113,6 @@ pub(super) fn create_with_depth(
         .new_render_pipeline_state(&descriptor)
         .map_err(|e| anyhow::anyhow!("Failed to create render pipeline: {}", e))?;
 
-    // Fragment shader is the primary source of push-constant access patterns
-    // (vertex shaders rarely use goldy_dyn_*); fall back to vertex if the
-    // fragment shader has no reflection.
-    let push_constant_categories = fs_shader
-        .reflection
-        .as_ref()
-        .map(|r| r.push_constant_categories.clone())
-        .filter(|v| !v.is_empty())
-        .or_else(|| {
-            vs_shader
-                .reflection
-                .as_ref()
-                .map(|r| r.push_constant_categories.clone())
-        })
-        .unwrap_or_default();
-
-    let push_constant_buffer_strides = fs_shader
-        .reflection
-        .as_ref()
-        .map(|r| r.push_constant_buffer_strides.clone())
-        .filter(|v| !v.is_empty())
-        .or_else(|| {
-            vs_shader
-                .reflection
-                .as_ref()
-                .map(|r| r.push_constant_buffer_strides.clone())
-        })
-        .unwrap_or_default();
-
     let handle = state.next_pipeline_handle;
     state.next_pipeline_handle += 1;
 
@@ -152,9 +123,8 @@ pub(super) fn create_with_depth(
             pipeline,
             depth_stencil: depth_stencil_state,
             primitive_type: topology_to_mtl(topology),
-            push_constant_categories,
-            push_constant_buffer_strides,
-            shader_debug_name: "fs_main/vs_main".to_string(),
+            push_constant_categories: Vec::new(),
+            shader_debug_name: String::new(),
         },
     );
 

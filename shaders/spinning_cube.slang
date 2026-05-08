@@ -7,9 +7,7 @@ struct TimeUniforms {
     float time;
 };
 
-#define TIME goldy_dyn_broadcast<TimeUniforms>(0).time
-
-[shader("vertex")]
+[goldy_vertex]
 FullscreenVarying vs_main(FullscreenVertex input) {
     return vs_fullscreen(input);
 }
@@ -39,10 +37,10 @@ float line_dist(float2 p, float2 a, float2 b) {
     return length(pa - ba * h);
 }
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(TimeUniforms uniforms, FullscreenVarying input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
-    float t = TIME;
+    float t = uniforms.time;
     
     // Cube vertices
     float3 verts[8];

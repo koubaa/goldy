@@ -15,6 +15,10 @@ To run all examples in a row interactively, use
 
 `run_all_examples.sh`
 
+To run a specific example (for instance metaballs), use
+
+`cargo run --example metaballs`
+
 ## Debugging
 
 For debugging tips, see [DEBUGGING.md](DEBUGGING.md).

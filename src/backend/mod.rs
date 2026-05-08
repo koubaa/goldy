@@ -91,8 +91,7 @@ pub(crate) fn validate_typed_push_constants(
         };
         if !handle.category().is_compatible_with(expected) {
             mismatches.push(format!(
-                "slot {slot}: shader expects `{}` (via goldy_dyn_{}(_)) but got `{}` handle (index {})",
-                expected.name(),
+                "slot {slot}: shader expects `{}` but got `{}` handle (index {})",
                 expected.name(),
                 handle.category().name(),
                 handle.index()
@@ -110,79 +109,6 @@ pub(crate) fn validate_typed_push_constants(
             mismatches.join("\n  ")
         );
     }
-}
-
-/// Pure stride validation — always runs, no env-var check.
-///
-/// `expected_strides[i]` is the byte stride the shader expects at slot `i`
-/// (from Slang reflection). `None` skips that slot. `resolve_stride` must return
-/// the host buffer's effective stride, or `None` if it cannot be determined.
-#[cfg(any(
-    test,
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
-))]
-fn check_push_constant_buffer_strides(
-    handles: &[BindlessHandle],
-    expected_strides: &[Option<u32>],
-    shader_name: &str,
-    mut resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
-) -> Result<()> {
-    let mut mismatches: Vec<String> = Vec::new();
-    for (slot, handle) in handles.iter().enumerate() {
-        let Some(expected) = expected_strides.get(slot).copied().flatten() else {
-            continue;
-        };
-        match handle.category() {
-            BindlessCategory::Scattered | BindlessCategory::Broadcast => {}
-            _ => continue,
-        }
-        let Some(actual) = resolve_stride(*handle) else {
-            mismatches.push(format!(
-                "slot {slot}: shader expects element stride {expected} bytes but no element stride could be resolved for bindless index {} ({})",
-                handle.index(),
-                handle.category().name()
-            ));
-            continue;
-        };
-        if actual != expected {
-            mismatches.push(format!(
-                "slot {slot}: shader expects element stride {expected} bytes but bound buffer has stride {actual} (bindless index {})",
-                handle.index()
-            ));
-        }
-    }
-    if mismatches.is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "push-constant buffer stride mismatch in shader `{shader_name}`:\n  {}\n\
-             Hint: match `Buffer::with_data` / `with_bytes_stride` / `new_with_stride` to the `T` in `goldy_dyn_*<T>`. \
-             See DEBUGGING.md (`GOLDY_VALIDATE_LAYOUTS`).",
-            mismatches.join("\n  ")
-        );
-    }
-}
-
-/// Hot-path wrapper: skips validation unless `GOLDY_VALIDATE_LAYOUTS=1`.
-/// Called by each backend's dispatch path.
-#[cfg(any(
-    test,
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
-))]
-pub(crate) fn validate_typed_push_constant_buffer_strides(
-    handles: &[BindlessHandle],
-    expected_strides: &[Option<u32>],
-    shader_name: &str,
-    resolve_stride: impl FnMut(BindlessHandle) -> Option<u32>,
-) -> Result<()> {
-    if !crate::slang::layout_validation_enabled() {
-        return Ok(());
-    }
-    check_push_constant_buffer_strides(handles, expected_strides, shader_name, resolve_stride)
 }
 
 // Re-export raw_window_handle for Surface API users
@@ -240,19 +166,22 @@ pub enum RenderCommand {
         offset: u64,
         format: IndexFormat,
     },
-    /// Set push constants directly with buffer handles (fully bindless mode).
-    /// The backend will look up each buffer's bindless index and push them.
-    SetPushConstants { buffers: Vec<BufferHandle> },
-    /// Set push constants with raw u32 indices (fully bindless mode).
+    /// Bind resource slots directly with buffer handles (fully bindless mode).
+    /// The backend will look up each buffer's bindless index and bind them.
+    BindResources { buffers: Vec<BufferHandle> },
+    /// Bind resource slots with raw u32 indices (fully bindless mode).
     /// Use this for textures/samplers or when you already have the indices.
     ///
-    /// **Prefer [`RenderCommand::SetPushConstantsTyped`]** — the raw form
+    /// `indices` go to region A (bindless, packed as u16).
+    /// `user` go to region B (user scalars, full u32).
+    ///
+    /// **Prefer [`RenderCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    SetPushConstantsRaw { indices: Vec<u32> },
-    /// Set push constants with typed [`BindlessHandle`]s. Backends validate
-    /// each handle's [`BindlessCategory`]
+    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
+    /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
+    /// each handle's [`crate::types::BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.
-    SetPushConstantsTyped { handles: Vec<BindlessHandle> },
+    BindResourcesTyped { handles: Vec<BindlessHandle> },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -271,22 +200,28 @@ pub enum RenderCommand {
     },
 }
 
-/// Compute command for compute pass recording.
+/// GPU command recorded into a command buffer / task-graph submission.
+///
+/// Includes compute dispatches, buffer upload/clear, texture uploads, and
+/// scheduling barriers — not compute-only despite historical naming in call sites.
 #[derive(Debug, Clone)]
-pub enum ComputeCommand {
+pub enum GpuCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
-    /// Set push constants (fully bindless mode - buffer indices passed directly).
-    SetPushConstants { buffers: Vec<BufferHandle> },
-    /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
+    /// Bind resource slots (fully bindless mode - buffer indices passed directly).
+    BindResources { buffers: Vec<BufferHandle> },
+    /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
-    /// **Prefer [`ComputeCommand::SetPushConstantsTyped`]** — the raw form
+    /// `indices` go to region A (bindless, packed as u16).
+    /// `user` go to region B (user scalars, full u32).
+    ///
+    /// **Prefer [`GpuCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    SetPushConstantsRaw { indices: Vec<u32> },
-    /// Set push constants with typed [`BindlessHandle`]s. Backends validate
-    /// each handle's [`BindlessCategory`]
+    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
+    /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
+    /// each handle's [`crate::types::BindlessCategory`]
     /// against the bound shader's reflection and emit the raw indices.
-    SetPushConstantsTyped { handles: Vec<BindlessHandle> },
+    BindResourcesTyped { handles: Vec<BindlessHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         workgroups_x: u32,
@@ -301,6 +236,34 @@ pub enum ComputeCommand {
         offset: u64,
         size: u64,
     },
+    /// Write CPU data into a buffer, batched onto the compute command list.
+    ///
+    /// For DEVICE_LOCAL storage buffers the backend writes to the staging area
+    /// then records a GPU copy; for HOST_VISIBLE buffers it maps directly.
+    /// This avoids a per-upload `queue_wait_idle` by deferring the GPU copy
+    /// to the same submission as the dispatches that consume the data.
+    WriteBuffer {
+        buffer: BufferHandle,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    /// Upload CPU pixel data into a texture (full image), batched with the same submission
+    /// as surrounding GPU work.
+    WriteTexture {
+        texture: TextureHandle,
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    /// Upload a subrectangle of a texture from CPU data.
+    WriteTextureRegion {
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
     /// Memory barrier between compute dispatches.
     /// Ensures all prior shader writes are visible to subsequent reads.
     Barrier,
@@ -311,6 +274,10 @@ pub enum ComputeCommand {
         textures: Vec<TextureHandle>,
     },
 }
+
+/// Deprecated alias for [`GpuCommand`].
+#[deprecated(since = "0.1.0", note = "renamed to GpuCommand")]
+pub type ComputeCommand = GpuCommand;
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 pub trait GpuBackend: Send + Sync {
@@ -343,26 +310,10 @@ pub trait GpuBackend: Send + Sync {
         buffer: BufferHandle,
         output: &mut [u8],
     ) -> Result<()>;
-    /// Copy bytes from a buffer created with [`BufferFlags::CPU_COHERENT`] into `output`
-    /// without a staging readback. Caller must have completed GPU work that wrote the buffer;
-    /// on Direct3D 12, call [`Self::copy_to_coherent_readback`] first after that work.
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        let _ = (buffer, offset, output);
-        anyhow::bail!("read_buffer_coherent: buffer is not CPU_COHERENT or not supported")
-    }
-    /// Direct3D 12 only: copy GPU-visible storage (UAV) contents into the persistently mapped
-    /// readback buffer. No-op on other backends. Call after the submit that produced the data.
-    fn copy_to_coherent_readback(
-        &mut self,
-        _device: DeviceHandle,
-        _buffer: BufferHandle,
-    ) -> Result<()> {
-        Ok(())
+    /// Capability snapshot for `device` (surface formats, [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`], …).
+    fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
+        let _ = device;
+        crate::device::DeviceCapabilities::default()
     }
     /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
     fn clear_buffer(
@@ -378,7 +329,7 @@ pub trait GpuBackend: Send + Sync {
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32>;
     /// Get the buffer's SRV (read-only) bindless index.
     /// For DX12, scattered buffers have both a UAV (write) and SRV (read-only) descriptor.
-    /// Returns the SRV index for use with `StructuredBuffer<T>` / goldy_dyn_buf_ro.
+    /// Returns the SRV index for use with `StructuredBuffer<T>` / `goldy_buf_ro`.
     /// Falls back to the primary bindless index on backends with unified descriptors.
     fn buffer_bindless_srv_index(&self, buffer: BufferHandle) -> Option<u32>;
 
@@ -612,11 +563,7 @@ pub trait GpuBackend: Send + Sync {
 
     /// Execute compute commands.
     /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(
-        &mut self,
-        device: DeviceHandle,
-        commands: &[ComputeCommand],
-    ) -> Result<()> {
+    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[GpuCommand]) -> Result<()> {
         let token = self.submit_compute(device, commands)?;
         self.wait_fence(device, token)
     }
@@ -625,7 +572,7 @@ pub trait GpuBackend: Send + Sync {
     fn submit_compute(
         &mut self,
         device: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<FenceToken>;
 
     /// Check if the fence for the given token has signaled (work complete).
@@ -770,109 +717,94 @@ pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> 
 }
 
 #[cfg(test)]
-mod typed_push_constant_validation_tests {
+mod push_constant_validation_tests {
     use super::validate_typed_push_constants;
     use crate::types::{BindlessCategory, BindlessHandle};
 
     #[test]
-    fn ok_when_categories_match() {
-        let handles = [
-            BindlessHandle::new(BindlessCategory::Broadcast, 3),
-            BindlessHandle::new(BindlessCategory::Scattered, 7),
-        ];
-        let expectations = [
-            Some(BindlessCategory::Broadcast),
-            Some(BindlessCategory::Scattered),
-        ];
-        validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
-    }
-
-    #[test]
-    fn ok_when_expectations_shorter_than_handles() {
-        // Shader only reflected the first slot; extra handles aren't validated.
-        let handles = [
+    fn valid_categories_pass() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 0),
             BindlessHandle::new(BindlessCategory::Broadcast, 1),
-            BindlessHandle::new(BindlessCategory::Scattered, 2),
         ];
-        let expectations = [Some(BindlessCategory::Broadcast)];
+        let expectations = vec![
+            Some(BindlessCategory::Scattered),
+            Some(BindlessCategory::Broadcast),
+        ];
         validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
     }
 
     #[test]
-    fn ok_when_slot_expectation_is_none() {
-        // `None` means reflection couldn't infer — skip validation.
-        let handles = [BindlessHandle::new(BindlessCategory::Scattered, 1)];
-        let expectations = [None];
+    fn none_expectations_are_skipped() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 0),
+            BindlessHandle::new(BindlessCategory::Texture, 1),
+        ];
+        let expectations = vec![None, None];
         validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
     }
 
     #[test]
-    fn err_when_category_mismatches() {
-        // The compute_to_surface bug: slot 0 is a Scattered storage buffer but
-        // the user passes a Broadcast-only uniform handle.
-        let handles = [BindlessHandle::new(BindlessCategory::Broadcast, 42)];
-        let expectations = [Some(BindlessCategory::Scattered)];
-        let err = validate_typed_push_constants(&handles, &expectations, "compute_to_surface_cs")
+    fn empty_expectations_passes_any_handles() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 5),
+            BindlessHandle::new(BindlessCategory::Sampler, 2),
+        ];
+        validate_typed_push_constants(&handles, &[], "test_shader").unwrap();
+    }
+
+    #[test]
+    fn scattered_where_broadcast_expected_fails() {
+        let handles = vec![BindlessHandle::new(BindlessCategory::Scattered, 0)];
+        let expectations = vec![Some(BindlessCategory::Broadcast)];
+        let err = validate_typed_push_constants(&handles, &expectations, "my_shader")
             .unwrap_err()
             .to_string();
+        assert!(err.contains("slot 0"), "error should name the slot: {err}");
         assert!(
-            err.contains("compute_to_surface_cs"),
-            "shader name in err: {err}"
+            err.contains("broadcast"),
+            "error should mention expected category: {err}"
         );
-        assert!(err.contains("slot 0"), "slot index in err: {err}");
-        assert!(err.contains("scattered"), "expected category in err: {err}");
-        assert!(err.contains("broadcast"), "got category in err: {err}");
-        assert!(err.contains("42"), "handle index in err: {err}");
+        assert!(
+            err.contains("scattered"),
+            "error should mention actual category: {err}"
+        );
     }
 
     #[test]
-    fn err_lists_all_mismatching_slots() {
-        let handles = [
-            BindlessHandle::new(BindlessCategory::Broadcast, 1),
-            BindlessHandle::new(BindlessCategory::Scattered, 2),
-            BindlessHandle::new(BindlessCategory::Sampler, 3),
+    fn texture_where_scattered_expected_fails() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Scattered, 0),
+            BindlessHandle::new(BindlessCategory::Texture, 3),
         ];
-        let expectations = [
-            Some(BindlessCategory::Broadcast), // ok
-            Some(BindlessCategory::Texture),   // mismatch
-            Some(BindlessCategory::Sampler),   // ok
+        let expectations = vec![
+            Some(BindlessCategory::Scattered),
+            Some(BindlessCategory::Scattered),
+        ];
+        let err = validate_typed_push_constants(&handles, &expectations, "compute_cs")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slot 1"), "error should name slot 1: {err}");
+        assert!(
+            err.contains("texture"),
+            "error should mention actual: {err}"
+        );
+    }
+
+    #[test]
+    fn multiple_mismatches_reported() {
+        let handles = vec![
+            BindlessHandle::new(BindlessCategory::Texture, 0),
+            BindlessHandle::new(BindlessCategory::Sampler, 1),
+        ];
+        let expectations = vec![
+            Some(BindlessCategory::Scattered),
+            Some(BindlessCategory::Broadcast),
         ];
         let err = validate_typed_push_constants(&handles, &expectations, "sh")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("slot 1"), "slot 1 must appear: {err}");
-        // Exactly one mismatch reported.
-        assert_eq!(err.matches("slot ").count(), 1, "only one mismatch: {err}");
-    }
-}
-
-#[cfg(test)]
-mod typed_push_constant_stride_validation_tests {
-    use super::check_push_constant_buffer_strides;
-    use crate::types::{BindlessCategory, BindlessHandle};
-
-    #[test]
-    fn stride_ok() {
-        let handles = [BindlessHandle::new(BindlessCategory::Scattered, 0)];
-        let expected = [Some(16u32)];
-        check_push_constant_buffer_strides(&handles, &expected, "s", |_| Some(16)).unwrap();
-    }
-
-    #[test]
-    fn stride_err_on_mismatch() {
-        let handles = [BindlessHandle::new(BindlessCategory::Scattered, 0)];
-        let expected = [Some(16u32)];
-        let err = check_push_constant_buffer_strides(&handles, &expected, "my_cs", |_| Some(1))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("16"), "expected stride in err: {err}");
-        assert!(err.contains('1'), "actual stride in err: {err}");
-    }
-
-    #[test]
-    fn stride_skips_non_buffer_categories() {
-        let handles = [BindlessHandle::new(BindlessCategory::Texture, 0)];
-        let expected = [Some(4u32)];
-        check_push_constant_buffer_strides(&handles, &expected, "s", |_| None).unwrap();
+        assert!(err.contains("slot 0"), "should report slot 0: {err}");
+        assert!(err.contains("slot 1"), "should report slot 1: {err}");
     }
 }

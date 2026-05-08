@@ -1,6 +1,8 @@
 //! Compute pipeline integration tests.
 //!
 //! These tests verify compute pipeline functionality with actual GPU backends.
+//! They are only compiled when at least one backend feature is enabled.
+#![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 mod common;
 
@@ -14,12 +16,10 @@ use goldy::{
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] * 2;
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
 }
 "#;
 
@@ -27,13 +27,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const COPY_SHADER: &str = r#"
 import goldy_exp;
 
-#define INPUT goldy_dyn_scattered<uint>(0)
-#define OUTPUT goldy_dyn_scattered<uint>(1)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    OUTPUT[id.x] = INPUT[id.x];
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
+    output[id.x] = input[id.x];
 }
 "#;
 
@@ -143,8 +140,8 @@ fn test_compute_with_uav_buffer() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // Pass buffer indices via push constants
-        pass.set_push_constants(&[&buffer]);
+        // Bind buffer resource slots
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1); // 64 threads total
     }
 
@@ -183,9 +180,9 @@ fn test_compute_with_srv_and_uav() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // Pass buffer indices via push constants
+        // Bind buffer resource slots
         // Order matches shader slots: [input (slot 0), output (slot 1)]
-        pass.set_push_constants(&[&input_buffer, &output_buffer]);
+        pass.bind_resources(&[&input_buffer, &output_buffer]);
         pass.dispatch(1, 1, 1); // 64 threads
     }
 
@@ -201,12 +198,10 @@ fn test_compute_with_srv_and_uav() {
 const INCREMENT_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] + 1;
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] + 1;
 }
 "#;
 
@@ -215,19 +210,14 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const SIX_SLOT_SUM_SHADER: &str = r#"
 import goldy_exp;
 
-#define A   goldy_dyn_scattered<uint>(0)
-#define B   goldy_dyn_scattered<uint>(1)
-#define C   goldy_dyn_scattered<uint>(2)
-#define D   goldy_dyn_scattered<uint>(3)
-#define E   goldy_dyn_scattered<uint>(4)
-#define OUT goldy_dyn_scattered<uint>(5)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<uint> a, Scattered<uint> b, Scattered<uint> c,
+             Scattered<uint> d, Scattered<uint> e, Scattered<uint> out,
+             ThreadId id) {
     uint idx = id.x;
     if (idx >= 16) return;
-    OUT[idx] = A[idx] + B[idx] + C[idx] + D[idx] + E[idx];
+    out[idx] = a[idx] + b[idx] + c[idx] + d[idx] + e[idx];
 }
 "#;
 
@@ -259,7 +249,7 @@ fn test_compute_write_and_readback() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffer]);
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1); // 64 threads, each doubles one element
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -386,7 +376,7 @@ fn test_compute_batched_clear_before_dispatch() {
         // Clear input before the copy — output should receive zeros.
         pass.clear_buffer(&input_buf, 0, 0);
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.bind_resources(&[&input_buf, &output_buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -427,13 +417,13 @@ fn test_compute_clear_between_dispatches() {
         let mut pass = encoder.begin_compute_pass();
         // Pass 1: copy 42s into output.
         pass.set_pipeline(&copy_pipeline);
-        pass.set_push_constants(&[&input_buf, &output_buf]);
+        pass.bind_resources(&[&input_buf, &output_buf]);
         pass.dispatch(1, 1, 1);
         // Clear output — must happen AFTER the copy dispatch.
         pass.clear_buffer(&output_buf, 0, 0);
         // Pass 2: increment output (zeros → 1s).
         pass.set_pipeline(&inc_pipeline);
-        pass.set_push_constants(&[&output_buf]);
+        pass.bind_resources(&[&output_buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -474,7 +464,7 @@ fn test_compute_dispatch_indirect() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&data_buf]);
+        pass.bind_resources(&[&data_buf]);
         pass.dispatch_indirect(&args_buf, 0);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -512,7 +502,7 @@ fn test_dispatch_indirect_invalid_buffer() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&data_buf]);
+        pass.bind_resources(&[&data_buf]);
 
         // Record indirect dispatch with a temp buffer, then drop the buffer.
         // The encoder stores the raw handle; after drop it's stale.
@@ -530,12 +520,12 @@ fn test_dispatch_indirect_invalid_buffer() {
     );
 }
 
-// ─── Many push-constant slots (>4, exercises 16-slot expansion) ───────────────
+// ─── Many resource slots (>4, exercises 16-slot expansion) ────────────────────
 
 /// Shader using 6 bindless slots (0–5). Before the 16-slot expansion, slots 4+
 /// were mapped to garbage indices and this test would produce wrong results.
 #[test]
-fn test_compute_many_push_constant_slots() {
+fn test_compute_many_resource_slots() {
     let device = make_device();
 
     let shader = ShaderModule::from_slang(&device, SIX_SLOT_SUM_SHADER).expect("compile shader");
@@ -554,7 +544,7 @@ fn test_compute_many_push_constant_slots() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&a, &b, &c, &d, &e, &out]);
+        pass.bind_resources(&[&a, &b, &c, &d, &e, &out]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -583,16 +573,14 @@ struct Particle {
     float2 velocity;
 };
 
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<Particle> particles, ThreadId id) {
     uint idx = id.x;
     if (idx >= 4) return;
-    Particle p = PARTICLES[idx];
+    Particle p = particles[idx];
     p.position += float2(0.01, 0.01);
-    PARTICLES[idx] = p;
+    particles[idx] = p;
 }
 "#;
 
@@ -631,7 +619,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffer]);
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1);
     }
 
@@ -679,7 +667,7 @@ fn test_buffer_view_copy_between_sub_regions() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[idx_a, idx_b]);
+        pass.bind_resources_raw(&[idx_a, idx_b]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -732,7 +720,7 @@ fn test_buffer_view_isolation() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[idx]);
+        pass.bind_resources_raw(&[idx]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -793,7 +781,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[src_idx, dst_idx]);
+        pass.bind_resources_raw(&[src_idx, dst_idx]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -865,24 +853,22 @@ fn test_positive_mod_correctness() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-#define OUT goldy_dyn_scattered<float>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<float> out, ThreadId id) {
     // scalar: negative dividend
-    OUT[0] = positive_mod(-1.0, 3.0);    // 2.0
-    OUT[1] = positive_mod(-3.0, 3.0);    // 0.0
-    OUT[2] = positive_mod(-0.5, 1.0);    // 0.5
+    out[0] = positive_mod(-1.0, 3.0);    // 2.0
+    out[1] = positive_mod(-3.0, 3.0);    // 0.0
+    out[2] = positive_mod(-0.5, 1.0);    // 0.5
 
     // scalar: positive / zero inputs (must be unchanged)
-    OUT[3] = positive_mod(2.5, 3.0);     // 2.5
-    OUT[4] = positive_mod(0.0, 1.0);     // 0.0
+    out[3] = positive_mod(2.5, 3.0);     // 2.5
+    out[4] = positive_mod(0.0, 1.0);     // 0.0
 
     // float2 overload
     float2 r = positive_mod(float2(-1.0, -0.5), float2(3.0, 1.0));
-    OUT[5] = r.x;   // 2.0
-    OUT[6] = r.y;   // 0.5
+    out[5] = r.x;   // 2.0
+    out[6] = r.y;   // 0.5
 }
 "#;
 
@@ -897,7 +883,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buf]);
+        pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -934,11 +920,9 @@ fn test_billboard_math() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-#define OUT goldy_dyn_scattered<float>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<float> out, ThreadId id) {
     // Row-major construction. Column 0 = (m[0][0], m[1][0], m[2][0]) = (1, 5, 9).
     float4x4 m = float4x4(
         1, 0, 0, 0,
@@ -947,9 +931,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         0, 0, 0, 1
     );
     float3 r = modelview_right(m);
-    OUT[0] = r.x;   // 1.0
-    OUT[1] = r.y;   // 5.0
-    OUT[2] = r.z;   // 9.0
+    out[0] = r.x;   // 1.0
+    out[1] = r.y;   // 5.0
+    out[2] = r.z;   // 9.0
 
     // center=(1,2,3), cam_right=(1,0,0), offset=5 → (6, 2, 3)
     float3 off = billboard_cylindrical_offset(
@@ -957,9 +941,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         float3(1.0, 0.0, 0.0),
         5.0
     );
-    OUT[3] = off.x;  // 6.0
-    OUT[4] = off.y;  // 2.0
-    OUT[5] = off.z;  // 3.0
+    out[3] = off.x;  // 6.0
+    out[4] = off.y;  // 2.0
+    out[5] = off.z;  // 3.0
 
     // Identity matrix: right = (1, 0, 0)
     float4x4 ident = float4x4(
@@ -969,9 +953,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         0, 0, 0, 1
     );
     float3 ident_right = modelview_right(ident);
-    OUT[6] = ident_right.x;  // 1.0
-    OUT[7] = ident_right.y;  // 0.0
-    OUT[8] = ident_right.z;  // 0.0
+    out[6] = ident_right.x;  // 1.0
+    out[7] = ident_right.y;  // 0.0
+    out[8] = ident_right.z;  // 0.0
 }
 "#;
 
@@ -986,7 +970,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buf]);
+        pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1020,22 +1004,19 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
 // ─── RWStructuredBuffer<T> typed variable assignment ──────────────────────────
 
-/// Verify `goldy_dyn_buf_ro` / `goldy_dyn_scattered` can be assigned to locals and used together.
-/// `goldy_dyn_buf_ro` returns `StructuredBuffer<T>` on DX12 (SRV) but `StorageBuffer<T>` on SPIRV/Metal;
-/// use `var` so Slang infers the correct type per target. Push constants: slot 0 = read buffer
-/// (`bindless_srv_index()` on DX12, same as `bindless_index()` on Vulkan), slot 1 = UAV.
+/// Verify `goldy_buf_ro` / `goldy_scattered` can be assigned to locals and used together.
+/// `goldy_buf_ro` returns `ReadOnlyBuffer<T>` (SRV on DX12, StorageBuffer on Vulkan/Metal).
+/// Resource slots: slot 0 = read buffer (`bindless_srv_index()` on DX12), slot 1 = UAV.
 #[test]
-fn test_dyn_scattered_typed_variable_assignment() {
+fn test_scattered_typed_variable_assignment() {
     const SHADER: &str = r#"
 import goldy_exp;
 
 struct Pair { uint a; uint b; };
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    ReadOnlyBuffer<Pair> input = goldy_dyn_buf_ro<Pair>(0);
-    StorageBuffer<Pair> output = goldy_dyn_scattered<Pair>(1);
+void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
     uint idx = id.x;
     if (idx >= 8) return;
     Pair p = input[idx];
@@ -1071,8 +1052,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        // goldy_dyn_buf_ro uses SRV on DX12; goldy_dyn_scattered uses UAV
-        pass.set_push_constants_raw(&[
+        pass.bind_resources_raw(&[
             input_buf.bindless_srv_index().expect("srv"),
             output_buf.bindless_index().expect("uav"),
         ]);
@@ -1110,15 +1090,12 @@ fn test_heap_overflow_allocation() {
     const LARGE_COPY_SHADER: &str = r#"
 import goldy_exp;
 
-#define INPUT  goldy_dyn_scattered<uint>(0)
-#define OUTPUT goldy_dyn_scattered<uint>(1)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
     uint idx = id.x;
     if (idx >= 2097152) return;  // 8 MB / 4 bytes = 2M elements
-    OUTPUT[idx] = INPUT[idx];
+    output[idx] = input[idx];
 }
 "#;
 
@@ -1149,7 +1126,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]);
+        pass.bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]);
         pass.dispatch(workgroups, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1174,14 +1151,13 @@ fn test_compute_write_to_texture() {
     const SHADER: &str = r#"
 import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(8, 8, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(0);
+void cs_main(DirectSpatial<float4> output, ThreadId id) {
     uint2 dims;
     output.GetDimensions(dims.x, dims.y);
     if (id.x < dims.x && id.y < dims.y) {
-        output[id.xy] = float4(1.0, 0.0, 0.0, 1.0);
+        output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
     }
 }
 "#;
@@ -1214,7 +1190,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants_raw(&[texture.bindless_index().expect("tex bindless")]);
+        pass.bind_resources_raw(&[texture.bindless_index().expect("tex bindless")]);
         pass.dispatch(wg_x, wg_y, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
@@ -1234,31 +1210,24 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     assert_eq!(output[3], 255, "A channel should be 255");
 }
 
-// ─── CPU_COHERENT buffer tests ────────────────────────────────────────────────
+// ─── CPU_READABLE buffer tests ────────────────────────────────────────────────
 
 /// A compute shader that doubles each element (same as `DOUBLE_SHADER`). Used by the
 /// coherent tests to avoid a dependency on the module-level constant's exact binding layout.
 const DOUBLE_SHADER_COHERENT: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] * 2;
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
 }
 "#;
 
-/// Create a `CPU_COHERENT` storage buffer, run a GPU compute pass that doubles every
-/// element, then read back via `Buffer::read_coherent`.
-///
-/// `read_coherent` performs a pure `memcpy` from the persistent host mapping — no
-/// fence wait, no staging copy on Vulkan/Metal. On DX12 `Device::copy_to_coherent_readback`
-/// is called first to sync the READBACK heap (the test calls it explicitly so the
-/// low-level path is exercised).
+/// Create a [`BufferFlags::CPU_READABLE`] storage buffer, run a GPU compute pass that doubles every
+/// element, then read back via [`Buffer::read_to_cpu`] (handles DX12 UAV → READBACK internally).
 #[test]
-fn test_cpu_coherent_compute_write_and_read() {
+fn test_cpu_readable_compute_write_and_read() {
     let device = make_device();
 
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER_COHERENT).expect("compile shader");
@@ -1272,27 +1241,21 @@ fn test_cpu_coherent_compute_write_and_read() {
         bytemuck::cast_slice(&initial),
         DataAccess::Scattered,
         size_of::<u32>() as u32,
-        BufferFlags::CPU_COHERENT,
+        BufferFlags::CPU_READABLE,
     )
-    .expect("create CPU_COHERENT buffer");
+    .expect("create CPU_READABLE buffer");
 
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffer]);
+        pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1);
     }
     encoder.dispatch(&device).expect("dispatch");
 
-    // On DX12 the backend writes to a DEFAULT-heap UAV and must copy to the
-    // persistent READBACK heap so the host mapping reflects current GPU contents.
-    device
-        .copy_to_coherent_readback(&buffer)
-        .expect("copy_to_coherent_readback");
-
     let mut out = vec![0u8; N * size_of::<u32>()];
-    buffer.read_coherent(0, &mut out).expect("read_coherent");
+    buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&out);
     for (i, &val) in result.iter().enumerate() {
@@ -1305,17 +1268,87 @@ fn test_cpu_coherent_compute_write_and_read() {
     }
 }
 
-/// `read_coherent` reflects CPU writes made directly to the persistent mapping.
+/// Two back-to-back non-blocking submits: `WriteBuffer` into the **same**
+/// scattered buffer handle, copying to distinct outputs — exercises per-buffer
+/// staging races fixed by the compute staging belt (Vulkan/DX12).
+#[test]
+fn test_write_buffer_reuse_across_submissions() {
+    use goldy::{NodeAccess, TaskGraph};
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 16;
+    let mid = Buffer::new(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        DataAccess::Scattered,
+    )
+    .expect("mid buffer");
+    let out_a = Buffer::new(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        DataAccess::Scattered,
+    )
+    .expect("out_a");
+    let out_b = Buffer::new(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        DataAccess::Scattered,
+    )
+    .expect("out_b");
+
+    let idx_in = mid.bindless_index().expect("mid bindless");
+    let idx_out_a = out_a.bindless_index().expect("out_a bindless");
+    let idx_out_b = out_b.bindless_index().expect("out_b bindless");
+
+    let data_a: Vec<u32> = (100..100 + N as u32).collect();
+    let data_b: Vec<u32> = (900..900 + N as u32).collect();
+
+    let mut g1 = TaskGraph::new();
+    g1.write_buffer(&mid, 0, bytemuck::cast_slice(&data_a).to_vec());
+    g1.node("copy_a", &pipeline)
+        .bind_buffer(&mid, NodeAccess::Read)
+        .bind_buffer(&out_a, NodeAccess::Write)
+        .bind_resources_raw(&[idx_in, idx_out_a])
+        .dispatch(1, 1, 1);
+
+    let mut g2 = TaskGraph::new();
+    g2.write_buffer(&mid, 0, bytemuck::cast_slice(&data_b).to_vec());
+    g2.node("copy_b", &pipeline)
+        .bind_buffer(&mid, NodeAccess::Read)
+        .bind_buffer(&out_b, NodeAccess::Write)
+        .bind_resources_raw(&[idx_in, idx_out_b])
+        .dispatch(1, 1, 1);
+
+    let mut fut1 = g1.submit(&device).expect("submit 1");
+    let mut fut2 = g2.submit(&device).expect("submit 2");
+
+    fut1.wait().expect("wait 1");
+    fut2.wait().expect("wait 2");
+
+    let read_u32 = |buf: &Buffer| -> Vec<u32> {
+        let mut raw = vec![0u8; N * core::mem::size_of::<u32>()];
+        buf.read_to_cpu(&device, &mut raw).expect("readback");
+        bytemuck::cast_slice(&raw).to_vec()
+    };
+
+    let got_a = read_u32(&out_a);
+    let got_b = read_u32(&out_b);
+    assert_eq!(got_a, data_a, "output A corrupted (staging race?)");
+    assert_eq!(got_b, data_b, "output B wrong");
+}
+
+/// CPU writes to a [`BufferFlags::CPU_READABLE`] buffer are reflected in reads.
 ///
 /// On Vulkan and Metal the buffer lives in host-visible/shared memory, so a plain
-/// `buffer.write()` followed immediately by `buffer.read_coherent()` must round-trip
-/// without any GPU involvement. This validates the zero-copy read path.
+/// `buffer.write()` followed immediately by `buffer.read_to_cpu()` round-trips.
 ///
-/// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so this
-/// test skips the coherent-read assertion on DX12 and only checks that creation and
-/// `copy_to_coherent_readback` do not panic.
+/// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so
+/// `read_to_cpu` copies UAV → READBACK internally.
 #[test]
-fn test_cpu_coherent_cpu_write_read_roundtrip() {
+fn test_cpu_readable_cpu_write_read_roundtrip() {
     let device = make_device();
 
     const N: usize = 16;
@@ -1326,22 +1359,17 @@ fn test_cpu_coherent_cpu_write_read_roundtrip() {
         bytemuck::cast_slice(&initial),
         DataAccess::Scattered,
         size_of::<u32>() as u32,
-        BufferFlags::CPU_COHERENT,
+        BufferFlags::CPU_READABLE,
     )
-    .expect("create CPU_COHERENT buffer");
+    .expect("create CPU_READABLE buffer");
 
     let new_values: Vec<u32> = (100..100 + N as u32).collect();
     buffer
         .write(0, bytemuck::cast_slice(&new_values))
         .expect("write");
 
-    // Ensure the readback path at least completes without error (required for DX12 parity).
-    device
-        .copy_to_coherent_readback(&buffer)
-        .expect("copy_to_coherent_readback");
-
     let mut out = vec![0u8; N * size_of::<u32>()];
-    buffer.read_coherent(0, &mut out).expect("read_coherent");
+    buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&out);
     for (i, &val) in result.iter().enumerate() {
@@ -1350,6 +1378,253 @@ fn test_cpu_coherent_cpu_write_read_roundtrip() {
             100 + i as u32,
             "element {i}: expected {} got {val}",
             100 + i
+        );
+    }
+}
+
+// ── uniform entry-point parameter tests ──────────────────────────────────────
+//
+// `uniform T param` in a `cs_main` signature maps directly to a resource
+// slot. The tests below exercise:
+//
+//  • uint round-trip (basic sanity)
+//  • zero value is preserved
+//  • maximum u32 (0xFFFF_FFFF) passes through unmodified
+//  • float (bit-for-bit round-trip of f32)
+//  • two independent scalar params in adjacent slots
+//  • scalar param after two buffer slots
+
+/// A `uniform uint` entry-point param round-trips a u32.
+#[test]
+fn test_uniform_param_uint_roundtrip() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+
+    const EXPECTED: u32 = 42;
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.bind_resources_raw_with_user(&[heap_idx], &[EXPECTED]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: u32 = bytemuck::pod_read_unaligned(&raw);
+    assert_eq!(result, EXPECTED, "uniform uint round-trip failed");
+}
+
+/// Zero passes through a `uniform uint` parameter unchanged.
+#[test]
+fn test_uniform_param_uint_zero() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0xDEAD_BEEFu32; 1], DataAccess::Scattered).expect("out");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.bind_resources_raw_with_user(&[heap_idx], &[0u32]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: u32 = bytemuck::pod_read_unaligned(&raw);
+    assert_eq!(
+        result, 0,
+        "zero should pass through uniform uint param unchanged"
+    );
+}
+
+/// Maximum u32 (0xFFFF_FFFF) passes through a `uniform uint` parameter unchanged.
+#[test]
+fn test_uniform_param_uint_max() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.bind_resources_raw_with_user(&[heap_idx], &[u32::MAX]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: u32 = bytemuck::pod_read_unaligned(&raw);
+    assert_eq!(
+        result,
+        u32::MAX,
+        "u32::MAX should pass through uniform uint param unchanged"
+    );
+}
+
+/// A `uniform float` entry-point param reinterprets raw bits as a float.
+/// We push the bit-pattern of a float and expect the shader to write it back,
+/// then reinterpret on the CPU side to confirm identity.
+#[test]
+fn test_uniform_param_float_reinterpret() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<float> out, float value, ThreadId id) {
+    out[0] = value;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+
+    let value: f32 = 3.14159;
+    let bits = value.to_bits();
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.bind_resources_raw_with_user(&[heap_idx], &[bits]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result_bits: u32 = bytemuck::pod_read_unaligned(&raw);
+    let result_float = f32::from_bits(result_bits);
+    assert_eq!(
+        result_bits, bits,
+        "float bit pattern should survive uniform float param round-trip (got {result_float}, expected {value})"
+    );
+}
+
+/// Two independent `uniform uint` params in adjacent slots each retrieve their own value.
+#[test]
+fn test_uniform_two_independent_scalar_params() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
+    out[0] = a;
+    out[1] = b;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let out = Buffer::with_data(&device, &[0u32; 2], DataAccess::Scattered).expect("out");
+
+    const A: u32 = 0xABCD;
+    const B: u32 = 0x1234;
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let heap_idx = out.bindless_index().unwrap();
+        pass.bind_resources_raw_with_user(&[heap_idx], &[A, B]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 8];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+    assert_eq!(result[0], A, "param a → out[0] mismatch");
+    assert_eq!(result[1], B, "param b → out[1] mismatch");
+}
+
+/// A scalar `uniform uint` param after two buffer-slot params correctly
+/// retrieves its value from the third resource slot.
+#[test]
+fn test_uniform_scalar_after_two_buffer_params() {
+    const SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id) {
+    out[id.x] = inp[id.x] + offset;
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    const N: usize = 64;
+    let input: Vec<u32> = (0..N as u32).collect();
+    let inp = Buffer::with_data(&device, &input, DataAccess::Scattered).expect("inp");
+    let out = Buffer::with_data(&device, &[0u32; N], DataAccess::Scattered).expect("out");
+
+    const OFFSET: u32 = 100;
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        let inp_idx = inp.bindless_index().unwrap();
+        let out_idx = out.bindless_index().unwrap();
+        pass.bind_resources_raw_with_user(&[inp_idx, out_idx], &[OFFSET]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; N * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            i as u32 + OFFSET,
+            "element {i}: expected {}, got {val}",
+            i as u32 + OFFSET
         );
     }
 }

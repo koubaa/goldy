@@ -101,8 +101,8 @@ def main():
         with encoder.begin_render_pass() as rp:
             rp.clear(goldy.Color.BLACK)
             rp.set_pipeline(pipeline)
-            # Pass buffer indices via push constants
-            rp.set_push_constants([uniform_buffer])
+            # Bind resource slots
+            rp.bind_resources([uniform_buffer])
             # Vertex-less fullscreen triangle: 3 vertices, no vertex buffer
             rp.draw(range(3))
 

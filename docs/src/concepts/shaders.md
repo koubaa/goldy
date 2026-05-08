@@ -74,6 +74,60 @@ Every `Device` comes with the `goldy_exp` shader library pre-registered.
 > ⚠️ **Experimental**: This library's API is unstable and may change significantly
 > as we learn what abstractions work best for shader development.
 
+### Bindless Resource Access — Virtual Entry Points
+
+The primary way to write bindless shaders with `goldy_exp` is the **virtual main** system.
+Tag your entry point with `[goldy_compute]`, `[goldy_vertex]`, or `[goldy_fragment]` and
+declare resources as typed parameters. Goldy generates the GPU-level `[shader(...)]`
+entry point — with `uniform uint` resource slots and `SV_*` system-value semantics — automatically.
+
+```hlsl
+import goldy_exp;
+
+struct Particle { float2 pos; float2 vel; };
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(SimParams params, Scattered<Particle> particles, ThreadId id) {
+    Particle particle = particles[id.x];
+    particle.pos += particle.vel * params.dt;
+    particles[id.x] = particle;
+}
+```
+
+**Resource types** (each resolved from a single `uint` resource slot by the codegen):
+
+| Type | Is / Backing resource | Access |
+|------|-----------------------|--------|
+| `Scattered<T>` | = `StorageBuffer<T>` (read/write) | `buf[i]`, `buf[i].field = v` |
+| `BufRO<T>` | = `ReadOnlyBuffer<T>` (read-only) | `buf[i]` |
+| `Interpolated<T>` | = `Texture2D<T>` | `tex.Sample(samp, uv)`, `tex.Load(loc)` |
+| `DirectSpatial<T>` | = `RWTexture2D<T>` | `img[int2(x,y)]`, `img.GetDimensions(w,h)` |
+| `ByteAddress` | = `ByteAddressView` (`RWByteAddressBuffer`) | `.Load/.Store/.Interlocked*` |
+| `Filter` | = `SamplerState` | `tex.Sample(samp, uv)` |
+| `MyUniforms` (any struct) | constant buffer broadcast | `cfg.field` directly |
+
+**System-value types** (codegen maps to `SV_*` semantics automatically):
+
+| Type | Maps to | Fields |
+|------|---------|--------|
+| `ThreadId` | `SV_DispatchThreadID` | `.x .y .z` |
+| `GroupThreadId` | `SV_GroupThreadID` | `.x .y .z` |
+| `GroupId` | `SV_GroupID` | `.x .y .z` |
+| `VertexId` | `SV_VertexID` | `.value` |
+| `InstanceId` | `SV_InstanceID` | `.value` |
+| `IsFrontFace` | `SV_IsFrontFace` | `.value` |
+
+Plain scalar types (`uint`, `float`, `int`, etc.) become `uniform` resource slots too:
+
+```hlsl
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, uint offset, ThreadId id) {
+    data[id.x + offset] *= 2;
+}
+```
+
 It provides:
 
 ### Math Utilities (`goldy_exp/math`)
@@ -270,19 +324,18 @@ let shader = ShaderModule::from_slang(&device, MY_SHADER)?;
 const EFFECT_SHADER: &str = r#"
 import goldy_exp;
 
-[[vk::binding(0, 0)]]
-cbuffer Uniforms { float time; };
+struct TimeData { float time; };
 
-[shader("vertex")]
+[goldy_vertex]
 FullscreenVarying vs_main(FullscreenVertex input) {
     return vs_fullscreen(input);
 }
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(TimeData uniforms, FullscreenVarying input) {
     float2 uv = center_uv(input.uv);
     float d = length(uv);
-    float t = d + time * 0.5;
+    float t = d + uniforms.time * 0.5;
     return float4(rainbow(t), 1.0);
 }
 "#;
@@ -312,7 +365,10 @@ float4x4 m = float4x4(...);
 
 ### Shader Entry Points
 
-Entry points are marked with `[shader("type")]`:
+Entry points are marked with `[shader("type")]` in standard Slang. Goldy's `[goldy_*]`
+virtual entry points (see above) are the preferred style — they handle resource slot
+plumbing and system-value semantics automatically. The manual form is shown here for
+reference:
 
 ```hlsl
 [shader("vertex")]
@@ -355,32 +411,36 @@ float4 fs_main(VertexOutput input) : SV_Target {
 
 ### Uniform Buffers
 
+Uniform data is accessed through Goldy's bindless resource model. Declare a struct
+parameter in your `[goldy_*]` entry point and Goldy resolves it to a broadcast
+constant buffer automatically:
+
 ```hlsl
-[[vk::binding(0, 0)]]
-cbuffer Uniforms {
+import goldy_exp;
+
+struct Uniforms {
     float4x4 modelViewProj;
     float time;
 };
 
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
+[goldy_vertex]
+VertexOutput vs_main(Uniforms uniforms, VertexInput input) {
     VertexOutput output;
-    output.position = mul(modelViewProj, float4(input.position, 1.0));
+    output.position = mul(uniforms.modelViewProj, float4(input.position, 1.0));
     return output;
 }
 ```
 
 ### Textures and Samplers
 
+Textures and samplers are accessed through `goldy_exp` resource types. Use
+`Interpolated<T>` for sampled textures and `Filter` for samplers:
+
 ```hlsl
-[[vk::binding(0, 0)]]
-Texture2D myTexture;
+import goldy_exp;
 
-[[vk::binding(1, 0)]]
-SamplerState mySampler;
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(Interpolated<float4> myTexture, Filter mySampler, VertexOutput input) {
     return myTexture.Sample(mySampler, input.uv);
 }
 ```
@@ -392,19 +452,18 @@ float4 fs_main(VertexOutput input) : SV_Target {
 ```hlsl
 import goldy_exp;
 
-[[vk::binding(0, 0)]]
-cbuffer Uniforms { float time; };
+struct TimeUniforms { float time; };
 
-[shader("vertex")]
+[goldy_vertex]
 FullscreenVarying vs_main(FullscreenVertex input) {
     return vs_fullscreen(input);
 }
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(TimeUniforms uniforms, FullscreenVarying input) {
     float2 uv = input.uv;
     // Apply your effect using uv (0-1) and time
-    return float4(rainbow(uv.x + time), 1.0);
+    return float4(rainbow(uv.x + uniforms.time), 1.0);
 }
 ```
 
@@ -413,12 +472,12 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 ```hlsl
 import goldy_exp;
 
-cbuffer TimeData { float time; };
+struct TimeData { float time; };
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    float r = sin(time * 2.0) * 0.5 + 0.5;
-    float g = cos(time * 3.0) * 0.5 + 0.5;
+[goldy_fragment]
+float4 fs_main(TimeData td, FullscreenVarying input) {
+    float r = sin(td.time * 2.0) * 0.5 + 0.5;
+    float g = cos(td.time * 3.0) * 0.5 + 0.5;
     return float4(r, g, 0.5, 1.0);
 }
 ```

@@ -291,15 +291,6 @@ impl GpuBackend for MetalBackend {
         buffer::read_to_cpu(&self.state, device, buffer, output)
     }
 
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        buffer::read_coherent(&self.state.buffers, buffer, offset, output)
-    }
-
     fn clear_buffer(
         &mut self,
         device: DeviceHandle,
@@ -594,7 +585,7 @@ impl GpuBackend for MetalBackend {
     fn submit_compute(
         &mut self,
         device: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<super::FenceToken> {
         compute::submit(&mut self.state, device, commands)
     }
@@ -604,12 +595,17 @@ impl GpuBackend for MetalBackend {
     }
 
     fn wait_fence(&mut self, device: DeviceHandle, token: super::FenceToken) -> Result<()> {
-        compute::wait_fence(&self.state, device, token)?;
-        // Successful wait establishes GPU idleness for everything submitted
-        // up to and including `token`. Any bindless slots parked pending while
-        // those command buffers were in-flight are now safe to recycle.
+        let result = compute::wait_fence(&self.state, device, token);
+        // Drain pending bindless slots regardless of success or error.
+        //
+        // A faulted command buffer (kIOGPUCommandBufferCallbackErrorPageFault or
+        // similar) has *terminated* — its argument-buffer descriptors are no longer
+        // live — so it is safe to recycle every pending slot even when `wait_fence`
+        // returns `Err`.  Skipping this on the error path keeps slots locked in
+        // `pending_free_*` permanently, starving subsequent frames of slots and
+        // leading to the "storage-buffer bindless slots exhausted (64 max)" panic.
         drain_all_pending_slots(&mut self.state);
-        Ok(())
+        result
     }
 
     fn wait_fence_timeout(

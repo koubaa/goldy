@@ -968,18 +968,15 @@ pub(super) fn destroy(
                 .resource_registry
                 .unregister_texture(texture_handle);
 
-            unsafe {
-                logical_device.device.device_wait_idle().ok();
-                logical_device.device.destroy_image_view(texture.view, None);
-                logical_device.device.destroy_image(texture.image, None);
-                logical_device.device.free_memory(texture.memory, None);
-                if let Some(staging_buffer) = texture.staging_buffer {
-                    logical_device.device.destroy_buffer(staging_buffer, None);
-                }
-                if let Some(staging_memory) = texture.staging_memory {
-                    logical_device.device.free_memory(staging_memory, None);
-                }
-            }
+            logical_device
+                .deletion_queue
+                .queue(types::PendingDeletion::Texture {
+                    image: texture.image,
+                    view: texture.view,
+                    memory: texture.memory,
+                    staging_buffer: texture.staging_buffer,
+                    staging_memory: texture.staging_memory,
+                });
         }
     }
 }
@@ -1085,6 +1082,276 @@ fn transition_image_layout(
     }
 
     Ok(())
+}
+
+/// Host-visible staging for a batched texture upload (see compute submit path).
+pub(super) struct ComputeTextureScratch {
+    pub buffer: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+    pub texture_handle: TextureHandle,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Allocate and CPU-fill staging for [`GpuCommand::WriteTexture`] / [`GpuCommand::WriteTextureRegion`].
+#[allow(clippy::too_many_arguments)]
+pub(super) fn allocate_compute_texture_staging(
+    instance: &ash::Instance,
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    textures: &HashMap<TextureHandle, TextureState>,
+    texture_handle: TextureHandle,
+    data: &[u8],
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<ComputeTextureScratch> {
+    let texture = textures
+        .get(&texture_handle)
+        .context("allocate_compute_texture_staging: invalid texture")?;
+
+    if x + width > texture.width || y + height > texture.height {
+        anyhow::bail!(
+            "Region out of bounds: {}x{} at ({},{}) exceeds {}x{} texture",
+            width,
+            height,
+            x,
+            y,
+            texture.width,
+            texture.height
+        );
+    }
+    let expected_size = (width * height * texture.format.bytes_per_pixel()) as usize;
+    if data.len() != expected_size {
+        anyhow::bail!(
+            "Data size mismatch: expected {} bytes, got {}",
+            expected_size,
+            data.len()
+        );
+    }
+
+    let device_handle = texture.device_handle;
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let physical_device = logical_device.physical_device;
+    let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    let find_mem_type = |type_filter: u32, properties: vk::MemoryPropertyFlags| -> Option<u32> {
+        (0..mem_props.memory_type_count).find(|&i| {
+            (type_filter & (1 << i)) != 0
+                && (mem_props.memory_types[i as usize].property_flags & properties) == properties
+        })
+    };
+
+    let buffer_size = data.len() as u64;
+    let staging_buffer_info = vk::BufferCreateInfo::default()
+        .size(buffer_size)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let staging_buffer = unsafe {
+        logical_device
+            .device
+            .create_buffer(&staging_buffer_info, None)
+    }
+    .context("compute texture staging: create_buffer")?;
+
+    let staging_mem_reqs = unsafe {
+        logical_device
+            .device
+            .get_buffer_memory_requirements(staging_buffer)
+    };
+    let staging_memory_type = find_mem_type(
+        staging_mem_reqs.memory_type_bits,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )
+    .context("compute texture staging: memory type")?;
+
+    let staging_alloc_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(staging_mem_reqs.size)
+        .memory_type_index(staging_memory_type);
+
+    let staging_memory = unsafe {
+        logical_device
+            .device
+            .allocate_memory(&staging_alloc_info, None)
+    }
+    .context("compute texture staging: allocate_memory")?;
+
+    unsafe {
+        logical_device
+            .device
+            .bind_buffer_memory(staging_buffer, staging_memory, 0)
+    }
+    .context("compute texture staging: bind_buffer_memory")?;
+
+    unsafe {
+        let ptr = logical_device
+            .map_memory2(staging_memory, 0, buffer_size)
+            .context("compute texture staging: map")?;
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+        logical_device
+            .unmap_memory2(staging_memory)
+            .context("compute texture staging: unmap")?;
+    }
+
+    Ok(ComputeTextureScratch {
+        buffer: staging_buffer,
+        memory: staging_memory,
+        texture_handle,
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+/// Record buffer→image copy + layout transitions into an open command buffer.
+pub(super) fn record_compute_texture_upload(
+    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    cmd: vk::CommandBuffer,
+    scratch: &ComputeTextureScratch,
+) -> Result<()> {
+    let (device_handle, width, height, format, image, old_layout) = {
+        let texture = textures
+            .get(&scratch.texture_handle)
+            .context("record_compute_texture_upload: invalid texture")?;
+        (
+            texture.device_handle,
+            texture.width,
+            texture.height,
+            texture.format,
+            texture.image,
+            texture.current_layout,
+        )
+    };
+
+    if scratch.x + scratch.width > width || scratch.y + scratch.height > height {
+        anyhow::bail!("record_compute_texture_upload: scratch region out of bounds");
+    }
+
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let (src_stage, src_access) = match old_layout {
+        vk::ImageLayout::UNDEFINED => (
+            vk::PipelineStageFlags2::TOP_OF_PIPE,
+            vk::AccessFlags2::empty(),
+        ),
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+            vk::AccessFlags2::SHADER_READ,
+        ),
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
+            vk::PipelineStageFlags2::TRANSFER,
+            vk::AccessFlags2::TRANSFER_WRITE,
+        ),
+        vk::ImageLayout::GENERAL => (
+            vk::PipelineStageFlags2::COMPUTE_SHADER,
+            vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+        ),
+        _ => (
+            vk::PipelineStageFlags2::TOP_OF_PIPE,
+            vk::AccessFlags2::empty(),
+        ),
+    };
+
+    let barrier_to_dst = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .old_layout(old_layout)
+        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .image(image)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+
+    let dep_info =
+        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_to_dst));
+    unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
+
+    let region = vk::BufferImageCopy::default()
+        .buffer_offset(0)
+        .buffer_row_length(0)
+        .buffer_image_height(0)
+        .image_subresource(vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+        .image_offset(vk::Offset3D {
+            x: scratch.x as i32,
+            y: scratch.y as i32,
+            z: 0,
+        })
+        .image_extent(vk::Extent3D {
+            width: scratch.width,
+            height: scratch.height,
+            depth: 1,
+        });
+
+    unsafe {
+        logical_device.device.cmd_copy_buffer_to_image(
+            cmd,
+            scratch.buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            std::slice::from_ref(&region),
+        );
+    }
+
+    let barrier_to_shader = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(
+            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+        )
+        .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .image(image)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+
+    let dep_info2 = vk::DependencyInfo::default()
+        .image_memory_barriers(std::slice::from_ref(&barrier_to_shader));
+    unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2) };
+
+    if let Some(tex) = textures.get_mut(&scratch.texture_handle) {
+        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    let _ = format;
+    Ok(())
+}
+
+pub(super) fn destroy_texture_staging_list(
+    logical_device: &types::LogicalDevice,
+    items: Vec<(vk::Buffer, vk::DeviceMemory)>,
+) {
+    for (buf, mem) in items {
+        unsafe {
+            logical_device.device.destroy_buffer(buf, None);
+            logical_device.device.free_memory(mem, None);
+        }
+    }
 }
 
 /// Get the bindless descriptor index for a texture, if any.

@@ -19,36 +19,32 @@ struct ParticleParams {
     float _pad2;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot, params_slot])
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-#define PARAMS goldy_dyn_broadcast<ParticleParams>(1)
-
 static const uint NUM_PARTICLES = 1000;
 
 float hash(float p) {
     return frac(sin(p * 127.1) * 43758.5453);
 }
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<Particle> PARTICLES, ParticleParams params, ThreadId id) {
     uint idx = id.x;
     
     if (idx >= NUM_PARTICLES) return;
     
     Particle p = PARTICLES[idx];
-    bool is_snow = PARAMS.is_snow > 0.5;
+    bool is_snow = params.is_snow > 0.5;
     
     p.position += p.velocity;
     
     if (is_snow) {
-        float seed = float(idx) + PARAMS.frame * 0.1;
+        float seed = float(idx) + params.frame * 0.1;
         p.velocity.x += (hash(seed) - 0.5) * 0.001;
         p.velocity.x = clamp(p.velocity.x, -0.01, 0.01);
     }
     
     if (p.position.y < -1.2 || p.position.x < -1.2 || p.position.x > 1.2) {
-        float seed = float(idx) + PARAMS.frame * 0.01;
+        float seed = float(idx) + params.frame * 0.01;
         
         p.position.x = hash(seed) * 2.0 - 1.0;
         p.position.y = 1.0 + hash(seed + 100.0) * 0.5;

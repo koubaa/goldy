@@ -16,7 +16,21 @@ use super::super::{
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
+
+/// Newtype around [`HANDLE`] that is `Send + Sync`.
+///
+/// Win32 kernel-object handles (e.g. the DXGI frame-latency waitable) are
+/// valid to use from any thread; the raw-pointer representation is purely an
+/// ABI artifact and is never dereferenced by user code.
+#[derive(Clone, Copy)]
+pub(crate) struct SendSyncHandle(pub HANDLE);
+// Safety: Win32 kernel handles identify kernel objects by integer value and
+// carry no thread-affinity; `WaitForSingleObject` / `CloseHandle` are safe to
+// call from any thread on the same handle.
+unsafe impl Send for SendSyncHandle {}
+unsafe impl Sync for SendSyncHandle {}
 
 /// Maximum number of descriptors in the CBV/SRV/UAV heap for bindless rendering
 #[allow(dead_code)]
@@ -26,17 +40,33 @@ pub const MAX_BINDLESS_CBV_SRV_UAV: u32 = 16384;
 #[allow(dead_code)]
 pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
 
-/// Maximum number of resource indices in root constants
-pub const MAX_ROOT_CONSTANT_INDICES: usize = 16;
+/// Maximum number of bindless resource indices in region A.
+pub const MAX_BINDLESS_SLOTS: usize = 16;
+/// Maximum number of u32 user parameters in region B.
+pub const MAX_USER_SLOTS: usize = 8;
+/// Total root constant size in bytes.
+pub const TOTAL_PUSH_BYTES: usize = 128;
 
-/// Root constants for passing bindless resource indices to shaders.
-/// This is used to tell shaders which indices in the descriptor heaps to access.
+/// Packed 128-byte root constant layout.
+///
+/// ```text
+/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
+/// Bytes 32–63:  8  × u32  user parameters            (region B)
+/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// ```
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
-pub struct BindlessIndices {
-    /// Resource indices (buffers, textures, samplers packed sequentially)
-    pub indices: [u32; MAX_ROOT_CONSTANT_INDICES],
+pub struct PushLayout {
+    pub bindless: [u16; MAX_BINDLESS_SLOTS],
+    pub user: [u32; MAX_USER_SLOTS],
+    pub _reserved: [u32; 16],
 }
+
+const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
+
+// Safety: PushLayout is a POD type with known layout
+unsafe impl bytemuck::Pod for PushLayout {}
+unsafe impl bytemuck::Zeroable for PushLayout {}
 
 /// Registry for tracking bindless resource descriptor heap offsets.
 ///
@@ -317,6 +347,49 @@ pub(crate) struct ComputeAllocatorSlot {
     pub fence_value: u64,
 }
 
+/// Resource pending deferred deletion.
+/// Kept alive until the GPU frame that was in-flight at queue time completes.
+#[allow(dead_code)]
+pub(crate) enum PendingDeletion {
+    Buffer {
+        resource: Direct3D12::ID3D12Resource,
+        upload_buffer: Option<Direct3D12::ID3D12Resource>,
+        coherent_readback: Option<Direct3D12::ID3D12Resource>,
+    },
+    Texture {
+        resource: Direct3D12::ID3D12Resource,
+    },
+}
+
+/// Deferred deletion queue for a DX12 device.
+/// Mirrors the Vulkan backend's `DeletionQueue`.
+pub(crate) struct DeletionQueue {
+    pending: Vec<(u64, PendingDeletion)>,
+}
+
+impl DeletionQueue {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn queue(&mut self, fence_value: u64, resource: PendingDeletion) {
+        self.pending.push((fence_value, resource));
+    }
+
+    /// Drop resources whose associated fence value has been reached by the GPU.
+    pub fn process(&mut self, fence: &Direct3D12::ID3D12Fence) {
+        let completed = unsafe { fence.GetCompletedValue() };
+        self.pending.retain(|(fv, _)| *fv > completed);
+    }
+
+    /// Flush all pending deletions unconditionally (device teardown).
+    pub fn flush_all(&mut self) {
+        self.pending.clear();
+    }
+}
+
 /// A logical D3D12 device with associated resources.
 #[allow(dead_code)]
 pub(crate) struct LogicalDevice {
@@ -353,6 +426,9 @@ pub(crate) struct LogicalDevice {
     /// Used to hold a temporary R32_UINT UAV so the GPU-side descriptor matches
     /// the clear format at execution time (not just at recording time).
     pub scratch_clear_uav_offset: u32,
+    /// Deferred deletion queue — resources are dropped only after the GPU finishes
+    /// the command list that was last submitted when the resource was queued.
+    pub deletion_queue: DeletionQueue,
 }
 
 /// GPU buffer state.
@@ -373,8 +449,8 @@ pub(crate) struct BufferState {
     pub element_stride: Option<u32>,
     /// If true, this is a view into another buffer — don't free the resource on destroy.
     pub is_view: bool,
-    /// Direct3D 12: paired READBACK resource for [`crate::types::BufferFlags::CPU_COHERENT`]
-    /// storage buffers; CPU reads copy from this after [`super::buffer::copy_to_coherent_readback`].
+    /// Direct3D 12: paired READBACK resource for [`crate::types::BufferFlags::CPU_READABLE`]
+    /// storage buffers. Copied UAV → READBACK by [`super::buffer::read_to_cpu`].
     pub coherent_readback: Option<Direct3D12::ID3D12Resource>,
     /// Persistent map of `coherent_readback` (see above).
     /// Persistent `Map` result address for the readback resource (`usize` for `Send`/`Sync`).
@@ -417,11 +493,8 @@ pub(crate) struct PipelineState {
     pub topology: crate::types::PrimitiveTopology,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound shader(s). Empty disables validation.
+    /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -434,11 +507,8 @@ pub(crate) struct ComputePipelineState {
     pub root_signature: Direct3D12::ID3D12RootSignature,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound compute shader. Empty disables validation.
+    /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -480,6 +550,8 @@ pub(crate) struct TextureState {
     pub bindless_offset: Option<u32>,
     /// Last known layout for enhanced texture barriers (replaces legacy `current_state`).
     pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
+    /// Whether this texture was created with UAV access (SpatialAccess::Direct).
+    pub is_storage: bool,
 }
 
 /// GPU sampler state.
@@ -533,12 +605,22 @@ pub(crate) struct SurfaceState {
     /// Per swapchain buffer index: persistent UAV texture for compute; results are
     /// copied to the real back buffer in `present` (swapchain images cannot be UAVs).
     pub compute_scratch_textures: Vec<Option<super::TextureHandle>>,
+    /// Presentation mode (vsync strategy).
+    pub present_mode: crate::types::PresentMode,
+    /// DXGI frame-latency waitable object handle.
+    /// Acquired once at swapchain creation via `IDXGISwapChain2::GetFrameLatencyWaitableObject`;
+    /// closed in `surface::destroy`.  `acquire()` calls `WaitForSingleObject` on this handle
+    /// to block until DXGI is ready to accept a new frame, replacing the per-present CPU stall.
+    pub frame_latency_waitable: Option<SendSyncHandle>,
 }
 
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
 pub(super) struct Dx12State {
     pub factory: Dxgi::IDXGIFactory4,
+    /// Whether the DXGI factory/driver supports `DXGI_PRESENT_ALLOW_TEARING`
+    /// (needed for tear-free immediate presentation in windowed mode).
+    pub allow_tearing: bool,
     pub adapters: Vec<DxgiAdapterInfo>,
     pub devices: HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
@@ -564,4 +646,6 @@ pub(super) struct Dx12State {
     pub next_dsv_offset: u32,
     /// Per-backend Slang compiler instance
     pub slang_compiler: crate::slang::SlangCompiler,
+    /// Per-device upload belts for `GpuCommand::WriteBuffer`.
+    pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
 }

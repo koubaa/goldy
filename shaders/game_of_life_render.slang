@@ -6,9 +6,6 @@ import goldy_exp;
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
-// Dynamic buffer selection - Rust: set_push_constants(&[cells_buffer_slot])
-#define CELLS goldy_dyn_scattered<uint>(0)
-
 struct VSOutput {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
@@ -26,16 +23,16 @@ static const float2 uvs[3] = {
     float2(0, -1)
 };
 
-[shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID) {
+[goldy_vertex]
+VSOutput vs_main(VertexId vertexID) {
     VSOutput output;
-    output.position = float4(positions[vertexID], 0.0, 1.0);
-    output.uv = uvs[vertexID];
+    output.position = float4(positions[vertexID.value], 0.0, 1.0);
+    output.uv = uvs[vertexID.value];
     return output;
 }
 
-[shader("fragment")]
-float4 fs_main(VSOutput input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(Scattered<uint> CELLS, VSOutput input) : SV_Target {
     float2 uv = input.uv;
     uv.y = 1.0 - uv.y;
     

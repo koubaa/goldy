@@ -589,6 +589,10 @@ pub type FnSpReflectionTypeLayoutGetBindingType =
 pub type FnSpReflectionTypeLayoutGetCategory =
     unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> c_int;
 
+// ============================================================================
+// User-defined attribute reflection
+// ============================================================================
+
 // ISlangBlob interface methods (COM-style vtable)
 pub type FnBlobGetBufferPointer = unsafe extern "C" fn(blob: *mut ISlangBlob) -> *const c_void;
 pub type FnBlobGetBufferSize = unsafe extern "C" fn(blob: *mut ISlangBlob) -> usize;

@@ -1,6 +1,6 @@
 //! Compute pipeline and pass management.
 
-use crate::backend::{ComputeCommand, ComputePipelineHandle, GpuBackend};
+use crate::backend::{ComputePipelineHandle, GpuBackend, GpuCommand};
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::shader::ShaderModule;
@@ -22,17 +22,12 @@ use std::sync::{Arc, Mutex};
 /// let device = instance.create_device(DeviceType::DiscreteGpu)?;
 ///
 /// let shader = ShaderModule::from_slang(&device, r#"
-///     #include "goldy_exp.slang"
+///     import goldy_exp;
 ///
-///     struct PushConstants { uint buffer_idx; };
-///     [[vk::push_constant]] PushConstants pc;
-///
-///     [shader("compute")]
+///     [goldy_compute]
 ///     [numthreads(64, 1, 1)]
-///     void cs_main(uint3 id : SV_DispatchThreadID) {
-///         // Access buffer via index
-///         float val = asfloat(g_StorageBuffers[pc.buffer_idx].Load(id.x * 4));
-///         g_StorageBuffers[pc.buffer_idx].Store(id.x * 4, asuint(val * 2.0));
+///     void cs_main(Scattered<float> data, ThreadId id) {
+///         data[id.x] = data[id.x] * 2.0;
 ///     }
 /// "#)?;
 ///
@@ -85,7 +80,7 @@ impl Drop for ComputePipeline {
 /// let mut encoder = ComputeEncoder::new();
 /// let mut pass = encoder.begin_compute_pass();
 /// // pass.set_pipeline(&pipeline);
-/// // pass.set_push_constants(&[&buffer]);
+/// // pass.bind_resources(&[&buffer]);
 /// // pass.dispatch(1, 1, 1);
 /// drop(pass);
 ///
@@ -93,7 +88,7 @@ impl Drop for ComputePipeline {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct ComputeEncoder {
-    pub(crate) commands: Vec<ComputeCommand>,
+    pub(crate) commands: Vec<GpuCommand>,
 }
 
 impl ComputeEncoder {
@@ -110,7 +105,7 @@ impl ComputeEncoder {
     }
 
     /// Get the recorded commands.
-    pub fn finish(self) -> Vec<ComputeCommand> {
+    pub fn finish(self) -> Vec<GpuCommand> {
         self.commands
     }
 
@@ -137,7 +132,7 @@ impl ComputeEncoder {
         Ok(crate::GpuFuture {
             backend: Arc::clone(&device.backend),
             device: device.handle,
-            fence_token: token,
+            fence_token: Some(token),
         })
     }
 }
@@ -158,73 +153,70 @@ impl<'a> ComputePass<'a> {
     pub fn set_pipeline(&mut self, pipeline: &ComputePipeline) {
         self.encoder
             .commands
-            .push(ComputeCommand::SetPipeline(pipeline.handle));
+            .push(GpuCommand::SetPipeline(pipeline.handle));
     }
 
-    /// Set push constants for resource binding (compute shaders).
+    /// Bind resource slots for a compute dispatch.
     ///
-    /// Buffer indices are passed via push/root constants. The shader accesses
-    /// resources through global descriptor arrays indexed by these values.
+    /// Buffer indices are passed to the shader as entry-point parameters.
+    /// The shader accesses resources through global descriptor arrays indexed
+    /// by these values.
     ///
     /// # Example
     /// ```ignore
-    /// pass.set_push_constants(&[&particle_buffer, &params_buffer]);
+    /// pass.bind_resources(&[&particle_buffer, &params_buffer]);
     /// // In shader: g_StorageBuffers[getBufferIndex(0)] for particles
     /// // In shader: g_UniformBuffers[getBufferIndex(1)] for params
     /// ```
-    pub fn set_push_constants(&mut self, buffers: &[&Buffer]) {
-        self.encoder
-            .commands
-            .push(ComputeCommand::SetPushConstants {
-                buffers: buffers.iter().map(|b| b.handle).collect(),
-            });
+    pub fn bind_resources(&mut self, buffers: &[&Buffer]) {
+        self.encoder.commands.push(GpuCommand::BindResources {
+            buffers: buffers.iter().map(|b| b.handle).collect(),
+        });
     }
 
-    /// Set push constants with raw u32 indices (for textures/samplers or mixed resources).
+    /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
-    /// **Prefer [`ComputePass::set_push_constants_typed`]** for new code — the
-    /// raw form skips per-slot category validation, so binding a uniform-buffer
-    /// index into a slot the shader reads via `goldy_dyn_buf_ro` will silently
-    /// produce garbage reads rather than erroring at dispatch time.
+    /// Use this when you need to pass texture or sampler slot indices, or when
+    /// constructing resource bindings manually. The indices must match the order of
+    /// `uniform uint` parameters declared in the shader's entry point.
     ///
     /// # Example
     /// ```ignore
     /// let tex_idx = texture.bindless_index().unwrap();
-    /// pass.set_push_constants_raw(&[buf_idx_0, buf_idx_1, tex_idx]);
+    /// pass.bind_resources_raw(&[buf_idx_0, buf_idx_1, tex_idx]);
     /// ```
-    pub fn set_push_constants_raw(&mut self, indices: &[u32]) {
-        self.encoder
-            .commands
-            .push(ComputeCommand::SetPushConstantsRaw {
-                indices: indices.to_vec(),
-            });
+    pub fn bind_resources_raw(&mut self, indices: &[u32]) {
+        self.encoder.commands.push(GpuCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: Vec::new(),
+        });
     }
 
-    /// Set push constants from typed [`BindlessHandle`]s.
+    /// Bind resources with both bindless indices (region A) and user scalars (region B).
+    pub fn bind_resources_raw_with_user(&mut self, indices: &[u32], user: &[u32]) {
+        self.encoder.commands.push(GpuCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: user.to_vec(),
+        });
+    }
+
+    /// Bind resource slots from typed [`BindlessHandle`]s.
     ///
     /// Each handle carries both the raw index and the resource's
-    /// [`crate::types::BindlessCategory`]. At dispatch time
-    /// the backend cross-checks these against the bound shader's reflection
-    /// and returns an error if any slot's category disagrees with how the
-    /// shader reads it (e.g. binding a
-    /// [`BindlessCategory::Broadcast`](crate::types::BindlessCategory::Broadcast)
-    /// handle to a slot accessed via `goldy_dyn_buf_ro`, which reads the
-    /// storage-buffer pool). When the shader provides no expectation for a slot
-    /// (e.g. computed slot indices that regex analysis can't resolve),
-    /// validation is skipped for that slot.
+    /// [`crate::types::BindlessCategory`]. The indices are extracted in order and
+    /// passed to the shader's `uniform uint` entry-point parameters in the
+    /// same order as this slice.
     ///
     /// # Example
     /// ```ignore
     /// let uniforms = uniform_buf.bindless_handle().unwrap();    // Broadcast
     /// let output  = output_tex.bindless_handle().unwrap();      // StorageImage
-    /// pass.set_push_constants_typed(&[uniforms, output]);
+    /// pass.bind_resources_typed(&[uniforms, output]);
     /// ```
-    pub fn set_push_constants_typed(&mut self, handles: &[BindlessHandle]) {
-        self.encoder
-            .commands
-            .push(ComputeCommand::SetPushConstantsTyped {
-                handles: handles.to_vec(),
-            });
+    pub fn bind_resources_typed(&mut self, handles: &[BindlessHandle]) {
+        self.encoder.commands.push(GpuCommand::BindResourcesTyped {
+            handles: handles.to_vec(),
+        });
     }
 
     /// Dispatch compute workgroups.
@@ -239,7 +231,7 @@ impl<'a> ComputePass<'a> {
     /// - `dispatch(16, 1, 1)` runs 16 * 64 = 1024 threads
     /// - `dispatch(256, 1, 1)` runs 256 * 64 = 16384 threads
     pub fn dispatch(&mut self, workgroups_x: u32, workgroups_y: u32, workgroups_z: u32) {
-        self.encoder.commands.push(ComputeCommand::Dispatch {
+        self.encoder.commands.push(GpuCommand::Dispatch {
             workgroups_x,
             workgroups_y,
             workgroups_z,
@@ -252,12 +244,10 @@ impl<'a> ComputePass<'a> {
     /// byte offset. This allows the GPU to determine dispatch size from a prior
     /// compute pass (e.g. a setup shader that writes the counts).
     pub fn dispatch_indirect(&mut self, buffer: &Buffer, offset: u64) {
-        self.encoder
-            .commands
-            .push(ComputeCommand::DispatchIndirect {
-                buffer: buffer.handle,
-                offset,
-            });
+        self.encoder.commands.push(GpuCommand::DispatchIndirect {
+            buffer: buffer.handle,
+            offset,
+        });
     }
 
     /// Insert a memory barrier between compute dispatches.
@@ -265,7 +255,7 @@ impl<'a> ComputePass<'a> {
     /// Ensures all prior shader writes complete and are visible before
     /// any subsequent shader reads or writes execute.
     pub fn barrier(&mut self) {
-        self.encoder.commands.push(ComputeCommand::Barrier);
+        self.encoder.commands.push(GpuCommand::Barrier);
     }
 
     /// Fill a buffer region with zeros, batched into the compute command stream.
@@ -274,7 +264,7 @@ impl<'a> ComputePass<'a> {
     /// into the encoder so it's submitted alongside dispatches in a single batch.
     /// If `size` is 0, clears from `offset` to end of buffer.
     pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
-        self.encoder.commands.push(ComputeCommand::ClearBuffer {
+        self.encoder.commands.push(GpuCommand::ClearBuffer {
             buffer: buffer.handle,
             offset,
             size,
@@ -309,7 +299,7 @@ mod tests {
 
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -334,8 +324,8 @@ mod tests {
         let commands = encoder.finish();
 
         assert_eq!(commands.len(), 3);
-        assert!(matches!(&commands[0], ComputeCommand::Dispatch { .. }));
-        assert!(matches!(&commands[1], ComputeCommand::Dispatch { .. }));
-        assert!(matches!(&commands[2], ComputeCommand::Dispatch { .. }));
+        assert!(matches!(&commands[0], GpuCommand::Dispatch { .. }));
+        assert!(matches!(&commands[1], GpuCommand::Dispatch { .. }));
+        assert!(matches!(&commands[2], GpuCommand::Dispatch { .. }));
     }
 }

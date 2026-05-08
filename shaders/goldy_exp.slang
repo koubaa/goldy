@@ -6,15 +6,16 @@
 //
 // == Cross-Platform Resource Binding ==
 //
-// Use access pattern functions for unified resource binding:
+// Tag your entry point with [goldy_compute], [goldy_vertex], or
+// [goldy_fragment] and declare resources as typed parameters:
 //
-//   // Uniforms (via push constants)
-//   float t = goldy_dyn_broadcast<TimeUniforms>(0).time;
+//   [goldy_compute]
+//   [numthreads(64, 1, 1)]
+//   void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
+//       data[id.x] = data[id.x] + cfg.base;
+//   }
 //
-//   // Storage buffers (via push constants)
-//   StorageBuffer<Particle> buf = goldy_dyn_scattered<Particle>(0);
-//
-// These work on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
+// Works on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
 //
 
 module goldy_exp;

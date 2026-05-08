@@ -95,8 +95,8 @@ impl Buffer {
 /// Describes how threads will access the buffer, determining hardware optimizations.
 pub enum DataAccess {
     /// Any thread, any address, read/write. No coherence assumptions.
-    /// Maps to RWStructuredBuffer in shaders (goldy_scattered/goldy_dyn_scattered).
-    /// For read-only access, use goldy_dyn_buf_ro<T>() in the shader to enable
+    /// Maps to RWStructuredBuffer in shaders via goldy_scattered<T>(slot).
+    /// For read-only access, use goldy_buf_ro<T>(slot) in the shader to enable
     /// hardware read cache optimizations (StructuredBuffer/NonWritable SSBO/const device*).
     Scattered,
     
@@ -378,7 +378,7 @@ impl Texture {
     pub fn height(&self) -> u32;
     pub fn format(&self) -> TextureFormat;
 
-    /// Bindless descriptor index for use in push constants.
+    /// Bindless descriptor index for use in resource bindings.
     pub fn bindless_index(&self) -> Option<u32>;
 }
 ```
@@ -390,7 +390,7 @@ pub struct Sampler { /* ... */ }
 
 impl Sampler {
     pub fn new(device: &Device, desc: &SamplerDesc) -> Result<Self>;
-    /// Bindless descriptor index for use in push constants.
+    /// Bindless descriptor index for use in resource bindings.
     pub fn bindless_index(&self) -> Option<u32>;
 }
 ```
@@ -477,10 +477,10 @@ pub struct ComputePass<'a> { /* ... */ }
 
 impl<'a> ComputePass<'a> {
     pub fn set_pipeline(&mut self, pipeline: &ComputePipeline);
-    /// Bind buffers via bindless indices (push constants).
-    pub fn set_push_constants(&mut self, buffers: &[&Buffer]);
+    /// Bind buffers via bindless indices (resource slots).
+    pub fn bind_resources(&mut self, buffers: &[&Buffer]);
     /// Pass raw u32 indices (for textures/samplers or mixed resources).
-    pub fn set_push_constants_raw(&mut self, indices: &[u32]);
+    pub fn bind_resources_raw(&mut self, indices: &[u32]);
     pub fn dispatch(&mut self, x: u32, y: u32, z: u32);
     /// Workgroup counts read from buffer at offset (3 × u32).
     pub fn dispatch_indirect(&mut self, buffer: &Buffer, offset: u64);

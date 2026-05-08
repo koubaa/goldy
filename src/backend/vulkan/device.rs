@@ -4,8 +4,8 @@ use super::types::{self, PhysicalDeviceInfo};
 use super::{DeviceHandle, VulkanState};
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
-use ash::khr;
 use ash::vk;
+use ash::{ext, khr};
 use std::ffi::CStr;
 
 /// Enumerate available physical devices/adapters.
@@ -88,11 +88,21 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .descriptor_binding_partially_bound(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
         .descriptor_binding_storage_buffer_update_after_bind(true)
+        .descriptor_binding_storage_image_update_after_bind(true)
         .descriptor_binding_uniform_buffer_update_after_bind(true)
         .runtime_descriptor_array(true)
         .shader_storage_buffer_array_non_uniform_indexing(true)
         .shader_sampled_image_array_non_uniform_indexing(true)
-        .shader_uniform_buffer_array_non_uniform_indexing(true);
+        .shader_uniform_buffer_array_non_uniform_indexing(true)
+        // Required for SPIR-V Float16 capability used by ekrano shaders.
+        .shader_float16(true)
+        // Required for SPIR-V Int8 capability (enabled alongside float16 in Vulkan 1.2).
+        .shader_int8(true);
+
+    // Vulkan 1.1 features: shaderDrawParameters is needed for SV_InstanceID
+    // (SPIR-V DrawParameters capability) in vertex shaders.
+    let mut vulkan_11_features =
+        vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
     // Vulkan 1.3 features: mandatory in 1.4, but must still be enabled.
     let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
@@ -104,6 +114,17 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default().pipeline_robustness(true);
 
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .features(
+            vk::PhysicalDeviceFeatures::default()
+                .vertex_pipeline_stores_and_atomics(true)
+                // Required so fragment shaders referencing the bindless storage
+                // heap (g_GoldyStorageHeap) don't need NonWritable decoration.
+                .fragment_stores_and_atomics(true)
+                // Required for SPIR-V Int16 / Int64 capabilities used by ekrano shaders.
+                .shader_int16(true)
+                .shader_int64(true),
+        )
+        .push_next(&mut vulkan_11_features)
         .push_next(&mut vulkan_13_features)
         .push_next(&mut vulkan_12_features)
         .push_next(&mut pipeline_robustness_features);
@@ -119,6 +140,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let device_extensions = [
         khr::swapchain::NAME.as_ptr(),
         khr::map_memory2::NAME.as_ptr(),
+        ext::pipeline_robustness::NAME.as_ptr(),
     ];
 
     let device_create_info = vk::DeviceCreateInfo::default()
@@ -257,26 +279,26 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
         let descriptor_set = descriptor_sets[0];
 
-        // Create a pipeline layout that includes the bindless set and push constants
+        // Create a pipeline layout that includes the bindless set and resource slots
         let layouts = [descriptor_set_layout];
 
-        // Push constant range for resource indices (16 x u32 = 64 bytes)
-        let push_constant_range = vk::PushConstantRange {
+        // Vulkan push constant range for the packed 128-byte PushLayout
+        let slot_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::ALL,
             offset: 0,
-            size: (types::MAX_PUSH_CONSTANT_INDICES * std::mem::size_of::<u32>()) as u32,
+            size: types::TOTAL_PUSH_BYTES as u32,
         };
 
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
-            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+            .push_constant_ranges(std::slice::from_ref(&slot_range));
 
         let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
             .context("Failed to create bindless pipeline layout")?;
 
         tracing::info!(
-            "Pipeline layout includes {} bytes of push constants for resource indices",
-            push_constant_range.size
+            "Pipeline layout includes {} bytes of push constants for resource slot indices",
+            slot_range.size
         );
 
         tracing::info!("Created descriptor infrastructure: pool, layout, set, pipeline layout");
@@ -371,6 +393,18 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 state
                     .samplers
                     .retain(|_, s| s.device_handle != device_handle);
+                let dropped_tokens: Vec<u64> = state
+                    .compute_fence_pool
+                    .iter()
+                    .filter(|(_, (dh, _, _))| *dh == device_handle)
+                    .map(|(t, _)| *t)
+                    .collect();
+                state
+                    .compute_fence_pool
+                    .retain(|_, (dh, _, _)| *dh != device_handle);
+                for t in dropped_tokens {
+                    state.compute_texture_staging_pool.remove(&t);
+                }
                 logical_device.device.destroy_device(None);
                 return;
             }
@@ -379,6 +413,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             logical_device
                 .deletion_queue
                 .flush_all(&logical_device.device);
+
+            if let Some(mut belt) = state.staging_belts.remove(&device_handle) {
+                belt.destroy_all(&logical_device);
+            }
 
             // Destroy buffers owned by this device
             let buffer_handles: Vec<_> = state
@@ -503,6 +541,35 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 }
             }
 
+            // Remove surface textures (swapchain images) from the textures map
+            // BEFORE the generic texture destroy loop.  These images are owned by
+            // the swapchain — only the VkImageView should be destroyed, NOT the
+            // VkImage.  Handles live in current_texture_handle and in per-frame
+            // pending_surface_texture slots.
+            for surface_state in state.surfaces.values_mut() {
+                if surface_state.device_handle != device_handle {
+                    continue;
+                }
+                if let Some(th) = surface_state.current_texture_handle.take() {
+                    if let Some(tex_state) = state.textures.remove(&th) {
+                        logical_device.resource_registry.unregister_texture(th);
+                        logical_device
+                            .device
+                            .destroy_image_view(tex_state.view, None);
+                    }
+                }
+                for fs in &mut surface_state.frame_sync {
+                    if let Some(th) = fs.pending_surface_texture.take() {
+                        if let Some(tex_state) = state.textures.remove(&th) {
+                            logical_device.resource_registry.unregister_texture(th);
+                            logical_device
+                                .device
+                                .destroy_image_view(tex_state.view, None);
+                        }
+                    }
+                }
+            }
+
             // Destroy textures owned by this device
             let texture_handles: Vec<_> = state
                 .textures
@@ -537,7 +604,88 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 }
             }
 
-            // Destroy bindless infrastructure
+            // Destroy surfaces owned by this device.
+            // Surface::Drop may run after Device::Drop (Rust struct field order),
+            // so we must clean up here while the VkDevice is still alive.
+            let surface_handles: Vec<_> = state
+                .surfaces
+                .iter()
+                .filter(|(_, s)| s.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in surface_handles {
+                if let Some(surface_state) = state.surfaces.remove(&handle) {
+                    for frame in surface_state.frame_sync {
+                        logical_device
+                            .device
+                            .destroy_semaphore(frame.image_available_semaphore, None);
+                        logical_device
+                            .device
+                            .destroy_semaphore(frame.image_ready_semaphore, None);
+                        logical_device
+                            .device
+                            .destroy_semaphore(frame.render_finished_semaphore, None);
+                        logical_device
+                            .device
+                            .destroy_fence(frame.in_flight_fence, None);
+                    }
+
+                    for view in surface_state.swapchain_image_views {
+                        logical_device.device.destroy_image_view(view, None);
+                    }
+
+                    if let Some(depth_view) = surface_state.depth_view {
+                        logical_device.device.destroy_image_view(depth_view, None);
+                    }
+                    if let Some(depth_image) = surface_state.depth_image {
+                        logical_device.device.destroy_image(depth_image, None);
+                    }
+                    if let Some(depth_memory) = surface_state.depth_memory {
+                        logical_device.device.free_memory(depth_memory, None);
+                    }
+
+                    let swapchain_loader =
+                        khr::swapchain::Device::new(&state.instance, &logical_device.device);
+                    swapchain_loader.destroy_swapchain(surface_state.swapchain, None);
+
+                    let surface_loader = khr::surface::Instance::new(&state.entry, &state.instance);
+                    surface_loader.destroy_surface(surface_state.surface, None);
+                }
+            }
+
+            // Clean up any remaining deferred compute state.  CBs are freed
+            // implicitly when the command pool is destroyed; just drain the maps
+            // so staging resources get destroyed.
+            for d in state.deferred_compute.drain(..) {
+                if let Some(staging) = state.compute_texture_staging_pool.remove(&d.token) {
+                    super::texture::destroy_texture_staging_list(&logical_device, staging);
+                }
+            }
+            state.deferred_pending_tokens.clear();
+
+            // Drain any compute fences still in the pool for this device.
+            // Tests (and async dispatch patterns) may leave signaled-but-uncollected
+            // fences in the pool; they must be destroyed before vkDestroyDevice.
+            let fence_tokens: Vec<u64> = state
+                .compute_fence_pool
+                .iter()
+                .filter(|(_, (dh, _, _))| *dh == device_handle)
+                .map(|(tok, _)| *tok)
+                .collect();
+            for tok in fence_tokens {
+                if let Some((_, fence, cmd_buf)) = state.compute_fence_pool.remove(&tok) {
+                    if let Some(cb) = cmd_buf {
+                        logical_device
+                            .device
+                            .free_command_buffers(logical_device.command_pool, &[cb]);
+                    }
+                    logical_device.device.destroy_fence(fence, None);
+                }
+                if let Some(staging) = state.compute_texture_staging_pool.remove(&tok) {
+                    super::texture::destroy_texture_staging_list(&logical_device, staging);
+                }
+            }
+
             if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {
                 logical_device
                     .device

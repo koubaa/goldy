@@ -40,13 +40,10 @@ struct Uniforms {
     float _padding;
 };
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(8, 8, 1)]
-void cs_main(uint3 tid : SV_DispatchThreadID) {
-    ReadOnlyBuffer<Uniforms> ub = goldy_dyn_buf_ro<Uniforms>(0);
-    Uniforms u = ub[0];
-
-    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(1);
+void cs_main(BufRO<Uniforms> uniforms_buf, DirectSpatial<float4> output, ThreadId tid) {
+    Uniforms u = uniforms_buf[0];
 
     if (tid.x >= u.width || tid.y >= u.height)
         return;
@@ -72,7 +69,12 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
 "#;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
     println!("Goldy — Compute to Surface Example");
     println!("===================================");
@@ -100,6 +102,7 @@ struct RenderState {
     uniform_buffer: Buffer,
     start_time: std::time::Instant,
     vsync: bool,
+    frame_count: u32,
 }
 
 impl App {
@@ -145,9 +148,25 @@ impl App {
             uniform_buffer,
             start_time: std::time::Instant::now(),
             vsync: true,
+            frame_count: 0,
         });
 
         Ok(())
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 {
+            self.frame_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        println!(
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            self.frame_count
+        );
     }
 }
 
@@ -219,6 +238,8 @@ impl ApplicationHandler for App {
 }
 
 fn render_frame(state: &mut RenderState) -> Result<()> {
+    state.frame_count += 1;
+
     let (width, height) = state.surface.size();
     if width == 0 || height == 0 {
         return Ok(());
@@ -247,11 +268,10 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    // The shader accesses the uniform buffer via `goldy_dyn_buf_ro<Uniforms>(0)` which
-    // maps to `StructuredBuffer<Uniforms>` — an SRV on DX12. `bindless_srv_handle()`
-    // returns the SRV index on DX12 (distinct from the UAV index) and falls back to
-    // the unified storage-buffer index on Vulkan / Metal, so it's correct on every
-    // backend.
+    // The shader reads the uniform buffer via `goldy_buf_ro<Uniforms>(uniforms_slot)`,
+    // which maps to an SRV (read-only) on DX12. Use `bindless_srv_handle()` so the
+    // index matches the SRV heap on DX12, while on Vulkan/Metal it falls back to
+    // the unified storage-buffer index.
     let uniform_handle = state
         .uniform_buffer
         .bindless_srv_handle()
@@ -264,7 +284,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&state.compute_pipeline);
-        pass.set_push_constants_typed(&[uniform_handle, texture_handle]);
+        pass.bind_resources_typed(&[uniform_handle, texture_handle]);
         pass.dispatch(wg_x, wg_y, 1);
     }
     encoder.submit(&state.device)?.wait()?;

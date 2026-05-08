@@ -1,25 +1,23 @@
-//! Compute graph integration tests.
+//! Task graph integration tests.
 //!
-//! These tests verify that `ComputeGraph` (Tier 1) and `ComputeProgram` (Tier 2)
-//! produce correct GPU results using real backends, exercising the dependency
-//! analysis, barrier insertion, and wave scheduling on actual hardware.
+//! These tests verify that `TaskGraph` produces correct GPU results using
+//! real backends, exercising dependency analysis, barrier insertion, and wave
+//! scheduling on actual hardware.
+//! They are only compiled when at least one backend feature is enabled.
+#![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    Buffer, ComputeEncoder, ComputeGraph, ComputePipeline, ComputeProgram, DataAccess, NodeAccess,
-    ShaderModule,
+    Buffer, ComputeEncoder, ComputePipeline, DataAccess, NodeAccess, ShaderModule, TaskGraph,
 };
 
 /// Doubles each element: out[i] = in[i] * 2
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
 
-#define INPUT  goldy_dyn_scattered<uint>(0)
-#define OUTPUT goldy_dyn_scattered<uint>(1)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    OUTPUT[id.x] = INPUT[id.x] * 2;
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
+    output[id.x] = input[id.x] * 2;
 }
 "#;
 
@@ -27,12 +25,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const ADD_TEN_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] + 10;
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] + 10;
 }
 "#;
 
@@ -40,12 +36,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const FILL_42_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = 42;
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = 42;
 }
 "#;
 
@@ -53,12 +47,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const FILL_99_SHADER: &str = r#"
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<uint>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = 99;
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = 99;
 }
 "#;
 
@@ -66,14 +58,21 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 const SUM_SHADER: &str = r#"
 import goldy_exp;
 
-#define A   goldy_dyn_scattered<uint>(0)
-#define B   goldy_dyn_scattered<uint>(1)
-#define OUT goldy_dyn_scattered<uint>(2)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    OUT[id.x] = A[id.x] + B[id.x];
+void cs_main(Scattered<uint> a, Scattered<uint> b, Scattered<uint> out, ThreadId id) {
+    out[id.x] = a[id.x] + b[id.x];
+}
+"#;
+
+/// Copies input to output: out[i] = in[i]
+const COPY_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
+    output[id.x] = input[id.x];
 }
 "#;
 
@@ -106,7 +105,7 @@ fn readback_u32(device: &goldy::Device, buffer: &Buffer, count: usize) -> Vec<u3
 }
 
 // ---------------------------------------------------------------------------
-// ComputeGraph (Tier 1) tests
+// TaskGraph dispatch tests
 // ---------------------------------------------------------------------------
 
 /// Linear chain: double then add 10. Exercises RAW dependency.
@@ -127,18 +126,18 @@ fn graph_linear_chain() {
     let src_idx = src.bindless_index().unwrap();
     let dst_idx = dst.bindless_index().unwrap();
 
-    let mut graph = ComputeGraph::new();
+    let mut graph = TaskGraph::new();
     graph
         .node("double", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&dst, NodeAccess::Write)
-        .push_constants_raw(&[src_idx, dst_idx])
+        .bind_resources_raw(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
 
     graph
         .node("add_ten", &add_pipe)
         .bind_buffer(&dst, NodeAccess::ReadWrite)
-        .push_constants_raw(&[dst_idx])
+        .bind_resources_raw(&[dst_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -167,16 +166,16 @@ fn graph_independent_dispatches() {
     let idx_a = buf_a.bindless_index().unwrap();
     let idx_b = buf_b.bindless_index().unwrap();
 
-    let mut graph = ComputeGraph::new();
+    let mut graph = TaskGraph::new();
     graph
         .node("fill_a", &pipe_42)
         .bind_buffer(&buf_a, NodeAccess::Write)
-        .push_constants_raw(&[idx_a])
+        .bind_resources_raw(&[idx_a])
         .dispatch(1, 1, 1);
     graph
         .node("fill_b", &pipe_99)
         .bind_buffer(&buf_b, NodeAccess::Write)
-        .push_constants_raw(&[idx_b])
+        .bind_resources_raw(&[idx_b])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -207,11 +206,10 @@ fn graph_diamond_dependency() {
 
     let fill_shader_src = r#"
 import goldy_exp;
-#define DATA goldy_dyn_scattered<uint>(0)
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = id.x;
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = id.x;
 }
 "#;
     let fill_shader = ShaderModule::from_slang(&device, fill_shader_src).unwrap();
@@ -233,13 +231,13 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let z_idx = z.bindless_index().unwrap();
     let out_idx = out.bindless_index().unwrap();
 
-    let mut graph = ComputeGraph::new();
+    let mut graph = TaskGraph::new();
 
     // A: fill src with thread index
     graph
         .node("fill_src", &fill_pipe)
         .bind_buffer(&src, NodeAccess::Write)
-        .push_constants_raw(&[src_idx])
+        .bind_resources_raw(&[src_idx])
         .dispatch(1, 1, 1);
 
     // B: double src -> y
@@ -247,7 +245,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         .node("double_to_y", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&y, NodeAccess::Write)
-        .push_constants_raw(&[src_idx, y_idx])
+        .bind_resources_raw(&[src_idx, y_idx])
         .dispatch(1, 1, 1);
 
     // C: double src -> z
@@ -255,7 +253,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         .node("double_to_z", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&z, NodeAccess::Write)
-        .push_constants_raw(&[src_idx, z_idx])
+        .bind_resources_raw(&[src_idx, z_idx])
         .dispatch(1, 1, 1);
 
     // D: sum y + z -> out
@@ -264,7 +262,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         .bind_buffer(&y, NodeAccess::Read)
         .bind_buffer(&z, NodeAccess::Read)
         .bind_buffer(&out, NodeAccess::Write)
-        .push_constants_raw(&[y_idx, z_idx, out_idx])
+        .bind_resources_raw(&[y_idx, z_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -276,46 +274,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ComputeProgram (Tier 2) tests
-// ---------------------------------------------------------------------------
-
-/// Compile a program once, specialize and run it twice with different buffers
-/// and dimensions. Verifies that the cached schedule is reusable.
-#[test]
-fn program_reuse() {
-    let device = make_device();
-
-    let fill_shader = ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap();
-    let fill_pipe = ComputePipeline::new(&device, &fill_shader).unwrap();
-
-    let mut builder = ComputeProgram::builder();
-    let buf_slot = builder.buffer_slot("buf");
-    let wg = builder.dim_slot("wg");
-
-    builder
-        .step("fill", &fill_pipe)
-        .bind_buffer(buf_slot, NodeAccess::Write)
-        .dispatch_slot(wg);
-
-    let program = builder.compile().unwrap();
-
-    // Specialize #1
-    let buf1 = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let mut exec1 = program.specialize();
-    exec1.bind_buffer(buf_slot, &buf1);
-    exec1.set_dim(wg, (1, 1, 1));
-    exec1.dispatch(&device).unwrap();
-
-    // Specialize #2 with a different buffer
-    let buf2 = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let mut exec2 = program.specialize();
-    exec2.bind_buffer(buf_slot, &buf2);
-    exec2.set_dim(wg, (1, 1, 1));
-    exec2.dispatch(&device).unwrap();
-}
-
-/// ComputeGraph produces the same result as manual ComputeEncoder for the same workload.
+/// TaskGraph produces the same result as manual ComputeEncoder for the same workload.
 #[test]
 fn graph_matches_encoder() {
     let device = make_device();
@@ -339,7 +298,7 @@ fn graph_matches_encoder() {
         {
             let mut pass = encoder.begin_compute_pass();
             pass.set_pipeline(&double_pipe);
-            pass.set_push_constants_raw(&[src_enc_idx, dst_enc_idx]);
+            pass.bind_resources_raw(&[src_enc_idx, dst_enc_idx]);
             pass.dispatch(1, 1, 1);
         }
         encoder.dispatch(&device).unwrap();
@@ -349,7 +308,7 @@ fn graph_matches_encoder() {
         {
             let mut pass = encoder.begin_compute_pass();
             pass.set_pipeline(&add_pipe);
-            pass.set_push_constants_raw(&[dst_enc_idx]);
+            pass.bind_resources_raw(&[dst_enc_idx]);
             pass.dispatch(1, 1, 1);
         }
         encoder.dispatch(&device).unwrap();
@@ -357,24 +316,24 @@ fn graph_matches_encoder() {
 
     let result_enc = readback_u32(&device, &dst_enc, 64);
 
-    // --- Run via ComputeGraph ---
+    // --- Run via TaskGraph ---
     let src_graph = Buffer::with_data(&device, &input, DataAccess::Scattered).unwrap();
     let dst_graph = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
 
     let src_graph_idx = src_graph.bindless_index().unwrap();
     let dst_graph_idx = dst_graph.bindless_index().unwrap();
 
-    let mut graph = ComputeGraph::new();
+    let mut graph = TaskGraph::new();
     graph
         .node("double", &double_pipe)
         .bind_buffer(&src_graph, NodeAccess::Read)
         .bind_buffer(&dst_graph, NodeAccess::Write)
-        .push_constants_raw(&[src_graph_idx, dst_graph_idx])
+        .bind_resources_raw(&[src_graph_idx, dst_graph_idx])
         .dispatch(1, 1, 1);
     graph
         .node("add_ten", &add_pipe)
         .bind_buffer(&dst_graph, NodeAccess::ReadWrite)
-        .push_constants_raw(&[dst_graph_idx])
+        .bind_resources_raw(&[dst_graph_idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&device).unwrap();
 
@@ -383,11 +342,11 @@ fn graph_matches_encoder() {
     // Both should produce identical results
     assert_eq!(
         result_enc, result_graph,
-        "ComputeGraph should match ComputeEncoder output"
+        "TaskGraph should match ComputeEncoder output"
     );
 }
 
-/// Non-blocking submit via ComputeGraph.
+/// Non-blocking submit via TaskGraph.
 #[test]
 fn graph_nonblocking_submit() {
     let device = make_device();
@@ -398,18 +357,118 @@ fn graph_nonblocking_submit() {
     let buf = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
     let idx = buf.bindless_index().unwrap();
 
-    let mut graph = ComputeGraph::new();
+    let mut graph = TaskGraph::new();
     graph
         .node("fill", &pipe)
         .bind_buffer(&buf, NodeAccess::Write)
-        .push_constants_raw(&[idx])
+        .bind_resources_raw(&[idx])
         .dispatch(1, 1, 1);
 
-    let future = graph.submit(&device).unwrap();
+    let mut future = graph.submit(&device).unwrap();
     future.wait().unwrap();
 
     let result = readback_u32(&device, &buf, 64);
     for &v in &result {
         assert_eq!(v, 42);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// New integration tests: clear_buffer and write_buffer nodes
+//
+// These tests exercise the exact scenario that caused the DX12 race condition
+// with `ComputeGraph::prelude`. Clears and writes are now first-class graph
+// nodes subject to dependency analysis, so the correct barrier is inserted
+// between the clear/write and the downstream dispatch on every backend.
+// ---------------------------------------------------------------------------
+
+/// `graph.clear_buffer()` followed by a dispatch that reads the buffer.
+///
+/// Previously this was done via `graph.prelude.push(ClearBuffer{..})` which
+/// bypassed dependency analysis. On DX12 this caused a race because
+/// `ClearUnorderedAccessViewUint` synchronizes under
+/// `D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW`, which is distinct from
+/// `D3D12_BARRIER_SYNC_COMPUTE_SHADING`. The TaskGraph refactor promotes the
+/// clear to a first-class node so the analyzer emits the required barrier.
+#[test]
+fn clear_then_dispatch_reads_zeros() {
+    let device = make_device();
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+
+    // Allocate and fill a buffer with nonzero values.
+    let nonzero: Vec<u32> = (1..=64).collect();
+    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+
+    let buf_idx = buf.bindless_index().unwrap();
+    let out_idx = out.bindless_index().unwrap();
+
+    // Build a graph: clear buf → copy buf→out
+    // The analyzer must insert a barrier between the clear and the copy.
+    let mut graph = TaskGraph::new();
+    graph.clear_buffer(&buf, 0, 64 * 4);
+    graph
+        .node("copy", &copy_pipe)
+        .bind_buffer(&buf, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw(&[buf_idx, out_idx])
+        .dispatch(1, 1, 1);
+
+    graph.dispatch(&device).unwrap();
+
+    // The copy reads from buf *after* the clear, so output must be all zeros.
+    let result = readback_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val, 0,
+            "element {i}: expected 0 after clear, got {val} (DX12 race check)"
+        );
+    }
+}
+
+/// `graph.write_buffer()` followed by a dispatch that reads the buffer.
+///
+/// The CPU data must be visible to the GPU dispatch. The TaskGraph analyzer
+/// inserts a barrier between the write node and the read dispatch, ensuring
+/// the upload completes before the shader accesses the buffer on all backends.
+#[test]
+fn write_then_dispatch_reads_uploaded_data() {
+    let device = make_device();
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+
+    // Buffer starts empty (zeroed).
+    let buf = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+
+    let buf_idx = buf.bindless_index().unwrap();
+    let out_idx = out.bindless_index().unwrap();
+
+    // Known data to upload: values 100..163.
+    let known_data: Vec<u32> = (100..164).collect();
+    let data_bytes: Vec<u8> = bytemuck::cast_slice(&known_data).to_vec();
+
+    // Build a graph: write known_data into buf → copy buf→out
+    let mut graph = TaskGraph::new();
+    graph.write_buffer(&buf, 0, data_bytes);
+    graph
+        .node("copy", &copy_pipe)
+        .bind_buffer(&buf, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw(&[buf_idx, out_idx])
+        .dispatch(1, 1, 1);
+
+    graph.dispatch(&device).unwrap();
+
+    let result = readback_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = known_data[i];
+        assert_eq!(
+            val, expected,
+            "element {i}: expected {expected} after write_buffer, got {val}"
+        );
     }
 }

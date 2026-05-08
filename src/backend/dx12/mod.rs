@@ -32,6 +32,7 @@ mod render_commands;
 mod render_target;
 mod sampler;
 mod shader;
+mod staging;
 mod surface;
 mod texture;
 mod types;
@@ -150,6 +151,24 @@ impl Dx12Backend {
         let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory2(factory_flags) }
             .context("Failed to create DXGI factory")?;
 
+        // Check tearing support (IDXGIFactory5::CheckFeatureSupport)
+        let allow_tearing = factory
+            .cast::<IDXGIFactory5>()
+            .ok()
+            .and_then(|f5| {
+                let mut allow: i32 = 0;
+                let hr = unsafe {
+                    f5.CheckFeatureSupport(
+                        DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                        &mut allow as *mut _ as *mut _,
+                        std::mem::size_of::<i32>() as u32,
+                    )
+                };
+                hr.ok().map(|()| allow != 0)
+            })
+            .unwrap_or(false);
+        tracing::info!("DXGI tearing support: {allow_tearing}");
+
         // Enumerate adapters
         let mut adapters = Vec::new();
         let mut adapter_index = 0u32;
@@ -222,6 +241,7 @@ impl Dx12Backend {
 
         let state = Dx12State {
             factory,
+            allow_tearing,
             adapters,
             devices: HashMap::new(),
             next_device_handle: 1,
@@ -244,6 +264,7 @@ impl Dx12Backend {
             next_rtv_offset: 0,
             next_dsv_offset: 0,
             slang_compiler,
+            staging_belts: HashMap::new(),
         };
 
         Ok(Self { state })
@@ -260,8 +281,15 @@ impl Dx12Backend {
 
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
-        if let Some(logical_device) = self.state.devices.remove(&device_handle) {
+        if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
+            logical_device.deletion_queue.flush_all();
+
+            if let Some(mut belt) = self.state.staging_belts.remove(&device_handle) {
+                unsafe {
+                    belt.destroy_all();
+                }
+            }
 
             let buffer_handles: Vec<_> = self
                 .state
@@ -439,21 +467,12 @@ impl GpuBackend for Dx12Backend {
         buffer::read_to_cpu(&mut self.state, device, buffer, output)
     }
 
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        buffer::read_coherent(&self.state.buffers, buffer, offset, output)
-    }
-
-    fn copy_to_coherent_readback(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-    ) -> Result<()> {
-        buffer::copy_to_coherent_readback(&mut self.state, device, buffer)
+    fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
+        let _ = device;
+        crate::device::DeviceCapabilities {
+            has_zero_copy_storage_readback: false,
+            ..Default::default()
+        }
     }
 
     fn clear_buffer(
@@ -614,6 +633,18 @@ impl GpuBackend for Dx12Backend {
         surface::format(&self.state, surface_handle)
     }
 
+    fn surface_set_present_mode(
+        &mut self,
+        surface_handle: SurfaceHandle,
+        mode: crate::types::PresentMode,
+    ) -> Result<()> {
+        surface::set_present_mode(&mut self.state, surface_handle, mode)
+    }
+
+    fn surface_present_mode(&self, surface_handle: SurfaceHandle) -> crate::types::PresentMode {
+        surface::get_present_mode(&self.state, surface_handle)
+    }
+
     fn create_pipeline_with_depth(
         &mut self,
         device_handle: DeviceHandle,
@@ -742,7 +773,7 @@ impl GpuBackend for Dx12Backend {
     fn submit_compute(
         &mut self,
         device_handle: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<FenceToken> {
         compute::submit(&mut self.state, device_handle, commands)
     }
@@ -762,5 +793,11 @@ impl GpuBackend for Dx12Backend {
         timeout_ms: u32,
     ) -> Result<bool> {
         compute::wait_fence_timeout(&self.state, device_handle, token, timeout_ms)
+    }
+
+    fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
+        if let Some(belt) = self.state.staging_belts.get_mut(&device_handle) {
+            belt.trim();
+        }
     }
 }

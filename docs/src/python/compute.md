@@ -18,17 +18,12 @@ buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
 
 # Define compute shader (Slang)
 SHADER = """
-#include "goldy_exp.slang"
+import goldy_exp;
 
-struct PushConstants { uint buffer_idx; };
-[[vk::push_constant]] PushConstants pc;
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    // Read, double, and write back
-    float val = asfloat(g_StorageBuffers[pc.buffer_idx].Load(id.x * 4));
-    g_StorageBuffers[pc.buffer_idx].Store(id.x * 4, asuint(val * 2.0));
+void cs_main(Scattered<float> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2.0;
 }
 """
 
@@ -40,7 +35,7 @@ pipeline = goldy.ComputePipeline(device, shader)
 encoder = goldy.ComputeEncoder()
 with encoder.begin_compute_pass() as cp:
     cp.set_pipeline(pipeline)
-    cp.set_push_constants([buffer])  # Buffer index passed via push constants
+    cp.bind_resources([buffer])  # Buffer index passed as resource binding
     cp.dispatch(4, 1, 1)  # 4 workgroups × 64 threads = 256 threads
 
 encoder.dispatch(device)
@@ -79,9 +74,9 @@ for iteration in range(100):
     with encoder.begin_compute_pass() as cp:
         cp.set_pipeline(pipeline)
         if use_a:
-            cp.set_push_constants([buffer_a, buffer_b])  # Read A, write B
+            cp.bind_resources([buffer_a, buffer_b])  # Read A, write B
         else:
-            cp.set_push_constants([buffer_b, buffer_a])  # Read B, write A
+            cp.bind_resources([buffer_b, buffer_a])  # Read B, write A
         cp.dispatch(workgroups_x, workgroups_y, 1)
     encoder.dispatch(device)
     use_a = not use_a
@@ -97,43 +92,34 @@ import numpy as np
 
 GRID_SIZE = 128
 COMPUTE_SHADER = f"""
-#include "goldy_exp.slang"
+import goldy_exp;
 
 static const uint SIZE = {GRID_SIZE};
 
-struct PushConstants {{ uint current_idx; uint next_idx; }};
-[[vk::push_constant]] PushConstants pc;
-
-uint getCell(int x, int y) {{
-    x = (x + SIZE) % SIZE;
-    y = (y + SIZE) % SIZE;
-    return g_StorageBuffers[pc.current_idx].Load((y * SIZE + x) * 4);
-}}
-
-uint countNeighbors(int x, int y) {{
-    uint n = 0;
-    for (int dy = -1; dy <= 1; dy++)
-        for (int dx = -1; dx <= 1; dx++)
-            if (dx != 0 || dy != 0)
-                n += getCell(x + dx, y + dy);
-    return n;
-}}
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(8, 8, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {{
+void cs_main(BufRO<uint> current, Scattered<uint> next, ThreadId id) {{
     if (id.x >= SIZE || id.y >= SIZE) return;
     
     uint idx = id.y * SIZE + id.x;
-    uint cell = g_StorageBuffers[pc.current_idx].Load(idx * 4);
-    uint neighbors = countNeighbors(int(id.x), int(id.y));
+    uint cell = current[idx];
+    
+    // Count neighbors
+    uint n = 0;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (dx != 0 || dy != 0) {{
+                int nx = (int(id.x) + dx + SIZE) % SIZE;
+                int ny = (int(id.y) + dy + SIZE) % SIZE;
+                n += current[ny * SIZE + nx];
+            }}
     
     // Conway's rules
-    uint next = (cell == 1) ? 
-        ((neighbors == 2 || neighbors == 3) ? 1 : 0) :
-        ((neighbors == 3) ? 1 : 0);
+    uint result = (cell == 1) ? 
+        ((n == 2 || n == 3) ? 1 : 0) :
+        ((n == 3) ? 1 : 0);
     
-    g_StorageBuffers[pc.next_idx].Store(idx * 4, next);
+    next[idx] = result;
 }}
 """
 
@@ -153,7 +139,7 @@ buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
 compute_encoder = goldy.ComputeEncoder()
 with compute_encoder.begin_compute_pass() as cp:
     cp.set_pipeline(compute_pipeline)
-    cp.set_push_constants([buffer])
+    cp.bind_resources([buffer])
     cp.dispatch(workgroups, 1, 1)
 compute_encoder.dispatch(device)
 
@@ -161,7 +147,7 @@ compute_encoder.dispatch(device)
 render_encoder = goldy.CommandEncoder()
 with render_encoder.begin_render_pass() as rp:
     rp.set_pipeline(render_pipeline)
-    rp.set_push_constants([buffer])  # Read compute results
+    rp.bind_resources([buffer])  # Read compute results
     rp.draw(range(3))
 target.render(render_encoder)
 ```

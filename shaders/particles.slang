@@ -10,10 +10,7 @@ struct ParticleParams {
     float _pad2;
 };
 
-#define TIME goldy_dyn_broadcast<ParticleParams>(0).time
-#define IS_SNOW goldy_dyn_broadcast<ParticleParams>(0).is_snow
-
-[shader("vertex")]
+[goldy_vertex]
 FullscreenVarying vs_main(FullscreenVertex input) {
     return vs_fullscreen(input);
 }
@@ -22,10 +19,10 @@ float hash(float p) {
     return frac(sin(p * 127.1) * 43758.5453);
 }
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(ParticleParams params, FullscreenVarying input) : SV_Target {
     float2 uv = input.uv;
-    bool snow = IS_SNOW > 0.5;
+    bool snow = params.is_snow > 0.5;
     
     float3 bg_color;
     float3 particle_color;
@@ -48,7 +45,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
         float x = hash(fi);
         
         if (snow) {
-            x += sin(TIME * 0.5 + fi * 0.3) * 0.05;
+            x += sin(params.time * 0.5 + fi * 0.3) * 0.05;
             x = frac(x);
         }
         
@@ -56,7 +53,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
         float speed = base_speed + hash(fi + 100.0) * (snow ? 0.08 : 0.4);
         float phase = hash(fi + 200.0) * 10.0;
         
-        float t = frac(TIME * speed + phase);
+        float t = frac(params.time * speed + phase);
         float particle_y = t;
         
         float2 particle_pos = float2(x, particle_y);

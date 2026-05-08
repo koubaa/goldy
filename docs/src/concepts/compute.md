@@ -17,16 +17,12 @@ Goldy's compute API lets you run general-purpose GPU programs (GPGPU) alongside 
 use goldy::{ComputePipeline, ShaderModule};
 
 let shader = ShaderModule::from_slang(&device, r#"
-    #include "goldy_exp.slang"
+    import goldy_exp;
 
-    struct PushConstants { uint buffer_idx; };
-    [[vk::push_constant]] PushConstants pc;
-
-    [shader("compute")]
+    [goldy_compute]
     [numthreads(64, 1, 1)]
-    void cs_main(uint3 id : SV_DispatchThreadID) {
-        float val = asfloat(g_StorageBuffers[pc.buffer_idx].Load(id.x * 4));
-        g_StorageBuffers[pc.buffer_idx].Store(id.x * 4, asuint(val * 2.0));
+    void cs_main(Scattered<float> data, ThreadId id) {
+        data[id.x] = data[id.x] * 2.0;
     }
 "#)?;
 
@@ -45,7 +41,7 @@ let mut encoder = ComputeEncoder::new();
 {
     let mut pass = encoder.begin_compute_pass();
     pass.set_pipeline(&pipeline);
-    pass.set_push_constants(&[&buffer]);
+    pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
     pass.dispatch(16, 1, 1); // 16 workgroups × 64 threads = 1024 threads
 }
 
@@ -89,7 +85,7 @@ Unlike `Buffer::clear()` which submits immediately, `ComputePass::clear_buffer` 
 let mut pass = encoder.begin_compute_pass();
 pass.clear_buffer(&buffer, 0, 0); // size=0 means "to end of buffer"
 pass.set_pipeline(&pipeline);
-pass.set_push_constants(&[&buffer]);
+pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
 pass.dispatch(groups, 1, 1);
 ```
 
@@ -111,32 +107,74 @@ See [GpuFuture](./gpu-future.md) for polling and timeout details.
 
 ## Resource Access in Shaders
 
-Buffers are accessed via **bindless indices** passed through push constants:
-
-```rust
-// Pass multiple buffers
-pass.set_push_constants(&[&input_buf, &output_buf]);
-```
+Buffers are accessed via **resource bindings** — shader entry-point parameters that
+Goldy resolves to resource handles. The `[goldy_compute]` virtual entry point generates
+the underlying `uniform uint` resource slots automatically.
 
 ```slang
-struct PC { uint in_idx; uint out_idx; };
-[[vk::push_constant]] PC pc;
+import goldy_exp;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    float val = asfloat(g_StorageBuffers[pc.in_idx].Load(id.x * 4));
-    g_StorageBuffers[pc.out_idx].Store(id.x * 4, asuint(val * val));
+void cs_main(Scattered<uint> inp, Scattered<uint> out, ThreadId id) {
+    out[id.x] = inp[id.x] * inp[id.x];
 }
 ```
 
-For raw u32 indices (e.g., to mix textures and buffers):
+```rust
+// Rust side: pass the heap indices in declaration order
+pass.bind_resources_raw(&[
+    input_buf.bindless_index().unwrap(),
+    output_buf.bindless_index().unwrap(),
+]);
+pass.dispatch(16, 1, 1);
+```
+
+### Per-dispatch Scalar Parameters
+
+Parameters that are not heap indices — thread base offsets, element counts, flags —
+are declared as typed entry-point parameters. No helper function is needed; the raw
+resource slot *is* the value:
+
+```slang
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, uint offset, uint stride, ThreadId id) {
+    data[id.x * stride + offset] += 1;
+}
+```
 
 ```rust
-let buf_idx = buffer.bindless_index().unwrap();
-let tex_idx = texture.bindless_index().unwrap();
-pass.set_push_constants_raw(&[buf_idx, tex_idx]);
+// Rust: [heap_index, offset, stride]
+pass.bind_resources_raw(&[data_buf.bindless_index().unwrap(), offset, stride]);
 ```
+
+Scalar parameters support any type ≤ 4 bytes (`uint`, `int`, `float`, `bool`).
+
+> **Tip:** The total resource slot budget is 64 bytes (16 `u32` slots) on all
+> supported backends. Goldy's `ResourceSlots` layout uses this full budget.
+
+### Advanced: Manual Entry Points
+
+For fine-grained control, you can write `[shader("compute")]` entry points with
+explicit `uniform uint` slots instead of using `[goldy_compute]`:
+
+```slang
+import goldy_exp;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uniform uint data_slot, uniform uint base, uniform uint stride,
+             uint3 id : SV_DispatchThreadID) {
+    StorageBuffer<uint> data = goldy_scattered<uint>(data_slot);
+    data[id.x * stride + base] += 1;
+}
+```
+
+This is equivalent to what `[goldy_compute]` generates, but requires manual resource
+resolution. Prefer `[goldy_compute]` for most use cases.
 
 ## Compute Graph
 

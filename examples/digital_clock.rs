@@ -23,6 +23,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
+/// Keep vertex buffers alive until the GPU is ~2 frames ahead (matches swapchain / in-flight work).
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
@@ -33,7 +36,11 @@ struct App {
     surface: Option<Surface>,
 
     start_time: Instant,
+    perf_start: Instant,
+    frame_count: u32,
     clock_state: ClockState,
+    /// Retain dynamic vertex buffers until they are no longer referenced by in-flight submits.
+    vertex_buffers: Vec<Buffer>,
 }
 
 impl App {
@@ -47,7 +54,10 @@ impl App {
             window: None,
             surface: None,
             start_time: Instant::now(),
+            perf_start: Instant::now(),
+            frame_count: 0,
             clock_state: ClockState::default(),
+            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
@@ -92,6 +102,8 @@ impl App {
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
+        self.frame_count += 1;
+
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
         let width = size.width;
@@ -120,6 +132,9 @@ impl App {
 
         // Render directly to surface
         let frame = surface.acquire()?;
+        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
+            self.vertex_buffers.remove(0);
+        }
 
         let mut encoder = CommandEncoder::new();
         {
@@ -132,6 +147,7 @@ impl App {
 
         frame.render(encoder)?;
         frame.present()?;
+        self.vertex_buffers.push(vertex_buffer);
 
         Ok(())
     }
@@ -142,6 +158,21 @@ impl App {
                 let _ = surface.resize(new_size.width, new_size.height);
             }
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let elapsed = self.perf_start.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 {
+            self.frame_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        println!(
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            self.frame_count
+        );
     }
 }
 
@@ -203,7 +234,10 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     println!("Goldy Clock Example (using shared rendering code, Surface API)");

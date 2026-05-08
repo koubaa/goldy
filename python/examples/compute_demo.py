@@ -16,12 +16,10 @@ import numpy as np
 COMPUTE_SHADER = """
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<float>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] * 2.0;
+void cs_main(Scattered<float> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2.0;
 }
 """
 
@@ -57,7 +55,7 @@ def main():
     encoder = goldy.ComputeEncoder()
     with encoder.begin_compute_pass() as cp:
         cp.set_pipeline(pipeline)
-        cp.set_push_constants([buffer])
+        cp.bind_resources([buffer])
         # 256 elements / 64 threads per workgroup = 4 workgroups
         cp.dispatch(4, 1, 1)
     

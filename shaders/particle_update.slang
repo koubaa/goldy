@@ -8,16 +8,17 @@ struct Particle {
     float2 velocity;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot])
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
+struct SimParams {
+    float deltaTime;
+};
 
-static const float deltaTime = 0.016;
 static const float2 gravity = float2(0.0, -0.3);
-static const float damping = 0.998;
+// Per-second damping factor (0.998^60 ≈ 0.887 — tuned at 60fps originally)
+static const float dampingPerSecond = 0.887;
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<Particle> PARTICLES, SimParams params, ThreadId id) {
     uint idx = id.x;
     
     if (idx >= 65536) return;
@@ -29,9 +30,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         return;
     }
     
-    p.velocity += gravity * deltaTime;
-    p.velocity *= damping;
-    p.position += p.velocity * deltaTime;
+    p.velocity += gravity * params.deltaTime;
+    p.velocity *= pow(dampingPerSecond, params.deltaTime);
+    p.position += p.velocity * params.deltaTime;
     
     if (p.position.x < -0.95) {
         p.velocity.x = abs(p.velocity.x) * 0.8;

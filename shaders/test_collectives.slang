@@ -9,8 +9,6 @@
 
 import goldy_exp;
 
-#define OUT goldy_dyn_scattered<uint>(0)
-
 struct TagMonoid {
     uint trans_ix;
     uint pathseg_ix;
@@ -140,9 +138,9 @@ groupshared Bbox2D     sh_bbox[WG_SIZE];
 groupshared uint       sh_uint[WG_SIZE];
 groupshared uint       sh_broadcast[1];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 local_id : SV_GroupThreadID) {
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     uint ix = local_id.x;
 
     // --- workgroup_reduce with TagMonoid ---

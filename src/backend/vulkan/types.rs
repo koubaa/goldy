@@ -65,21 +65,37 @@ pub mod bindless_bindings {
     pub const SAMPLERS: u32 = FILTER_CONFIG;
 }
 
-/// Maximum number of resource indices in push constants
-pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
+/// Maximum number of bindless resource indices in region A.
+pub const MAX_BINDLESS_SLOTS: usize = 16;
+/// Maximum number of u32 user parameters in region B.
+pub const MAX_USER_SLOTS: usize = 8;
+/// Total push constant size in bytes.
+pub const TOTAL_PUSH_BYTES: usize = 128;
 
-/// Push constants for passing bindless resource indices to shaders.
-/// This is used to tell shaders which indices in the global descriptor arrays to access.
+/// Packed 128-byte push constant layout.
+///
+/// ```text
+/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
+/// Bytes 32–63:  8  × u32  user parameters            (region B)
+/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// ```
+///
+/// - Region A: bindless heap indices for `Scattered<T>`, `BufRO<T>`, textures, samplers, etc.
+/// - Region B: per-dispatch scalar user params (uint, float, int …).
+/// - Region C: zero-filled, reserved for future extension.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
-pub struct BindlessIndices {
-    /// Resource indices (buffers, textures, samplers packed sequentially)
-    pub indices: [u32; MAX_PUSH_CONSTANT_INDICES],
+pub struct PushLayout {
+    pub bindless: [u16; MAX_BINDLESS_SLOTS],
+    pub user: [u32; MAX_USER_SLOTS],
+    pub _reserved: [u32; 16],
 }
 
-// Safety: BindlessIndices is a POD type with known layout
-unsafe impl bytemuck::Pod for BindlessIndices {}
-unsafe impl bytemuck::Zeroable for BindlessIndices {}
+const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
+
+// Safety: PushLayout is a POD type with known layout
+unsafe impl bytemuck::Pod for PushLayout {}
+unsafe impl bytemuck::Zeroable for PushLayout {}
 
 /// Registry for tracking bindless resource indices.
 ///
@@ -386,16 +402,17 @@ pub(crate) struct BufferState {
     /// Whether this is a storage buffer (vs uniform buffer)
     #[allow(dead_code)]
     pub is_storage: bool,
-    /// Structured-buffer / uniform element stride from buffer creation (for optional validation).
+    /// Structured-buffer / uniform element stride from buffer creation (retained for future validation).
+    #[allow(dead_code)]
     pub element_stride: Option<u32>,
     /// HOST_VISIBLE staging buffer for DEVICE_LOCAL storage buffers (CPU upload/readback)
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
     /// If true, this is a view into another buffer — don't free the VkBuffer/memory on destroy.
     pub is_view: bool,
-    /// Set when the buffer was created with [`crate::types::BufferFlags::CPU_COHERENT`]:
+    /// Set when the buffer was created with [`crate::types::BufferFlags::CPU_READABLE`]:
     /// persistent host mapping of the entire buffer for CPU read/write.
-    /// Opaque address of the persistent `map_memory2` region for `CPU_COHERENT` storage.
+    /// Opaque address of the persistent `map_memory2` region for `CPU_READABLE` storage.
     /// Stored as [`usize`] so `BufferState` is `Send`/`Sync` for `GpuBackend` (raw pointers and
     /// `NonNull` are not in this environment).
     pub host_mapped: Option<usize>,
@@ -426,6 +443,7 @@ pub(crate) struct ShaderState {
 }
 
 /// Graphics pipeline state.
+#[allow(dead_code)]
 pub(crate) struct PipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
@@ -433,18 +451,15 @@ pub(crate) struct PipelineState {
     /// Whether this pipeline owns its layout (false when using bindless_pipeline_layout)
     pub owns_layout: bool,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
-    #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound shader(s). Empty disables validation.
+    /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
-    /// Human-readable identifier used in category-mismatch error messages.
+    /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }
 
 /// Compute pipeline state.
+#[allow(dead_code)]
 pub(crate) struct ComputePipelineState {
     pub device_handle: DeviceHandle,
     pub pipeline: vk::Pipeline,
@@ -452,14 +467,10 @@ pub(crate) struct ComputePipelineState {
     /// Whether this pipeline owns its layout (false when using bindless_pipeline_layout)
     pub owns_layout: bool,
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
-    #[allow(dead_code)]
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
-    /// Per-push-constant-slot category inferred from `goldy_dyn_*(N)` literal
-    /// calls in the bound compute shader. Empty disables validation.
+    /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
-    /// Human-readable identifier used in category-mismatch error messages.
+    /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }
 
@@ -528,8 +539,8 @@ pub(crate) struct FrameSync {
     pub prep_command_buffer: vk::CommandBuffer,
     pub image_available_semaphore: vk::Semaphore,
     /// Signaled by the acquire-time prep submit once the swapchain image is in
-    /// `GENERAL` layout. Render and compute-only present paths wait on this instead
-    /// of `image_available_semaphore`, so the swapchain image is always in a
+    /// `GENERAL` layout. The graphics render path and the compute-only flush
+    /// submit wait on this so the swapchain image is always in a
     /// compute-writable layout by the time any downstream submit touches it.
     pub image_ready_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
@@ -537,6 +548,18 @@ pub(crate) struct FrameSync {
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
     /// presentation uses a barrier submit in `present` instead (see `surface::present`).
     pub render_pass_submitted: bool,
+    /// Deferred compute CBs submitted as part of this frame slot's single
+    /// `vkQueueSubmit`.  Freed in `acquire()` after the frame's in_flight_fence
+    /// has been waited on.
+    pub deferred_compute_cbs: Vec<vk::CommandBuffer>,
+    /// Tokens for deferred compute submits in this frame slot, so
+    /// `is_fence_complete` / `wait_fence` can treat them as complete once the
+    /// frame fence is reclaimed.
+    pub deferred_compute_tokens: Vec<u64>,
+    /// Surface texture handle whose VkImageView + bindless descriptor must stay
+    /// alive until the GPU finishes this frame slot's work.  Unregistered in
+    /// `acquire()` after `in_flight_fence` has been waited on.
+    pub pending_surface_texture: Option<super::TextureHandle>,
 }
 
 /// Surface (swapchain) state for window presentation.
@@ -549,8 +572,12 @@ pub(crate) struct SurfaceState {
     pub width: u32,
     pub height: u32,
     pub format: vk::Format,
-    /// Current swapchain present mode (vsync strategy).
+    /// Desired present mode (may differ from `swapchain_present_mode` until
+    /// the swapchain is recreated).
     pub present_mode: vk::PresentModeKHR,
+    /// Present mode the live swapchain was actually created with.  Used by
+    /// `resize()` to detect when a mode change requires swapchain recreation.
+    pub swapchain_present_mode: vk::PresentModeKHR,
     /// Depth buffer (when depth_format is Some)
     pub depth_format: Option<DepthFormat>,
     pub depth_image: Option<vk::Image>,
@@ -756,5 +783,25 @@ pub(super) struct VulkanState {
     /// Per-submission fences for non-blocking compute; token -> (device, VkFence, Option<VkCommandBuffer>).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
     pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
+    /// Texture upload staging (VkBuffer/VkDeviceMemory) freed when the matching compute fence is collected.
+    pub compute_texture_staging_pool: HashMap<u64, Vec<(vk::Buffer, vk::DeviceMemory)>>,
     pub next_compute_fence_token: u64,
+    /// Per-device staging belts for batched WriteBuffer uploads.
+    pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
+    /// Compute command buffers deferred until present() so they can be batched
+    /// into a single vkQueueSubmit with the present-barrier CB.
+    pub deferred_compute: Vec<DeferredCompute>,
+    /// Tokens whose work is deferred or in-flight as part of a frame's single
+    /// submit.  Value is `None` while the CB is recorded but not yet submitted
+    /// (between `submit_compute` and `present`), and `Some(fence)` after
+    /// `present()` submits the batch.  `wait_fence` blocks on the fence;
+    /// `is_fence_complete` returns false when `None`, checks `get_fence_status`
+    /// when `Some`.  Entries are removed in `acquire()` after the fence has been
+    /// waited on.
+    pub deferred_pending_tokens: HashMap<u64, Option<vk::Fence>>,
+}
+
+pub(super) struct DeferredCompute {
+    pub cmd: vk::CommandBuffer,
+    pub token: u64,
 }

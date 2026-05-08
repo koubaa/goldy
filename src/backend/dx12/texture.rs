@@ -1,13 +1,24 @@
 //! Texture management operations.
 
 use super::barriers;
-use super::types::{Dx12State, TextureState};
+use super::types::{Dx12State, PendingDeletion, TextureState};
 use super::utils::{format_to_dxgi, wait_for_fence};
 use super::{DeviceHandle, TextureHandle};
 use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
+
+/// Staged texture upload (CPU-filled staging + copy footprint) before GPU copy.
+pub(super) struct StagedTextureUpload {
+    pub staging_resource: ID3D12Resource,
+    pub footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+    pub texture_handle: TextureHandle,
+    pub dst_x: u32,
+    pub dst_y: u32,
+    /// Texture layout at the time this copy was enqueued.
+    pub layout_before: D3D12_BARRIER_LAYOUT,
+}
 
 /// [`D3D12_BARRIER_ACCESS`] that matches `layout` for texture barriers.
 fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
@@ -40,6 +51,8 @@ pub(super) fn create(
     access: SpatialAccess,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
+    let is_storage = matches!(access, SpatialAccess::Direct);
+
     let logical_device = state
         .devices
         .get(&device_handle)
@@ -53,7 +66,6 @@ pub(super) fn create(
         VisibleNodeMask: 0,
     };
 
-    let is_storage = matches!(access, SpatialAccess::Direct);
     let resource_flags = if is_storage {
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
     } else {
@@ -79,7 +91,7 @@ pub(super) fn create(
     let initial_state = D3D12_RESOURCE_STATE_COMMON;
 
     let mut resource: Option<ID3D12Resource> = None;
-    unsafe {
+    let hr = unsafe {
         logical_device.device.CreateCommittedResource(
             &heap_properties,
             D3D12_HEAP_FLAG_NONE,
@@ -88,9 +100,11 @@ pub(super) fn create(
             None,
             &mut resource,
         )
-    }
-    .context("Failed to create texture")?;
+    };
+    hr.context("Failed to create texture")?;
     let resource = resource.context("CreateCommittedResource returned null")?;
+
+    let last_layout = D3D12_BARRIER_LAYOUT_COMMON;
 
     // Get texture handle first (needed for registry)
     let handle = state.next_texture_handle;
@@ -132,7 +146,7 @@ pub(super) fn create(
     }
 
     // For storage images (Direct access): create UAV so compute shaders can write via RWTexture2D.
-    // bindless_offset must point to UAV for goldy_dyn_direct_spatial.
+    // bindless_offset must point to UAV for goldy_direct_spatial.
     let bindless_offset = if is_storage {
         let uav_offset = logical_device
             .resource_registry
@@ -167,70 +181,68 @@ pub(super) fn create(
         Some(srv_offset)
     };
 
-    let last_layout = if is_storage {
-        // Storage textures need explicit layout transition from COMMON to UAV-compatible
-        // layout. Global compute barriers don't change texture layouts, so this must
-        // happen once at creation. Without this, UAV writes via compute shaders may
-        // silently fail on some drivers when the texture is still in COMMON layout.
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle for storage texture initial barrier")?;
+    let last_layout =
+        if is_storage && last_layout != D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS {
+            let logical_device = state
+                .devices
+                .get(&device_handle)
+                .context("Invalid device handle for storage texture initial barrier")?;
 
-        unsafe { logical_device.command_allocator.Reset() }
-            .context("Failed to reset command allocator for texture init barrier")?;
-        let init_cmd: ID3D12GraphicsCommandList = unsafe {
-            logical_device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &logical_device.command_allocator,
-                None,
-            )
-        }
-        .context("Failed to create init barrier command list")?;
-        let init_cmd7: ID3D12GraphicsCommandList7 =
-            init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
+            unsafe { logical_device.command_allocator.Reset() }
+                .context("Failed to reset command allocator for texture init barrier")?;
+            let init_cmd: ID3D12GraphicsCommandList = unsafe {
+                logical_device.device.CreateCommandList(
+                    0,
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    &logical_device.command_allocator,
+                    None,
+                )
+            }
+            .context("Failed to create init barrier command list")?;
+            let init_cmd7: ID3D12GraphicsCommandList7 =
+                init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
-        let b = barriers::texture_barrier_full(
-            &resource,
-            D3D12_BARRIER_SYNC_NONE,
-            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-            D3D12_BARRIER_ACCESS_NO_ACCESS,
-            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-            D3D12_BARRIER_LAYOUT_COMMON,
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
-        );
-        unsafe {
-            barriers::barrier_textures(&init_cmd7, &[b]);
-            init_cmd.Close()
-        }
-        .context("Failed to close init barrier command list")?;
+            let b = barriers::texture_barrier_full(
+                &resource,
+                D3D12_BARRIER_SYNC_NONE,
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_ACCESS_NO_ACCESS,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                last_layout,
+                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+            );
+            unsafe {
+                barriers::barrier_textures(&init_cmd7, &[b]);
+                init_cmd.Close()
+            }
+            .context("Failed to close init barrier command list")?;
 
-        let cmd_list: ID3D12CommandList = init_cmd
-            .cast()
-            .context("Failed to cast init command list")?;
-        unsafe {
-            logical_device
-                .command_queue
-                .ExecuteCommandLists(&[Some(cmd_list)]);
-        }
+            let cmd_list: ID3D12CommandList = init_cmd
+                .cast()
+                .context("Failed to cast init command list")?;
+            unsafe {
+                logical_device
+                    .command_queue
+                    .ExecuteCommandLists(&[Some(cmd_list)]);
+            }
 
-        let fence_value = logical_device.fence_value;
-        unsafe {
-            logical_device
-                .command_queue
-                .Signal(&logical_device.fence, fence_value)
-        }
-        .context("Failed to signal fence for init barrier")?;
-        super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
-        if let Some(dev) = state.devices.get_mut(&device_handle) {
-            dev.fence_value += 1;
-        }
+            let fence_value = logical_device.fence_value;
+            unsafe {
+                logical_device
+                    .command_queue
+                    .Signal(&logical_device.fence, fence_value)
+            }
+            .context("Failed to signal fence for init barrier")?;
+            super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
 
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-    } else {
-        D3D12_BARRIER_LAYOUT_COMMON
-    };
+            if let Some(dev) = state.devices.get_mut(&device_handle) {
+                dev.fence_value += 1;
+            }
+
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+        } else {
+            last_layout
+        };
 
     state.textures.insert(
         handle,
@@ -243,10 +255,12 @@ pub(super) fn create(
             srv_offset,
             bindless_offset,
             last_layout,
+            is_storage,
         },
     );
 
     let _ = flags; // reserved for future use
+
     tracing::debug!(
         "Created texture {}x{} (handle={}, storage={})",
         width,
@@ -257,14 +271,15 @@ pub(super) fn create(
     Ok(handle)
 }
 
-/// Write data to a texture.
-pub(super) fn write(
-    state: &mut Dx12State,
+/// Build a staged full-texture upload (caller runs GPU copy via task graph or
+/// [`execute_staged_uploads_sync`]).
+pub(super) fn stage_texture_upload_full(
+    state: &Dx12State,
     texture_handle: TextureHandle,
     data: &[u8],
     width: u32,
     height: u32,
-) -> Result<()> {
+) -> Result<StagedTextureUpload> {
     let texture = state
         .textures
         .get(&texture_handle)
@@ -280,7 +295,6 @@ pub(super) fn write(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    // Use GetCopyableFootprints with the actual texture's resource desc
     let resource_desc = unsafe { texture.resource.GetDesc() };
     let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
     let mut num_rows: u32 = 0;
@@ -300,50 +314,12 @@ pub(super) fn write(
     }
     let staging_size = total_bytes;
 
-    // Create staging buffer
-    let upload_heap = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_UPLOAD,
-        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-        CreationNodeMask: 0,
-        VisibleNodeMask: 0,
-    };
+    let staging = create_upload_staging(&logical_device.device, staging_size)?;
 
-    let buffer_desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Alignment: 0,
-        Width: staging_size,
-        Height: 1,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        Flags: D3D12_RESOURCE_FLAG_NONE,
-    };
-
-    let mut staging: Option<ID3D12Resource> = None;
-    unsafe {
-        logical_device.device.CreateCommittedResource(
-            &upload_heap,
-            D3D12_HEAP_FLAG_NONE,
-            &buffer_desc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            None,
-            &mut staging,
-        )
-    }
-    .context("Failed to create staging buffer")?;
-    let staging = staging.context("CreateCommittedResource returned null")?;
-
-    // Map and copy data
     let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     let read_range = D3D12_RANGE { Begin: 0, End: 0 };
     unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
-        .context("Failed to map staging buffer (texture with_data)")?;
+        .context("Failed to map staging buffer (texture write)")?;
 
     let texture_format = texture.format;
     let bytes_per_row = (width * texture_format.bytes_per_pixel()) as usize;
@@ -366,113 +342,28 @@ pub(super) fn write(
     };
     unsafe { staging.Unmap(0, Some(&written_range)) };
 
-    // Execute copy command
-    unsafe { logical_device.command_allocator.Reset() }
-        .context("Failed to reset command allocator")?;
-
-    let command_list: ID3D12GraphicsCommandList = unsafe {
-        logical_device.device.CreateCommandList(
-            0,
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            &logical_device.command_allocator,
-            None,
-        )
-    }
-    .context("Failed to create command list")?;
-    let command_list7: ID3D12GraphicsCommandList7 =
-        command_list.cast().context("ID3D12GraphicsCommandList7")?;
-
-    let texture = state.textures.get(&texture_handle).unwrap();
     let layout_before = texture.last_layout;
 
-    let b_to_copy = barriers::texture_barrier_full(
-        &texture.resource,
-        D3D12_BARRIER_SYNC_ALL,
-        D3D12_BARRIER_SYNC_COPY,
-        access_for_layout(layout_before),
-        D3D12_BARRIER_ACCESS_COPY_DEST,
+    Ok(StagedTextureUpload {
+        staging_resource: staging,
+        footprint,
+        texture_handle,
+        dst_x: 0,
+        dst_y: 0,
         layout_before,
-        D3D12_BARRIER_LAYOUT_COPY_DEST,
-    );
-    unsafe { barriers::barrier_textures(&command_list7, &[b_to_copy]) };
-
-    let src_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&staging) },
-        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: footprint.Offset,
-                Footprint: footprint.Footprint,
-            },
-        },
-    };
-
-    let dst_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            SubresourceIndex: 0,
-        },
-    };
-
-    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
-    let b_to_shader = barriers::texture_barrier_full(
-        &texture.resource,
-        D3D12_BARRIER_SYNC_COPY,
-        D3D12_BARRIER_SYNC_ALL,
-        D3D12_BARRIER_ACCESS_COPY_DEST,
-        D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-        D3D12_BARRIER_LAYOUT_COPY_DEST,
-        after_layout,
-    );
-    unsafe {
-        command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None);
-        barriers::barrier_textures(&command_list7, &[b_to_shader]);
-        command_list.Close()
-    }
-    .context("Failed to close command list")?;
-
-    if let Some(tex) = state.textures.get_mut(&texture_handle) {
-        tex.last_layout = after_layout;
-    }
-
-    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
-
-    let logical_device = state.devices.get(&device_handle).unwrap();
-    unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-
-    // Wait for completion
-    let fence_value = logical_device.fence_value;
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("Failed to signal fence")?;
-    wait_for_fence(&logical_device.fence, fence_value)?;
-
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
-    }
-
-    tracing::debug!("Wrote {}x{} texture data", width, height);
-    Ok(())
+    })
 }
 
-/// Write data to a subregion of a texture.
-pub(super) fn write_region(
-    state: &mut Dx12State,
+/// Build a staged subregion texture upload.
+pub(super) fn stage_texture_upload_region(
+    state: &Dx12State,
     texture_handle: TextureHandle,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
     data: &[u8],
-) -> Result<()> {
+) -> Result<StagedTextureUpload> {
     let texture = state
         .textures
         .get(&texture_handle)
@@ -505,8 +396,6 @@ pub(super) fn write_region(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    // Use footprint for the UPLOAD REGION (width x height), not the full texture.
-    // The buffer layout must match GetCopyableFootprints for the region we're uploading.
     let region_desc = D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
         Alignment: 0,
@@ -540,43 +429,7 @@ pub(super) fn write_region(
     }
     let staging_size = total_bytes;
 
-    let upload_heap = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_UPLOAD,
-        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-        CreationNodeMask: 0,
-        VisibleNodeMask: 0,
-    };
-
-    let buffer_desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Alignment: 0,
-        Width: staging_size,
-        Height: 1,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        Flags: D3D12_RESOURCE_FLAG_NONE,
-    };
-
-    let mut staging: Option<ID3D12Resource> = None;
-    unsafe {
-        logical_device.device.CreateCommittedResource(
-            &upload_heap,
-            D3D12_HEAP_FLAG_NONE,
-            &buffer_desc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            None,
-            &mut staging,
-        )
-    }
-    .context("Failed to create staging buffer")?;
-    let staging = staging.context("CreateCommittedResource returned null")?;
+    let staging = create_upload_staging(&logical_device.device, staging_size)?;
 
     let texture_format = texture.format;
     let bytes_per_row = (width * texture_format.bytes_per_pixel()) as usize;
@@ -604,25 +457,33 @@ pub(super) fn write_region(
     };
     unsafe { staging.Unmap(0, Some(&written_range)) };
 
-    unsafe { logical_device.command_allocator.Reset() }
-        .context("Failed to reset command allocator")?;
-
-    let command_list: ID3D12GraphicsCommandList = unsafe {
-        logical_device.device.CreateCommandList(
-            0,
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            &logical_device.command_allocator,
-            None,
-        )
-    }
-    .context("Failed to create command list")?;
-    let command_list7: ID3D12GraphicsCommandList7 =
-        command_list.cast().context("ID3D12GraphicsCommandList7")?;
-
-    let texture = state.textures.get(&texture_handle).unwrap();
     let layout_before = texture.last_layout;
 
-    let b_to_copy = barriers::texture_barrier_full(
+    Ok(StagedTextureUpload {
+        staging_resource: staging,
+        footprint,
+        texture_handle,
+        dst_x: x,
+        dst_y: y,
+        layout_before,
+    })
+}
+
+/// Record one staged texture upload on an open command list (task graph / compute submit).
+pub(super) fn record_staged_texture_upload(
+    command_list: &ID3D12GraphicsCommandList,
+    command_list7: &ID3D12GraphicsCommandList7,
+    state: &mut Dx12State,
+    upload: &StagedTextureUpload,
+) -> Result<()> {
+    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+    let texture = state
+        .textures
+        .get(&upload.texture_handle)
+        .context("record_staged_texture_upload: invalid texture")?;
+    let layout_before = upload.layout_before;
+
+    let mut b_to_copy = [barriers::texture_barrier_full(
         &texture.resource,
         D3D12_BARRIER_SYNC_ALL,
         D3D12_BARRIER_SYNC_COPY,
@@ -630,16 +491,17 @@ pub(super) fn write_region(
         D3D12_BARRIER_ACCESS_COPY_DEST,
         layout_before,
         D3D12_BARRIER_LAYOUT_COPY_DEST,
-    );
-    unsafe { barriers::barrier_textures(&command_list7, &[b_to_copy]) };
+    )];
+    unsafe { barriers::barrier_textures(command_list7, &b_to_copy) };
+    unsafe { barriers::drop_texture_barriers(&mut b_to_copy) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&staging) },
+        pResource: unsafe { std::mem::transmute_copy(&upload.staging_resource) },
         Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
             PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: footprint.Offset,
-                Footprint: footprint.Footprint,
+                Offset: upload.footprint.Offset,
+                Footprint: upload.footprint.Footprint,
             },
         },
     };
@@ -652,8 +514,18 @@ pub(super) fn write_region(
         },
     };
 
-    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
-    let b_to_shader = barriers::texture_barrier_full(
+    unsafe {
+        command_list.CopyTextureRegion(
+            &dst_location,
+            upload.dst_x,
+            upload.dst_y,
+            0,
+            &src_location,
+            None,
+        );
+    }
+
+    let mut b_to_shader = [barriers::texture_barrier_full(
         &texture.resource,
         D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_ALL,
@@ -661,16 +533,222 @@ pub(super) fn write_region(
         D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
         D3D12_BARRIER_LAYOUT_COPY_DEST,
         after_layout,
-    );
-    unsafe {
-        command_list.CopyTextureRegion(&dst_location, x, y, 0, &src_location, None);
-        barriers::barrier_textures(&command_list7, &[b_to_shader]);
-        command_list.Close()
+    )];
+    unsafe { barriers::barrier_textures(command_list7, &b_to_shader) };
+    unsafe { barriers::drop_texture_barriers(&mut b_to_shader) };
+
+    if let Some(tex) = state.textures.get_mut(&upload.texture_handle) {
+        tex.last_layout = after_layout;
     }
-    .context("Failed to close command list")?;
+    Ok(())
+}
+
+/// Write data to a texture (synchronous: submits immediately and waits).
+pub(super) fn write(
+    state: &mut Dx12State,
+    texture_handle: TextureHandle,
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let staged = stage_texture_upload_full(state, texture_handle, data, width, height)?;
+    execute_staged_uploads_sync(state, vec![staged])?;
+    tracing::debug!("Wrote {}x{} texture (sync upload)", width, height);
+    Ok(())
+}
+
+/// Write data to a subregion of a texture (synchronous).
+pub(super) fn write_region(
+    state: &mut Dx12State,
+    texture_handle: TextureHandle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Result<()> {
+    let staged = stage_texture_upload_region(state, texture_handle, x, y, width, height, data)?;
+    execute_staged_uploads_sync(state, vec![staged])?;
+    tracing::debug!(
+        "Wrote {}x{} texture region at ({},{}) (sync upload)",
+        width,
+        height,
+        x,
+        y,
+    );
+    Ok(())
+}
+
+/// Allocate a UPLOAD-heap staging buffer of `size` bytes.
+fn create_upload_staging(device: &ID3D12Device10, size: u64) -> Result<ID3D12Resource> {
+    let upload_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_UPLOAD,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+    let buffer_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut resource: Option<ID3D12Resource> = None;
+    unsafe {
+        device.CreateCommittedResource(
+            &upload_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &buffer_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            None,
+            &mut resource,
+        )
+    }
+    .context("Failed to create upload staging buffer")?;
+    resource.context("CreateCommittedResource returned null")
+}
+
+/// Execute staged texture uploads on a dedicated command list and wait (sync path).
+pub(super) fn execute_staged_uploads_sync(
+    state: &mut Dx12State,
+    uploads: Vec<StagedTextureUpload>,
+) -> Result<()> {
+    if uploads.is_empty() {
+        return Ok(());
+    }
+
+    let copies = uploads;
+    let count = copies.len();
+
+    let first_tex = state
+        .textures
+        .get(&copies[0].texture_handle)
+        .context("flush_pending_copies: invalid texture handle")?;
+    let device_handle = first_tex.device_handle;
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("flush_pending_copies: invalid device handle")?;
+
+    unsafe { logical_device.command_allocator.Reset() }
+        .context("flush_pending_copies: failed to reset command allocator")?;
+
+    let command_list: ID3D12GraphicsCommandList = unsafe {
+        logical_device.device.CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            &logical_device.command_allocator,
+            None,
+        )
+    }
+    .context("flush_pending_copies: failed to create command list")?;
+    let command_list7: ID3D12GraphicsCommandList7 =
+        command_list.cast().context("ID3D12GraphicsCommandList7")?;
+
+    // Group copies by texture handle (preserving order within each texture).
+    let mut texture_order: Vec<TextureHandle> = Vec::new();
+    let mut groups: std::collections::HashMap<TextureHandle, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, copy) in copies.iter().enumerate() {
+        groups
+            .entry(copy.texture_handle)
+            .or_insert_with(|| {
+                texture_order.push(copy.texture_handle);
+                Vec::new()
+            })
+            .push(i);
+    }
+
+    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+
+    for tex_handle in &texture_order {
+        let indices = &groups[tex_handle];
+        let texture = state
+            .textures
+            .get(tex_handle)
+            .context("flush_pending_copies: texture disappeared")?;
+
+        // Use the layout the texture was in when the FIRST copy was enqueued.
+        let layout_before = copies[indices[0]].layout_before;
+
+        let mut b_to_copy = [barriers::texture_barrier_full(
+            &texture.resource,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_SYNC_COPY,
+            access_for_layout(layout_before),
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+            layout_before,
+            D3D12_BARRIER_LAYOUT_COPY_DEST,
+        )];
+        unsafe { barriers::barrier_textures(&command_list7, &b_to_copy) };
+        unsafe { barriers::drop_texture_barriers(&mut b_to_copy) };
+
+        for &idx in indices {
+            let copy = &copies[idx];
+
+            let src_location = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: unsafe { std::mem::transmute_copy(&copy.staging_resource) },
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: copy.footprint.Offset,
+                        Footprint: copy.footprint.Footprint,
+                    },
+                },
+            };
+
+            let dst_location = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    SubresourceIndex: 0,
+                },
+            };
+
+            unsafe {
+                command_list.CopyTextureRegion(
+                    &dst_location,
+                    copy.dst_x,
+                    copy.dst_y,
+                    0,
+                    &src_location,
+                    None,
+                );
+            }
+        }
+
+        let mut b_to_shader = [barriers::texture_barrier_full(
+            &texture.resource,
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+            D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+            D3D12_BARRIER_LAYOUT_COPY_DEST,
+            after_layout,
+        )];
+        unsafe { barriers::barrier_textures(&command_list7, &b_to_shader) };
+        unsafe { barriers::drop_texture_barriers(&mut b_to_shader) };
+
+        if let Some(tex) = state.textures.get_mut(tex_handle) {
+            tex.last_layout = after_layout;
+        }
+    }
+
+    unsafe { command_list.Close() }
+        .context("flush_pending_copies: failed to close command list")?;
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
-
     let logical_device = state.devices.get(&device_handle).unwrap();
     unsafe {
         logical_device
@@ -684,18 +762,17 @@ pub(super) fn write_region(
             .command_queue
             .Signal(&logical_device.fence, fence_value)
     }
-    .context("Failed to signal fence")?;
+    .context("flush_pending_copies: failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
         dev.fence_value += 1;
     }
 
-    if let Some(tex) = state.textures.get_mut(&texture_handle) {
-        tex.last_layout = after_layout;
-    }
+    // Staging resources dropped here (GPU is done via fence wait).
+    drop(copies);
 
-    tracing::debug!("Wrote {}x{} region at ({},{})", width, height, x, y);
+    tracing::debug!("Flushed {} pending texture copies in one submission", count);
     Ok(())
 }
 
@@ -921,13 +998,18 @@ pub(super) fn read_to_cpu(
 
 /// Destroy a texture.
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
-    if let Some(tex) = state.textures.get(&texture_handle) {
-        let device_handle = tex.device_handle;
-        if let Some(dev) = state.devices.get_mut(&device_handle) {
+    if let Some(tex) = state.textures.remove(&texture_handle) {
+        if let Some(dev) = state.devices.get_mut(&tex.device_handle) {
             dev.resource_registry.unregister_texture(texture_handle);
+            let last_fence = dev.fence_value.saturating_sub(1);
+            dev.deletion_queue.queue(
+                last_fence,
+                PendingDeletion::Texture {
+                    resource: tex.resource,
+                },
+            );
         }
     }
-    state.textures.remove(&texture_handle);
 }
 
 /// Get the bindless index for a texture.

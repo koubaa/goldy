@@ -142,15 +142,14 @@ pub enum DataAccess {
     /// Any thread, any address, read/write. No coherence assumptions.
     ///
     /// Structured-buffer views use the buffer's recorded **element stride** (from
-    /// [`crate::Buffer::with_data`], [`crate::Buffer::with_bytes_stride`], etc.). A stride
-    /// that does not match the shader's `T` in `goldy_dyn_*<T>` can read incorrectly on
-    /// some backends without error.
+    /// [`crate::Buffer::with_data`], [`crate::Buffer::with_bytes_stride`], etc.).
     ///
     /// Maps to storage buffers (StructuredBuffer, RWStructuredBuffer in shaders).
     #[default]
     Scattered,
-    /// All threads read same address. Hardware broadcast optimization.
-    /// Maps to uniform/constant buffers (ConstantBuffer in shaders).
+    /// All threads read the same address. Hardware can broadcast a single
+    /// fetch to the entire wave. Maps to uniform buffers (Vulkan/Metal) or
+    /// constant buffers (DX12/HLSL) depending on the backend.
     Broadcast,
 }
 
@@ -168,16 +167,16 @@ pub enum DataAccess {
 /// other — see [`BindlessHandle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindlessCategory {
-    /// Storage-buffer slot. Consumed by `goldy_dyn_scattered<T>` / `goldy_dyn_buf_ro<T>`
+    /// Storage-buffer slot. Used with `goldy_scattered<T>` / `goldy_buf_ro<T>`
     /// (both shader functions index the same pool).
     Scattered,
-    /// Uniform / constant-buffer slot. Consumed by `goldy_dyn_broadcast<T>`.
+    /// Uniform / constant-buffer slot. Used with `goldy_broadcast<T>`.
     Broadcast,
-    /// Storage-image (writable texture) slot. Consumed by `goldy_dyn_direct_spatial<T>`.
+    /// Storage-image (writable texture) slot. Used with `goldy_direct_spatial<T>`.
     StorageImage,
-    /// Sampled-texture slot. Consumed by `goldy_dyn_interpolated<T>`.
+    /// Sampled-texture slot. Used with `goldy_interpolated<T>`.
     Texture,
-    /// Sampler slot. Consumed by `goldy_dyn_filter`.
+    /// Sampler slot. Used with `goldy_filter`.
     Sampler,
 }
 
@@ -227,7 +226,7 @@ impl From<SpatialAccess> for BindlessCategory {
 /// which returns one of these. Push-constant setters that accept `BindlessHandle`
 /// can be validated against the shader's reflection: a
 /// [`BindlessCategory::Broadcast`] handle bound to a slot the shader reads
-/// through `goldy_dyn_buf_ro` (`Scattered`) is a type error caught at dispatch
+/// through `goldy_buf_ro` (`Scattered`) is a type error caught at dispatch
 /// time rather than silently producing a garbage read.
 ///
 /// The raw u32 index is recoverable via [`BindlessHandle::index`] — the typed
@@ -306,8 +305,16 @@ bitflags! {
         const COPY_SRC = 1 << 0;
         /// Can be used as a copy destination.
         const COPY_DST = 1 << 1;
-        /// Can be read by the CPU.
-        const CPU_COHERENT = 1 << 2;
+        /// Optimize this buffer for CPU readback.
+        ///
+        /// On backends with shared storage memory (Vulkan `HOST_VISIBLE`, Metal Shared),
+        /// [`crate::buffer::Buffer::read_to_cpu`] is a direct `memcpy` with no GPU involvement.
+        /// On Direct3D 12, storage buffers live on GPU-local memory; `read_to_cpu` performs a
+        /// GPU copy to a pre-allocated READBACK heap and waits for completion.
+        ///
+        /// Query [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`] to distinguish
+        /// these at runtime.
+        const CPU_READABLE = 1 << 2;
     }
 }
 

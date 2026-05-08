@@ -123,7 +123,14 @@ pub(super) fn ensure_stage_compiled(
         .as_dxil()
         .context("Invalid DXIL output")?
         .to_vec();
-    let new_reflection = result.reflection;
+    let new_reflection = {
+        let mut r = result.reflection;
+        if r.push_constant_categories.is_empty() {
+            r.push_constant_categories =
+                crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
+        }
+        r
+    };
 
     tracing::debug!(
         "Compiled {} to DXIL ({} bytes)",
@@ -142,7 +149,6 @@ pub(super) fn ensure_stage_compiled(
             tracing::info!("Dumped DXIL bytecode to {}", path.display());
         }
     }
-
     // Cache the bytecode and reflection
     let shader = state.shaders.get_mut(&shader_handle).unwrap();
     match stage {
@@ -162,6 +168,9 @@ pub(super) fn ensure_stage_compiled(
             if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
                 existing.parameter_blocks.push(pb.clone());
             }
+        }
+        if existing.push_constant_categories.is_empty() {
+            existing.push_constant_categories = new_reflection.push_constant_categories;
         }
     } else {
         shader.reflection = Some(new_reflection);

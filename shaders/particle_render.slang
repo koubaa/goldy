@@ -8,9 +8,6 @@ struct Particle {
     float2 velocity;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot])
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-
 struct VSOutput {
     float4 position : SV_Position;
     float4 color : COLOR;
@@ -21,14 +18,14 @@ static const float2 quadVerts[6] = {
     float2(-1, -1), float2( 1,  1), float2(-1,  1)
 };
 
-[shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+[goldy_vertex]
+VSOutput vs_main(Scattered<Particle> PARTICLES, VertexId vertexID, InstanceId instanceID) {
     VSOutput output;
     
-    Particle p = PARTICLES[instanceID];
+    Particle p = PARTICLES[instanceID.value];
     
     float size = 0.015;
-    float2 localPos = quadVerts[vertexID] * size;
+    float2 localPos = quadVerts[vertexID.value] * size;
     
     output.position = float4(p.position + localPos, 0.0, 1.0);
     
@@ -45,7 +42,7 @@ VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
     return output;
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VSOutput input) : SV_Target {
     return input.color;
 }

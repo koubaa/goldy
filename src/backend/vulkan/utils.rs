@@ -93,31 +93,6 @@ pub fn find_memory_type(
     None
 }
 
-/// Map vendor ID to vendor name.
-#[allow(dead_code)]
-pub fn vendor_name(vendor_id: u32) -> &'static str {
-    match vendor_id {
-        0x1002 | 0x1022 => "AMD",
-        0x10DE => "NVIDIA",
-        0x8086 => "Intel",
-        0x13B5 => "ARM",
-        0x5143 => "Qualcomm",
-        0x106B => "Apple",
-        _ => "Unknown",
-    }
-}
-
-/// Map Vulkan physical device type to Goldy DeviceType.
-#[allow(dead_code)]
-pub fn device_type_from_vk(vk_type: vk::PhysicalDeviceType) -> crate::types::DeviceType {
-    match vk_type {
-        vk::PhysicalDeviceType::DISCRETE_GPU => crate::types::DeviceType::DiscreteGpu,
-        vk::PhysicalDeviceType::INTEGRATED_GPU => crate::types::DeviceType::IntegratedGpu,
-        vk::PhysicalDeviceType::CPU => crate::types::DeviceType::Cpu,
-        _ => crate::types::DeviceType::Other,
-    }
-}
-
 /// Convert Goldy DepthFormat to Vulkan format.
 pub fn depth_format_to_vk(format: DepthFormat) -> vk::Format {
     match format {

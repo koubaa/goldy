@@ -19,7 +19,7 @@ pub(super) fn create(
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
-    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     // First pass: create the resource (immutable borrow of device)
     let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
         let logical_device = state
@@ -30,8 +30,8 @@ pub(super) fn create(
         // Scattered access -> storage buffer (UAV), Broadcast access -> uniform buffer (CBV)
         let is_storage = access == DataAccess::Scattered;
 
-        if cpu_coherent && !is_storage {
-            anyhow::bail!("BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers");
+        if cpu_readable && !is_storage {
+            anyhow::bail!("BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers");
         }
 
         // Storage buffers need DEFAULT heap for UAV support (bindless)
@@ -95,8 +95,8 @@ pub(super) fn create(
         // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
         let upload_buffer = None;
 
-        // CPU_COHERENT storage: pair DEFAULT UAV with a READBACK heap for `read_coherent` / `copy_to_coherent_readback`.
-        let (coherent_readback, coherent_readback_mapped) = if cpu_coherent && is_storage {
+        // CPU_READABLE storage: pair DEFAULT UAV with a READBACK heap for `read_coherent`.
+        let (coherent_readback, coherent_readback_mapped) = if cpu_readable && is_storage {
             let readback_heap = D3D12_HEAP_PROPERTIES {
                 Type: D3D12_HEAP_TYPE_READBACK,
                 CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
@@ -130,15 +130,15 @@ pub(super) fn create(
                     &mut rb,
                 )
             }
-            .context("Failed to create CPU_COHERENT readback buffer")?;
+            .context("Failed to create CPU_READABLE readback buffer")?;
             let rb = rb.context("CreateCommittedResource readback returned null")?;
             let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
             let no_read = D3D12_RANGE { Begin: 0, End: 0 };
             unsafe { rb.Map(0, Some(&no_read), Some(&mut mapped)) }
-                .context("Failed to map CPU_COHERENT readback buffer")?;
+                .context("Failed to map CPU_READABLE readback buffer")?;
             let p = mapped as *mut u8;
             if p.is_null() {
-                anyhow::bail!("Map returned null for CPU_COHERENT readback");
+                anyhow::bail!("Map returned null for CPU_READABLE readback");
             }
             (Some(rb), Some(p as usize))
         } else {
@@ -317,19 +317,30 @@ pub(super) fn create(
 /// Destroy a buffer, unregistering it from bindless.
 /// For views, only the descriptor is unregistered — the underlying resource belongs
 /// to the parent and is not freed.
+/// Non-view resources are deferred until the GPU finishes the last submitted command list.
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
             device.resource_registry.unregister_buffer(buffer_handle);
-        }
-        if buffer.coherent_readback_mapped.is_some() {
-            if let Some(ref rb) = buffer.coherent_readback {
-                let no_write = D3D12_RANGE { Begin: 0, End: 0 };
-                unsafe { rb.Unmap(0, Some(&no_write)) };
+
+            if !buffer.is_view {
+                if buffer.coherent_readback_mapped.is_some() {
+                    if let Some(ref rb) = buffer.coherent_readback {
+                        let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                        unsafe { rb.Unmap(0, Some(&no_write)) };
+                    }
+                }
+                let last_fence = device.fence_value.saturating_sub(1);
+                device.deletion_queue.queue(
+                    last_fence,
+                    super::types::PendingDeletion::Buffer {
+                        resource: buffer.resource,
+                        upload_buffer: buffer.upload_buffer,
+                        coherent_readback: buffer.coherent_readback,
+                    },
+                );
             }
         }
-        // Views don't own the resource — the parent does.
-        // When `is_view` is false the ID3D12Resource drops naturally via its Drop impl.
     }
 }
 
@@ -518,6 +529,67 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 /// Large uploads are split into chunks of this size to avoid massive staging allocations.
 const UPLOAD_CHUNK_SIZE: u64 = 16 * 1024 * 1024; // 16 MB
 
+/// Ensure the upload (staging) buffer exists for a DEFAULT-heap storage buffer.
+///
+/// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
+/// upload resource is ready before command recording begins.
+pub(super) fn ensure_upload_buffer(
+    state: &mut Dx12State,
+    buffer_handle: BufferHandle,
+    min_size: u64,
+) -> Result<()> {
+    let buffer = state
+        .buffers
+        .get(&buffer_handle)
+        .context("ensure_upload_buffer: invalid handle")?;
+    if buffer.upload_buffer.is_some() {
+        return Ok(());
+    }
+    let chunk_size = min_size.min(UPLOAD_CHUNK_SIZE);
+    let device_handle = buffer.device_handle;
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("ensure_upload_buffer: invalid device")?;
+    let upload_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_UPLOAD,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+    let upload_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: chunk_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut upload: Option<ID3D12Resource> = None;
+    unsafe {
+        logical_device.device.CreateCommittedResource(
+            &upload_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &upload_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            None,
+            &mut upload,
+        )
+    }
+    .context("ensure_upload_buffer: create failed")?;
+    state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer =
+        Some(upload.context("Upload buffer is null")?);
+    Ok(())
+}
+
 /// Write data to a buffer at the specified offset.
 ///
 /// For storage buffers (DEFAULT heap), uses a capped-size upload buffer and copies
@@ -589,48 +661,8 @@ pub(super) fn write(
     let main_resource = buffer.resource.clone();
 
     // Create or reuse the upload buffer (capped at chunk_size)
-    let upload_needed = buffer.upload_buffer.is_none();
-    if upload_needed {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-        let upload_heap = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_UPLOAD,
-            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-            CreationNodeMask: 0,
-            VisibleNodeMask: 0,
-        };
-        let upload_desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Alignment: 0,
-            Width: chunk_size,
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_NONE,
-        };
-        let mut upload: Option<ID3D12Resource> = None;
-        unsafe {
-            logical_device.device.CreateCommittedResource(
-                &upload_heap,
-                D3D12_HEAP_FLAG_NONE,
-                &upload_desc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                None,
-                &mut upload,
-            )
-        }
-        .context("Failed to create upload staging buffer")?;
-        state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer =
-            Some(upload.context("Upload buffer is null")?);
+    if buffer.upload_buffer.is_none() {
+        ensure_upload_buffer(state, buffer_handle, chunk_size)?;
     }
 
     let upload_buf = state
@@ -688,24 +720,26 @@ pub(super) fn write(
         let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
         let dst_offset = offset + written;
-        let b_to_copy = barriers::buffer_barrier_full(
+        let mut b_to_copy = [barriers::buffer_barrier_full(
             &main_resource,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_ACCESS_COMMON,
             D3D12_BARRIER_ACCESS_COPY_DEST,
-        );
-        let b_to_uav = barriers::buffer_barrier_full(
+        )];
+        let mut b_to_uav = [barriers::buffer_barrier_full(
             &main_resource,
             D3D12_BARRIER_SYNC_COPY,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_ACCESS_COPY_DEST,
             D3D12_BARRIER_ACCESS_COMMON,
-        );
+        )];
         unsafe {
-            barriers::barrier_buffers(&cmd7, &[b_to_copy]);
+            barriers::barrier_buffers(&cmd7, &b_to_copy);
+            barriers::drop_buffer_barriers(&mut b_to_copy);
             cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk);
-            barriers::barrier_buffers(&cmd7, &[b_to_uav]);
+            barriers::barrier_buffers(&cmd7, &b_to_uav);
+            barriers::drop_buffer_barriers(&mut b_to_uav);
         }
         unsafe { cmd.Close() }.context("Failed to close command list")?;
 
@@ -752,41 +786,14 @@ pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle)
         .and_then(|b| b.bindless_srv_offset.or(b.bindless_offset))
 }
 
-/// Effective structured-buffer element stride for `GOLDY_VALIDATE_BUFFER_STRIDES` checks.
-pub(super) fn element_stride_for_bindless_handle(
+/// Record DEFAULT → READBACK copy for a `CPU_READABLE` buffer on an already-open command list.
+/// Does not submit.
+pub(super) fn emit_copy_coherent_readback_on_command_list(
     state: &Dx12State,
-    handle: crate::types::BindlessHandle,
-) -> Option<u32> {
-    use crate::types::BindlessCategory;
-    let idx = handle.index();
-    for b in state.buffers.values() {
-        match handle.category() {
-            BindlessCategory::Scattered if !b.is_storage => continue,
-            BindlessCategory::Broadcast if b.is_storage => continue,
-            BindlessCategory::Scattered | BindlessCategory::Broadcast => {}
-            _ => continue,
-        }
-        let matches_idx = b.bindless_offset == Some(idx)
-            || (handle.category() == BindlessCategory::Scattered
-                && b.bindless_srv_offset == Some(idx));
-        if !matches_idx {
-            continue;
-        }
-        if b.is_storage {
-            return Some(b.element_stride.unwrap_or(4));
-        }
-        return b.element_stride;
-    }
-    None
-}
-
-/// GPU copy DEFAULT UAV → paired READBACK for `CPU_COHERENT` storage buffers. Wait until complete.
-pub(super) fn copy_to_coherent_readback(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
+    command_list: &ID3D12GraphicsCommandList,
+    command_list7: &ID3D12GraphicsCommandList7,
 ) -> Result<()> {
-    use super::utils::wait_for_fence;
     use windows::Win32::Graphics::Direct3D12::*;
 
     let (main_resource, readback, len) = {
@@ -794,15 +801,49 @@ pub(super) fn copy_to_coherent_readback(
             .buffers
             .get(&buffer_handle)
             .context("Invalid buffer handle")?;
-        if !buffer.flags.contains(BufferFlags::CPU_COHERENT) || !buffer.is_storage {
+        if !buffer.flags.contains(BufferFlags::CPU_READABLE) || !buffer.is_storage {
             return Ok(());
         }
         let readback = buffer
             .coherent_readback
             .as_ref()
-            .context("CPU_COHERENT buffer missing readback resource")?;
+            .context("CPU_READABLE buffer missing readback resource")?;
         (buffer.resource.clone(), readback.clone(), buffer.size)
     };
+
+    let pre_copy = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_ALL,
+        SyncAfter: D3D12_BARRIER_SYNC_COPY,
+        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+    };
+    let post_copy = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_COPY,
+        SyncAfter: D3D12_BARRIER_SYNC_ALL,
+        AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+    };
+    unsafe {
+        barriers::barrier_globals(command_list7, &[pre_copy]);
+    }
+    unsafe {
+        command_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
+    }
+    unsafe {
+        barriers::barrier_globals(command_list7, &[post_copy]);
+    }
+    Ok(())
+}
+
+/// Standalone GPU copy + wait for `read_to_cpu` on `CPU_READABLE` buffers.
+/// Creates a one-shot command list to copy the UAV to the paired READBACK heap.
+fn standalone_copy_coherent_readback(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+) -> Result<()> {
+    use super::utils::wait_for_fence;
+    use windows::Win32::Graphics::Direct3D12::*;
 
     let device = state
         .devices
@@ -824,27 +865,7 @@ pub(super) fn copy_to_coherent_readback(
     .context("Failed to create copy command list (coherent readback)")?;
     let copy_list7: ID3D12GraphicsCommandList7 = copy_list.cast()?;
 
-    let pre_copy = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_ALL,
-        SyncAfter: D3D12_BARRIER_SYNC_COPY,
-        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-        AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-    };
-    let post_copy = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_COPY,
-        SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-    };
-    unsafe {
-        barriers::barrier_globals(&copy_list7, &[pre_copy]);
-    }
-    unsafe {
-        copy_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
-    }
-    unsafe {
-        barriers::barrier_globals(&copy_list7, &[post_copy]);
-    }
+    emit_copy_coherent_readback_on_command_list(state, buffer_handle, &copy_list, &copy_list7)?;
     unsafe { copy_list.Close() }
         .context("Failed to close copy command list (coherent readback)")?;
 
@@ -864,7 +885,7 @@ pub(super) fn copy_to_coherent_readback(
     Ok(())
 }
 
-/// Read from the persistent READBACK map after `copy_to_coherent_readback`.
+/// Read from the persistent READBACK map after the submit's auto-copy.
 pub(super) fn read_coherent(
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
@@ -874,12 +895,12 @@ pub(super) fn read_coherent(
     let buffer = buffers
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
-        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
+    if !buffer.flags.contains(BufferFlags::CPU_READABLE) {
+        anyhow::bail!("read_coherent requires BufferFlags::CPU_READABLE");
     }
     let base = buffer
         .coherent_readback_mapped
-        .context("CPU_COHERENT buffer not mapped for readback")?;
+        .context("CPU_READABLE buffer not mapped for readback")?;
     if offset + output.len() as u64 > buffer.size {
         anyhow::bail!("read_coherent would exceed buffer bounds");
     }
@@ -917,10 +938,10 @@ pub(super) fn read_to_cpu(
     }
 
     if buffer.is_storage
-        && buffer.flags.contains(BufferFlags::CPU_COHERENT)
+        && buffer.flags.contains(BufferFlags::CPU_READABLE)
         && buffer.coherent_readback.is_some()
     {
-        copy_to_coherent_readback(state, device_handle, buffer_handle)?;
+        standalone_copy_coherent_readback(state, device_handle, buffer_handle)?;
         return read_coherent(&state.buffers, buffer_handle, 0, output);
     }
 

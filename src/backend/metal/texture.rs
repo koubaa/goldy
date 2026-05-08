@@ -37,7 +37,15 @@ pub(super) fn create(
             mtl_usage |= MTLTextureUsage::ShaderRead;
         }
         SpatialAccess::Direct => {
-            mtl_usage |= MTLTextureUsage::ShaderWrite;
+            // Storage images (RWTexture2D / DirectSpatial) need both read and
+            // write usage bits. Metal's `texture2d<T, access::read_write>` —
+            // which Slang emits for DirectSpatial — requires ShaderRead even
+            // when the shader only writes, and filter passes (filter_pass.slang)
+            // do read from src/dst via integer loads. Without ShaderRead the
+            // GPU faults on the first dispatch that reads the texture, which
+            // then cascades into kIOGPUCommandBufferCallbackErrorSubmissionsIgnored
+            // on every subsequent frame.
+            mtl_usage |= MTLTextureUsage::ShaderWrite | MTLTextureUsage::ShaderRead;
         }
     }
     if flags.contains(TextureFlags::RENDER_TARGET) {
@@ -69,18 +77,24 @@ pub(super) fn create(
         is_storage_image,
     );
 
-    let encoded_length = logical_device.texture_encoder.encoded_length();
+    // Use the appropriate encoder: storage images need ReadWrite access in the
+    // argument buffer descriptor, sampled textures only need ReadOnly.
+    let encoder = if is_storage_image {
+        &logical_device.storage_image_encoder
+    } else {
+        &logical_device.texture_encoder
+    };
+    let encoded_length = encoder.encoded_length();
     let offset = (encoding_index as u64) * encoded_length;
     if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
-        logical_device
-            .texture_encoder
-            .set_argument_buffer(&logical_device.argument_buffer, offset);
-        logical_device.texture_encoder.set_texture(0, &texture);
+        encoder.set_argument_buffer(&logical_device.argument_buffer, offset);
+        encoder.set_texture(0, &texture);
         tracing::trace!(
-            "Encoded texture {} at arg buffer offset {} (global slot {})",
+            "Encoded texture {} at arg buffer offset {} (global slot {}, storage_image={})",
             handle,
             offset,
-            encoding_index
+            encoding_index,
+            is_storage_image,
         );
     }
 

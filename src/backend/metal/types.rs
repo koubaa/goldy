@@ -31,28 +31,38 @@ use mtl::{
 /// Maximum size of the argument buffer (supports up to 16K resources)
 pub const ARGUMENT_BUFFER_SIZE: u64 = 16 * 1024 * 8; // 8 bytes per resource ID
 
-/// Buffer slot for push constants (resource indices) in shaders.
-/// Slang assigns gGoldyDynamic to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
-pub const PUSH_CONSTANTS_SLOT: u64 = 1;
+/// Buffer slot for resource binding indices in shaders.
+/// Slang assigns uniform entry-point params to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
+pub const RESOURCE_SLOT_BUFFER: u64 = 1;
 
 /// Starting Metal buffer index for vertex attributes.
-/// Slots 0 and 1 are reserved for the argument buffer (gGoldy) and push constants
-/// (gGoldyDynamic). Vertex data must use higher indices to avoid collisions.
+/// Slots 0 and 1 are reserved for the argument buffer (gGoldy) and resource slots.
+/// Vertex data must use higher indices to avoid collisions.
 pub const VERTEX_BUFFER_START_SLOT: u64 = 2;
 
-/// Maximum number of resource indices in push constants
-pub const MAX_PUSH_CONSTANT_INDICES: usize = 16;
+/// Maximum number of bindless resource indices in region A.
+pub const MAX_BINDLESS_SLOTS: usize = 16;
+/// Maximum number of u32 user parameters in region B.
+pub const MAX_USER_SLOTS: usize = 8;
+/// Total set_bytes size in bytes.
+pub const TOTAL_PUSH_BYTES: usize = 128;
 
-/// Push constants structure for passing bindless resource indices to shaders.
+/// Packed 128-byte buffer layout passed via Metal `set_bytes`.
 ///
-/// Matches the flat layout used by DX12 (`SetGraphicsRoot32BitConstants`) and
-/// Vulkan (`vkCmdPushConstants`). Indices are packed sequentially: the caller
-/// decides what each slot means (buffer, texture, or sampler index).
+/// ```text
+/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
+/// Bytes 32–63:  8  × u32  user parameters            (region B)
+/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// ```
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct BindlessIndices {
-    pub indices: [u32; MAX_PUSH_CONSTANT_INDICES],
+pub struct PushLayout {
+    pub bindless: [u16; MAX_BINDLESS_SLOTS],
+    pub user: [u32; MAX_USER_SLOTS],
+    pub _reserved: [u32; 16],
 }
+
+const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
 
 /// Minimum primary heap size (64 MB).
 const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;
@@ -343,8 +353,10 @@ pub(crate) struct LogicalDevice {
     pub argument_buffer: MTLBuffer,
     /// Encoder for writing buffers to the argument buffer
     pub argument_encoder: ArgumentEncoder,
-    /// Encoder for writing textures to the argument buffer
+    /// Encoder for writing sampled textures (ReadOnly) to the argument buffer
     pub texture_encoder: ArgumentEncoder,
+    /// Encoder for writing storage images (ReadWrite) to the argument buffer
+    pub storage_image_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
 }
@@ -466,7 +478,7 @@ impl ResourceRegistry {
     /// If the local index would exceed [`MAX_RESOURCES_PER_CATEGORY`], the
     /// returned slot would silently bleed into the next category's
     /// argument-buffer region (uniform buffers at 64-127). The shader's
-    /// `goldy_dyn_buf_ro<T>(slot)` would then read undefined / zero bytes
+    /// `goldy_buf_ro<T>(slot)` would then read undefined / zero bytes
     /// from a wrong heap entry — observed in ekrano as binning's
     /// `config.lines_size == 0` and a spurious `STAGE_FLATTEN` overflow.
     /// Failing fast surfaces the leak instead of producing corrupt frames.
@@ -507,7 +519,7 @@ impl ResourceRegistry {
 
     /// Register a uniform buffer (Broadcast access) - local indices 0-63 (shader slot),
     /// global indices 64-127 (argument buffer encoding offset).
-    /// Returns the LOCAL index so push constants pass 0-63 to the shader
+    /// Returns the LOCAL index so resource slots pass 0-63 to the shader
     /// (which indexes into uniformBuffers[0..63]).
     ///
     /// Reuses a freed slot if available (see `unregister_buffer`).
@@ -634,7 +646,7 @@ impl ResourceRegistry {
         local_index + 3 * MAX_RESOURCES_PER_CATEGORY
     }
 
-    /// Register a sampler — returns the LOCAL index (0-63) for push constants.
+    /// Register a sampler — returns the LOCAL index (0-63) for resource slots.
     /// Use `sampler_global_index()` to get the argument buffer encoding offset.
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
         let global_index = self.next_sampler_index;
@@ -719,13 +731,6 @@ pub(crate) struct BufferState {
     pub size: u64,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
-    pub access: crate::types::DataAccess,
-    /// Structured-buffer / uniform element stride from buffer creation.
-    pub element_stride: Option<u32>,
-    /// Persistent `contents()` pointer when created with [`crate::types::BufferFlags::CPU_COHERENT`]
-    /// (shared storage: same as a normal read for other buffers).
-    /// `buffer.contents() as usize` when `CPU_COHERENT` (for `Send`/`Sync`).
-    pub host_mapped: Option<usize>,
     pub flags: crate::types::BufferFlags,
 }
 
@@ -757,12 +762,9 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
-    /// Per-push-constant-slot category expected by the fragment/vertex shader,
-    /// inferred from `goldy_dyn_*(N)` calls. Empty disables validation.
+    /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
-    /// Human-readable identifier used in category-mismatch error messages.
+    /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }
 
@@ -772,15 +774,9 @@ pub(crate) struct ComputePipelineState {
     pub pipeline: MTLComputePipelineState,
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
-    /// Per-push-constant-slot category expected by the compute shader, inferred
-    /// from the shader's `goldy_dyn_*(N)` calls during Slang compile. Empty or
-    /// all-`None` disables validation. See
-    /// [`crate::slang::ShaderReflection::push_constant_categories`].
+    /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
-    /// Per-slot structured element stride from shader reflection (bytes), when resolved.
-    pub push_constant_buffer_strides: Vec<Option<u32>>,
-    /// Human-readable identifier used in category-mismatch error messages.
-    /// Defaults to `"cs_main"` for compute pipelines.
+    /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }
 
@@ -848,14 +844,11 @@ pub(crate) struct SurfaceState {
     pub current_drawable: Option<*mut std::ffi::c_void>,
     /// Texture handle for the current drawable's texture (registered for bindless access)
     pub current_texture_handle: Option<TextureHandle>,
-    /// Persistent bindless storage-image LOCAL index reserved at surface create
-    /// and re-encoded with the current drawable's `MTLTexture` on every `acquire`.
-    ///
-    /// This avoids leaking a fresh slot per frame (the storage-image window is
-    /// only `MAX_RESOURCES_PER_CATEGORY` = 64 slots, so a per-frame allocation
-    /// would exhaust it in ~1 second at 60 fps). Released back to the device's
-    /// `ResourceRegistry` free list when the surface is destroyed.
-    pub bindless_storage_slot: u32,
+    /// Triple-buffered storage-image LOCAL indices reserved at surface create.
+    /// Each frame uses `bindless_storage_slots[current_frame]` so the CPU never
+    /// re-encodes a slot that the GPU is still reading from a previous frame.
+    /// Released back to the device's `ResourceRegistry` free list on surface destroy.
+    pub bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT],
     /// Current present mode
     pub present_mode: crate::types::PresentMode,
 }

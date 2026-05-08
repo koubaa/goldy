@@ -3,9 +3,9 @@
 //! Used by both render_target and surface to avoid code duplication.
 
 use super::super::{BufferHandle, PipelineHandle, RenderCommand};
-use super::buffer;
 use super::types::{
-    BindlessIndices, PipelineState, MAX_PUSH_CONSTANT_INDICES, PUSH_CONSTANTS_SLOT,
+    PipelineState, PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS, RESOURCE_SLOT_BUFFER,
+    TOTAL_PUSH_BYTES,
 };
 use super::utils::index_format_to_mtl;
 use crate::types::IndexFormat;
@@ -23,19 +23,19 @@ pub(super) fn record(
 ) -> Result<()> {
     let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
     let mut current_primitive_type = MTLPrimitiveType::Triangle;
-    let mut current_pipeline: Option<&PipelineState> = None;
+    let mut current_pipeline_handle: Option<PipelineHandle> = None;
 
     for cmd in commands {
         match cmd {
             RenderCommand::Clear(_) | RenderCommand::ClearDepth(_) => {}
             RenderCommand::SetPipeline(pipeline_handle) => {
+                current_pipeline_handle = Some(*pipeline_handle);
                 if let Some(pipeline) = pipelines.get(pipeline_handle) {
                     encoder.set_render_pipeline_state(&pipeline.pipeline);
                     current_primitive_type = pipeline.primitive_type;
                     if let Some(ds) = &pipeline.depth_stencil {
                         encoder.set_depth_stencil_state(ds);
                     }
-                    current_pipeline = Some(pipeline);
                 }
             }
             RenderCommand::SetVertexBuffer {
@@ -55,110 +55,92 @@ pub(super) fn record(
             } => {
                 current_index_buffer = Some((*buffer, *offset, *format));
             }
-            RenderCommand::SetPushConstants {
+            RenderCommand::BindResources {
                 buffers: buf_handles,
             } => {
-                let mut indices = BindlessIndices::default();
+                let mut layout = PushLayout::default();
                 for (i, buffer_handle) in buf_handles.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_BINDLESS_SLOTS {
                         break;
                     }
                     if let Some(buf) = buffers.get(buffer_handle) {
-                        indices.indices[i] = buf.arg_buffer_index;
+                        layout.bindless[i] = buf.arg_buffer_index as u16;
                     }
                 }
-                let indices_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
-                    )
+                let layout_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
                 };
                 encoder.set_vertex_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
                 encoder.set_fragment_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
             }
-            RenderCommand::SetPushConstantsRaw {
+            RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
-                let mut indices = BindlessIndices::default();
+                let mut layout = PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_BINDLESS_SLOTS {
                         break;
                     }
-                    indices.indices[i] = idx;
+                    layout.bindless[i] = idx as u16;
                 }
-                let indices_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
-                    )
+                for (i, &val) in raw_user.iter().enumerate() {
+                    if i >= MAX_USER_SLOTS {
+                        break;
+                    }
+                    layout.user[i] = val;
+                }
+                let layout_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
                 };
                 encoder.set_vertex_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
                 encoder.set_fragment_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
             }
-            RenderCommand::SetPushConstantsTyped {
+            RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                let (expectations, stride_expectations, debug_name): (
-                    &[Option<crate::types::BindlessCategory>],
-                    &[Option<u32>],
-                    &str,
-                ) = match current_pipeline {
-                    Some(p) => (
-                        &p.push_constant_categories,
-                        &p.push_constant_buffer_strides,
-                        p.shader_debug_name.as_str(),
-                    ),
-                    None => (&[], &[], "<no pipeline bound>"),
-                };
-                super::super::validate_typed_push_constants(
-                    typed_handles,
-                    expectations,
-                    debug_name,
-                )?;
-                super::super::validate_typed_push_constant_buffer_strides(
-                    typed_handles,
-                    stride_expectations,
-                    debug_name,
-                    |h| buffer::element_stride_for_bindless_handle_map(buffers, h),
-                )?;
-                let mut indices = BindlessIndices::default();
+                if let Some(pipeline) = current_pipeline_handle.and_then(|h| pipelines.get(&h)) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
+                let mut layout = PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_BINDLESS_SLOTS {
                         break;
                     }
-                    indices.indices[i] = handle.index();
+                    layout.bindless[i] = handle.index() as u16;
                 }
-                let indices_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
-                    )
+                let layout_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
                 };
                 encoder.set_vertex_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
                 encoder.set_fragment_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
             }
             RenderCommand::Draw {

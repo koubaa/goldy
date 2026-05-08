@@ -39,7 +39,7 @@ Choose based on access pattern:
 - **Scattered**: General-purpose storage (particles, compute data)
 - **Broadcast**: Uniform data (transforms, time, settings)
 
-For read-only input buffers, use `DataAccess::Scattered` on the Rust side but access via `goldy_dyn_buf_ro<T>()` in the shader. This tells the GPU the buffer won't be written, enabling hardware read cache optimizations (larger L1/L2 caches, bypassed coherency tracking).
+For read-only input buffers, use `DataAccess::Scattered` on the Rust side but access via `goldy_buf_ro<T>(slot)` in the shader. This tells the GPU the buffer won't be written, enabling hardware read cache optimizations (larger L1/L2 caches, bypassed coherency tracking).
 
 ## Writing Data
 
@@ -92,8 +92,8 @@ and accessed directly in shaders via bindless descriptors:
 // Store vertex data in a scattered buffer
 let vertices = Buffer::with_data(&device, &vertex_data, DataAccess::Scattered)?;
 
-// In shader: access via bindless index
-// StructuredBuffer<Vertex> vertices = getBuffer(push_constants.vertex_buffer_index);
+// In shader: access via bindless index passed as a resource binding
+// StructuredBuffer<Vertex> vertices = getBuffer(resource_slots.vertex_buffer_index);
 ```
 
 ### Built-in Vertex2D

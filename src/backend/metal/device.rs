@@ -106,7 +106,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         argument_encoder.encoded_length()
     );
 
-    // Create ArgumentEncoder for encoding textures
+    // Create ArgumentEncoder for encoding sampled textures (read-only access)
     let texture_arg_desc = mtl::ArgumentDescriptor::new();
     texture_arg_desc.set_index(0);
     texture_arg_desc.set_data_type(mtl::MTLDataType::Texture);
@@ -116,6 +116,23 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     tracing::info!(
         "Created texture ArgumentEncoder (encoded_length={})",
         texture_encoder.encoded_length()
+    );
+
+    // Create ArgumentEncoder for encoding storage images (read-write access).
+    // Storage images (RWTexture2D / DirectSpatial) are written by compute shaders,
+    // so the argument buffer descriptor must grant ReadWrite access. Using a ReadOnly
+    // encoder for storage images causes kIOGPUCommandBufferCallbackErrorPageFault on
+    // the first write dispatch because the GPU descriptor restricts the access level.
+    let storage_image_arg_desc = mtl::ArgumentDescriptor::new();
+    storage_image_arg_desc.set_index(0);
+    storage_image_arg_desc.set_data_type(mtl::MTLDataType::Texture);
+    storage_image_arg_desc.set_texture_type(mtl::MTLTextureType::D2);
+    storage_image_arg_desc.set_access(mtl::MTLArgumentAccess::ReadWrite);
+    let storage_image_encoder =
+        device.new_argument_encoder(mtl::Array::from_slice(&[storage_image_arg_desc]));
+    tracing::info!(
+        "Created storage image ArgumentEncoder (encoded_length={})",
+        storage_image_encoder.encoded_length()
     );
 
     let handle = state.next_device_handle;
@@ -138,6 +155,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             argument_buffer,
             argument_encoder,
             texture_encoder,
+            storage_image_encoder,
             resource_registry: ResourceRegistry::new(),
         },
     );

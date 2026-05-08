@@ -3,7 +3,6 @@
 //! This module contains `record` which is used by both
 //! `render_to_target` and `surface_render` to avoid code duplication.
 
-use super::buffer;
 use super::types::{self, Dx12State};
 use super::utils::{index_format_to_dxgi, topology_to_d3d12};
 use super::{DeviceHandle, RenderCommand};
@@ -20,7 +19,7 @@ pub(super) fn record(
     // COM: same pointer as ID3D12GraphicsCommandList for method calls.
     let cmd: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let mut current_vertex_stride = 24u32; // Default stride
-    let mut current_pipeline: Option<&types::PipelineState> = None;
+    let mut current_pipeline_handle: Option<super::PipelineHandle> = None;
     for command in commands {
         match command {
             RenderCommand::Clear(_) => {
@@ -32,12 +31,12 @@ pub(super) fn record(
             RenderCommand::SetPipeline(pipeline_handle) => {
                 if let Some(pipeline) = state.pipelines.get(pipeline_handle) {
                     current_vertex_stride = pipeline.vertex_stride;
+                    current_pipeline_handle = Some(*pipeline_handle);
                     unsafe {
                         cmd.SetGraphicsRootSignature(&pipeline.root_signature);
                         cmd.SetPipelineState(&pipeline.pipeline_state);
                         cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
                     }
-                    current_pipeline = Some(pipeline);
                 }
             }
             RenderCommand::SetVertexBuffer {
@@ -70,76 +69,76 @@ pub(super) fn record(
                     unsafe { cmd.IASetIndexBuffer(Some(&view)) };
                 }
             }
-            RenderCommand::SetPushConstants { buffers } => {
-                let mut indices = types::BindlessIndices::default();
+            RenderCommand::BindResources { buffers } => {
+                let mut layout = types::PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                    if i >= types::MAX_BINDLESS_SLOTS {
                         break;
                     }
                     if let Some(buf_state) = state.buffers.get(buffer_handle) {
-                        // Shaders using goldy_dyn_scattered() return RWStructuredBuffer which needs UAV.
-                        // Always use UAV offset (bindless_offset) for storage buffers.
-                        // For uniform buffers (Broadcast), use bindless_offset directly (CBV).
                         let offset = buf_state.bindless_offset.unwrap_or(0);
-                        indices.indices[i] = offset;
+                        layout.bindless[i] = offset as u16;
                     }
                 }
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
-                        0, // Root parameter index for constants
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const _,
+                        0,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const _,
                         0,
                     );
                 }
             }
-            RenderCommand::SetPushConstantsRaw {
+            RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
-                let mut indices = types::BindlessIndices::default();
+                let mut layout = types::PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                    if i >= types::MAX_BINDLESS_SLOTS {
                         break;
                     }
-                    indices.indices[i] = idx;
+                    layout.bindless[i] = idx as u16;
+                }
+                for (i, &val) in raw_user.iter().enumerate() {
+                    if i >= types::MAX_USER_SLOTS {
+                        break;
+                    }
+                    layout.user[i] = val;
                 }
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const _,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const _,
                         0,
                     );
                 }
             }
-            RenderCommand::SetPushConstantsTyped {
+            RenderCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                if let Some(pipeline) = current_pipeline {
+                if let Some(pipeline) =
+                    current_pipeline_handle.and_then(|h| state.pipelines.get(&h))
+                {
                     crate::backend::validate_typed_push_constants(
                         typed_handles,
                         &pipeline.push_constant_categories,
                         &pipeline.shader_debug_name,
                     )?;
-                    crate::backend::validate_typed_push_constant_buffer_strides(
-                        typed_handles,
-                        &pipeline.push_constant_buffer_strides,
-                        &pipeline.shader_debug_name,
-                        |h| buffer::element_stride_for_bindless_handle(state, h),
-                    )?;
                 }
-                let mut indices = types::BindlessIndices::default();
+                let mut layout = types::PushLayout::default();
                 for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= types::MAX_ROOT_CONSTANT_INDICES {
+                    if i >= types::MAX_BINDLESS_SLOTS {
                         break;
                     }
-                    indices.indices[i] = handle.index();
+                    layout.bindless[i] = handle.index() as u16;
                 }
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
-                        types::MAX_ROOT_CONSTANT_INDICES as u32,
-                        indices.indices.as_ptr() as *const _,
+                        (types::TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const _,
                         0,
                     );
                 }

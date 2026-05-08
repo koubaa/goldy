@@ -1,17 +1,16 @@
 //! Compute pipeline and dispatch logic.
 
-use super::super::{ComputeCommand, ComputePipelineHandle, DeviceHandle, FenceToken, ShaderHandle};
-use super::buffer;
+use super::super::{ComputePipelineHandle, DeviceHandle, FenceToken, GpuCommand, ShaderHandle};
 use super::shader::parse_numthreads;
-use super::types::PUSH_CONSTANTS_SLOT;
+use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{
-    BindlessIndices, ComputePipelineState, FenceEntry, FenceSignal, MetalState,
-    MAX_PUSH_CONSTANT_INDICES,
+    ComputePipelineState, FenceEntry, FenceSignal, MetalState, PushLayout, MAX_BINDLESS_SLOTS,
+    MAX_USER_SLOTS, TOTAL_PUSH_BYTES,
 };
 use crate::slang::SlangStage;
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLCommandBufferStatus, MTLSize};
+use mtl::{MTLCommandBufferStatus, MTLOrigin, MTLSize};
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -53,17 +52,6 @@ pub(super) fn create(
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("Failed to create compute pipeline: {}", e))?;
 
-    let (push_constant_categories, push_constant_buffer_strides) = shader
-        .reflection
-        .as_ref()
-        .map(|r| {
-            (
-                r.push_constant_categories.clone(),
-                r.push_constant_buffer_strides.clone(),
-            )
-        })
-        .unwrap_or_default();
-
     let handle = state.next_compute_pipeline_handle;
     state.next_compute_pipeline_handle += 1;
 
@@ -73,9 +61,8 @@ pub(super) fn create(
             device_handle,
             pipeline,
             workgroup_size,
-            push_constant_categories,
-            push_constant_buffer_strides,
-            shader_debug_name: "cs_main".to_string(),
+            push_constant_categories: Vec::new(),
+            shader_debug_name: String::new(),
         },
     );
 
@@ -143,7 +130,7 @@ fn record_commands_to_buffer(
     command_buffer: &mtl::CommandBufferRef,
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
-    commands: &[ComputeCommand],
+    commands: &[GpuCommand],
 ) -> Result<()> {
     let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
     let mut current_pipeline: Option<&ComputePipelineState> = None;
@@ -171,7 +158,7 @@ fn record_commands_to_buffer(
 
     for cmd in commands {
         match cmd {
-            ComputeCommand::SetPipeline(handle) => {
+            GpuCommand::SetPipeline(handle) => {
                 ensure_compute!();
                 if let Some(pipeline) = state.compute_pipelines.get(handle) {
                     encoder
@@ -180,87 +167,79 @@ fn record_commands_to_buffer(
                     current_pipeline = Some(pipeline);
                 }
             }
-            ComputeCommand::SetPushConstants { buffers } => {
+            GpuCommand::BindResources { buffers } => {
                 ensure_compute!();
-                let mut indices = BindlessIndices::default();
+                let mut layout = PushLayout::default();
                 for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_BINDLESS_SLOTS {
                         break;
                     }
                     if let Some(buf) = state.buffers.get(buffer_handle) {
-                        indices.indices[i] = buf.arg_buffer_index;
+                        layout.bindless[i] = buf.arg_buffer_index as u16;
                     }
                 }
-                let indices_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
-                    )
+                let layout_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
                 };
                 encoder.unwrap().set_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::SetPushConstantsRaw {
+            GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
+                user: raw_user,
             } => {
                 ensure_compute!();
-                let mut indices = BindlessIndices::default();
+                let mut layout = PushLayout::default();
                 for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_BINDLESS_SLOTS {
                         break;
                     }
-                    indices.indices[i] = idx;
+                    layout.bindless[i] = idx as u16;
                 }
-                let indices_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
-                    )
+                for (i, &val) in raw_user.iter().enumerate() {
+                    if i >= MAX_USER_SLOTS {
+                        break;
+                    }
+                    layout.user[i] = val;
+                }
+                let layout_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
                 };
                 encoder.unwrap().set_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::SetPushConstantsTyped { handles } => {
+            GpuCommand::BindResourcesTyped { handles } => {
                 ensure_compute!();
-                let pipeline = current_pipeline
-                    .context("SetPushConstantsTyped without a bound compute pipeline")?;
-                super::super::validate_typed_push_constants(
-                    handles,
-                    &pipeline.push_constant_categories,
-                    &pipeline.shader_debug_name,
-                )?;
-                super::super::validate_typed_push_constant_buffer_strides(
-                    handles,
-                    &pipeline.push_constant_buffer_strides,
-                    &pipeline.shader_debug_name,
-                    |h| buffer::element_stride_for_bindless_handle(state, h),
-                )?;
-                let mut indices = BindlessIndices::default();
+                if let Some(pipeline) = current_pipeline {
+                    crate::backend::validate_typed_push_constants(
+                        handles,
+                        &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
+                let mut layout = PushLayout::default();
                 for (i, handle) in handles.iter().enumerate() {
-                    if i >= MAX_PUSH_CONSTANT_INDICES {
+                    if i >= MAX_BINDLESS_SLOTS {
                         break;
                     }
-                    indices.indices[i] = handle.index();
+                    layout.bindless[i] = handle.index() as u16;
                 }
-                let indices_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        &indices as *const _ as *const u8,
-                        std::mem::size_of::<BindlessIndices>(),
-                    )
+                let layout_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
                 };
                 encoder.unwrap().set_bytes(
-                    PUSH_CONSTANTS_SLOT,
-                    indices_bytes.len() as u64,
-                    indices_bytes.as_ptr() as *const _,
+                    RESOURCE_SLOT_BUFFER,
+                    layout_bytes.len() as u64,
+                    layout_bytes.as_ptr() as *const _,
                 );
             }
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -282,7 +261,7 @@ fn record_commands_to_buffer(
                         .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
             }
-            ComputeCommand::DispatchIndirect { buffer, offset } => {
+            GpuCommand::DispatchIndirect { buffer, offset } => {
                 ensure_compute!();
                 let buf_state = match state.buffers.get(buffer) {
                     Some(b) => b,
@@ -309,7 +288,7 @@ fn record_commands_to_buffer(
                     threads_per_group,
                 );
             }
-            ComputeCommand::Barrier => {
+            GpuCommand::Barrier => {
                 if let Some(enc) = encoder {
                     // memoryBarrierWithScope: ensures all prior writes within
                     // this encoder are visible before subsequent dispatches.
@@ -318,7 +297,7 @@ fn record_commands_to_buffer(
                     let () = unsafe { msg_send![enc, memoryBarrierWithScope: scope] };
                 }
             }
-            ComputeCommand::ResourceBarrier {
+            GpuCommand::ResourceBarrier {
                 buffers: buf_handles,
                 textures: tex_handles,
             } => {
@@ -348,7 +327,7 @@ fn record_commands_to_buffer(
                     }
                 }
             }
-            ComputeCommand::ClearBuffer {
+            GpuCommand::ClearBuffer {
                 buffer,
                 offset,
                 size,
@@ -373,6 +352,159 @@ fn record_commands_to_buffer(
                     blit.end_encoding();
                 }
             }
+            GpuCommand::WriteBuffer {
+                buffer: buf_handle,
+                offset,
+                data,
+            } => {
+                let buf_state = match state.buffers.get(buf_handle) {
+                    Some(b) => b,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("WriteBuffer: invalid buffer handle");
+                    }
+                };
+                if data.is_empty() {
+                    continue;
+                }
+                if *offset + data.len() as u64 > buf_state.size {
+                    end_compute!();
+                    anyhow::bail!("WriteBuffer: write exceeds buffer bounds");
+                }
+                // Same rationale as `buffer::write`: a CPU memcpy into `contents()` is not
+                // ordered with other command buffers on the queue. Two back-to-back submits that
+                // write the same buffer would record the second memcpy while the first submit's
+                // GPU work is still reading that memory (shared storage), corrupting results.
+                end_compute!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let blit = command_buffer.new_blit_command_encoder();
+                blit.copy_from_buffer(&staging, 0, &buf_state.buffer, *offset, data.len() as u64);
+                blit.end_encoding();
+            }
+            GpuCommand::WriteTexture {
+                texture: tex_handle,
+                data,
+                width,
+                height,
+            } => {
+                let tex_state = match state.textures.get(tex_handle) {
+                    Some(t) => t,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("WriteTexture: invalid texture handle");
+                    }
+                };
+                if *width != tex_state.width || *height != tex_state.height {
+                    end_compute!();
+                    anyhow::bail!("WriteTexture: dimension mismatch");
+                }
+                let bpp = tex_state.format.bytes_per_pixel();
+                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
+                if data.len() != expected {
+                    end_compute!();
+                    anyhow::bail!(
+                        "WriteTexture: expected {} bytes for {}x{}, got {}",
+                        expected,
+                        width,
+                        height,
+                        data.len()
+                    );
+                }
+                if expected == 0 {
+                    continue;
+                }
+                end_compute!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let bytes_per_row = (*width as u64) * (bpp as u64);
+                let blit = command_buffer.new_blit_command_encoder();
+                blit.copy_from_buffer_to_texture(
+                    &staging,
+                    0,
+                    bytes_per_row,
+                    0,
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &tex_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    mtl::MTLBlitOption::empty(),
+                );
+                blit.end_encoding();
+            }
+            GpuCommand::WriteTextureRegion {
+                texture: tex_handle,
+                x,
+                y,
+                width,
+                height,
+                data,
+            } => {
+                let tex_state = match state.textures.get(tex_handle) {
+                    Some(t) => t,
+                    None => {
+                        end_compute!();
+                        anyhow::bail!("WriteTextureRegion: invalid texture handle");
+                    }
+                };
+                if *x + *width > tex_state.width || *y + *height > tex_state.height {
+                    end_compute!();
+                    anyhow::bail!("WriteTextureRegion: region out of bounds");
+                }
+                let bpp = tex_state.format.bytes_per_pixel();
+                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
+                if data.len() != expected {
+                    end_compute!();
+                    anyhow::bail!(
+                        "WriteTextureRegion: expected {} bytes, got {}",
+                        expected,
+                        data.len()
+                    );
+                }
+                if expected == 0 {
+                    continue;
+                }
+                end_compute!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let bytes_per_row = (*width as u64) * (bpp as u64);
+                let blit = command_buffer.new_blit_command_encoder();
+                blit.copy_from_buffer_to_texture(
+                    &staging,
+                    0,
+                    bytes_per_row,
+                    0,
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &tex_state.texture,
+                    0,
+                    0,
+                    MTLOrigin {
+                        x: *x as u64,
+                        y: *y as u64,
+                        z: 0,
+                    },
+                    mtl::MTLBlitOption::empty(),
+                );
+                blit.end_encoding();
+            }
         }
     }
 
@@ -384,7 +516,7 @@ fn record_commands_to_buffer(
 pub(super) fn submit(
     state: &mut MetalState,
     device_handle: DeviceHandle,
-    commands: &[ComputeCommand],
+    commands: &[GpuCommand],
 ) -> Result<FenceToken> {
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");

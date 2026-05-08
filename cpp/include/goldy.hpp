@@ -588,15 +588,15 @@ public:
     }
 
     /**
-     * @brief Set push constants for resource binding.
+     * @brief Bind resource slots for rendering.
      *
-     * Pass the buffers whose indices should be pushed to the shader.
-     * The indices are pushed in order, so buffers[0] becomes index 0,
-     * buffers[1] becomes index 1, etc.
+     * Pass the buffers whose indices should be bound to shader resource slots.
+     * The indices are bound in order, so buffers[0] becomes slot 0,
+     * buffers[1] becomes slot 1, etc.
      *
-     * @param buffers Span of buffer pointers to pass to the shader.
+     * @param buffers Span of buffer pointers to bind to shader resource slots.
      */
-    void set_push_constants(std::span<const Buffer* const> buffers) {
+    void bind_resources(std::span<const Buffer* const> buffers) {
         if (buffers.empty()) return;
         
         std::vector<const GoldyBuffer*> ptrs;
@@ -604,22 +604,22 @@ public:
         for (const auto* buf : buffers) {
             ptrs.push_back(buf->get());
         }
-        goldy_encoder_set_push_constants(ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size()));
+        goldy_encoder_bind_resources(ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size()));
     }
 
     /**
-     * @brief Set push constants for a single buffer (convenience overload).
+     * @brief Bind a single buffer to a resource slot (convenience overload).
      */
-    void set_push_constants(const Buffer& buffer) {
+    void bind_resources(const Buffer& buffer) {
         const GoldyBuffer* ptr = buffer.get();
-        goldy_encoder_set_push_constants(ptr_.get(), &ptr, 1);
+        goldy_encoder_bind_resources(ptr_.get(), &ptr, 1);
     }
 
     /**
-     * @brief Set push constants from an initializer list (convenience overload).
+     * @brief Bind resource slots from an initializer list (convenience overload).
      */
-    void set_push_constants(std::initializer_list<const Buffer*> buffers) {
-        set_push_constants(std::span<const Buffer* const>{buffers.begin(), buffers.size()});
+    void bind_resources(std::initializer_list<const Buffer*> buffers) {
+        bind_resources(std::span<const Buffer* const>{buffers.begin(), buffers.size()});
     }
 
     /**

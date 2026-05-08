@@ -183,8 +183,8 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_encoder_draw_indexed")]
     internal static partial void EncoderDrawIndexed(nint encoder, uint indexStart, uint indexCount, int baseVertex, uint instanceStart, uint instanceCount);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_push_constants")]
-    internal static partial void EncoderSetPushConstants(nint encoder, nint buffers, uint bufferCount);
+    [LibraryImport(LibName, EntryPoint = "goldy_encoder_bind_resources")]
+    internal static partial void EncoderBindResources(nint encoder, nint buffers, uint bufferCount);
 
     // ========================================================================
     // Compute
@@ -205,8 +205,8 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_pipeline")]
     internal static partial void ComputeEncoderSetPipeline(nint encoder, nint pipeline);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_push_constants")]
-    internal static partial void ComputeEncoderSetPushConstants(nint encoder, nint buffers, uint bufferCount);
+    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_bind_resources")]
+    internal static partial void ComputeEncoderBindResources(nint encoder, nint buffers, uint bufferCount);
 
     [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_dispatch")]
     internal static partial void ComputeEncoderDispatch(nint encoder, uint workgroupsX, uint workgroupsY, uint workgroupsZ);

@@ -7,7 +7,6 @@ use crate::types::BufferFlags;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
-use std::collections::HashMap;
 
 /// Create a buffer with the given size and access pattern.
 pub(super) fn create(
@@ -15,14 +14,14 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     size: u64,
     access: DataAccess,
-    element_stride: Option<u32>,
+    _element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
-    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let is_storage = access == DataAccess::Scattered;
-    if cpu_coherent && !is_storage {
+    if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
         );
     }
     let logical_device = state
@@ -78,15 +77,12 @@ pub(super) fn create(
         );
     }
 
-    let host_mapped = if cpu_coherent && is_storage {
+    if cpu_readable && is_storage {
         let ptr = buffer.contents() as *mut u8;
         if ptr.is_null() {
-            anyhow::bail!("Metal buffer contents() returned null for CPU_COHERENT");
+            anyhow::bail!("Metal buffer contents() returned null for CPU_READABLE");
         }
-        Some(ptr as usize)
-    } else {
-        None
-    };
+    }
 
     state.buffers.insert(
         handle,
@@ -95,9 +91,6 @@ pub(super) fn create(
             buffer,
             size,
             arg_buffer_index,
-            access,
-            element_stride,
-            host_mapped,
             flags,
         },
     );
@@ -114,7 +107,7 @@ pub(super) fn create_view(
     parent_handle: BufferHandle,
     offset: u64,
     size: u64,
-    element_stride: Option<u32>,
+    _element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
     let parent = state
         .buffers
@@ -164,44 +157,11 @@ pub(super) fn create_view(
             buffer: parent_mtl_buffer,
             size,
             arg_buffer_index,
-            access: DataAccess::Scattered,
-            element_stride,
-            host_mapped: None,
             flags: parent_flags,
         },
     );
 
     Ok(handle)
-}
-
-/// Read from a `CPU_COHERENT` host mapping (same physical memory as the GPU on shared storage).
-pub(super) fn read_coherent(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-    offset: u64,
-    output: &mut [u8],
-) -> Result<()> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
-        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
-    }
-    let base = buffer
-        .host_mapped
-        .context("CPU_COHERENT buffer has no host mapping")?;
-    if offset + output.len() as u64 > buffer.size {
-        anyhow::bail!("read_coherent would exceed buffer bounds");
-    }
-    let p = base as *mut u8;
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            p.add(offset as usize) as *const u8,
-            output.as_mut_ptr(),
-            output.len(),
-        );
-    }
-    Ok(())
 }
 
 /// Destroy a buffer, unregistering it from the bindless registry.
@@ -303,38 +263,6 @@ pub(super) fn bindless_index(state: &MetalState, buffer_handle: BufferHandle) ->
         .buffers
         .get(&buffer_handle)
         .map(|b| b.arg_buffer_index)
-}
-
-/// Effective structured-buffer element stride for `GOLDY_VALIDATE_BUFFER_STRIDES` checks.
-pub(super) fn element_stride_for_bindless_handle_map(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    handle: crate::types::BindlessHandle,
-) -> Option<u32> {
-    use crate::types::{BindlessCategory, DataAccess};
-    let want_access = match handle.category() {
-        BindlessCategory::Scattered => DataAccess::Scattered,
-        BindlessCategory::Broadcast => DataAccess::Broadcast,
-        _ => return None,
-    };
-    let idx = handle.index();
-    for b in buffers.values() {
-        if b.access != want_access || b.arg_buffer_index != idx {
-            continue;
-        }
-        if b.access == DataAccess::Scattered {
-            return Some(b.element_stride.unwrap_or(4));
-        }
-        return b.element_stride;
-    }
-    None
-}
-
-/// See [`element_stride_for_bindless_handle_map`].
-pub(super) fn element_stride_for_bindless_handle(
-    state: &MetalState,
-    handle: crate::types::BindlessHandle,
-) -> Option<u32> {
-    element_stride_for_bindless_handle_map(&state.buffers, handle)
 }
 
 /// Read buffer contents back to CPU memory.

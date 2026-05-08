@@ -11,7 +11,7 @@ struct VertexOutput {
     float4 color : COLOR;
 };
 
-[shader("vertex")]
+[goldy_vertex]
 VertexOutput vs_main(VertexInput input) {
     VertexOutput output;
     output.position = float4(input.position, 0.0, 1.0);
@@ -19,8 +19,7 @@ VertexOutput vs_main(VertexInput input) {
     return output;
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VertexOutput input) : SV_Target {
     return input.color;
 }
-

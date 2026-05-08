@@ -8,6 +8,75 @@ use anyhow::{Context, Result};
 use mtl::{Device as MTLDevice, Library};
 use std::collections::HashMap;
 
+/// Patch vertex-shader MSL to inject the missing EntryPointParams [[buffer(1)]] binding.
+///
+/// Slang's Metal backend generates `EntryPointParams_0` inside `KernelContext_0` for
+/// vertex shaders with `uniform` entry-point parameters, but — unlike compute shaders —
+/// it never exposes the struct as a `[[buffer(1)]]` parameter in the vertex entry point.
+/// The `entryPointParams_0` pointer in `KernelContext_0` therefore remains uninitialized,
+/// causing `goldy_scattered` / `goldy_broadcast` to read from garbage memory.
+///
+/// This function patches the generated MSL to:
+///   1. Add `EntryPointParams_0 constant* _goldy_ep [[buffer(1)]]` to the entry-point
+///      parameter list (right before the closing `)` after `[[buffer(0)]]`).
+///   2. Set `(&kernelContextN)->entryPointParams_0 = _goldy_ep;` immediately after the
+///      `gGoldy_0` assignment that already exists in the entry-point body.
+///
+/// Only applied when `EntryPointParams_0` appears in the source but is not yet a
+/// `[[buffer(1)]]` parameter (i.e., the Slang bug is present).
+pub(super) fn patch_vertex_msl_entry_point_params(msl: &str) -> String {
+    // Nothing to do if there are no entry-point params.
+    if !msl.contains("EntryPointParams_0") {
+        return msl.to_string();
+    }
+    // Already correctly bound (Slang fixed the bug, or it's a compute shader).
+    if msl.contains("EntryPointParams_0 constant*") && msl.contains("[[buffer(1)]]") {
+        return msl.to_string();
+    }
+
+    // Step 1 — inject the missing parameter into the entry-point signature.
+    // The vertex entry point ends with `[[buffer(0)]])` (the closing paren is immediately
+    // after the last attribute). We replace the first occurrence only.
+    const SIG_NEEDLE: &str = "[[buffer(0)]])";
+    const SIG_REPLACEMENT: &str =
+        "[[buffer(0)]], EntryPointParams_0 constant* _goldy_ep [[buffer(1)]])";
+    let patched = if let Some(pos) = msl.find(SIG_NEEDLE) {
+        let mut s = String::with_capacity(msl.len() + 80);
+        s.push_str(&msl[..pos]);
+        s.push_str(SIG_REPLACEMENT);
+        s.push_str(&msl[pos + SIG_NEEDLE.len()..]);
+        s
+    } else {
+        // Pattern not found — leave unchanged (defensive).
+        return msl.to_string();
+    };
+
+    // Step 2 — inject the assignment inside the entry-point body.
+    // Find the ASSIGNMENT `->gGoldy_0 = ` (as opposed to member accesses `->gGoldy_0->`).
+    // Extract the kernel-context variable name from the LHS: `(&KCTX)->gGoldy_0 = `.
+    const ASSIGN_NEEDLE: &str = ")->gGoldy_0 = ";
+    if let Some(arrow_pos) = patched.find(ASSIGN_NEEDLE) {
+        // Walk backwards from arrow_pos to find the opening `(&`.
+        let prefix = &patched[..arrow_pos];
+        if let Some(amp_pos) = prefix.rfind("(&") {
+            let kctx_name = &prefix[amp_pos + 2..]; // from after `(&` to arrow_pos
+                                                    // Find the end of the assignment statement (the semicolon).
+            let after_arrow = &patched[arrow_pos + ASSIGN_NEEDLE.len()..];
+            if let Some(semi_rel) = after_arrow.find(';') {
+                let semi_abs = arrow_pos + ASSIGN_NEEDLE.len() + semi_rel;
+                let injection = format!("\n    (&{})->entryPointParams_0 = _goldy_ep;", kctx_name);
+                let mut result = String::with_capacity(patched.len() + injection.len());
+                result.push_str(&patched[..=semi_abs]);
+                result.push_str(&injection);
+                result.push_str(&patched[semi_abs + 1..]);
+                return result;
+            }
+        }
+    }
+
+    patched
+}
+
 /// Parse `[numthreads(x, y, z)]` from Slang shader source.
 ///
 /// Returns `None` if the attribute is absent; the caller falls back to `[64, 1, 1]`.
@@ -81,11 +150,25 @@ fn compile_stage_with_reflection(
         }
     }
 
-    let msl_source = result
+    let raw_msl = result
         .shader
         .as_str()
         .context("Failed to get MSL source")?
         .to_string();
+
+    // Apply vertex-shader patch for missing EntryPointParams [[buffer(1)]] binding.
+    let msl_source = if stage == SlangStage::Vertex {
+        let patched = patch_vertex_msl_entry_point_params(&raw_msl);
+        if patched != raw_msl {
+            tracing::debug!(
+                "Applied vertex EntryPointParams [[buffer(1)]] patch for {}",
+                entry_point
+            );
+        }
+        patched
+    } else {
+        raw_msl
+    };
 
     tracing::debug!(
         "Compiled MSL {} shader ({} bytes)",
@@ -174,6 +257,13 @@ pub(super) fn ensure_stage_compiled(
         _ => unreachable!("stage already validated above"),
     }
     if shader.reflection.is_none() {
+        let reflection = reflection.map(|mut r| {
+            if r.push_constant_categories.is_empty() {
+                r.push_constant_categories =
+                    crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
+            }
+            r
+        });
         shader.reflection = reflection;
     }
 

@@ -2,8 +2,6 @@
 //!
 //! Format conversion and helper functions for Metal types.
 
-#![allow(dead_code)] // Some utils are for future use
-
 use crate::types::{
     AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
     TextureFormat, VertexFormat,
@@ -26,21 +24,6 @@ pub fn format_to_mtl(format: TextureFormat) -> MTLPixelFormat {
         TextureFormat::Bgra8Unorm => MTLPixelFormat::BGRA8Unorm,
         TextureFormat::Rgba16Float => MTLPixelFormat::RGBA16Float,
         TextureFormat::Rgba32Float => MTLPixelFormat::RGBA32Float,
-    }
-}
-
-/// Convert Metal MTLPixelFormat to goldy TextureFormat.
-pub fn mtl_to_format(format: MTLPixelFormat) -> TextureFormat {
-    match format {
-        MTLPixelFormat::R8Unorm => TextureFormat::R8Unorm,
-        MTLPixelFormat::RG8Unorm => TextureFormat::Rg8Unorm,
-        MTLPixelFormat::RGBA8Unorm_sRGB => TextureFormat::Rgba8UnormSrgb,
-        MTLPixelFormat::RGBA8Unorm => TextureFormat::Rgba8Unorm,
-        MTLPixelFormat::BGRA8Unorm_sRGB => TextureFormat::Bgra8UnormSrgb,
-        MTLPixelFormat::BGRA8Unorm => TextureFormat::Bgra8Unorm,
-        MTLPixelFormat::RGBA16Float => TextureFormat::Rgba16Float,
-        MTLPixelFormat::RGBA32Float => TextureFormat::Rgba32Float,
-        _ => TextureFormat::Bgra8Unorm,
     }
 }
 

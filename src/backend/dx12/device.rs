@@ -155,7 +155,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
                 Constants: D3D12_ROOT_CONSTANTS {
                     ShaderRegister: 0,
                     RegisterSpace: 0,
-                    Num32BitValues: types::MAX_ROOT_CONSTANT_INDICES as u32,
+                    Num32BitValues: (types::TOTAL_PUSH_BYTES / 4) as u32,
                 },
             },
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
@@ -284,26 +284,10 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             resource_registry,
             cpu_clear_heap,
             scratch_clear_uav_offset,
+            deletion_queue: super::types::DeletionQueue::new(),
         },
     );
 
     tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);
     Ok(handle)
-}
-
-/// Destroy a logical device.
-#[allow(dead_code)] // Will be used when mod.rs destroy_device is refactored in Phase 8
-pub(super) fn destroy(state: &mut Dx12State, device_handle: DeviceHandle) {
-    if let Some(logical_device) = state.devices.remove(&device_handle) {
-        // Wait for GPU to finish
-        let fence_value = logical_device.fence_value;
-        let _ = unsafe {
-            logical_device
-                .command_queue
-                .Signal(&logical_device.fence, fence_value)
-        };
-        // Note: no event handle - we're just doing a simple GPU wait
-
-        tracing::info!("Destroyed DX12 device {}", device_handle);
-    }
 }

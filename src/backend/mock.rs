@@ -37,7 +37,7 @@ pub struct MockBackend {
     /// Render commands recorded during render operations
     pub recorded_commands: Vec<Vec<RenderCommand>>,
     /// Compute commands recorded during dispatch operations
-    pub recorded_compute_commands: Vec<Vec<ComputeCommand>>,
+    pub recorded_compute_commands: Vec<Vec<GpuCommand>>,
     /// Targets that were created (for verification)
     pub targets_created: Vec<(u32, u32, TextureFormat)>,
     /// Targets with depth buffer that were created (for verification)
@@ -349,28 +349,6 @@ impl GpuBackend for MockBackend {
 
         let len = output.len().min(buf.data.len());
         output[..len].copy_from_slice(&buf.data[..len]);
-        Ok(())
-    }
-
-    fn read_buffer_coherent(
-        &self,
-        buffer: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        let buf = self
-            .buffers
-            .get(&buffer)
-            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
-        if !buf.flags.contains(BufferFlags::CPU_COHERENT) {
-            anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
-        }
-        let start = offset as usize;
-        let end = start.saturating_add(output.len());
-        if end > buf.data.len() {
-            anyhow::bail!("read_coherent would exceed buffer bounds");
-        }
-        output.copy_from_slice(&buf.data[start..end]);
         Ok(())
     }
 
@@ -950,7 +928,7 @@ impl GpuBackend for MockBackend {
     fn submit_compute(
         &mut self,
         device: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<FenceToken> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -1558,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_constants_command_recording() {
+    fn test_bind_resources_command_recording() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
@@ -1584,62 +1562,59 @@ mod tests {
             )
             .unwrap();
 
-        // Record render commands with push constants (bindless path)
         let commands = vec![
             RenderCommand::Clear(Color::BLACK),
-            RenderCommand::SetPushConstants {
+            RenderCommand::BindResources {
                 buffers: vec![buffer1, buffer2],
             },
         ];
 
         backend.render_to_target(device, target, &commands).unwrap();
 
-        // Verify commands were recorded correctly
         assert_eq!(backend.recorded_commands.len(), 1);
         assert_eq!(backend.recorded_commands[0].len(), 2);
 
         match &backend.recorded_commands[0][1] {
-            RenderCommand::SetPushConstants { buffers } => {
+            RenderCommand::BindResources { buffers } => {
                 assert_eq!(buffers.len(), 2);
                 assert_eq!(buffers[0], buffer1);
                 assert_eq!(buffers[1], buffer2);
             }
-            _ => panic!("Expected SetPushConstants command"),
+            _ => panic!("Expected BindResources command"),
         }
     }
 
     #[test]
-    fn test_push_constants_raw_command_recording() {
+    fn test_bind_resources_raw_command_recording() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
             .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
             .unwrap();
 
-        // Record render commands with raw push constants
         let commands = vec![
             RenderCommand::Clear(Color::BLACK),
-            RenderCommand::SetPushConstantsRaw {
+            RenderCommand::BindResourcesRaw {
                 indices: vec![0, 1, 2, 3],
+                user: vec![],
             },
         ];
 
         backend.render_to_target(device, target, &commands).unwrap();
 
-        // Verify commands were recorded correctly
         assert_eq!(backend.recorded_commands.len(), 1);
         assert_eq!(backend.recorded_commands[0].len(), 2);
 
         match &backend.recorded_commands[0][1] {
-            RenderCommand::SetPushConstantsRaw { indices } => {
+            RenderCommand::BindResourcesRaw { indices, .. } => {
                 assert_eq!(*indices, vec![0, 1, 2, 3]);
             }
-            _ => panic!("Expected SetPushConstantsRaw command"),
+            _ => panic!("Expected BindResourcesRaw command"),
         }
     }
 
     #[test]
-    fn test_compute_push_constants_recording() {
+    fn test_compute_bind_resources_recording() {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
 
@@ -1662,12 +1637,11 @@ mod tests {
             )
             .unwrap();
 
-        // Record compute commands with push constants (bindless path)
         let commands = vec![
-            ComputeCommand::SetPushConstants {
+            GpuCommand::BindResources {
                 buffers: vec![buffer1, buffer2],
             },
-            ComputeCommand::Dispatch {
+            GpuCommand::Dispatch {
                 workgroups_x: 8,
                 workgroups_y: 8,
                 workgroups_z: 1,
@@ -1676,17 +1650,16 @@ mod tests {
 
         backend.dispatch_compute(device, &commands).unwrap();
 
-        // Verify commands were recorded correctly
         assert_eq!(backend.recorded_compute_commands.len(), 1);
         assert_eq!(backend.recorded_compute_commands[0].len(), 2);
 
         match &backend.recorded_compute_commands[0][0] {
-            ComputeCommand::SetPushConstants { buffers } => {
+            GpuCommand::BindResources { buffers } => {
                 assert_eq!(buffers.len(), 2);
                 assert_eq!(buffers[0], buffer1);
                 assert_eq!(buffers[1], buffer2);
             }
-            _ => panic!("Expected SetPushConstants command"),
+            _ => panic!("Expected BindResources command"),
         }
     }
 }

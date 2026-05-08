@@ -6,8 +6,8 @@ struct VertexOutput {
     float3 color : COLOR;
 };
 
-[shader("vertex")]
-VertexOutput vs_main(uint idx : SV_VertexID) {
+[goldy_vertex]
+VertexOutput vs_main(VertexId idx) {
     // Hardcoded triangle vertices
     float2 positions[3];
     positions[0] = float2(0.0, 0.5);
@@ -20,13 +20,12 @@ VertexOutput vs_main(uint idx : SV_VertexID) {
     colors[2] = float3(0.0, 0.0, 1.0); // Blue
     
     VertexOutput output;
-    output.position = float4(positions[idx], 0.0, 1.0);
-    output.color = colors[idx];
+    output.position = float4(positions[idx.value], 0.0, 1.0);
+    output.color = colors[idx.value];
     return output;
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VertexOutput input) : SV_Target {
     return float4(input.color, 1.0);
 }
-

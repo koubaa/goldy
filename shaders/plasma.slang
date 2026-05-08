@@ -7,17 +7,15 @@ struct TimeUniforms {
     float time;
 };
 
-#define TIME goldy_dyn_broadcast<TimeUniforms>(0).time
-
-[shader("vertex")]
-FullscreenVarying vs_main(uint vertex_id : SV_VertexID) {
-    return vs_fullscreen_triangle(vertex_id);
+[goldy_vertex]
+FullscreenVarying vs_main(VertexId vertex_id) {
+    return vs_fullscreen_triangle(vertex_id.value);
 }
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
+[goldy_fragment]
+float4 fs_main(TimeUniforms uniforms, FullscreenVarying input) : SV_Target {
     float2 uv = scale_uv(input.uv, 4.0);
-    float t = TIME;
+    float t = uniforms.time;
     
     // Classic plasma formula
     float v = sin(uv.x + t);

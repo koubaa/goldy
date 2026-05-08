@@ -38,7 +38,12 @@ struct Line {
 impl goldy::StructuredBufferElement for Line {}
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
     println!("Goldy Bouncing Lines Example");
     println!("  Escape - Exit");
 
@@ -68,6 +73,7 @@ struct RenderState {
     render_pipeline: RenderPipeline,
     // Frame counter
     frame_count: u32,
+    start_time: std::time::Instant,
 }
 
 impl RenderState {
@@ -138,6 +144,7 @@ impl RenderState {
             line_buffer,
             render_pipeline,
             frame_count: 0,
+            start_time: std::time::Instant::now(),
         })
     }
 
@@ -150,7 +157,7 @@ impl RenderState {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
             // Pass buffer indices via push constants
-            pass.set_push_constants(&[&self.line_buffer]);
+            pass.bind_resources(&[&self.line_buffer]);
             // Only 20 lines, but dispatch at least 1 workgroup
             let workgroups = NUM_LINES.div_ceil(64);
             pass.dispatch(workgroups.max(1), 1, 1);
@@ -173,7 +180,7 @@ impl RenderState {
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
             // Pass buffer indices via push constants
-            pass.set_push_constants(&[&self.line_buffer]);
+            pass.bind_resources(&[&self.line_buffer]);
             // Draw 2 vertices (line) per instance
             pass.draw(0..2, 0..NUM_LINES);
         }
@@ -183,6 +190,21 @@ impl RenderState {
 
         self.window.request_redraw();
         Ok(())
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 {
+            self.frame_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        println!(
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            self.frame_count
+        );
     }
 }
 

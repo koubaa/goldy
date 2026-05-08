@@ -58,7 +58,7 @@ render_pass.draw_quads(num_instances);  // 6 vertices per quad
 
 Goldy's bindless architecture treats all GPU data as indexed buffers:
 
-- **Uniforms**: `ConstantBuffer<T>` arrays with push constants for indices
+- **Uniforms**: `ConstantBuffer<T>` arrays with resource bindings for indices
 - **Instance data**: `StructuredBuffer<T>` indexed by `SV_InstanceID`
 - **Geometry**: Generated from `SV_VertexID` + `quad_position()` helpers
 
@@ -97,7 +97,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | `goldy_exp/types.slang` | Common data types: `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `Instance2D` |
 | `goldy_exp/primitives.slang` | Procedural geometry: `quad_local()`, `quad_position()`, `quad_position_rotated()`, `billboard_position()`, `fullscreen_position()`, `fullscreen_uv()` |
 | `goldy_exp/descriptor_handle.slang` | Cross-platform `DescriptorHandle<T>` support (routes by access pattern) |
-| `goldy_exp/access.slang` | Unified access functions: `goldy_broadcast<T>()`, `goldy_scattered<T>()`, etc. |
+| `goldy_exp/access.slang` | Resource type aliases (`Scattered<T>` = `StorageBuffer<T>`, `BufRO<T>`, `Interpolated<T>`, etc.) and SV types (`ThreadId`, `VertexId`, etc.). Declare any struct type directly as a parameter for implicit constant-buffer broadcast. |
 | `goldy_exp/bindless_resources.slang` | Metal Tier 2 ParameterBlock for bindless resources |
 
 ### Vertex Formats
@@ -191,7 +191,7 @@ device.register_library(ShaderLibrary::from_source("myutils", r#"
 
 | File | Description | Uses Module |
 |------|-------------|-------------|
-| `plasma.slang` | Classic demoscene plasma (uses `goldy_dyn_broadcast<T>()`) | ✓ `import goldy_exp` |
+| `plasma.slang` | Classic demoscene plasma | ✓ `import goldy_exp` |
 | `mandelbrot.slang` | Fractal explorer with zoom | ✓ `import goldy_exp` |
 | `gradient.slang` | Animated color gradient | ✓ `import goldy_exp` |
 | `tunnel.slang` | Demoscene tunnel effect | ✓ `import goldy_exp` |
@@ -301,39 +301,50 @@ Slang's `reinterpret<>` handles buffer types specially, avoiding the problematic
 
 ### Cross-Platform Resource Binding
 
-Goldy provides **unified access functions** that work across all platforms:
+Goldy's bindless architecture passes resource slot indices as small `uniform uint` resource
+bindings. The preferred way to write bindless shaders is the **virtual main** system:
 
 ```slang
 import goldy_exp;
 
 struct TimeUniforms { float time; };
+struct Particle { float2 pos; float2 vel; };
 
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    // Unified access - works on SPIRV, DX12, and Metal!
-    // Rust side: pass.set_push_constants(&[uniform_buffer]);
-    float t = goldy_dyn_broadcast<TimeUniforms>(0).time;
-    return float4(rainbow(t), 1.0);
+// [goldy_compute] generates the real [shader("compute")] entry point automatically.
+// Resource handles and SV types are resolved automatically. Any plain struct type
+// is treated as a constant-buffer broadcast — no wrapper needed.
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(TimeUniforms params, Scattered<Particle> particles, ThreadId id) {
+    Particle p = particles[id.x];
+    p.pos += p.vel * params.time;
+    particles[id.x] = p;
 }
 ```
 
-#### Access Pattern Functions
+Rust binds resources in declaration order (left to right):
 
-| Function | Access Pattern | Use For |
-|----------|----------------|---------|
-| `goldy_broadcast<T>(slot)` | All threads read same address | Uniforms, material params |
-| `goldy_scattered<T>(slot)` | Any thread, any address, read/write | Particle buffers, compute storage |
-| `goldy_dyn_buf_ro<T>(slot)` | Any thread, any address, read-only | Input buffers (hardware read cache) |
-| `goldy_interpolated<T>(slot)` | Hardware-filtered texture reads | Material textures |
-| `goldy_direct_spatial<T>(slot)` | Unfiltered read/write texture | Compute output, framebuffer effects |
-| `goldy_filter(slot)` | Sampler state for filtering | Texture sampling config |
+```rust
+pass.bind_resources_raw(&[
+    particles_buf.bindless_index().unwrap(),
+    params_buf.bindless_index().unwrap(),
+]);
+```
+
+Plain scalar params (e.g. `uint offset`) are also resource bindings — no wrapper needed:
+
+```slang
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, uint offset, ThreadId id) {
+    data[id.x + offset] += 1;
+}
+```
 
 **Platform support:**
-- **SPIRV**: Routes to Goldy's custom binding layout (bindings 0-4)
-- **DX12**: Uses `DescriptorHandle<T>` → `ResourceDescriptorHeap`
-- **Metal**: Uses `ParameterBlock` with typed resource arrays (Tier 2 required)
-
-**See `plasma.slang` and `test_access_functions.slang` for complete examples.**
+- **SPIR-V**: `uniform` entry-point params → push constants / resource bindings (std430 layout, offset 0)
+- **DX12**: `uniform` entry-point params → root constants at `b0, space0`
+- **Metal**: Slang wraps params in an `EntryPointParams` struct at `[[buffer(1)]]`
 
 #### Alternative: Direct `DescriptorHandle<T>`
 
@@ -390,15 +401,11 @@ This is transparent to shader code — just `import goldy_exp` and use `Descript
    - Use functions instead of macros (functions export, macros don't)
    - Don't use guards in modules that are only imported when needed
 
-2. **Push constants require specific syntax** for Vulkan SPIR-V:
+2. **Resource bindings** are expressed as `uniform` entry-point parameters — no manual
+   `[[vk::push_constant]]` declaration is needed:
    ```slang
-   // WRONG - cbuffer doesn't generate push constants
-   [[vk::push_constant]]
-   cbuffer MyData { ... };
-   
-   // CORRECT - struct + ConstantBuffer pattern
-   struct MyDataBlock { ... };
-   [[vk::push_constant]] ConstantBuffer<MyDataBlock> myData;
+   // Preferred: Slang maps uniform params to resource bindings on all backends
+   void cs_main(uniform uint slot, uint3 id : SV_DispatchThreadID) { ... }
    ```
 
 3. **DX12: Use named indices, not arrays** in cbuffers for buffer indices:
@@ -435,7 +442,7 @@ This is transparent to shader code — just `import goldy_exp` and use `Descript
    ParameterBlock<GoldyBindlessResources> gGoldy;
    ```
    
-   The Goldy backend uses `ArgumentEncoder.setBuffer()` to write native device pointers to the argument buffer. When using `set_push_constants()` in Rust with a Metal ParameterBlock shader, the backend automatically handles this translation.
+   The Goldy backend uses `ArgumentEncoder.setBuffer()` to write native device pointers to the argument buffer. When using `bind_resources()` in Rust with a Metal ParameterBlock shader, the backend automatically handles this translation.
 
 ## Module System
 

@@ -1,22 +1,40 @@
 #!/usr/bin/env bash
 # Run all goldy examples one at a time. Each example blocks until the user
 # dismisses it (e.g. Esc or close window), then the next one starts.
+#
+# Prints wall-clock duration for each example, and average FPS when the
+# example outputs a GOLDY_PERF line (format: GOLDY_PERF: frames=N elapsed=Ts avg_fps=F).
+#
+# Usage:
+#   GOLDY_BACKEND=vk ./run_all_examples.sh          # normal
+#   SLEEP_BETWEEN=3 ./run_all_examples.sh            # 3s sleep between examples
+#   VULKAN_VALIDATE=1 ./run_all_examples.sh          # with validation layers
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Extract example names from Cargo.toml (name line immediately after [[example]])
+SLEEP_BETWEEN="${SLEEP_BETWEEN:-0}"
+
+if [[ "${VULKAN_VALIDATE:-0}" == "1" ]]; then
+    export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
+    echo "Vulkan validation layers ENABLED"
+fi
+
+# Extract example names from Cargo.toml
 EXAMPLES=()
 while IFS= read -r name; do
     [[ -n "$name" ]] && EXAMPLES+=("$name")
 done < <(grep -A1 '\[\[example\]\]' Cargo.toml | grep 'name = ' | sed 's/.*name = "\([^"]*\)".*/\1/')
 
-# Fallback if extraction fails
 if [[ ${#EXAMPLES[@]} -eq 0 ]]; then
-    EXAMPLES=(triangle digital_clock gradient plasma starfield mandelbrot bouncing_lines spinning_cube metaballs checkerboard instancing particles waveform tunnel multi_window compute_particles game_of_life depth_quads)
+    echo "ERROR: No examples found in Cargo.toml"
+    exit 1
 fi
+
+# Collect results for the summary table
+declare -a RESULTS
 
 total=${#EXAMPLES[@]}
 for i in "${!EXAMPLES[@]}"; do
@@ -28,8 +46,39 @@ for i in "${!EXAMPLES[@]}"; do
     echo "[$n/$total] Running example: $name"
     echo "Close the window or press Esc to continue to next"
     echo "========================================"
-    cargo run --example "$name"
+
+    start_ns=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
+    output=$(cargo run --example "$name" 2>&1) || true
+    end_ns=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
+
+    echo "$output"
+
+    wall_ms=$(( (end_ns - start_ns) / 1000000 ))
+    wall_s=$(awk "BEGIN {printf \"%.2f\", $wall_ms / 1000}")
+
+    # Look for GOLDY_PERF line from the example
+    perf_line=$(echo "$output" | grep '^GOLDY_PERF:' | tail -1)
+    if [[ -n "$perf_line" ]]; then
+        fps=$(echo "$perf_line" | sed 's/.*avg_fps=\([0-9.]*\).*/\1/')
+        frames=$(echo "$perf_line" | sed 's/.*frames=\([0-9]*\).*/\1/')
+        RESULTS+=("$(printf "%-25s %8s ms  %6s frames  %7s fps" "$name" "$wall_ms" "$frames" "$fps")")
+    else
+        RESULTS+=("$(printf "%-25s %8s ms" "$name" "$wall_ms")")
+    fi
+
+    if [[ "$SLEEP_BETWEEN" -gt 0 ]] && [[ $n -lt $total ]]; then
+        echo "Sleeping ${SLEEP_BETWEEN}s before next example..."
+        sleep "$SLEEP_BETWEEN"
+    fi
 done
 
 echo ""
-echo "All $total examples finished."
+echo "========================================"
+echo "Summary ($total examples)"
+echo "========================================"
+printf "%-25s %11s  %13s  %11s\n" "Example" "Wall time" "Frames" "Avg FPS"
+printf "%-25s %11s  %13s  %11s\n" "-------" "---------" "------" "-------"
+for line in "${RESULTS[@]}"; do
+    echo "$line"
+done
+echo ""

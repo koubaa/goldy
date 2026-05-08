@@ -60,7 +60,7 @@ loop {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&compute_pipeline);
-        pass.set_push_constants_raw(&[uniform_idx, tex_idx]);
+        pass.bind_resources_raw(&[uniform_idx, tex_idx]);
         pass.dispatch(width / 8, height / 8, 1);
     }
     encoder.submit(&device)?.wait()?;

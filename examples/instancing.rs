@@ -39,7 +39,12 @@ struct AnimParams {
 impl goldy::StructuredBufferElement for AnimParams {}
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
     println!(
         "Goldy Instancing Example - {} quads (GPU-driven)",
         NUM_QUADS
@@ -74,6 +79,7 @@ struct RenderState {
     // State
     start_time: Instant,
     last_time: f32,
+    frame_count: u32,
 }
 
 impl RenderState {
@@ -151,10 +157,13 @@ impl RenderState {
             params_buffer,
             start_time: Instant::now(),
             last_time: 0.0,
+            frame_count: 0,
         })
     }
 
     fn render(&mut self) -> Result<()> {
+        self.frame_count += 1;
+
         let time = self.start_time.elapsed().as_secs_f32();
         let delta_time = time - self.last_time;
         self.last_time = time;
@@ -173,7 +182,7 @@ impl RenderState {
         {
             let mut pass = compute_encoder.begin_compute_pass();
             pass.set_pipeline(&self.compute_pipeline);
-            pass.set_push_constants(&[&self.instance_buffer, &self.params_buffer]);
+            pass.bind_resources(&[&self.instance_buffer, &self.params_buffer]);
             // Dispatch enough workgroups for all instances (64 threads per group)
             let workgroups = NUM_QUADS.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
@@ -195,7 +204,7 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            pass.set_push_constants(&[&self.instance_buffer]);
+            pass.bind_resources(&[&self.instance_buffer]);
             // Draw 6 vertices (quad) per instance - no vertex buffer!
             pass.draw_quads(NUM_QUADS);
         }
@@ -205,6 +214,21 @@ impl RenderState {
 
         self.window.request_redraw();
         Ok(())
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 {
+            self.frame_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        println!(
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            self.frame_count
+        );
     }
 }
 

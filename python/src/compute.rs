@@ -58,7 +58,7 @@ impl PyComputePipeline {
 ///     >>> encoder = goldy.ComputeEncoder()
 ///     >>> with encoder.begin_compute_pass() as cp:
 ///     ...     cp.set_pipeline(pipeline)
-///     ...     cp.set_push_constants([buffer])
+///     ...     cp.bind_resources([buffer])
 ///     ...     cp.dispatch(16, 16, 1)
 ///     >>> encoder.dispatch(device)
 #[pyclass(name = "ComputeEncoder", module = "goldy")]
@@ -132,25 +132,25 @@ impl PyComputePass {
         });
     }
 
-    /// Set push constants for compute resource binding.
+    /// Bind resource slots for compute.
     ///
-    /// Pass buffer indices to shaders. The buffers' descriptor indices are pushed
-    /// directly to the GPU.
+    /// Pass buffer indices to shaders. The buffers' descriptor indices are bound
+    /// to shader resource slots.
     ///
     /// Args:
-    ///     buffers: List of buffers to pass to the shader via push constants.
+    ///     buffers: List of buffers to bind to shader resource slots.
     ///
     /// Example:
-    ///     >>> cp.set_push_constants([buffer_a, buffer_b])
+    ///     >>> cp.bind_resources([buffer_a, buffer_b])
     ///     # In shader: g_StorageBuffers[getBufferIndex(0)] and [getBufferIndex(1)]
-    fn set_push_constants(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
+    fn bind_resources(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
         self.encoder.borrow(py).with_encoder(|enc| {
             // Collect buffer references - deref the Arc to get &Buffer
             let buffer_refs: Vec<&goldy::Buffer> =
                 buffers.iter().map(|b| b.inner.as_ref()).collect();
 
             let mut pass = enc.begin_compute_pass();
-            pass.set_push_constants(&buffer_refs);
+            pass.bind_resources(&buffer_refs);
         });
     }
 

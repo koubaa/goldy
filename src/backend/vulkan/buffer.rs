@@ -4,7 +4,7 @@ use super::types::{self, BufferState};
 use super::utils::find_memory_type;
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::DataAccess;
-use crate::types::{BindlessCategory, BindlessHandle, BufferFlags};
+use crate::types::BufferFlags;
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -45,8 +45,15 @@ fn submit_copy(
         let mem_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER
+                    | vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_READ
+                    | vk::AccessFlags2::SHADER_WRITE
+                    | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            );
         let dep_info =
             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
         device.device.cmd_pipeline_barrier2(cmd, &dep_info);
@@ -89,7 +96,9 @@ pub(super) fn create(
 
     let is_storage = match access {
         DataAccess::Scattered => {
-            vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER;
+            vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::VERTEX_BUFFER
+                | vk::BufferUsageFlags::INDEX_BUFFER;
             // Indirect dispatch reads 3× u32 (12 bytes) from a storage buffer
             if size >= 12 {
                 vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
@@ -102,10 +111,10 @@ pub(super) fn create(
         }
     };
 
-    let cpu_coherent = flags.contains(BufferFlags::CPU_COHERENT);
-    if cpu_coherent && !is_storage {
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_COHERENT is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
         );
     }
 
@@ -121,11 +130,11 @@ pub(super) fn create(
 
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };
 
-    // Storage buffers → DEVICE_LOCAL for GPU compute performance, unless CPU_COHERENT
+    // Storage buffers → DEVICE_LOCAL for GPU compute performance, unless CPU_READABLE
     // (host-visible storage for persistent map + stable UAV bindless use).
     // Uniform buffers → HOST_VISIBLE|HOST_COHERENT for frequent CPU writes.
     let desired_flags = if is_storage {
-        if cpu_coherent {
+        if cpu_readable {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
         } else {
             vk::MemoryPropertyFlags::DEVICE_LOCAL
@@ -157,15 +166,15 @@ pub(super) fn create(
     // Clear uses vkCmdFillBuffer (GPU-side) so staging isn't needed for that.
     let (staging_buffer, staging_memory) = (None, None);
 
-    let host_mapped: Option<usize> = if cpu_coherent && is_storage {
+    let host_mapped: Option<usize> = if cpu_readable && is_storage {
         let device = devices
             .get(&device_handle)
             .context("Buffer's device is invalid for host map")?;
         let ptr = unsafe { device.map_memory2(memory, 0, size) }
-            .context("Failed to map CPU_COHERENT buffer memory")?;
+            .context("Failed to map CPU_READABLE buffer memory")?;
         let p = ptr as *mut u8;
         if p.is_null() {
-            anyhow::bail!("map_memory2 returned null for CPU_COHERENT buffer");
+            anyhow::bail!("map_memory2 returned null for CPU_READABLE buffer");
         }
         Some(p as usize)
     } else {
@@ -264,7 +273,7 @@ pub(super) fn destroy(
                     if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
                         tracing::warn!(
                             ?e,
-                            "unmap_memory2 failed for CPU_COHERENT buffer on destroy"
+                            "unmap_memory2 failed for CPU_READABLE buffer on destroy"
                         );
                     }
                 }
@@ -321,7 +330,13 @@ pub(super) fn create_view(
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
-    let bindless_index = {
+    let bindless_index = if size == 0 {
+        // A zero-byte view has no addressable data; VkDescriptorBufferInfo.range must be > 0
+        // (VUID-VkDescriptorBufferInfo-range-00341), so skip registration entirely.
+        // bindless_handle() returns None, which is correct — zero-size views cannot
+        // be bound to shaders.
+        None
+    } else {
         let handle_for_registry = *next_buffer_handle;
         let index = logical_device
             .resource_registry
@@ -395,7 +410,7 @@ pub(super) fn ensure_staging(
         .context("Invalid buffer handle")?;
     if !buffer.is_storage
         || buffer.staging_buffer.is_some()
-        || buffer.flags.contains(BufferFlags::CPU_COHERENT)
+        || buffer.flags.contains(BufferFlags::CPU_READABLE)
     {
         return Ok(());
     }
@@ -451,6 +466,11 @@ pub(super) fn write(
     offset: u64,
     data: &[u8],
 ) -> Result<()> {
+    // vkMapMemory2 and vkCmdCopyBuffer both require size > 0.
+    if data.is_empty() {
+        return Ok(());
+    }
+
     {
         let buffer = buffers
             .get(&buffer_handle)
@@ -520,36 +540,6 @@ pub(super) fn write(
     Ok(())
 }
 
-/// Copy from a `CPU_COHERENT` host mapping (no staging, no map/unmap per call).
-pub(super) fn read_coherent(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-    offset: u64,
-    output: &mut [u8],
-) -> Result<()> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_COHERENT) {
-        anyhow::bail!("read_buffer_coherent requires BufferFlags::CPU_COHERENT");
-    }
-    let Some(base) = buffer.host_mapped else {
-        anyhow::bail!("CPU_COHERENT buffer has no host mapping");
-    };
-    if offset + output.len() as u64 > buffer.size {
-        anyhow::bail!("read_coherent would exceed buffer bounds");
-    }
-    let p = base as *mut u8;
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            p.add(offset as usize) as *const u8,
-            output.as_mut_ptr(),
-            output.len(),
-        );
-    }
-    Ok(())
-}
-
 /// Get the size of a buffer in bytes.
 pub(super) fn size(
     buffers: &HashMap<BufferHandle, BufferState>,
@@ -564,30 +554,6 @@ pub(super) fn bindless_index(
     buffer_handle: BufferHandle,
 ) -> Option<u32> {
     buffers.get(&buffer_handle).and_then(|b| b.bindless_index)
-}
-
-/// Effective structured-buffer element stride for `GOLDY_VALIDATE_BUFFER_STRIDES` checks.
-pub(super) fn element_stride_for_bindless_handle(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    handle: BindlessHandle,
-) -> Option<u32> {
-    let idx = handle.index();
-    for b in buffers.values() {
-        match handle.category() {
-            BindlessCategory::Scattered if !b.is_storage => continue,
-            BindlessCategory::Broadcast if b.is_storage => continue,
-            BindlessCategory::Scattered | BindlessCategory::Broadcast => {}
-            _ => continue,
-        }
-        if b.bindless_index != Some(idx) {
-            continue;
-        }
-        if b.is_storage {
-            return Some(b.element_stride.unwrap_or(4));
-        }
-        return b.element_stride;
-    }
-    None
 }
 
 /// Read buffer contents to CPU. Copies from offset 0 for length output.len().

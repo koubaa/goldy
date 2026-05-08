@@ -136,7 +136,14 @@ pub(super) fn ensure_stage_compiled(
         .as_spirv()
         .context("Invalid SPIR-V output")?
         .to_vec();
-    let reflection = Some(result.reflection);
+    let reflection = {
+        let mut r = result.reflection;
+        if r.push_constant_categories.is_empty() {
+            r.push_constant_categories =
+                crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
+        }
+        Some(r)
+    };
 
     // Get device
     let logical_device = devices
@@ -175,7 +182,6 @@ pub(super) fn ensure_stage_compiled(
             tracing::info!("Dumped SPIR-V bytecode to {}", path.display());
         }
     }
-
     // Cache the module and reflection data
     let shader = shaders.get_mut(&shader_handle).unwrap();
     match stage {
@@ -197,6 +203,9 @@ pub(super) fn ensure_stage_compiled(
                 if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
                     existing.parameter_blocks.push(pb.clone());
                 }
+            }
+            if existing.push_constant_categories.is_empty() {
+                existing.push_constant_categories = new_reflection.push_constant_categories.clone();
             }
         } else {
             shader.reflection = reflection;

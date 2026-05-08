@@ -27,7 +27,12 @@ const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: u32 = GRID_WIDTH * GRID_HEIGHT;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
@@ -60,6 +65,7 @@ struct RenderState {
     use_buffer_a: bool,
     frame_count: u32,
     last_update: std::time::Instant,
+    start_time: std::time::Instant,
 }
 
 /// Create initial pattern (glider gun + some random cells)
@@ -197,6 +203,7 @@ impl RenderState {
             use_buffer_a: true,
             frame_count: 0,
             last_update: std::time::Instant::now(),
+            start_time: std::time::Instant::now(),
         })
     }
 
@@ -231,7 +238,7 @@ impl RenderState {
                         self.view_a.bindless_handle().unwrap(),
                     )
                 };
-                pass.set_push_constants_typed(&[read_handle, write_handle]);
+                pass.bind_resources_typed(&[read_handle, write_handle]);
 
                 // Dispatch workgroups (8x8 threads per group)
                 let workgroups_x = GRID_WIDTH.div_ceil(8);
@@ -260,7 +267,7 @@ impl RenderState {
             } else {
                 self.view_b.bindless_handle().unwrap()
             };
-            pass.set_push_constants_typed(&[current_handle]);
+            pass.bind_resources_typed(&[current_handle]);
 
             // Draw fullscreen triangle
             pass.draw(0..3, 0..1);
@@ -272,6 +279,21 @@ impl RenderState {
         self.window.request_redraw();
 
         Ok(())
+    }
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 {
+            self.frame_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        println!(
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            self.frame_count
+        );
     }
 }
 

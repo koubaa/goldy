@@ -9,8 +9,6 @@
 
 import goldy_exp;
 
-#define OUT goldy_dyn_scattered<uint>(0)
-
 // --- Simplified 2D-renderer-like types ---
 
 struct TagMonoid {
@@ -104,9 +102,9 @@ groupshared TagMonoid  sh_tag[WG];
 groupshared DrawMonoid sh_draw[WG];
 groupshared Bic        sh_bic[WG];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 local_id : SV_GroupThreadID) {
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     uint ix = local_id.x;
 
     TagMonoid t = TagMonoid.identity();

@@ -19,6 +19,7 @@ mod render_commands;
 mod render_target;
 mod sampler;
 mod shader;
+mod staging;
 mod surface;
 mod texture;
 mod types;
@@ -32,46 +33,27 @@ use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 
-/// Collect per-push-constant-slot categories for a render pipeline by looking
-/// up reflection data on the bound vertex/fragment shaders. Fragment shader
-/// expectations take precedence (that's where `goldy_dyn_*` is typically used);
-/// vertex shader data is used as a fallback when fragment has none.
-fn render_push_constant_expectations(
+/// Extract push-constant slot categories for a render pipeline from shader
+/// reflection. Fragment shader data takes precedence; vertex is a fallback.
+fn render_push_constant_categories(
     shaders: &HashMap<ShaderHandle, ShaderState>,
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
-) -> (
-    Vec<Option<crate::types::BindlessCategory>>,
-    Vec<Option<u32>>,
-    String,
-) {
-    let fs = shaders
+) -> Vec<Option<crate::types::BindlessCategory>> {
+    let fs_cats = shaders
         .get(&fragment_shader)
-        .and_then(|s| s.reflection.as_ref());
-    let fs_cats = fs
+        .and_then(|s| s.reflection.as_ref())
+        .map(|r| &r.push_constant_categories);
+    if let Some(cats) = fs_cats {
+        if !cats.is_empty() {
+            return cats.clone();
+        }
+    }
+    shaders
+        .get(&vertex_shader)
+        .and_then(|s| s.reflection.as_ref())
         .map(|r| r.push_constant_categories.clone())
-        .unwrap_or_default();
-    let fs_strides = fs
-        .map(|r| r.push_constant_buffer_strides.clone())
-        .unwrap_or_default();
-    let (cats, strides) = if !fs_cats.is_empty() {
-        (fs_cats, fs_strides)
-    } else {
-        let vs = shaders
-            .get(&vertex_shader)
-            .and_then(|s| s.reflection.as_ref());
-        (
-            vs.map(|r| r.push_constant_categories.clone())
-                .unwrap_or_default(),
-            vs.map(|r| r.push_constant_buffer_strides.clone())
-                .unwrap_or_default(),
-        )
-    };
-    (
-        cats,
-        strides,
-        format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})"),
-    )
+        .unwrap_or_default()
 }
 
 /// Khronos instance validation when GPU API validation is requested (`GOLDY_VALIDATION=1`,
@@ -264,7 +246,11 @@ impl VulkanBackend {
             next_sampler_handle: 1,
             slang_compiler,
             compute_fence_pool: HashMap::new(),
+            compute_texture_staging_pool: HashMap::new(),
             next_compute_fence_token: 1,
+            staging_belts: HashMap::new(),
+            deferred_compute: Vec::new(),
+            deferred_pending_tokens: HashMap::new(),
         };
 
         Ok(Self { state })
@@ -401,15 +387,6 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn read_buffer_coherent(
-        &self,
-        buffer_handle: BufferHandle,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<()> {
-        buffer::read_coherent(&self.state.buffers, buffer_handle, offset, output)
-    }
-
     fn clear_buffer(
         &mut self,
         device_handle: DeviceHandle,
@@ -486,10 +463,11 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
-            render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
+        let cats =
+            render_push_constant_categories(&self.state.shaders, vertex_shader, fragment_shader);
+        let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        pipeline::create(
+        let handle = pipeline::create(
             &self.state.devices,
             &mut self.state.pipelines,
             &mut self.state.next_pipeline_handle,
@@ -499,10 +477,13 @@ impl GpuBackend for VulkanBackend {
             vertex_layout,
             topology,
             target_format,
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
-        )
+        )?;
+
+        if let Some(ps) = self.state.pipelines.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+        }
+        Ok(handle)
     }
 
     fn destroy_pipeline(&mut self, pipeline_handle: PipelineHandle) {
@@ -599,6 +580,8 @@ impl GpuBackend for VulkanBackend {
             &mut self.state.surfaces,
             &mut self.state.textures,
             surface_handle,
+            &mut self.state.deferred_pending_tokens,
+            &mut self.state.compute_texture_staging_pool,
         );
     }
 
@@ -610,6 +593,8 @@ impl GpuBackend for VulkanBackend {
             &mut self.state.textures,
             &mut self.state.next_texture_handle,
             surface_handle,
+            &mut self.state.deferred_pending_tokens,
+            &mut self.state.compute_texture_staging_pool,
         )
     }
 
@@ -647,14 +632,7 @@ impl GpuBackend for VulkanBackend {
         surface_handle: SurfaceHandle,
         _image: SwapchainImageHandle,
     ) -> Result<()> {
-        surface::present(
-            &self.state.instance,
-            &mut self.state.devices,
-            &mut self.state.surfaces,
-            &mut self.state.textures,
-            surface_handle,
-            _image,
-        )
+        surface::present(&mut self.state, surface_handle, _image)
     }
 
     fn surface_resize(
@@ -717,10 +695,12 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) =
-            render_push_constant_expectations(&self.state.shaders, vertex_shader, fragment_shader);
+        let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        pipeline::create_with_depth(
+        let cats =
+            render_push_constant_categories(&self.state.shaders, vertex_shader, fragment_shader);
+
+        let handle = pipeline::create_with_depth(
             &self.state.devices,
             &mut self.state.pipelines,
             &mut self.state.next_pipeline_handle,
@@ -731,10 +711,13 @@ impl GpuBackend for VulkanBackend {
             topology,
             target_format,
             depth_stencil,
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
-        )
+        )?;
+
+        if let Some(ps) = self.state.pipelines.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+        }
+        Ok(handle)
     }
 
     fn create_render_target_with_depth(
@@ -882,32 +865,29 @@ impl GpuBackend for VulkanBackend {
         let cs_module =
             self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
-        let (push_constant_categories, push_constant_buffer_strides, shader_debug_name) = self
+        let cats = self
             .state
             .shaders
             .get(&compute_shader)
-            .map(|s| {
-                let refl = s.reflection.as_ref();
-                let cats = refl
-                    .map(|r| r.push_constant_categories.clone())
-                    .unwrap_or_default();
-                let strides = refl
-                    .map(|r| r.push_constant_buffer_strides.clone())
-                    .unwrap_or_default();
-                (cats, strides, format!("compute_shader#{compute_shader}"))
-            })
+            .and_then(|s| s.reflection.as_ref())
+            .map(|r| r.push_constant_categories.clone())
             .unwrap_or_default();
 
-        compute::create(
+        let shader_debug_name = format!("compute_shader#{compute_shader}");
+
+        let handle = compute::create(
             &self.state.devices,
             &mut self.state.compute_pipelines,
             &mut self.state.next_compute_pipeline_handle,
             device_handle,
             cs_module,
-            push_constant_categories,
-            push_constant_buffer_strides,
             shader_debug_name,
-        )
+        )?;
+
+        if let Some(ps) = self.state.compute_pipelines.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+        }
+        Ok(handle)
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
@@ -921,7 +901,7 @@ impl GpuBackend for VulkanBackend {
     fn submit_compute(
         &mut self,
         device_handle: DeviceHandle,
-        commands: &[ComputeCommand],
+        commands: &[GpuCommand],
     ) -> Result<FenceToken> {
         compute::submit(&mut self.state, device_handle, commands)
     }
@@ -941,5 +921,14 @@ impl GpuBackend for VulkanBackend {
         timeout_ms: u32,
     ) -> Result<bool> {
         compute::wait_fence_timeout(&mut self.state, device_handle, token, timeout_ms)
+    }
+
+    fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
+        if let (Some(logical_device), Some(belt)) = (
+            self.state.devices.get(&device_handle),
+            self.state.staging_belts.get_mut(&device_handle),
+        ) {
+            unsafe { belt.trim(logical_device) };
+        }
     }
 }

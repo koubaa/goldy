@@ -19,10 +19,6 @@ struct ParticleParams {
     float _pad2;
 };
 
-// Dynamic buffer selection - Rust: set_push_constants(&[particles_slot, params_slot])
-#define PARTICLES goldy_dyn_scattered<Particle>(0)
-#define PARAMS goldy_dyn_broadcast<ParticleParams>(1)
-
 struct VSOutput {
     float4 position : SV_Position;
     float4 color : COLOR;
@@ -38,20 +34,21 @@ static const float2 snowQuadVerts[6] = {
     float2(-1, -1), float2( 1,  1), float2(-1,  1)
 };
 
-[shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+[goldy_vertex]
+VSOutput vs_main(Scattered<Particle> PARTICLES, ParticleParams params,
+                 VertexId vertexID, InstanceId instanceID) {
     VSOutput output;
     
-    Particle p = PARTICLES[instanceID];
-    bool is_snow = PARAMS.is_snow > 0.5;
+    Particle p = PARTICLES[instanceID.value];
+    bool is_snow = params.is_snow > 0.5;
     
     float size = p.size;
     float2 localPos;
     
     if (is_snow) {
-        localPos = snowQuadVerts[vertexID] * size;
+        localPos = snowQuadVerts[vertexID.value] * size;
     } else {
-        localPos = quadVerts[vertexID] * size;
+        localPos = quadVerts[vertexID.value] * size;
     }
     
     output.position = float4(p.position + localPos, 0.0, 1.0);
@@ -67,7 +64,7 @@ VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
     return output;
 }
 
-[shader("fragment")]
+[goldy_fragment]
 float4 fs_main(VSOutput input) : SV_Target {
     return input.color;
 }

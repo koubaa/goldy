@@ -1,6 +1,7 @@
 //! Integration tests for RenderTarget with real GPU.
 //!
 //! These tests require a GPU and are skipped in CI if no GPU is available.
+#![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 mod common;
 
@@ -54,7 +55,7 @@ fn test_vulkan_render_and_readback() {
             float4 color : COLOR;
         };
 
-        [shader("vertex")]
+        [goldy_vertex]
         VertexOutput vs_main(VertexInput input) {
             VertexOutput output;
             output.position = float4(input.position, 0.0, 1.0);
@@ -62,7 +63,7 @@ fn test_vulkan_render_and_readback() {
             return output;
         }
 
-        [shader("fragment")]
+        [goldy_fragment]
         float4 fs_main(VertexOutput input) : SV_Target {
             return input.color;
         }
@@ -217,7 +218,7 @@ fn test_indexed_drawing() {
             float4 color : COLOR;
         };
 
-        [shader("vertex")]
+        [goldy_vertex]
         VertexOutput vs_main(VertexInput input) {
             VertexOutput output;
             output.position = float4(input.position, 0.0, 1.0);
@@ -225,7 +226,7 @@ fn test_indexed_drawing() {
             return output;
         }
 
-        [shader("fragment")]
+        [goldy_fragment]
         float4 fs_main(VertexOutput input) : SV_Target {
             return input.color;
         }
@@ -315,7 +316,7 @@ fn test_indexed_drawing_uint32() {
             float4 color : COLOR;
         };
 
-        [shader("vertex")]
+        [goldy_vertex]
         VertexOutput vs_main(VertexInput input) {
             VertexOutput output;
             output.position = float4(input.position, 0.0, 1.0);
@@ -323,7 +324,7 @@ fn test_indexed_drawing_uint32() {
             return output;
         }
 
-        [shader("fragment")]
+        [goldy_fragment]
         float4 fs_main(VertexOutput input) : SV_Target {
             return input.color;
         }
@@ -635,7 +636,7 @@ fn test_depth_occlusion_green_beats_red() {
 }
 
 /// Render a fullscreen triangle whose fragment shader reads a value from a bindless buffer
-/// via push constants. Verifies the global argument buffer is correctly bound to offscreen
+/// via resource bindings. Verifies the global argument buffer is correctly bound to offscreen
 /// render targets (a bug that produces a completely blank output if missing).
 #[test]
 fn test_render_target_bindless_buffer_read() {
@@ -647,7 +648,7 @@ fn test_render_target_bindless_buffer_read() {
     let data = vec![1u32; 4];
     let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
 
-    // Fragment shader reads buffer[0] via bindless push constant.
+    // Fragment shader reads buffer[0] via bindless resource binding.
     // Outputs bright green when value == 1 (alive), dark gray otherwise.
     // Both branches are visually distinct from the black clear color, so we can
     // tell whether the shader ran vs. the draw call being skipped entirely.
@@ -656,8 +657,6 @@ fn test_render_target_bindless_buffer_read() {
     // Slang codegen differences (UV varying, local variable assignment).
     let shader_source = r#"
 import goldy_exp;
-
-#define CELLS goldy_dyn_scattered<uint>(0)
 
 static const float2 positions[3] = {
     float2(-1, -1),
@@ -676,17 +675,17 @@ struct VSOut {
     float2 uv  : TEXCOORD0;
 };
 
-[shader("vertex")]
-VSOut vs_main(uint id : SV_VertexID) {
+[goldy_vertex]
+VSOut vs_main(VertexId id) {
     VSOut o;
-    o.pos = float4(positions[id], 0.0, 1.0);
-    o.uv  = uvs[id];
+    o.pos = float4(positions[id.value], 0.0, 1.0);
+    o.uv  = uvs[id.value];
     return o;
 }
 
-[shader("fragment")]
-float4 fs_main(VSOut i) : SV_Target {
-    uint val = CELLS[0];
+[goldy_fragment]
+float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
+    uint val = cells[0];
     if (val == 1u) {
         return float4(0.2, 0.9, 0.3, 1.0);
     } else {
@@ -707,9 +706,6 @@ float4 fs_main(VSOut i) : SV_Target {
         &RenderPipelineDesc {
             // Empty vertex layout: this shader uses SV_VertexID with no vertex
             // attributes, so no vertex descriptor should be set on the pipeline.
-            // Using VertexBufferLayout::default() (Vertex2D) would set
-            // buffer_index(0) for vertex data, conflicting with the argument
-            // buffer also at slot 0.
             vertex_layout: VertexBufferLayout {
                 attributes: vec![],
                 stride: 0,
@@ -726,7 +722,7 @@ float4 fs_main(VSOut i) : SV_Target {
         let mut pass = encoder.begin_render_pass();
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
-        pass.set_push_constants(&[&buffer]);
+        pass.bind_resources(&[&buffer]);
         pass.draw(0..3, 0..1);
     }
     target.render(encoder).expect("render");

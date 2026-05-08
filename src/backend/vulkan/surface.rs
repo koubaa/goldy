@@ -124,17 +124,12 @@ pub(super) fn create(
         .or_else(|| formats.first())
         .context("No suitable surface format")?;
 
-    // Choose present mode (FIFO = vsync)
-    let present_modes = unsafe {
-        surface_loader.get_physical_device_surface_present_modes(physical_device, surface)
-    }
-    .context("Failed to get present modes")?;
-
-    let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-        vk::PresentModeKHR::MAILBOX // Triple buffering if available
-    } else {
-        vk::PresentModeKHR::FIFO // Vsync (always available)
-    };
+    // Default to FIFO (vsync, always available). The public Surface API calls
+    // set_present_mode immediately after creation when a non-Auto mode is
+    // requested, so using FIFO here avoids a wasteful MAILBOX→FIFO swapchain
+    // recreation cycle that can confuse some drivers' present-mode inheritance
+    // via the old_swapchain parameter.
+    let present_mode = vk::PresentModeKHR::FIFO;
 
     // Determine extent
     let extent = if capabilities.current_extent.width != u32::MAX {
@@ -256,6 +251,9 @@ pub(super) fn create(
             render_finished_semaphore,
             in_flight_fence,
             render_pass_submitted: false,
+            deferred_compute_cbs: Vec::new(),
+            deferred_compute_tokens: Vec::new(),
+            pending_surface_texture: None,
         });
     }
 
@@ -339,6 +337,7 @@ pub(super) fn create(
             height: extent.height,
             format: format.format,
             present_mode,
+            swapchain_present_mode: present_mode,
             current_frame: 0,
             current_image_index: None,
             frame_sync,
@@ -360,6 +359,7 @@ pub(super) fn create(
 }
 
 /// Destroy a surface and all associated resources.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn destroy(
     entry: &Entry,
     instance: &Instance,
@@ -367,19 +367,48 @@ pub(super) fn destroy(
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
+    deferred_pending_tokens: &mut HashMap<u64, Option<vk::Fence>>,
+    compute_texture_staging_pool: &mut HashMap<u64, Vec<(vk::Buffer, vk::DeviceMemory)>>,
 ) {
-    // Clean up any outstanding surface texture
+    // Clean up any outstanding surface texture (current or deferred in frame slots)
     if let Some(tex_handle) = surfaces
         .get(&surface_handle)
         .and_then(|s| s.current_texture_handle)
     {
         unregister_surface_texture(devices, textures, tex_handle);
     }
+    if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
+        for fs in &mut surface_state.frame_sync {
+            if let Some(th) = fs.pending_surface_texture.take() {
+                unregister_surface_texture(devices, textures, th);
+            }
+        }
+    }
 
-    if let Some(surface_state) = surfaces.remove(&surface_handle) {
+    if let Some(mut surface_state) = surfaces.remove(&surface_handle) {
         if let Some(logical_device) = devices.get(&surface_state.device_handle) {
             unsafe {
                 let _ = logical_device.device.device_wait_idle();
+
+                // Free deferred compute CBs and remove their tokens from the
+                // pending map BEFORE destroying the fences they reference.
+                for frame in &mut surface_state.frame_sync {
+                    let deferred_cbs = std::mem::take(&mut frame.deferred_compute_cbs);
+                    let deferred_tokens = std::mem::take(&mut frame.deferred_compute_tokens);
+                    if !deferred_cbs.is_empty() {
+                        logical_device
+                            .device
+                            .free_command_buffers(logical_device.command_pool, &deferred_cbs);
+                    }
+                    for tok in &deferred_tokens {
+                        if let Some(staging) = compute_texture_staging_pool.remove(tok) {
+                            super::texture::destroy_texture_staging_list(logical_device, staging);
+                        }
+                    }
+                    for tok in deferred_tokens {
+                        deferred_pending_tokens.remove(&tok);
+                    }
+                }
 
                 // Destroy per-frame sync resources
                 for frame in surface_state.frame_sync {
@@ -427,6 +456,7 @@ pub(super) fn destroy(
 /// After acquiring, the swapchain image is registered in the bindless descriptor
 /// set as a storage image. The resulting `TextureHandle` is available via
 /// `frame_texture()` until `present()` is called.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn acquire(
     instance: &Instance,
     devices: &mut HashMap<DeviceHandle, LogicalDevice>,
@@ -434,6 +464,8 @@ pub(super) fn acquire(
     textures: &mut HashMap<TextureHandle, TextureState>,
     next_texture_handle: &mut TextureHandle,
     surface_handle: SurfaceHandle,
+    deferred_pending_tokens: &mut HashMap<u64, Option<vk::Fence>>,
+    compute_texture_staging_pool: &mut HashMap<u64, Vec<(vk::Buffer, vk::DeviceMemory)>>,
 ) -> Result<SwapchainImageHandle> {
     // Clean up any previously acquired surface texture that wasn't presented
     if let Some(surface_state) = surfaces.get(&surface_handle) {
@@ -484,10 +516,38 @@ pub(super) fn acquire(
         let surface_state = surfaces.get_mut(&surface_handle).unwrap();
         let cf = surface_state.current_frame;
         surface_state.frame_sync[cf].render_pass_submitted = false;
+
+        // The fence guarantees all GPU work for this frame slot has completed.
+        // Unregister the surface texture whose VkImageView + bindless descriptor
+        // were kept alive for the deferred compute CBs.
+        if let Some(tex_handle) = surface_state.frame_sync[cf].pending_surface_texture.take() {
+            unregister_surface_texture(devices, textures, tex_handle);
+        }
+
+        // Free deferred compute command buffers that were part of this frame
+        // slot's single submit.
+        let deferred_cbs = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
+        let deferred_tokens =
+            std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_tokens);
+        if !deferred_cbs.is_empty() {
+            if let Some(ld) = devices.get(&device_handle) {
+                unsafe {
+                    ld.device
+                        .free_command_buffers(ld.command_pool, &deferred_cbs);
+                }
+                for tok in &deferred_tokens {
+                    if let Some(staging) = compute_texture_staging_pool.remove(tok) {
+                        super::texture::destroy_texture_staging_list(ld, staging);
+                    }
+                }
+            }
+        }
+        for tok in deferred_tokens {
+            deferred_pending_tokens.remove(&tok);
+        }
     }
 
     // Process deferred deletions - resources from frames that have now completed
-    // Since we just waited for the fence, frame (current_deletion_frame - MAX_FRAMES_IN_FLIGHT) has completed
     {
         let logical_device = devices
             .get_mut(&device_handle)
@@ -543,9 +603,10 @@ pub(super) fn acquire(
             // either `UNDEFINED` (first use) or `PRESENT_SRC_KHR` (recycled). Compute
             // shaders writing via `RWTexture2D` require `GENERAL`. This prep submit
             // consumes the acquire semaphore, performs the layout transition once, and
-            // signals `image_ready_semaphore` which both the graphics render path and
-            // the compute-only present path wait on — so downstream compute submits
-            // can safely write the image in any order on the same queue.
+            // signals `image_ready_semaphore` which both the graphics render path
+            // and the compute-only present path wait on. Compute submits include
+            // a release barrier at the end of the command buffer that makes their
+            // writes available, so the present-barrier layout transition sees them.
             let (prep_cmd, image_ready_semaphore, image) = {
                 let surface_state = surfaces.get_mut(&surface_handle).unwrap();
                 surface_state.current_image_index = Some(image_index);
@@ -754,6 +815,29 @@ where
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
 
+    // Cross-submission memory barrier: make writes from prior compute dispatches
+    // (submitted as separate queue batches) visible to vertex/fragment shader
+    // reads.  Vulkan guarantees execution ordering between same-queue batches
+    // but NOT memory visibility — explicit synchronisation is required.
+    unsafe {
+        let mem_barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+            )
+            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::VERTEX_INPUT,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            );
+        let dep_info =
+            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+    }
+
     // Transition image to color attachment. The image is in `GENERAL` layout at this
     // point (acquire submits a prep barrier `UNDEFINED → GENERAL`), but we pass
     // `UNDEFINED` as old_layout to let the driver discard any prior contents — the
@@ -950,26 +1034,22 @@ where
 /// Unregisters the transient surface texture from the bindless descriptor set,
 /// then queues the swapchain image for presentation.
 pub(super) fn present(
-    instance: &Instance,
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
-    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
 ) -> Result<()> {
-    // Unregister the transient surface texture before presenting
-    if let Some(tex_handle) = surfaces
-        .get(&surface_handle)
-        .and_then(|s| s.current_texture_handle)
-    {
-        unregister_surface_texture(devices, textures, tex_handle);
-    }
-
-    let surface_state = surfaces
+    // Take the surface texture handle but do NOT unregister yet — the deferred
+    // compute CBs (and the render CB in the graphics path) reference the
+    // VkImageView + bindless descriptor.  Vulkan requires the image view to
+    // remain valid while any pending CB uses it.  We store the handle in the
+    // per-frame-slot FrameSync and unregister in acquire() after the fence
+    // guarantees all GPU work is complete.
+    let surface_state = state
+        .surfaces
         .get_mut(&surface_handle)
         .context("Invalid surface handle")?;
 
-    surface_state.current_texture_handle = None;
+    let pending_tex = surface_state.current_texture_handle.take();
 
     let image_index = surface_state
         .current_image_index
@@ -980,15 +1060,11 @@ pub(super) fn present(
     let render_pass_submitted = surface_state.frame_sync[current_frame].render_pass_submitted;
     let device_handle = surface_state.device_handle;
 
-    let logical_device = devices
+    let logical_device = state
+        .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
 
-    // Graphics path: `surface_render` waits `image_available`, writes the swapchain image,
-    // signals `render_finished`, and sets `render_pass_submitted`.
-    // Compute-only path: host waits on the compute fence, but nothing signals
-    // `render_finished` or `in_flight_fence` — `queue_present` would block forever.
-    // Submit a layout barrier (GENERAL → PRESENT_SRC) with the same semaphore/fence pattern.
     if !render_pass_submitted {
         let frame = &surface_state.frame_sync[current_frame];
         let cmd = frame.command_buffer;
@@ -1006,10 +1082,10 @@ pub(super) fn present(
             .context("Failed to begin compute-present barrier command buffer")?;
 
         let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-            .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-            .dst_access_mask(vk::AccessFlags2::NONE)
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_access_mask(vk::AccessFlags2::MEMORY_READ)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
             .image(image)
@@ -1028,18 +1104,23 @@ pub(super) fn present(
         unsafe { logical_device.device.end_command_buffer(cmd) }
             .context("Failed to end compute-present barrier command buffer")?;
 
-        // Wait on `image_ready_semaphore` (signaled by the acquire-time prep submit).
-        // The prep barrier already consumed `image_available_semaphore` and transitioned
-        // the image from `UNDEFINED` into `GENERAL`, so compute shaders have already
-        // written it at the correct layout by the time we reach this post-barrier.
+        // Collect deferred compute CBs + the present-barrier CB into a single
+        // vkQueueSubmit.  Within one submit, command buffers execute in array
+        // order with full memory visibility from prior CBs' barriers, so the
+        // release barrier in the compute CB makes writes visible to the layout
+        // transition in the barrier CB.
+        let deferred = std::mem::take(&mut state.deferred_compute);
+        let mut all_cbs: Vec<vk::CommandBuffer> = deferred.iter().map(|d| d.cmd).collect();
+        all_cbs.push(cmd);
+
         let frame = &surface_state.frame_sync[current_frame];
         let wait_semaphores = [frame.image_ready_semaphore];
-        let wait_stages = [vk::PipelineStageFlags::COMPUTE_SHADER];
+        let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
         let signal_semaphores = [frame.render_finished_semaphore];
         let submit_info = vk::SubmitInfo::default()
             .wait_semaphores(&wait_semaphores)
             .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(std::slice::from_ref(&cmd))
+            .command_buffers(&all_cbs)
             .signal_semaphores(&signal_semaphores);
 
         let submit_result = unsafe {
@@ -1056,15 +1137,42 @@ pub(super) fn present(
                 current_frame,
                 image_index,
                 result = ?e,
-                "compute-present layout barrier queue_submit failed"
+                "single-submit compute+present queue_submit failed"
             );
         }
-        submit_result.context("Failed to submit compute-present layout barrier")?;
+        submit_result.context("Failed to submit compute+present")?;
+
+        // Store deferred compute CBs/tokens in the frame sync slot.  They
+        // are freed in acquire() once in_flight_fence has been waited on.
+        // Upgrade deferred_pending_tokens from None → Some(fence) so
+        // wait_fence / is_fence_complete can actually block / poll.
+        let the_fence = surface_state.frame_sync[current_frame].in_flight_fence;
+        for d in &deferred {
+            state
+                .deferred_pending_tokens
+                .insert(d.token, Some(the_fence));
+        }
+        let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
+        let fs = &mut surface_state_mut.frame_sync[current_frame];
+        for d in deferred {
+            fs.deferred_compute_cbs.push(d.cmd);
+            fs.deferred_compute_tokens.push(d.token);
+        }
+        fs.pending_surface_texture = pending_tex;
+    } else if let Some(th) = pending_tex {
+        // Render path: the graphics CB was already submitted by render() but
+        // the VkImageView must stay alive until the fence signals.
+        let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
+        surface_state.frame_sync[current_frame].pending_surface_texture = Some(th);
     }
 
+    let surface_state = state
+        .surfaces
+        .get(&surface_handle)
+        .context("Invalid surface handle")?;
     let frame = &surface_state.frame_sync[current_frame];
 
-    let swapchain_loader = khr::swapchain::Device::new(instance, &logical_device.device);
+    let swapchain_loader = khr::swapchain::Device::new(&state.instance, &logical_device.device);
 
     let swapchains = [surface_state.swapchain];
     let image_indices = [image_index];
@@ -1088,12 +1196,12 @@ pub(super) fn present(
     }
 
     // Clear the current image and advance frame counter
-    let surface_state = surfaces.get_mut(&surface_handle).unwrap();
+    let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
     surface_state.current_image_index = None;
     surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
     // Advance the deletion queue's frame counter
-    if let Some(device) = devices.get_mut(&device_handle) {
+    if let Some(device) = state.devices.get_mut(&device_handle) {
         device.deletion_queue.advance_frame();
     }
 
@@ -1136,6 +1244,47 @@ pub(super) fn resize(
         .context("Surface's device is invalid")?;
     let physical_device = logical_device.physical_device;
 
+    // Get new capabilities early so we can bail out if nothing changed.
+    let surface_loader = khr::surface::Instance::new(entry, instance);
+    let capabilities = unsafe {
+        surface_loader.get_physical_device_surface_capabilities(physical_device, surface)
+    }
+    .context("Failed to get surface capabilities")?;
+
+    let extent = vk::Extent2D {
+        width: width.clamp(
+            capabilities.min_image_extent.width,
+            capabilities.max_image_extent.width,
+        ),
+        height: height.clamp(
+            capabilities.min_image_extent.height,
+            capabilities.max_image_extent.height,
+        ),
+    };
+
+    // Skip the expensive recreation when the clamped extent already matches
+    // the current swapchain AND the present mode hasn't changed.  Winit can
+    // fire multiple Resized events during window creation that would
+    // otherwise cause redundant swapchain teardown/rebuild cycles.
+    //
+    // `stored_present_mode` is the *desired* mode (possibly just updated by
+    // `set_present_mode`).  Compare it against what the swapchain was
+    // actually created with (`swapchain_present_mode`) to detect mode
+    // changes.  If `set_present_mode` updated `present_mode` and called
+    // `resize`, the size check alone would early-return because the window
+    // hasn't moved — so we must also compare the mode.
+    {
+        let surface_state = surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        if surface_state.width == extent.width
+            && surface_state.height == extent.height
+            && surface_state.swapchain_present_mode == stored_present_mode
+        {
+            return Ok(());
+        }
+    }
+
     // Wait for all in-flight frames to complete before resizing
     unsafe { logical_device.device.device_wait_idle() }?;
 
@@ -1158,24 +1307,6 @@ pub(super) fn resize(
             unsafe { logical_device.device.destroy_image_view(*view, None) };
         }
     }
-
-    // Get new capabilities
-    let surface_loader = khr::surface::Instance::new(entry, instance);
-    let capabilities = unsafe {
-        surface_loader.get_physical_device_surface_capabilities(physical_device, surface)
-    }
-    .context("Failed to get surface capabilities")?;
-
-    let extent = vk::Extent2D {
-        width: width.clamp(
-            capabilities.min_image_extent.width,
-            capabilities.max_image_extent.width,
-        ),
-        height: height.clamp(
-            capabilities.min_image_extent.height,
-            capabilities.max_image_extent.height,
-        ),
-    };
 
     let image_count = (capabilities.min_image_count + 1)
         .max(MAX_FRAMES_IN_FLIGHT as u32)
@@ -1310,9 +1441,15 @@ pub(super) fn resize(
         surface_state.depth_memory = new_depth_memory;
         surface_state.depth_view = new_depth_view;
         surface_state.present_mode = stored_present_mode;
+        surface_state.swapchain_present_mode = stored_present_mode;
     }
 
-    tracing::debug!("Resized surface to {}x{}", extent.width, extent.height);
+    tracing::debug!(
+        width = extent.width,
+        height = extent.height,
+        present_mode = ?stored_present_mode,
+        "Resized surface"
+    );
 
     Ok(())
 }

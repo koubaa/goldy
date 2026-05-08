@@ -55,6 +55,11 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    #[inline]
+    pub(crate) fn gpu_buffer_handle(&self) -> BufferHandle {
+        self.handle
+    }
+
     /// Create a new buffer with the specified access pattern.
     ///
     /// # Access Patterns
@@ -234,7 +239,7 @@ impl Buffer {
         self.access
     }
 
-    /// Creation flags (e.g. [`BufferFlags::CPU_COHERENT`]).
+    /// Creation flags (e.g. [`BufferFlags::CPU_READABLE`]).
     pub fn flags(&self) -> BufferFlags {
         self.flags
     }
@@ -245,10 +250,7 @@ impl Buffer {
     /// All buffers with Scattered or Broadcast access are registered.
     ///
     /// **Prefer [`Buffer::bindless_handle`]** for new code: the typed handle
-    /// captures the buffer's [`DataAccess`] category so push-constant setters
-    /// can catch category mismatches (e.g. binding a `Broadcast` buffer to a
-    /// slot read via `goldy_dyn_buf_ro`) at dispatch time instead of silently
-    /// producing garbage reads.
+    /// captures the buffer's [`DataAccess`] category alongside the raw index.
     pub fn bindless_index(&self) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         backend.buffer_bindless_index(self.handle)
@@ -266,7 +268,7 @@ impl Buffer {
     }
 
     /// Get this buffer's typed bindless handle for read-only structured-buffer
-    /// access (maps to `goldy_dyn_buf_ro` / `StructuredBuffer<T>`).
+    /// access (maps to `goldy_buf_ro` / `StructuredBuffer<T>`).
     ///
     /// Uses [`Self::bindless_srv_index`]: on Direct3D 12, scattered storage buffers have a
     /// separate SRV heap slot from the UAV; on Vulkan and Metal the read index matches
@@ -278,7 +280,7 @@ impl Buffer {
             .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
     }
 
-    /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_dyn_buf_ro` access.
+    /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_buf_ro` access.
     ///
     /// On DX12, scattered buffers have separate UAV (write) and SRV (read-only) descriptors at
     /// different heap indices. Use this index when the shader declares `StructuredBuffer<T>`.
@@ -291,17 +293,14 @@ impl Buffer {
     /// Read buffer contents back to CPU memory.
     ///
     /// The `output` slice must be at least `size` bytes. Reads from offset 0.
+    ///
+    /// For buffers created with [`BufferFlags::CPU_READABLE`], cost differs by backend:
+    /// Vulkan / Metal typically copy directly from host-visible memory (see
+    /// [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`]). Direct3D 12 performs a
+    /// GPU copy into a READBACK heap and waits — query capabilities to branch on behavior.
     pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
         backend.read_buffer_to_cpu(device.handle, self.handle, output)
-    }
-
-    /// Read from a [`BufferFlags::CPU_COHERENT`] buffer without staging. On Direct3D 12, call
-    /// [`Device::copy_to_coherent_readback`](crate::Device::copy_to_coherent_readback) after
-    /// the GPU work that produced the data.
-    pub fn read_coherent(&self, offset: u64, output: &mut [u8]) -> Result<()> {
-        let backend = self.backend.lock().unwrap();
-        backend.read_buffer_coherent(self.handle, offset, output)
     }
 
     /// Clear the buffer (fill with zeros) from offset for size bytes.
@@ -314,7 +313,7 @@ impl Buffer {
     ///
     /// The view gets its own bindless descriptor index, so shaders see a zero-based
     /// buffer starting at `offset`. Multiple views of the same buffer can be bound
-    /// simultaneously to different push constant slots.
+    /// simultaneously to different resource slots.
     ///
     /// `element_stride` sets the structured buffer stride for the view's descriptor.
     /// If `None`, defaults to 4 bytes (u32).
@@ -387,7 +386,7 @@ impl BufferSource for Buffer {
 /// as a zero-based buffer.
 ///
 /// This enables buffer pooling: allocate one large buffer and create views for
-/// each logical sub-allocation. Each view can be independently bound via push constants.
+/// each logical sub-allocation. Each view can be independently bound via resource slots.
 ///
 /// Dropping a `BufferView` unregisters its descriptor but does not free the parent's memory.
 pub struct BufferView {
@@ -422,25 +421,77 @@ impl BufferView {
     }
 
     /// Get the view's typed bindless handle for read-only structured-buffer
-    /// access (same as `goldy_dyn_buf_ro`, [`BindlessCategory::Scattered`]).
+    /// access (maps to `goldy_buf_ro`, [`BindlessCategory::Scattered`]).
     pub fn bindless_srv_handle(&self) -> Option<BindlessHandle> {
         self.bindless_srv_index()
             .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))
     }
 
     /// Get the handle of the backing buffer that owns this view's memory.
-    pub fn parent_handle(&self) -> BufferHandle {
+    pub(crate) fn parent_handle(&self) -> BufferHandle {
         self.parent_handle
     }
 
     /// Get the view's offset within the parent buffer in bytes.
-    pub fn offset(&self) -> u64 {
+    pub(crate) fn offset(&self) -> u64 {
         self.offset
     }
 
     /// Get the view size in bytes.
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Clear (zero-fill) a region within this view.
+    ///
+    /// `offset` is relative to the view's start. If `size` is 0, clears from
+    /// `offset` to the end of the view.
+    pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
+        let clear_size = if size == 0 {
+            self.size.saturating_sub(offset)
+        } else {
+            size
+        };
+        if offset + clear_size > self.size {
+            anyhow::bail!(
+                "BufferView::clear [{}, {}) exceeds view size {}",
+                offset,
+                offset + clear_size,
+                self.size
+            );
+        }
+        let mut backend = self.backend.lock().unwrap();
+        backend.clear_buffer(
+            device.handle,
+            self.parent_handle,
+            self.offset + offset,
+            clear_size,
+        )
+    }
+
+    /// Read this view's contents back to CPU memory.
+    ///
+    /// `output` must be exactly `self.size()` bytes. Reads only the view's
+    /// sub-region from the parent buffer.
+    pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
+        if output.len() as u64 != self.size {
+            anyhow::bail!(
+                "BufferView::read_to_cpu: output len {} != view size {}",
+                output.len(),
+                self.size
+            );
+        }
+        if self.size == 0 {
+            return Ok(());
+        }
+        let mut backend = self.backend.lock().unwrap();
+        let parent_size = backend.buffer_size(self.parent_handle);
+        let mut full = vec![0u8; parent_size as usize];
+        backend.read_buffer_to_cpu(device.handle, self.parent_handle, &mut full)?;
+        output.copy_from_slice(
+            &full[self.offset as usize..self.offset as usize + self.size as usize],
+        );
+        Ok(())
     }
 
     /// Write typed data into this view's region of the parent buffer.

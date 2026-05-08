@@ -6,40 +6,34 @@ import goldy_exp;
 static const uint GRID_WIDTH = 128;
 static const uint GRID_HEIGHT = 128;
 
-// Dynamic buffer selection for ping-pong pattern
-// Rust side: set_push_constants(&[read_buffer_slot, write_buffer_slot])
-#define CURRENT_STATE goldy_dyn_scattered<uint>(0)
-#define NEXT_STATE goldy_dyn_scattered<uint>(1)
-
-// Get cell state (1 = alive, 0 = dead)
-uint getCell(int x, int y) {
+uint getCell(Scattered<uint> state, int x, int y) {
     x = (x + GRID_WIDTH) % GRID_WIDTH;
     y = (y + GRID_HEIGHT) % GRID_HEIGHT;
-    return CURRENT_STATE[y * GRID_WIDTH + x];
+    return state[y * GRID_WIDTH + x];
 }
 
-// Count living neighbors
-uint countNeighbors(int x, int y) {
+uint countNeighbors(Scattered<uint> state, int x, int y) {
     uint count = 0;
-    count += getCell(x - 1, y - 1);
-    count += getCell(x,     y - 1);
-    count += getCell(x + 1, y - 1);
-    count += getCell(x - 1, y);
-    count += getCell(x + 1, y);
-    count += getCell(x - 1, y + 1);
-    count += getCell(x,     y + 1);
-    count += getCell(x + 1, y + 1);
+    count += getCell(state, x - 1, y - 1);
+    count += getCell(state, x,     y - 1);
+    count += getCell(state, x + 1, y - 1);
+    count += getCell(state, x - 1, y);
+    count += getCell(state, x + 1, y);
+    count += getCell(state, x - 1, y + 1);
+    count += getCell(state, x,     y + 1);
+    count += getCell(state, x + 1, y + 1);
     return count;
 }
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(8, 8, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
+void cs_main(Scattered<uint> CURRENT_STATE, Scattered<uint> NEXT_STATE,
+             ThreadId id) {
     if (id.x >= GRID_WIDTH || id.y >= GRID_HEIGHT) return;
     
     uint idx = id.y * GRID_WIDTH + id.x;
     uint cell = CURRENT_STATE[idx];
-    uint neighbors = countNeighbors(int(id.x), int(id.y));
+    uint neighbors = countNeighbors(CURRENT_STATE, int(id.x), int(id.y));
     
     // Conway's rules
     uint newState = 0;

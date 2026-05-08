@@ -2,7 +2,7 @@
  * Goldy C++ Example: Plasma
  *
  * Demonstrates bindless rendering with vertex-less fullscreen triangle:
- * - Using set_push_constants() to pass buffer indices to shaders
+ * - Using bind_resources() to pass buffer indices to shaders
  * - Time-based animation with uniform buffer updates
  * - No vertex buffer needed - geometry generated in vertex shader
  *
@@ -117,8 +117,8 @@ int main() {
             goldy::CommandEncoder encoder;
             encoder.clear(goldy::Color::black());
             encoder.set_pipeline(pipeline);
-            // Pass buffer indices via push constants
-            encoder.set_push_constants(uniform_buffer);
+            // Bind resource slots
+            encoder.bind_resources(uniform_buffer);
             // Vertex-less fullscreen triangle: 3 vertices, no vertex buffer
             encoder.draw(3);
 
