@@ -16,12 +16,10 @@ import numpy as np
 COMPUTE_SHADER = """
 import goldy_exp;
 
-#define DATA goldy_dyn_scattered<float>(0)
-
-[shader("compute")]
+[goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(uint3 id : SV_DispatchThreadID) {
-    DATA[id.x] = DATA[id.x] * 2.0;
+void cs_main(Scattered<float> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2.0;
 }
 """
 
