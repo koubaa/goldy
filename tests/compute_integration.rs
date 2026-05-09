@@ -1628,3 +1628,46 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
         );
     }
 }
+
+/// Headless compute: a buffer dropped after a standalone submit stays in the backend's
+/// deferred-destruction queue until `wait_until` sees the matching timeline value.
+#[test]
+fn headless_deferred_buffer_destroy_drains_after_timeline_wait() {
+    const MINIMAL_SHADER: &str = r#"
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+}
+"#;
+
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("compile");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.dispatch(1, 1, 1);
+    }
+    let tv = encoder.submit(&device).expect("submit");
+
+    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+
+    let pending_after_drop = {
+        drop(buf);
+        device.deferred_deletion_pending_count()
+    };
+    assert!(
+        pending_after_drop > 0,
+        "expected deferred deletion queue to retain GPU resources until the timeline catches up"
+    );
+
+    device.wait_until(tv).expect("wait_until");
+
+    assert_eq!(
+        device.deferred_deletion_pending_count(),
+        0,
+        "wait_until should drain deferred destruction for completed timeline values"
+    );
+}

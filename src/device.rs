@@ -416,6 +416,12 @@ impl Device {
         backend.wait_until_timeout(self.handle, value, timeout_ms)
     }
 
+    #[doc(hidden)]
+    pub fn deferred_deletion_pending_count(&self) -> usize {
+        let backend = self.backend.lock().unwrap();
+        backend.deferred_deletion_pending_count(self.handle)
+    }
+
     /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).
     pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
         let commands = graph.compile_commands();

@@ -968,15 +968,17 @@ pub(super) fn destroy(
                 .resource_registry
                 .unregister_texture(texture_handle);
 
-            logical_device
-                .deletion_queue
-                .queue(types::PendingDeletion::Texture {
+            let barrier = logical_device.timeline_next.saturating_sub(1);
+            logical_device.deletion_queue.queue(
+                barrier,
+                types::PendingDeletion::Texture {
                     image: texture.image,
                     view: texture.view,
                     memory: texture.memory,
                     staging_buffer: texture.staging_buffer,
                     staging_memory: texture.staging_memory,
-                });
+                },
+            );
         }
     }
 }

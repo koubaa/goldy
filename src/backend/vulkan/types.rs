@@ -14,6 +14,7 @@ use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
+use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::HashMap;
@@ -555,14 +556,13 @@ pub(crate) struct FrameSync {
     /// Device timeline value signaled for this frame slot's last queue submission
     /// (render or compute+present batch). Consumed when presenting.
     pub frame_timeline_value: Option<u64>,
-    /// Deferred compute CBs submitted as part of this frame slot's single
-    /// `vkQueueSubmit`.  Freed in `acquire()` after the frame's in_flight_fence
-    /// has been waited on.
+    /// Compute command buffers recorded in [`GpuBackend::end_frame`] and submitted
+    /// with the present-barrier batch in [`super::surface::present`].
     pub deferred_compute_cbs: Vec<vk::CommandBuffer>,
-    /// Tokens for deferred compute submits in this frame slot, so
-    /// `is_fence_complete` / `wait_fence` can treat them as complete once the
-    /// frame fence is reclaimed.
-    pub deferred_compute_tokens: Vec<u64>,
+    /// Texture upload staging for [`deferred_compute_cbs`], merged into
+    /// [`VulkanState::compute_texture_staging_pool`] under the frame's timeline
+    /// signal value at present time.
+    pub pending_compute_texture_staging: Vec<(vk::Buffer, vk::DeviceMemory)>,
     /// Surface texture handle whose VkImageView + bindless descriptor must stay
     /// alive until the GPU finishes this frame slot's work.  Unregistered in
     /// `acquire()` after `in_flight_fence` has been waited on.
@@ -614,7 +614,8 @@ pub(crate) struct PendingBuffer {
 }
 
 /// Resource pending deferred deletion.
-/// Resources are kept alive until the frame they were last used in completes.
+/// Resources are kept alive until the device timeline reaches the queued barrier
+/// ([`DeletionQueue::queue`]) — see [`crate::timeline`].
 #[allow(dead_code)]
 pub(crate) enum PendingDeletion {
     Buffer {
@@ -638,42 +639,32 @@ pub(crate) enum PendingDeletion {
 /// Deferred deletion queue for a device.
 /// Tracks resources waiting to be deleted after GPU work completes.
 pub(crate) struct DeletionQueue {
-    /// Resources pending deletion, tagged with the frame they were queued on
-    pub pending: Vec<(u64, PendingDeletion)>,
-    /// Current frame counter (incremented each present)
-    pub current_frame: u64,
+    /// Resources pending deletion, tagged with a [`TimelineValue`] barrier:
+    /// safe to destroy once `gpu_progress >= barrier`.
+    pub pending: Vec<(TimelineValue, PendingDeletion)>,
 }
 
 impl DeletionQueue {
     pub fn new() -> Self {
         Self {
             pending: Vec::new(),
-            current_frame: 0,
         }
     }
 
-    /// Queue a resource for deferred deletion
-    pub fn queue(&mut self, resource: PendingDeletion) {
-        self.pending.push((self.current_frame, resource));
+    /// Queue a resource for deferred deletion once the device timeline reaches `barrier`.
+    pub fn queue(&mut self, barrier: TimelineValue, resource: PendingDeletion) {
+        self.pending.push((barrier, resource));
     }
 
-    /// Advance the frame counter (called after present)
-    pub fn advance_frame(&mut self) {
-        self.current_frame += 1;
-    }
-
-    /// Process deletions for frames that have completed.
-    /// `completed_frame` is the frame number that has finished executing on the GPU.
-    pub fn process_deletions(&mut self, device: &ash::Device, completed_frame: u64) {
-        // Keep resources from frames that haven't completed yet
+    /// Drop resources whose barrier has been reached (`completed` is latest GPU timeline counter).
+    pub fn process_up_to(&mut self, device: &ash::Device, completed: TimelineValue) {
         let (to_delete, to_keep): (Vec<_>, Vec<_>) = self
             .pending
             .drain(..)
-            .partition(|(frame, _)| *frame <= completed_frame);
+            .partition(|(barrier, _)| *barrier <= completed);
 
         self.pending = to_keep;
 
-        // Delete resources from completed frames
         for (_, resource) in to_delete {
             unsafe {
                 match resource {
@@ -763,6 +754,18 @@ impl DeletionQueue {
     }
 }
 
+impl LogicalDevice {
+    /// Drop deferred resources for which the device timeline counter has caught up (non-blocking).
+    pub(crate) fn process_deletion_queue_up_to_gpu_progress(&mut self) {
+        let completed = unsafe {
+            self.device
+                .get_semaphore_counter_value(self.timeline_semaphore)
+                .unwrap_or(0)
+        };
+        self.deletion_queue.process_up_to(&self.device, completed);
+    }
+}
+
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
 pub(super) struct VulkanState {
@@ -792,28 +795,14 @@ pub(super) struct VulkanState {
     /// Per-submission fences for non-blocking compute; token -> (device, VkFence, Option<VkCommandBuffer>).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
     pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
-    /// Texture upload staging (VkBuffer/VkDeviceMemory) freed when the matching compute fence is collected.
-    pub compute_texture_staging_pool: HashMap<u64, Vec<(vk::Buffer, vk::DeviceMemory)>>,
-    pub next_compute_fence_token: u64,
+    /// Texture upload staging (VkBuffer/VkDeviceMemory) freed when the matching compute fence
+    /// or timeline reap runs. Keyed by `(device, timeline_or_fence_token)` so teardown can drain
+    /// per device and values from different devices never collide.
+    pub compute_texture_staging_pool:
+        HashMap<(DeviceHandle, u64), Vec<(vk::Buffer, vk::DeviceMemory)>>,
     /// Per-device staging belts for batched WriteBuffer uploads.
     pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
-    /// Compute command buffers deferred until present() so they can be batched
-    /// into a single vkQueueSubmit with the present-barrier CB.
-    pub deferred_compute: Vec<DeferredCompute>,
-    /// Tokens whose work is deferred or in-flight as part of a frame's single
-    /// submit.  Value is `None` while the CB is recorded but not yet submitted
-    /// (between `submit_compute` and `present`), and `Some(fence)` after
-    /// `present()` submits the batch.  `wait_fence` blocks on the fence;
-    /// `is_fence_complete` returns false when `None`, checks `get_fence_status`
-    /// when `Some`.  Entries are removed in `acquire()` after the fence has been
-    /// waited on.
-    pub deferred_pending_tokens: HashMap<u64, Option<vk::Fence>>,
     /// Command buffers to free once the device timeline reaches the given value
     /// (one submit may register multiple buffers at the same timeline point).
     pub timeline_cmd_buffers: HashMap<u64, Vec<(DeviceHandle, vk::CommandBuffer)>>,
-}
-
-pub(super) struct DeferredCompute {
-    pub cmd: vk::CommandBuffer,
-    pub token: u64,
 }

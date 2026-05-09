@@ -384,6 +384,10 @@ impl DeletionQueue {
         self.pending.retain(|(fv, _)| *fv > completed);
     }
 
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Flush all pending deletions unconditionally (device teardown).
     pub fn flush_all(&mut self) {
         self.pending.clear();

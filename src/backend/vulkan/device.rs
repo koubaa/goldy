@@ -85,6 +85,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     // dynamicRendering and synchronization2 are mandatory in 1.3+ (guaranteed by 1.4).
     // Descriptor indexing sub-features are still optional; we request them here.
     let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
+        // Device timeline semaphore (`VkSemaphoreType::TIMELINE`) for `gpu_progress` / deferred destroy.
+        .timeline_semaphore(true)
         .descriptor_binding_partially_bound(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
         .descriptor_binding_storage_buffer_update_after_bind(true)
@@ -402,17 +404,17 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 state
                     .samplers
                     .retain(|_, s| s.device_handle != device_handle);
-                let dropped_tokens: Vec<u64> = state
-                    .compute_fence_pool
-                    .iter()
-                    .filter(|(_, (dh, _, _))| *dh == device_handle)
-                    .map(|(t, _)| *t)
-                    .collect();
                 state
                     .compute_fence_pool
                     .retain(|_, (dh, _, _)| *dh != device_handle);
-                for t in dropped_tokens {
-                    state.compute_texture_staging_pool.remove(&t);
+                let staging_drop: Vec<(DeviceHandle, u64)> = state
+                    .compute_texture_staging_pool
+                    .keys()
+                    .filter(|(dh, _)| *dh == device_handle)
+                    .cloned()
+                    .collect();
+                for k in staging_drop {
+                    state.compute_texture_staging_pool.remove(&k);
                 }
                 logical_device.device.destroy_device(None);
                 return;
@@ -662,17 +664,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 }
             }
 
-            // Clean up any remaining deferred compute state.  CBs are freed
-            // implicitly when the command pool is destroyed; just drain the maps
-            // so staging resources get destroyed.
-            for d in state.deferred_compute.drain(..) {
-                if let Some(staging) = state.compute_texture_staging_pool.remove(&d.token) {
-                    super::texture::destroy_texture_staging_list(&logical_device, staging);
-                }
-            }
-            state.deferred_pending_tokens.clear();
-
-            // Drain any compute fences still in the pool for this device.
             // Tests (and async dispatch patterns) may leave signaled-but-uncollected
             // fences in the pool; they must be destroyed before vkDestroyDevice.
             let fence_tokens: Vec<u64> = state
@@ -690,8 +681,44 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     }
                     logical_device.device.destroy_fence(fence, None);
                 }
-                if let Some(staging) = state.compute_texture_staging_pool.remove(&tok) {
+                if let Some(staging) = state
+                    .compute_texture_staging_pool
+                    .remove(&(device_handle, tok))
+                {
                     super::texture::destroy_texture_staging_list(&logical_device, staging);
+                }
+            }
+
+            // Timeline-only compute/present may leave staging that was never tied to compute_fence_pool keys.
+            let staging_keys: Vec<(DeviceHandle, u64)> = state
+                .compute_texture_staging_pool
+                .keys()
+                .filter(|(dh, _)| *dh == device_handle)
+                .cloned()
+                .collect();
+            for key in staging_keys {
+                if let Some(staging) = state.compute_texture_staging_pool.remove(&key) {
+                    super::texture::destroy_texture_staging_list(&logical_device, staging);
+                }
+            }
+
+            // Free command buffers still registered on the timeline for this device.
+            let timeline_keys: Vec<u64> = state.timeline_cmd_buffers.keys().copied().collect();
+            for tk in timeline_keys {
+                if let Some(entries) = state.timeline_cmd_buffers.remove(&tk) {
+                    let mut reinsert = Vec::new();
+                    for (dh, cb) in entries {
+                        if dh == device_handle {
+                            logical_device
+                                .device
+                                .free_command_buffers(logical_device.command_pool, &[cb]);
+                        } else {
+                            reinsert.push((dh, cb));
+                        }
+                    }
+                    if !reinsert.is_empty() {
+                        state.timeline_cmd_buffers.insert(tk, reinsert);
+                    }
                 }
             }
 

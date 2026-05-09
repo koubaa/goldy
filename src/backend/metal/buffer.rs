@@ -179,6 +179,13 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
             device
                 .resource_registry
                 .unregister_buffer(buffer_handle, !gpu_idle);
+            let barrier = device.timeline_scheduled_max;
+            device.deletion_queue.queue(
+                barrier,
+                super::types::PendingDeletion::Buffer {
+                    buffer: buffer.buffer,
+                },
+            );
         }
     }
 }

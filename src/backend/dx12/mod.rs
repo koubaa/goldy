@@ -593,28 +593,24 @@ impl GpuBackend for Dx12Backend {
         surface::destroy(&mut self.state, surface_handle);
     }
 
-    fn surface_acquire(&mut self, surface_handle: SurfaceHandle) -> Result<SwapchainImageHandle> {
-        surface::acquire(&mut self.state, surface_handle)
-    }
-
-    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
-        surface::frame_texture(&self.state, surface)
-    }
-
-    fn surface_render(
+    fn begin_frame(
         &mut self,
         surface_handle: SurfaceHandle,
-        image: SwapchainImageHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
-        surface::render(&mut self.state, surface_handle, image, commands)
+    ) -> Result<(FrameToken, TextureHandle)> {
+        let image = surface::acquire(&mut self.state, surface_handle)?;
+        let tex = surface::frame_texture(&self.state, surface_handle)
+            .context("begin_frame: surface frame texture unavailable")?;
+        Ok((
+            FrameToken {
+                surface: surface_handle,
+                image,
+            },
+            tex,
+        ))
     }
-    fn surface_present(
-        &mut self,
-        surface_handle: SurfaceHandle,
-        image: SwapchainImageHandle,
-    ) -> Result<()> {
-        surface::present(&mut self.state, surface_handle, image)
+
+    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
+        surface::render(&mut self.state, frame.surface, frame.image, commands)
     }
 
     fn surface_resize(
@@ -665,7 +661,11 @@ impl GpuBackend for Dx12Backend {
             .context("Invalid device handle")?
             .fence
             .clone();
-        utils::wait_for_fence(&fence, value)
+        utils::wait_for_fence(&fence, value)?;
+        if let Some(dev) = self.state.devices.get_mut(&device_handle) {
+            dev.deletion_queue.process(&dev.fence);
+        }
+        Ok(())
     }
 
     fn wait_until_timeout(
@@ -681,7 +681,13 @@ impl GpuBackend for Dx12Backend {
             .context("Invalid device handle")?
             .fence
             .clone();
-        utils::wait_for_fence_timeout(&fence, value, timeout_ms)
+        let ok = utils::wait_for_fence_timeout(&fence, value, timeout_ms)?;
+        if ok {
+            if let Some(dev) = self.state.devices.get_mut(&device_handle) {
+                dev.deletion_queue.process(&dev.fence);
+            }
+        }
+        Ok(ok)
     }
 
     fn submit_standalone(
@@ -829,5 +835,13 @@ impl GpuBackend for Dx12Backend {
         if let Some(belt) = self.state.staging_belts.get_mut(&device_handle) {
             belt.trim();
         }
+    }
+
+    fn deferred_deletion_pending_count(&self, device_handle: DeviceHandle) -> usize {
+        self.state
+            .devices
+            .get(&device_handle)
+            .map(|d| d.deletion_queue.pending_len())
+            .unwrap_or(0)
     }
 }

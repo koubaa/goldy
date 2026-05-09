@@ -38,15 +38,12 @@ use super::utils::depth_format_to_mtl;
 use crate::types::{DepthFormat, PresentMode, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use block::ConcreteBlock;
 use cocoa::base::{id, nil, NO, YES};
 use core_graphics_types::geometry::CGSize;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 /// Create a surface for window presentation.
 /// When `depth_format` is `Some`, a depth buffer is created for 3D rendering.
@@ -237,6 +234,10 @@ pub(super) fn acquire(
     let surface_state = state.surfaces.get_mut(&surface).unwrap();
     surface_state.current_texture_handle = Some(tex_handle);
 
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.process_deletion_queue_up_to_signaled();
+    }
+
     Ok(surface_state.current_frame as u64)
 }
 
@@ -352,14 +353,31 @@ pub(super) fn present(
         .get(&surface)
         .context("Invalid surface handle")?;
 
+    let device_handle = surface_state.device_handle;
+
     let drawable_ptr = match surface_state.current_drawable {
         Some(d) => d,
         None => {
-            return Ok(state.timeline_completed.load(Ordering::Acquire));
+            let ld = state
+                .devices
+                .get_mut(&device_handle)
+                .context("Device no longer valid")?;
+            ld.process_deletion_queue_up_to_signaled();
+            return Ok(ld.timeline_event.as_ref().signaled_value());
         }
     };
     let tex_handle = surface_state.current_texture_handle;
-    let device_handle = surface_state.device_handle;
+
+    let signal_value = {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Device no longer valid")?;
+        let v = ld.timeline_next;
+        ld.timeline_next += 1;
+        ld.timeline_scheduled_max = ld.timeline_scheduled_max.max(v);
+        v
+    };
 
     let logical_device = state
         .devices
@@ -367,19 +385,7 @@ pub(super) fn present(
         .context("Device no longer valid")?;
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
-
-    let token = state
-        .next_compute_fence_token
-        .fetch_add(1, Ordering::SeqCst);
-    let timeline = Arc::clone(&state.timeline_completed);
-    let handler = ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
-        let status = cb.status();
-        if status == mtl::MTLCommandBufferStatus::Completed {
-            timeline.fetch_max(token, Ordering::SeqCst);
-        }
-    })
-    .copy();
-    command_buffer.add_completed_handler(&handler);
+    command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
 
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
@@ -401,9 +407,12 @@ pub(super) fn present(
     surface_state.current_drawable = None;
     surface_state.current_texture_handle = None;
 
-    Ok(token)
-}
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.process_deletion_queue_up_to_signaled();
+    }
 
+    Ok(signal_value)
+}
 pub(super) fn end_frame(
     state: &mut MetalState,
     frame: FrameToken,

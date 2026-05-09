@@ -247,10 +247,7 @@ impl VulkanBackend {
             slang_compiler,
             compute_fence_pool: HashMap::new(),
             compute_texture_staging_pool: HashMap::new(),
-            next_compute_fence_token: 1,
             staging_belts: HashMap::new(),
-            deferred_compute: Vec::new(),
-            deferred_pending_tokens: HashMap::new(),
             timeline_cmd_buffers: HashMap::new(),
         };
 
@@ -581,30 +578,31 @@ impl GpuBackend for VulkanBackend {
             &mut self.state.surfaces,
             &mut self.state.textures,
             surface_handle,
-            &mut self.state.deferred_pending_tokens,
-            &mut self.state.compute_texture_staging_pool,
         );
     }
 
-    fn surface_acquire(&mut self, surface_handle: SurfaceHandle) -> Result<SwapchainImageHandle> {
-        surface::acquire(&mut self.state, surface_handle)
-    }
-
-    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
-        surface::frame_texture(&self.state.surfaces, surface)
-    }
-
-    fn surface_render(
+    fn begin_frame(
         &mut self,
         surface_handle: SurfaceHandle,
-        _image: SwapchainImageHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
+    ) -> Result<(FrameToken, TextureHandle)> {
+        let image = surface::acquire(&mut self.state, surface_handle)?;
+        let tex = surface::frame_texture(&self.state.surfaces, surface_handle)
+            .context("begin_frame: surface frame texture unavailable")?;
+        Ok((
+            FrameToken {
+                surface: surface_handle,
+                image,
+            },
+            tex,
+        ))
+    }
+
+    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
         surface::render(
             &mut self.state.devices,
             &mut self.state.surfaces,
-            surface_handle,
-            _image,
+            frame.surface,
+            frame.image,
             commands,
             |cmd, cmds, logical_device, current_pipeline| {
                 render_commands::record(
@@ -617,14 +615,6 @@ impl GpuBackend for VulkanBackend {
                 )
             },
         )
-    }
-
-    fn surface_present(
-        &mut self,
-        surface_handle: SurfaceHandle,
-        _image: SwapchainImageHandle,
-    ) -> Result<()> {
-        surface::present(&mut self.state, surface_handle, _image).map(|_| ())
     }
 
     fn surface_resize(
@@ -914,6 +904,9 @@ impl GpuBackend for VulkanBackend {
             .values(std::slice::from_ref(&value));
         unsafe { dev.wait_semaphores(&wait, u64::MAX) }.context("wait_semaphores failed")?;
         compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+            ld.deletion_queue.process_up_to(&ld.device, value);
+        }
         Ok(())
     }
 
@@ -937,6 +930,9 @@ impl GpuBackend for VulkanBackend {
         match unsafe { dev.wait_semaphores(&wait, timeout_ns) } {
             Ok(()) => {
                 compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+                if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+                    ld.deletion_queue.process_up_to(&ld.device, value);
+                }
                 Ok(true)
             }
             Err(vk::Result::TIMEOUT) => Ok(false),
@@ -966,23 +962,6 @@ impl GpuBackend for VulkanBackend {
         surface::end_frame(&mut self.state, frame)
     }
 
-    fn is_fence_complete(&self, device_handle: DeviceHandle, token: FenceToken) -> bool {
-        compute::is_fence_complete(&self.state, device_handle, token)
-    }
-
-    fn wait_fence(&mut self, device_handle: DeviceHandle, token: FenceToken) -> Result<()> {
-        compute::wait_fence(&mut self.state, device_handle, token)
-    }
-
-    fn wait_fence_timeout(
-        &mut self,
-        device_handle: DeviceHandle,
-        token: FenceToken,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        compute::wait_fence_timeout(&mut self.state, device_handle, token, timeout_ms)
-    }
-
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
         if let (Some(logical_device), Some(belt)) = (
             self.state.devices.get(&device_handle),
@@ -990,5 +969,13 @@ impl GpuBackend for VulkanBackend {
         ) {
             unsafe { belt.trim(logical_device) };
         }
+    }
+
+    fn deferred_deletion_pending_count(&self, device_handle: DeviceHandle) -> usize {
+        self.state
+            .devices
+            .get(&device_handle)
+            .map(|d| d.deletion_queue.pending.len())
+            .unwrap_or(0)
     }
 }

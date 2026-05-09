@@ -2,8 +2,8 @@
 
 use super::super::DeviceHandle;
 use super::types::{
-    HeapAllocator, LogicalDevice, MetalState, ResourceRegistry, TextureHeapAllocator,
-    ARGUMENT_BUFFER_SIZE,
+    DeletionQueue, HeapAllocator, LogicalDevice, MetalState, ResourceRegistry,
+    TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
@@ -145,6 +145,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         device.name(),
     );
 
+    let timeline_event = device.new_shared_event();
+
     state.devices.insert(
         handle,
         LogicalDevice {
@@ -157,6 +159,10 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             texture_encoder,
             storage_image_encoder,
             resource_registry: ResourceRegistry::new(),
+            timeline_event,
+            timeline_next: 1,
+            timeline_scheduled_max: 0,
+            deletion_queue: DeletionQueue::new(),
         },
     );
 
@@ -165,7 +171,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
 
 /// Destroy a logical device and clean up resources owned by it.
 pub(super) fn destroy(state: &mut MetalState, device_handle: DeviceHandle) {
-    if state.devices.remove(&device_handle).is_some() {
+    if let Some(mut ld) = state.devices.remove(&device_handle) {
+        ld.deletion_queue.flush_all();
         state
             .buffers
             .retain(|_, b| b.device_handle != device_handle);

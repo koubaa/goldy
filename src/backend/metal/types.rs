@@ -14,18 +14,17 @@ use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
-use crate::backend::{DataAccess, FenceToken};
+use crate::backend::DataAccess;
+use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
     ArgumentEncoder, Buffer as MTLBuffer, CommandQueue,
     ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState,
     Device as MTLDevice, Heap, Library, MTLPrimitiveType, MTLResourceOptions, RenderPipelineState,
-    SamplerState, Texture as MTLTexture,
+    SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
 /// Maximum size of the argument buffer (supports up to 16K resources)
@@ -337,6 +336,45 @@ impl TextureHeapAllocator {
     }
 }
 
+/// GPU resource retained until [`TimelineValue`] completion on [`LogicalDevice::timeline_event`].
+pub(crate) enum PendingDeletion {
+    Buffer { buffer: MTLBuffer },
+    Texture { texture: MTLTexture },
+    Sampler { sampler: SamplerState },
+}
+
+pub(crate) struct DeletionQueue {
+    pending: Vec<(TimelineValue, PendingDeletion)>,
+}
+
+impl DeletionQueue {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn queue(&mut self, barrier: TimelineValue, resource: PendingDeletion) {
+        self.pending.push((barrier, resource));
+    }
+
+    /// Destroy resources whose `barrier` has been signaled by the GPU (`signaled_value >= barrier`).
+    pub fn process_up_to(&mut self, signaled: TimelineValue) {
+        let (done, rest): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|(b, _)| *b <= signaled);
+        self.pending = rest;
+        drop(done);
+    }
+
+    pub fn flush_all(&mut self) {
+        self.pending.clear();
+    }
+
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 /// A logical Metal device with associated resources.
 ///
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
@@ -359,6 +397,21 @@ pub(crate) struct LogicalDevice {
     pub storage_image_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
+    /// GPU timeline shared between standalone submits and surface presents.
+    pub timeline_event: SharedEvent,
+    /// Next [`TimelineValue`] assigned on submission (`timeline_next` follows successful commits).
+    pub timeline_next: u64,
+    /// Highest timeline value scheduled on the GPU queue for this device (used for idle / flush).
+    pub timeline_scheduled_max: u64,
+    /// Deferred GPU resource teardown until [`SharedEvent`] reaches the queued barrier.
+    pub deletion_queue: DeletionQueue,
+}
+
+impl LogicalDevice {
+    pub(crate) fn process_deletion_queue_up_to_signaled(&mut self) {
+        let signaled = self.timeline_event.as_ref().signaled_value();
+        self.deletion_queue.process_up_to(signaled);
+    }
 }
 
 /// Maximum resources per access pattern category (must match GOLDY_MAX_RESOURCES in shaders)
@@ -859,47 +912,9 @@ pub(crate) struct SurfaceState {
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
 
-/// Terminal status of a submitted command buffer, published by its Metal
-/// completion handler. `None` means the command buffer is still in flight.
-///
-/// Paired with [`FenceSignal::cv`] so waiters can block on a condvar instead
-/// of polling `MTLCommandBuffer::status()` at a fixed 1 ms cadence. On a
-/// GPU frame that finishes in e.g. 2.3 ms the poll loop wasted an average
-/// of ~0.5 ms of wall time per frame simply waiting for the next tick; the
-/// condvar wakes within microseconds of Metal's completion-handler callback
-/// firing. The polling path remains available as a bounded-timeout safety
-/// net (see [`super::compute::wait_fence`]) for a truly wedged GPU where
-/// the completion handler never fires.
-pub(super) struct FenceSignal {
-    pub done: Mutex<Option<mtl::MTLCommandBufferStatus>>,
-    pub cv: Condvar,
-}
-
-impl FenceSignal {
-    pub fn new() -> Self {
-        Self {
-            done: Mutex::new(None),
-            cv: Condvar::new(),
-        }
-    }
-}
-
-/// An in-flight command buffer tracked by the fence pool, bundled with the
-/// completion-signal primitive its handler writes to.
-pub(super) struct FenceEntry {
-    pub buffer: mtl::CommandBuffer,
-    pub signal: Arc<FenceSignal>,
-}
-
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
-    /// Monotonic timeline: max completed fence token (see compute `submit` / surface `present`).
-    pub timeline_completed: Arc<AtomicU64>,
-    /// Pool of in-flight compute command buffers for non-blocking submit.
-    /// Key: FenceToken. Removed when wait completes.
-    pub compute_fence_pool: Mutex<HashMap<FenceToken, FenceEntry>>,
-    pub next_compute_fence_token: AtomicU64,
     /// Set once any GPU wait has timed out (the GPU has wedged in a compute
     /// shader without the driver watchdog noticing). Subsequent waits fail
     /// fast instead of burning the full timeout budget per frame, letting

@@ -82,6 +82,13 @@ pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
     if let Some(sampler) = state.samplers.remove(&sampler_handle) {
         if let Some(device) = state.devices.get_mut(&sampler.device_handle) {
             device.resource_registry.unregister_sampler(sampler_handle);
+            let barrier = device.timeline_scheduled_max;
+            device.deletion_queue.queue(
+                barrier,
+                super::types::PendingDeletion::Sampler {
+                    sampler: sampler.sampler,
+                },
+            );
         }
     }
 }

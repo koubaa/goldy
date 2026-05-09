@@ -127,52 +127,72 @@ pub struct StructFieldLayout {
 impl StructLayout {
     /// Compare this Slang layout against Rust `size_of` / `offset_of!` / per-field `size_of`.
     ///
-    /// `rust_fields` must be in declaration order and use the same field names as Slang.
+    /// Validation rules:
+    /// - Every field declared in the shader must exist in the Rust struct with a matching name,
+    ///   byte offset, and size. A missing or mismatched shader field is a hard error.
+    /// - The Rust struct must be large enough to cover all shader-declared data (i.e. ≥ the last
+    ///   shader field's end byte). Tail padding added by constant-buffer alignment rules is *not*
+    ///   required to be present in the Rust struct.
+    /// - Extra Rust fields that have no counterpart in the shader are allowed (they are padding or
+    ///   bookkeeping). A warning is emitted for non-`_`-prefixed extras so genuine "forgot to add
+    ///   this field to the shader" mistakes are visible. Prefix with `_` to silence the warning.
     pub fn validate(&self, rust_size: usize, rust_fields: &[(&str, usize, usize)]) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
 
-        if self.size != rust_size {
+        // Data extent: the last byte actually declared by the shader (excludes CB tail padding).
+        let slang_data_extent = self
+            .fields
+            .iter()
+            .map(|f| f.offset + f.size)
+            .max()
+            .unwrap_or(0);
+
+        if rust_size < slang_data_extent {
             errors.push(format!(
-                "struct size: Slang {} bytes vs Rust {} bytes",
-                self.size, rust_size
+                "Rust struct ({rust_size} bytes) is smaller than the shader's data extent \
+                 ({slang_data_extent} bytes); all shader fields must fit inside the Rust struct"
             ));
         }
-        if self.fields.len() != rust_fields.len() {
-            errors.push(format!(
-                "field count: Slang {} vs Rust {}",
-                self.fields.len(),
-                rust_fields.len()
-            ));
-        }
 
-        for (i, &(name, rust_offset, rust_size_field)) in rust_fields.iter().enumerate() {
-            match self.fields.get(i) {
-                Some(sf) => {
-                    if sf.name != name {
-                        errors.push(format!(
-                            "field[{i}]: expected name `{name}`, Slang has `{}`",
-                            sf.name
-                        ));
-                    }
+        // Direction 1: every Slang field must exist in Rust with matching offset and size.
+        for sf in &self.fields {
+            match rust_fields.iter().find(|&&(name, _, _)| name == sf.name) {
+                Some(&(_, rust_offset, rust_size_field)) => {
                     if sf.offset != rust_offset {
                         errors.push(format!(
-                            "field `{name}`: offset Slang {} vs Rust {}",
-                            sf.offset, rust_offset
+                            "field `{}`: offset Slang {} vs Rust {}",
+                            sf.name, sf.offset, rust_offset
                         ));
                     }
                     if sf.size != rust_size_field {
                         errors.push(format!(
-                            "field `{name}`: size Slang {} vs Rust {}",
-                            sf.size, rust_size_field
+                            "field `{}`: size Slang {} vs Rust {}",
+                            sf.name, sf.size, rust_size_field
                         ));
                     }
                 }
                 None => {
                     errors.push(format!(
-                        "field[{i}] (`{name}`): missing in Slang reflection"
+                        "field `{}` is declared in the shader but missing from the Rust struct",
+                        sf.name
                     ));
                 }
             }
+        }
+
+        // Direction 2: Rust fields absent from the shader — warn for non-`_`-prefixed ones.
+        for &(name, _, _) in rust_fields {
+            if !self.fields.iter().any(|sf| sf.name == name) && !name.starts_with('_') {
+                warnings.push(format!(
+                    "field `{name}` is in the Rust struct but not in the shader \
+                     (prefix with `_` to suppress this warning)"
+                ));
+            }
+        }
+
+        if !warnings.is_empty() {
+            tracing::warn!("Layout check for `{}`: {}", self.name, warnings.join("; "));
         }
 
         if errors.is_empty() {

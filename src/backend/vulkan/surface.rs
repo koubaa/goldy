@@ -253,7 +253,7 @@ pub(super) fn create(
             render_pass_submitted: false,
             frame_timeline_value: None,
             deferred_compute_cbs: Vec::new(),
-            deferred_compute_tokens: Vec::new(),
+            pending_compute_texture_staging: Vec::new(),
             pending_surface_texture: None,
         });
     }
@@ -369,8 +369,6 @@ pub(super) fn destroy(
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
-    deferred_pending_tokens: &mut HashMap<u64, Option<vk::Fence>>,
-    compute_texture_staging_pool: &mut HashMap<u64, Vec<(vk::Buffer, vk::DeviceMemory)>>,
 ) {
     // Clean up any outstanding surface texture (current or deferred in frame slots)
     if let Some(tex_handle) = surfaces
@@ -396,19 +394,18 @@ pub(super) fn destroy(
                 // pending map BEFORE destroying the fences they reference.
                 for frame in &mut surface_state.frame_sync {
                     let deferred_cbs = std::mem::take(&mut frame.deferred_compute_cbs);
-                    let deferred_tokens = std::mem::take(&mut frame.deferred_compute_tokens);
+                    let pending_tex_staging =
+                        std::mem::take(&mut frame.pending_compute_texture_staging);
                     if !deferred_cbs.is_empty() {
                         logical_device
                             .device
                             .free_command_buffers(logical_device.command_pool, &deferred_cbs);
                     }
-                    for tok in &deferred_tokens {
-                        if let Some(staging) = compute_texture_staging_pool.remove(tok) {
-                            super::texture::destroy_texture_staging_list(logical_device, staging);
-                        }
-                    }
-                    for tok in deferred_tokens {
-                        deferred_pending_tokens.remove(&tok);
+                    if !pending_tex_staging.is_empty() {
+                        super::texture::destroy_texture_staging_list(
+                            logical_device,
+                            pending_tex_staging,
+                        );
                     }
                 }
 
@@ -537,36 +534,27 @@ pub(super) fn acquire(
             unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
         }
 
-        // Deferred compute command buffers are freed via timeline reap above; release
-        // per-token staging and pending maps for legacy fence/token bookkeeping.
-        let deferred_tokens =
-            std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_tokens);
+        // Deferred compute command buffers are freed via timeline reap above; clear
+        // any stray per-frame staging lists (present must have merged uploads into the pool).
+        let orphaned_tex_staging =
+            std::mem::take(&mut surface_state.frame_sync[cf].pending_compute_texture_staging);
         let _ = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
-        if let Some(ld) = state.devices.get(&device_handle) {
-            for tok in &deferred_tokens {
-                if let Some(staging) = state.compute_texture_staging_pool.remove(tok) {
-                    super::texture::destroy_texture_staging_list(ld, staging);
-                }
+        if !orphaned_tex_staging.is_empty() {
+            if let Some(ld) = state.devices.get(&device_handle) {
+                super::texture::destroy_texture_staging_list(ld, orphaned_tex_staging);
             }
-        }
-        for tok in deferred_tokens {
-            state.deferred_pending_tokens.remove(&tok);
         }
     }
 
-    // Process deferred deletions - resources from frames that have now completed
+    // Process deferred deletions: GPU timeline has reached `completed` after frame-fence wait.
     {
         let logical_device = state
             .devices
             .get_mut(&device_handle)
             .context("Surface's device is invalid")?;
-        let current_frame = logical_device.deletion_queue.current_frame;
-        if current_frame >= types::MAX_FRAMES_IN_FLIGHT as u64 {
-            let completed_frame = current_frame - types::MAX_FRAMES_IN_FLIGHT as u64;
-            logical_device
-                .deletion_queue
-                .process_deletions(&logical_device.device, completed_frame);
-        }
+        logical_device
+            .deletion_queue
+            .process_up_to(&logical_device.device, completed);
     }
 
     let logical_device = state
@@ -1223,12 +1211,19 @@ pub(super) fn present(
                 .context("Failed to end compute-present barrier command buffer")?;
         }
 
-        // Collect deferred compute CBs + the present-barrier CB into a single
+        // Collect frame-recorded compute CBs + the present-barrier CB into a single
         // vkQueueSubmit.  Within one submit, command buffers execute in array
         // order with full memory visibility from prior CBs' barriers, so the
         // release barrier in the compute CB makes writes visible to the layout
         // transition in the barrier CB.
-        let deferred = std::mem::take(&mut state.deferred_compute);
+        let deferred = {
+            let s = state.surfaces.get_mut(&surface_handle).unwrap();
+            std::mem::take(&mut s.frame_sync[current_frame].deferred_compute_cbs)
+        };
+        let pending_tex_upload_staging = {
+            let s = state.surfaces.get_mut(&surface_handle).unwrap();
+            std::mem::take(&mut s.frame_sync[current_frame].pending_compute_texture_staging)
+        };
         let signal_timeline_value = {
             let ld = state
                 .devices
@@ -1238,6 +1233,23 @@ pub(super) fn present(
             ld.timeline_next += 1;
             v
         };
+
+        if !deferred.is_empty() {
+            state
+                .staging_belts
+                .entry(device_handle)
+                .or_insert_with(|| {
+                    super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE)
+                })
+                .finish(signal_timeline_value);
+        }
+        if !pending_tex_upload_staging.is_empty() {
+            state.compute_texture_staging_pool.insert(
+                (device_handle, signal_timeline_value),
+                pending_tex_upload_staging,
+            );
+        }
+
         let timeline_sem = state
             .devices
             .get(&device_handle)
@@ -1246,7 +1258,8 @@ pub(super) fn present(
 
         let mut cmd_infos: Vec<vk::CommandBufferSubmitInfo> = deferred
             .iter()
-            .map(|d| vk::CommandBufferSubmitInfo::default().command_buffer(d.cmd))
+            .copied()
+            .map(|cb| vk::CommandBufferSubmitInfo::default().command_buffer(cb))
             .collect();
         cmd_infos.push(vk::CommandBufferSubmitInfo::default().command_buffer(barrier_cmd));
 
@@ -1289,28 +1302,17 @@ pub(super) fn present(
         }
         submit_result.context("Failed to submit compute+present")?;
 
-        for d in &deferred {
+        for cb in &deferred {
             state
                 .timeline_cmd_buffers
                 .entry(signal_timeline_value)
                 .or_default()
-                .push((device_handle, d.cmd));
+                .push((device_handle, *cb));
         }
 
-        // Tokens are still tracked so legacy `wait_fence` / staging can key off
-        // the deferred submission; command buffers are freed via timeline reap.
-        let the_fence = in_flight_fence_present;
-        for d in &deferred {
-            state
-                .deferred_pending_tokens
-                .insert(d.token, Some(the_fence));
-        }
         let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
         let fs = &mut surface_state_mut.frame_sync[current_frame];
         fs.frame_timeline_value = Some(signal_timeline_value);
-        for d in deferred {
-            fs.deferred_compute_tokens.push(d.token);
-        }
         fs.pending_surface_texture = pending_tex;
     } else if let Some(th) = pending_tex {
         // Render path: the graphics CB was already submitted by render() but
@@ -1350,11 +1352,6 @@ pub(super) fn present(
     let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
     surface_state.current_image_index = None;
     surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-
-    // Advance the deletion queue's frame counter
-    if let Some(device) = state.devices.get_mut(&device_handle) {
-        device.deletion_queue.advance_frame();
-    }
 
     // Handle suboptimal or out of date
     match result {

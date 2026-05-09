@@ -30,126 +30,60 @@ use super::*;
 use crate::{goldy_event, goldy_span};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use objc::{msg_send, sel, sel_impl};
 use types::MetalState;
 
-/// Returns `true` when every command buffer we've submitted has reached
-/// `MTLCommandBufferStatus::Completed`. Used by the destroy paths to decide
-/// whether a just-released bindless slot can be recycled immediately (GPU
-/// idle) or must park on the registry's pending list until the next
-/// `wait_fence()` confirms completion.
-///
-/// ## Why this exists
-///
-/// Metal argument buffers are CPU-writable GPU memory: each descriptor is a
-/// device pointer the shader dereferences at dispatch time. If the CPU
-/// overwrites slot N's descriptor while any in-flight command buffer still
-/// has a pending dispatch that will read slot N, the GPU reads the *new*
-/// descriptor and ends up pointing at the wrong buffer. Observationally this
-/// presents as:
-/// - Random glitches in parts of the scene that encode late (e.g. the
-///   stats/HUD overlay drawn after the main scene).
-/// - `MTLCommandBufferError::Internal` when the shader dereferences a pointer
-///   that isn't in the command buffer's residency set.
-///
-/// A conservative approximation — "if there's nothing in the fence pool, the
-/// GPU is idle" — isn't quite enough because `submit_graph` (non-blocking)
-/// leaves old fences in the pool until someone waits on them. Checking
-/// `status() == Completed` on each entry gives us an accurate snapshot.
+#[inline]
+fn shared_event_wait_reached(ev: &mtl::SharedEventRef, value: u64, timeout_ms: u64) -> bool {
+    unsafe { msg_send![ev, waitUntilSignaledValue: value timeoutMS: timeout_ms] }
+}
+
+/// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
-    let pool = state.compute_fence_pool.lock().unwrap();
-    pool.values().all(|entry| {
-        // Prefer the handler-published status to avoid a Metal call on the
-        // fast (already-done) path; fall back to the live `status()` read if
-        // the handler has not yet been dispatched.
-        if let Some(status) = *entry.signal.done.lock().unwrap() {
-            status == mtl::MTLCommandBufferStatus::Completed
-        } else {
-            entry.buffer.status() == mtl::MTLCommandBufferStatus::Completed
-        }
+    state.devices.values().all(|ld| {
+        ld.timeline_scheduled_max == 0
+            || ld.timeline_event.as_ref().signaled_value() >= ld.timeline_scheduled_max
     })
 }
 
 /// Move every entry in each device's pending-slot list to its free list.
 ///
-/// Called by the compute module after a successful `wait_fence()`: at that
-/// point we've established that all previously-submitted GPU work has
-/// completed, so any slot that was parked pending (because it was released
-/// while the GPU was still busy) is now safe to recycle.
+/// Called after [`GpuBackend::wait_until`] has confirmed GPU completion so slots
+/// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values_mut() {
         device.resource_registry.drain_pending_slots();
     }
 }
 
-/// Block until every command buffer in `compute_fence_pool` is `Completed`
-/// (or `Error`), then remove the drained entries so the pool doesn't keep
-/// growing across frames. Uses the same bounded-polling pattern as
-/// [`compute::wait_fence`] so a wedged GPU is reported as a timeout rather
-/// than hanging the caller forever.
-///
-/// Returns `Ok(())` if all in-flight work finished; bails if any command
-/// buffer ended in `Error` status (so an upstream failure isn't silently
-/// swallowed by a reset) or if the timeout budget is exhausted.
+/// Block until scheduled timeline values have been signaled on every device, or timeout.
 pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Result<()> {
     use std::sync::atomic::Ordering;
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
     }
-    // Snapshot (token, signal) pairs without holding the pool lock across a
-    // blocking wait — the completion handler also locks the pool briefly
-    // to drop itself, and we must not deadlock against it.
-    let entries: Vec<(super::FenceToken, std::sync::Arc<types::FenceSignal>)> = {
-        let pool = state.compute_fence_pool.lock().unwrap();
-        pool.iter().map(|(t, e)| (*t, e.signal.clone())).collect()
-    };
-    if entries.is_empty() {
-        return Ok(());
-    }
     let timeout = std::time::Duration::from_millis(5000);
-    let start = std::time::Instant::now();
-    for (token, signal) in entries {
-        let remaining = timeout.saturating_sub(start.elapsed());
-        if remaining.is_zero() {
-            state.device_lost.store(true, Ordering::Relaxed);
-            anyhow::bail!(
-                "GPU wait_all_in_flight timed out after {}ms",
-                timeout.as_millis()
-            );
+    let deadline = std::time::Instant::now() + timeout;
+    for ld in state.devices.values() {
+        let target = ld.timeline_scheduled_max;
+        if target == 0 {
+            continue;
         }
-        let status = {
-            let mut guard = signal.done.lock().unwrap();
-            loop {
-                if let Some(status) = *guard {
-                    break status;
-                }
-                let now_remaining = timeout.saturating_sub(start.elapsed());
-                if now_remaining.is_zero() {
-                    break mtl::MTLCommandBufferStatus::NotEnqueued;
-                }
-                let (g, result) = signal.cv.wait_timeout(guard, now_remaining).unwrap();
-                guard = g;
-                if result.timed_out() && guard.is_none() {
-                    break mtl::MTLCommandBufferStatus::NotEnqueued;
-                }
+        loop {
+            if ld.timeline_event.as_ref().signaled_value() >= target {
+                break;
             }
-        };
-        match status {
-            mtl::MTLCommandBufferStatus::Completed => {
-                state.compute_fence_pool.lock().unwrap().remove(&token);
-            }
-            mtl::MTLCommandBufferStatus::Error => {
-                state.compute_fence_pool.lock().unwrap().remove(&token);
-                anyhow::bail!("Metal command buffer errored while waiting for idle");
-            }
-            _ => {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
                 state.device_lost.store(true, Ordering::Relaxed);
                 anyhow::bail!(
-                    "GPU wait_all_in_flight timed out after {}ms (status={:?})",
-                    timeout.as_millis(),
-                    status
+                    "GPU wait_all_in_flight timed out after {}ms",
+                    timeout.as_millis()
                 );
+            }
+            let chunk_ms = remaining.as_millis().min(5000).max(1) as u64;
+            if shared_event_wait_reached(ld.timeline_event.as_ref(), target, chunk_ms) {
+                break;
             }
         }
     }
@@ -183,9 +117,6 @@ impl MetalBackend {
 
         Ok(Self {
             state: MetalState {
-                timeline_completed: Arc::new(AtomicU64::new(0)),
-                compute_fence_pool: std::sync::Mutex::new(std::collections::HashMap::new()),
-                next_compute_fence_token: std::sync::atomic::AtomicU64::new(1),
                 device_lost: std::sync::atomic::AtomicBool::new(false),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
@@ -524,29 +455,15 @@ impl GpuBackend for MetalBackend {
         surface::destroy(&mut self.state, surface);
     }
 
-    fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle> {
-        surface::acquire(&mut self.state, surface)
+    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
+        let image = surface::acquire(&mut self.state, surface)?;
+        let tex = surface::frame_texture(&self.state, surface)
+            .context("begin_frame: surface frame texture unavailable")?;
+        Ok((FrameToken { surface, image }, tex))
     }
 
-    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
-        surface::frame_texture(&self.state, surface)
-    }
-
-    fn surface_render(
-        &mut self,
-        surface: SurfaceHandle,
-        image: SwapchainImageHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
-        surface::render(&mut self.state, surface, image, commands)
-    }
-
-    fn surface_present(
-        &mut self,
-        surface: SurfaceHandle,
-        image: SwapchainImageHandle,
-    ) -> Result<()> {
-        surface::present(&mut self.state, surface, image).map(|_| ())
+    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
+        surface::render(&mut self.state, frame.surface, frame.image, commands)
     }
 
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
@@ -581,32 +498,55 @@ impl GpuBackend for MetalBackend {
         compute::create(&mut self.state, device, compute_shader)
     }
 
-    fn gpu_progress(&self, _device: DeviceHandle) -> crate::timeline::TimelineValue {
+    fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
         self.state
-            .timeline_completed
-            .load(std::sync::atomic::Ordering::Acquire)
+            .devices
+            .get(&device)
+            .map(|ld| ld.timeline_event.as_ref().signaled_value())
+            .unwrap_or(0)
     }
 
     fn wait_until(
         &mut self,
-        _device: DeviceHandle,
+        device: DeviceHandle,
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
+        use std::sync::atomic::Ordering;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-        while self.gpu_progress(_device) < value {
-            if self
-                .state
-                .device_lost
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
+        loop {
+            let signaled = {
+                let ld = self
+                    .state
+                    .devices
+                    .get(&device)
+                    .context("Invalid device handle")?;
+                ld.timeline_event.as_ref().signaled_value()
+            };
+            if signaled >= value {
+                if let Some(ld) = self.state.devices.get_mut(&device) {
+                    ld.process_deletion_queue_up_to_signaled();
+                }
+                drain_all_pending_slots(&mut self.state);
+                return Ok(());
+            }
+            if self.state.device_lost.load(Ordering::Relaxed) {
                 anyhow::bail!("Metal device lost");
             }
             if std::time::Instant::now() > deadline {
                 anyhow::bail!("wait_until exceeded 300s");
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            let chunk_ms = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+                .min(5000)
+                .max(1) as u64;
+            let ld = self
+                .state
+                .devices
+                .get(&device)
+                .context("Invalid device handle")?;
+            let _ = shared_event_wait_reached(ld.timeline_event.as_ref(), value, chunk_ms);
         }
-        Ok(())
     }
 
     fn wait_until_timeout(
@@ -615,22 +555,40 @@ impl GpuBackend for MetalBackend {
         value: crate::timeline::TimelineValue,
         timeout_ms: u32,
     ) -> Result<bool> {
+        use std::sync::atomic::Ordering;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
-        while self.gpu_progress(device) < value {
-            if self
-                .state
-                .device_lost
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
+        loop {
+            let signaled = {
+                let ld = self
+                    .state
+                    .devices
+                    .get(&device)
+                    .context("Invalid device handle")?;
+                ld.timeline_event.as_ref().signaled_value()
+            };
+            if signaled >= value {
+                if let Some(ld) = self.state.devices.get_mut(&device) {
+                    ld.process_deletion_queue_up_to_signaled();
+                }
+                drain_all_pending_slots(&mut self.state);
+                return Ok(true);
+            }
+            if self.state.device_lost.load(Ordering::Relaxed) {
                 anyhow::bail!("Metal device lost");
             }
-            if std::time::Instant::now() > deadline {
+            let now = std::time::Instant::now();
+            if now > deadline {
                 return Ok(false);
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            let chunk_ms = deadline.saturating_duration_since(now).as_millis().max(1) as u64;
+            let ld = self
+                .state
+                .devices
+                .get(&device)
+                .context("Invalid device handle")?;
+            let _ = shared_event_wait_reached(ld.timeline_event.as_ref(), value, chunk_ms);
         }
-        Ok(true)
     }
 
     fn submit_standalone(
@@ -659,33 +617,6 @@ impl GpuBackend for MetalBackend {
         compute::destroy(&mut self.state, pipeline);
     }
 
-    fn wait_fence(&mut self, device: DeviceHandle, token: super::FenceToken) -> Result<()> {
-        let result = compute::wait_fence(&self.state, device, token);
-        // Drain pending bindless slots regardless of success or error.
-        //
-        // A faulted command buffer (kIOGPUCommandBufferCallbackErrorPageFault or
-        // similar) has *terminated* — its argument-buffer descriptors are no longer
-        // live — so it is safe to recycle every pending slot even when `wait_fence`
-        // returns `Err`.  Skipping this on the error path keeps slots locked in
-        // `pending_free_*` permanently, starving subsequent frames of slots and
-        // leading to the "storage-buffer bindless slots exhausted (64 max)" panic.
-        drain_all_pending_slots(&mut self.state);
-        result
-    }
-
-    fn wait_fence_timeout(
-        &mut self,
-        device: DeviceHandle,
-        token: super::FenceToken,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        let signaled = compute::wait_fence_timeout(&self.state, device, token, timeout_ms)?;
-        if signaled {
-            drain_all_pending_slots(&mut self.state);
-        }
-        Ok(signaled)
-    }
-
     fn reset_buffer_heaps(&mut self, device: DeviceHandle) {
         // Safety: dropping the old primary heap and clearing overflow heaps
         // is only sound once every command buffer that allocated buffers from
@@ -702,6 +633,14 @@ impl GpuBackend for MetalBackend {
         if let Some(logical_device) = self.state.devices.get_mut(&device) {
             logical_device.heap_allocator.reset_for_frame();
         }
+    }
+
+    fn deferred_deletion_pending_count(&self, device: DeviceHandle) -> usize {
+        self.state
+            .devices
+            .get(&device)
+            .map(|d| d.deletion_queue.pending_len())
+            .unwrap_or(0)
     }
 }
 
