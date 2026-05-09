@@ -7,7 +7,7 @@
 mod common;
 
 use goldy::{
-    types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
+    types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
     Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
     ShaderModule, Texture,
 };
@@ -239,6 +239,22 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
+/// True when the default host process is using the Vulkan backend (e.g. Linux CI).  
+/// On Windows with DX12 as default, returns false so we do not spawn a Vulkan-only subprocess.
+#[cfg(feature = "vulkan")]
+fn vk_api_validation_active_backend_is_vulkan() -> bool {
+    let Ok(instance) = Instance::new() else {
+        return false;
+    };
+    let Ok(device) = instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+    else {
+        return false;
+    };
+    device.backend_type() == BackendType::Vulkan
+}
+
 /// Re-run this integration test binary in a subprocess with Vulkan validation enabled.
 /// Parent process skips GPU work (avoids validation overhead + layer state on the shared harness).
 #[cfg(feature = "vulkan")]
@@ -267,6 +283,9 @@ fn run_in_subprocess_with_vk_validation(test_name: &str) {
 #[cfg(feature = "vulkan")]
 fn vk_api_validation_timeline_semaphore() {
     if std::env::var("GOLDY_SUBPROC").is_err() {
+        if !vk_api_validation_active_backend_is_vulkan() {
+            return;
+        }
         run_in_subprocess_with_vk_validation("vk_api_validation_timeline_semaphore");
         return;
     }
@@ -299,6 +318,9 @@ fn vk_api_validation_timeline_semaphore() {
 #[cfg(feature = "vulkan")]
 fn vk_api_validation_two_device_teardown() {
     if std::env::var("GOLDY_SUBPROC").is_err() {
+        if !vk_api_validation_active_backend_is_vulkan() {
+            return;
+        }
         run_in_subprocess_with_vk_validation("vk_api_validation_two_device_teardown");
         return;
     }

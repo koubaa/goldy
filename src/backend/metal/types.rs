@@ -337,6 +337,8 @@ impl TextureHeapAllocator {
 }
 
 /// GPU resource retained until [`TimelineValue`] completion on [`LogicalDevice::timeline_event`].
+/// Variant payloads are only held so `Drop` runs after the GPU barrier; nothing reads them.
+#[allow(dead_code)]
 pub(crate) enum PendingDeletion {
     Buffer { buffer: MTLBuffer },
     Texture { texture: MTLTexture },

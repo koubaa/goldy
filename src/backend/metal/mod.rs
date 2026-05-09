@@ -81,7 +81,7 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
                     timeout.as_millis()
                 );
             }
-            let chunk_ms = remaining.as_millis().min(5000).max(1) as u64;
+            let chunk_ms = remaining.as_millis().clamp(1, 5000) as u64;
             if shared_event_wait_reached(ld.timeline_event.as_ref(), target, chunk_ms) {
                 break;
             }
@@ -538,8 +538,7 @@ impl GpuBackend for MetalBackend {
             let chunk_ms = deadline
                 .saturating_duration_since(std::time::Instant::now())
                 .as_millis()
-                .min(5000)
-                .max(1) as u64;
+                .clamp(1, 5000) as u64;
             let ld = self
                 .state
                 .devices
