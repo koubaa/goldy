@@ -8,6 +8,7 @@ use super::types::{
     TOTAL_PUSH_BYTES,
 };
 use crate::slang::SlangStage;
+use crate::timeline::TimelineValue;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLCommandBufferStatus, MTLOrigin, MTLSize};
@@ -516,7 +517,7 @@ pub(super) fn submit(
     state: &mut MetalState,
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
-) -> Result<u64> {
+) -> Result<TimelineValue> {
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
     }

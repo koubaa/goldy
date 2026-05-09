@@ -5,7 +5,8 @@ use super::shader;
 use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
 use super::{ComputePipelineHandle, DeviceHandle, ShaderHandle};
-use crate::backend::{FenceToken, GpuCommand};
+use crate::backend::GpuCommand;
+use crate::timeline::TimelineValue;
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
@@ -137,7 +138,7 @@ pub(super) fn submit(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
-) -> Result<FenceToken> {
+) -> Result<TimelineValue> {
     let (allocator, fence_value, slot_idx) = {
         let logical_device = state
             .devices
@@ -752,7 +753,7 @@ pub(super) fn submit(
 pub(super) fn is_fence_complete(
     state: &Dx12State,
     device_handle: DeviceHandle,
-    token: FenceToken,
+    token: TimelineValue,
 ) -> bool {
     let logical_device = match state.devices.get(&device_handle) {
         Some(dev) => dev,
@@ -766,7 +767,7 @@ pub(super) fn is_fence_complete(
 pub(super) fn wait_fence(
     state: &Dx12State,
     device_handle: DeviceHandle,
-    token: FenceToken,
+    token: TimelineValue,
 ) -> Result<()> {
     let logical_device = state
         .devices
@@ -788,7 +789,7 @@ pub(super) fn wait_fence(
 pub(super) fn wait_fence_timeout(
     state: &Dx12State,
     device_handle: DeviceHandle,
-    token: FenceToken,
+    token: TimelineValue,
     timeout_ms: u32,
 ) -> Result<bool> {
     let logical_device = state

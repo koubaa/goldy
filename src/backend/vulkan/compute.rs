@@ -3,7 +3,8 @@
 use super::staging;
 use super::types::{self, ComputePipelineState, LogicalDevice, PushLayout};
 use super::{ComputePipelineHandle, DeviceHandle, SurfaceHandle};
-use crate::backend::{FenceToken, GpuCommand};
+use crate::backend::GpuCommand;
+use crate::timeline::TimelineValue;
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -153,7 +154,7 @@ pub(super) fn submit(
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
     defer_to_present_for_surface: Option<SurfaceHandle>,
-) -> Result<FenceToken> {
+) -> Result<TimelineValue> {
     // Reap any previously-submitted fences that have already signaled. Keeps
     // the pool bounded when callers (ekrano) don't wait on every intermediate submit.
     // Belt before reap: need live VkFence handles to poll completion.

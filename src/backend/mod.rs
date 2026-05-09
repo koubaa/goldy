@@ -141,9 +141,6 @@ pub type SwapchainImageHandle = u64;
 pub type TextureHandle = u64;
 pub type SamplerHandle = u64;
 
-/// Legacy fence token for internal submissions (same numeric space as [`crate::timeline::TimelineValue`] on DX12).
-pub(crate) type FenceToken = u64;
-
 /// Opaque token tying surface work to an acquired swapchain frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameToken {
