@@ -3,7 +3,7 @@
 use super::super::DeviceHandle;
 use super::types::{
     DeletionQueue, HeapAllocator, LogicalDevice, MetalState, ResourceRegistry,
-    TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
+    TextureHeapAllocator, TimelineWaiter, ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
@@ -146,6 +146,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     );
 
     let timeline_event = device.new_shared_event();
+    let timeline_waiter = TimelineWaiter::new();
 
     state.devices.insert(
         handle,
@@ -160,6 +161,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             storage_image_encoder,
             resource_registry: ResourceRegistry::new(),
             timeline_event,
+            timeline_waiter,
             timeline_next: 1,
             timeline_scheduled_max: 0,
             deletion_queue: DeletionQueue::new(),

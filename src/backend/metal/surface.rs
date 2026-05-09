@@ -387,6 +387,13 @@ pub(super) fn present(
     let command_buffer = logical_device.command_queue.new_command_buffer();
     command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
 
+    let waiter = logical_device.timeline_waiter.clone();
+    let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+        waiter.signal(signal_value);
+    })
+    .copy();
+    command_buffer.add_completed_handler(&handler);
+
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
     command_buffer.present_drawable(drawable_ref);

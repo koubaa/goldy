@@ -28,15 +28,8 @@ mod utils;
 
 use super::*;
 use crate::{goldy_event, goldy_span};
-use ::metal as mtl;
 use anyhow::{Context, Result};
-use objc::{msg_send, sel, sel_impl};
 use types::MetalState;
-
-#[inline]
-fn shared_event_wait_reached(ev: &mtl::SharedEventRef, value: u64, timeout_ms: u64) -> bool {
-    unsafe { msg_send![ev, waitUntilSignaledValue: value timeoutMS: timeout_ms] }
-}
 
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
@@ -63,28 +56,17 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
         anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
     }
     let timeout = std::time::Duration::from_millis(5000);
-    let deadline = std::time::Instant::now() + timeout;
     for ld in state.devices.values() {
         let target = ld.timeline_scheduled_max;
         if target == 0 {
             continue;
         }
-        loop {
-            if ld.timeline_event.as_ref().signaled_value() >= target {
-                break;
-            }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                state.device_lost.store(true, Ordering::Relaxed);
-                anyhow::bail!(
-                    "GPU wait_all_in_flight timed out after {}ms",
-                    timeout.as_millis()
-                );
-            }
-            let chunk_ms = remaining.as_millis().clamp(1, 5000) as u64;
-            if shared_event_wait_reached(ld.timeline_event.as_ref(), target, chunk_ms) {
-                break;
-            }
+        if !ld.timeline_waiter.wait_until(target, timeout) {
+            state.device_lost.store(true, Ordering::Relaxed);
+            anyhow::bail!(
+                "GPU wait_all_in_flight timed out after {}ms",
+                timeout.as_millis()
+            );
         }
     }
     Ok(())
@@ -512,40 +494,32 @@ impl GpuBackend for MetalBackend {
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-        loop {
-            let signaled = {
-                let ld = self
-                    .state
-                    .devices
-                    .get(&device)
-                    .context("Invalid device handle")?;
-                ld.timeline_event.as_ref().signaled_value()
-            };
-            if signaled >= value {
-                if let Some(ld) = self.state.devices.get_mut(&device) {
-                    ld.process_deletion_queue_up_to_signaled();
-                }
-                drain_all_pending_slots(&mut self.state);
-                return Ok(());
-            }
+
+        if self.state.device_lost.load(Ordering::Relaxed) {
+            anyhow::bail!("Metal device lost");
+        }
+
+        let waiter = self
+            .state
+            .devices
+            .get(&device)
+            .context("Invalid device handle")?
+            .timeline_waiter
+            .clone();
+
+        let timeout = std::time::Duration::from_secs(300);
+        if !waiter.wait_until(value, timeout) {
             if self.state.device_lost.load(Ordering::Relaxed) {
                 anyhow::bail!("Metal device lost");
             }
-            if std::time::Instant::now() > deadline {
-                anyhow::bail!("wait_until exceeded 300s");
-            }
-            let chunk_ms = deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_millis()
-                .clamp(1, 5000) as u64;
-            let ld = self
-                .state
-                .devices
-                .get(&device)
-                .context("Invalid device handle")?;
-            let _ = shared_event_wait_reached(ld.timeline_event.as_ref(), value, chunk_ms);
+            anyhow::bail!("wait_until exceeded 300s");
         }
+
+        if let Some(ld) = self.state.devices.get_mut(&device) {
+            ld.process_deletion_queue_up_to_signaled();
+        }
+        drain_all_pending_slots(&mut self.state);
+        Ok(())
     }
 
     fn wait_until_timeout(
@@ -555,39 +529,32 @@ impl GpuBackend for MetalBackend {
         timeout_ms: u32,
     ) -> Result<bool> {
         use std::sync::atomic::Ordering;
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
-        loop {
-            let signaled = {
-                let ld = self
-                    .state
-                    .devices
-                    .get(&device)
-                    .context("Invalid device handle")?;
-                ld.timeline_event.as_ref().signaled_value()
-            };
-            if signaled >= value {
-                if let Some(ld) = self.state.devices.get_mut(&device) {
-                    ld.process_deletion_queue_up_to_signaled();
-                }
-                drain_all_pending_slots(&mut self.state);
-                return Ok(true);
-            }
+
+        if self.state.device_lost.load(Ordering::Relaxed) {
+            anyhow::bail!("Metal device lost");
+        }
+
+        let waiter = self
+            .state
+            .devices
+            .get(&device)
+            .context("Invalid device handle")?
+            .timeline_waiter
+            .clone();
+
+        let timeout = std::time::Duration::from_millis(u64::from(timeout_ms));
+        if !waiter.wait_until(value, timeout) {
             if self.state.device_lost.load(Ordering::Relaxed) {
                 anyhow::bail!("Metal device lost");
             }
-            let now = std::time::Instant::now();
-            if now > deadline {
-                return Ok(false);
-            }
-            let chunk_ms = deadline.saturating_duration_since(now).as_millis().max(1) as u64;
-            let ld = self
-                .state
-                .devices
-                .get(&device)
-                .context("Invalid device handle")?;
-            let _ = shared_event_wait_reached(ld.timeline_event.as_ref(), value, chunk_ms);
+            return Ok(false);
         }
+
+        if let Some(ld) = self.state.devices.get_mut(&device) {
+            ld.process_deletion_queue_up_to_signaled();
+        }
+        drain_all_pending_slots(&mut self.state);
+        Ok(true)
     }
 
     fn submit_standalone(

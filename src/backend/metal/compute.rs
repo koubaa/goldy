@@ -550,6 +550,13 @@ pub(super) fn submit(
         v
     };
 
+    let waiter = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .timeline_waiter
+        .clone();
+
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {
@@ -561,6 +568,7 @@ pub(super) fn submit(
                 description
             );
         }
+        waiter.signal(signal_value);
     })
     .copy();
     command_buffer_ref.add_completed_handler(&handler);

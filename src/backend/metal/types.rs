@@ -18,6 +18,7 @@ use crate::backend::DataAccess;
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::HashMap;
+use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
@@ -377,6 +378,59 @@ impl DeletionQueue {
     }
 }
 
+/// CPU-side waiter for GPU timeline completion, driven by `notifyListener:atValue:block:`.
+///
+/// The inner `Mutex<u64>` tracks the highest timeline value confirmed complete by the GPU.
+/// The `Condvar` is signaled from the Metal shared-event listener callback so that
+/// `wait_until` can sleep with zero polling overhead.
+#[derive(Clone)]
+pub(crate) struct TimelineWaiter {
+    inner: Arc<(Mutex<u64>, Condvar)>,
+}
+
+impl TimelineWaiter {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new((Mutex::new(0), Condvar::new())),
+        }
+    }
+
+    /// Called from the `notifyListener` block when the GPU signals a timeline value.
+    pub fn signal(&self, value: u64) {
+        let (lock, cvar) = &*self.inner;
+        let mut signaled = lock.lock().unwrap();
+        if value > *signaled {
+            *signaled = value;
+        }
+        cvar.notify_all();
+    }
+
+    /// Block until the signaled value reaches at least `target`, or timeout.
+    /// Returns `Ok(true)` if reached, `Ok(false)` on timeout.
+    pub fn wait_until(&self, target: u64, timeout: std::time::Duration) -> bool {
+        let (lock, cvar) = &*self.inner;
+        let mut signaled = lock.lock().unwrap();
+        if *signaled >= target {
+            return true;
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return *signaled >= target;
+            }
+            let (guard, result) = cvar.wait_timeout(signaled, remaining).unwrap();
+            signaled = guard;
+            if *signaled >= target {
+                return true;
+            }
+            if result.timed_out() {
+                return *signaled >= target;
+            }
+        }
+    }
+}
+
 /// A logical Metal device with associated resources.
 ///
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
@@ -401,6 +455,8 @@ pub(crate) struct LogicalDevice {
     pub resource_registry: ResourceRegistry,
     /// GPU timeline shared between standalone submits and surface presents.
     pub timeline_event: SharedEvent,
+    /// Event-driven waiter for GPU timeline completion (replaces poll loop).
+    pub timeline_waiter: TimelineWaiter,
     /// Next [`TimelineValue`] assigned on submission (`timeline_next` follows successful commits).
     pub timeline_next: u64,
     /// Highest timeline value scheduled on the GPU queue for this device (used for idle / flush).
