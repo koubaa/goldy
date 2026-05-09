@@ -71,9 +71,7 @@ impl PushLayout {
     /// `PushLayout` is `#[repr(C)]` with a static size assertion (`TOTAL_PUSH_BYTES`),
     /// so the cast is well-defined with no padding surprises.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(self as *const _ as *const u8, TOTAL_PUSH_BYTES)
-        }
+        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, TOTAL_PUSH_BYTES) }
     }
 }
 
@@ -260,6 +258,9 @@ pub(crate) struct TextureHeapAllocator {
     device: MTLDevice,
     primary: Heap,
     overflow: Vec<Heap>,
+    /// Recorded for telemetry / future heap resize decisions.
+    /// Not read in production paths; suppress dead_code since
+    /// it exists for observability, not active logic.
     #[allow(dead_code)]
     primary_size: u64,
     texture_count: u32,
@@ -351,7 +352,10 @@ impl TextureHeapAllocator {
 }
 
 /// GPU resource retained until [`TimelineValue`] completion on [`LogicalDevice::timeline_event`].
-/// Variant payloads are only held so `Drop` runs after the GPU barrier; nothing reads them.
+///
+/// Variant payloads are held **only for their `Drop` impl** — once the GPU signals the
+/// timeline value, `DeletionQueue::drain` removes the variant so the MTL object is released.
+/// Nothing reads the inner fields; `#[allow(dead_code)]` is intentional.
 #[allow(dead_code)]
 pub(crate) enum PendingDeletion {
     Buffer { buffer: MTLBuffer },
@@ -941,7 +945,10 @@ pub(crate) struct TextureState {
 /// GPU sampler state.
 pub(crate) struct SamplerState_ {
     pub device_handle: DeviceHandle,
-    /// Held so the GPU sampler stays resident while its ID is in the argument buffer.
+    /// Held so the GPU sampler stays resident in memory while its resource ID is
+    /// encoded in the argument buffer. The field is never read after construction;
+    /// `#[allow(dead_code)]` is intentional — dropping it early would invalidate
+    /// the GPU-side binding.
     #[allow(dead_code)]
     pub sampler: SamplerState,
     /// Index in the global argument buffer (always present).
@@ -979,7 +986,12 @@ pub(crate) struct SurfaceState {
     pub frame_pending_gpu_commands: Vec<crate::backend::GpuCommand>,
 }
 
-// Safety: Metal objects are thread-safe when properly synchronized
+// SAFETY: `SurfaceState` contains raw pointers to a `CALayer` and `CAMetalDrawable`.
+// These Metal objects are reference-counted by Objective-C and are themselves thread-safe
+// for retain/release. All mutation (acquire, present, destroy) is serialised through the
+// `MetalBackend` mutex (`backend.lock()` in every GpuBackend method), so no two threads
+// can access these pointers concurrently. Callers must uphold this invariant — do not
+// share `SurfaceState` directly across threads without the backend lock.
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
 

@@ -12,6 +12,10 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 
 /// Create a graphics pipeline (with optional depth stencil).
+///
+/// The argument count mirrors the Vulkan and DX12 backends for cross-backend navigability.
+/// If this function is ever refactored to a `PipelineDesc` struct, update all three backends
+/// simultaneously to keep the API surface consistent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_with_depth(
     state: &mut MetalState,

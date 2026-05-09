@@ -52,7 +52,10 @@ pub(super) fn create(
         DEFAULT_WORKGROUP
     });
 
-    let library = shader.compute_library.as_ref().expect("compute library must be compiled before pipeline creation");
+    let library = shader
+        .compute_library
+        .as_ref()
+        .expect("compute library must be compiled before pipeline creation");
 
     let function = library
         .get_function("cs_main", None)
@@ -190,11 +193,13 @@ fn record_commands_to_buffer(
                     }
                 }
                 let layout_bytes = layout.as_bytes();
-                encoder.expect("encoder must be set after ensure_compute!()").set_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        layout_bytes.len() as u64,
+                        layout_bytes.as_ptr() as *const _,
+                    );
             }
             GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
@@ -215,11 +220,13 @@ fn record_commands_to_buffer(
                     layout.user[i] = val;
                 }
                 let layout_bytes = layout.as_bytes();
-                encoder.expect("encoder must be set after ensure_compute!()").set_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        layout_bytes.len() as u64,
+                        layout_bytes.as_ptr() as *const _,
+                    );
             }
             GpuCommand::BindResourcesTyped { handles } => {
                 ensure_compute!();
@@ -238,11 +245,13 @@ fn record_commands_to_buffer(
                     layout.bindless[i] = handle.index() as u16;
                 }
                 let layout_bytes = layout.as_bytes();
-                encoder.expect("encoder must be set after ensure_compute!()").set_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        layout_bytes.len() as u64,
+                        layout_bytes.as_ptr() as *const _,
+                    );
             }
             GpuCommand::Dispatch {
                 workgroups_x,
@@ -287,11 +296,9 @@ fn record_commands_to_buffer(
                     height: pipeline.workgroup_size[1] as u64,
                     depth: pipeline.workgroup_size[2] as u64,
                 };
-                encoder.expect("encoder must be set after ensure_compute!()").dispatch_thread_groups_indirect(
-                    &buf_state.buffer,
-                    *offset,
-                    threads_per_group,
-                );
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
             }
             GpuCommand::Barrier => {
                 if let Some(enc) = encoder {

@@ -3,6 +3,13 @@
 //! The acquire/render/present cycle is decoupled:
 //! - `acquire()` calls `nextDrawable` and registers the drawable's texture for bindless access
 //! - `frame_texture()` returns the registered texture handle
+//!
+//! ## Deprecation note
+//! This file uses `cocoa::base::id`, `NSRect`, and related types from the
+//! `cocoa`/`objc` 0.2.x ecosystem, which are deprecated in favour of the
+//! `objc2` crate. Migration is deferred until the `metal` and `cocoa` crates
+//! offer stable `objc2`-compatible bindings for `CAMetalLayer`.
+#![allow(deprecated)]
 //! - `render()` uses the already-acquired drawable (does NOT call `nextDrawable` again)
 //! - `present()` presents the drawable and unregisters the temporary texture
 //!

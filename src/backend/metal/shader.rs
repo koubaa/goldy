@@ -96,7 +96,12 @@ pub(super) fn parse_numthreads(source: &str) -> Option<[u32; 3]> {
 }
 
 /// Compile a shader stage to MSL and create a Metal library.
-#[allow(clippy::too_many_arguments)] // Mirrors Slang compile API surface.
+///
+/// The argument count reflects the Slang compile API surface: each parameter
+/// maps to a distinct compile-time concept (source, search paths, entry point,
+/// stage, defines, layout checks, optimization). Grouping them into a struct
+/// would require the same change in the Vulkan and DX12 backends.
+#[allow(clippy::too_many_arguments)]
 fn compile_stage_with_reflection(
     slang_compiler: &SlangCompiler,
     device: &MTLDevice,
@@ -256,6 +261,8 @@ pub(super) fn ensure_stage_compiled(
         SlangStage::Vertex => shader.vertex_library = Some(library),
         SlangStage::Fragment => shader.fragment_library = Some(library),
         SlangStage::Compute => shader.compute_library = Some(library),
+        // `stage` was validated by `validate_stage` (called from `ensure_stage_compiled`)
+        // to be Vertex, Fragment, or Compute before we reach this point.
         _ => unreachable!("stage already validated above"),
     }
     if shader.reflection.is_none() {

@@ -220,9 +220,9 @@ pub(super) fn create_render_pass<'a>(
     color_attachment.set_store_action(mtl::MTLStoreAction::Store);
 
     if let Some(depth) = depth_texture {
-        let depth_attachment = descriptor
-            .depth_attachment()
-            .expect("Metal render pass descriptor must have a depth attachment when depth texture is set");
+        let depth_attachment = descriptor.depth_attachment().expect(
+            "Metal render pass descriptor must have a depth attachment when depth texture is set",
+        );
         depth_attachment.set_texture(Some(depth));
         if let Some(depth_value) = clear_depth {
             depth_attachment.set_load_action(mtl::MTLLoadAction::Clear);

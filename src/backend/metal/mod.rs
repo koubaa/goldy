@@ -11,8 +11,6 @@
 //! - `types`: Internal state structs
 //! - `utils`: Format conversion and helpers
 
-#![allow(deprecated)]
-
 mod buffer;
 mod compute;
 mod device;
@@ -134,7 +132,6 @@ impl Drop for MetalBackend {
     }
 }
 
-#[allow(clippy::manual_find)]
 impl GpuBackend for MetalBackend {
     fn backend_type(&self) -> BackendType {
         BackendType::Metal

@@ -31,7 +31,12 @@ pub fn format_to_mtl(format: TextureFormat) -> MTLPixelFormat {
 pub fn depth_format_to_mtl(format: DepthFormat) -> MTLPixelFormat {
     match format {
         DepthFormat::Depth16Unorm => MTLPixelFormat::Depth16Unorm,
-        DepthFormat::Depth24Plus => MTLPixelFormat::Depth32Float, // macOS doesn't have 24-bit, use 32
+        // CROSS-BACKEND: Metal on macOS has no 24-bit depth format; Depth24Plus is
+        // promoted to Depth32Float (32-bit). This means depth precision is higher on
+        // Metal than on Vulkan/DX12 where 24-bit native formats exist. Code that
+        // assumes identical depth precision across backends should use Depth32Float
+        // explicitly instead of relying on Depth24Plus.
+        DepthFormat::Depth24Plus => MTLPixelFormat::Depth32Float,
         DepthFormat::Depth24PlusStencil8 => MTLPixelFormat::Depth32Float_Stencil8,
         DepthFormat::Depth32Float => MTLPixelFormat::Depth32Float,
         DepthFormat::Depth32FloatStencil8 => MTLPixelFormat::Depth32Float_Stencil8,
