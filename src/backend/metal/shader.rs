@@ -249,7 +249,9 @@ pub(super) fn ensure_stage_compiled(
         optimization_level,
     )?;
 
-    let shader = shaders.get_mut(&shader_handle).unwrap();
+    let shader = shaders
+        .get_mut(&shader_handle)
+        .expect("shader handle must be valid after ensure_stage_compiled");
     match stage {
         SlangStage::Vertex => shader.vertex_library = Some(library),
         SlangStage::Fragment => shader.fragment_library = Some(library),

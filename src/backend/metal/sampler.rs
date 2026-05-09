@@ -6,6 +6,11 @@ use super::utils::{address_mode_to_mtl, compare_to_mtl, filter_to_mtl, mipmap_mo
 use ::metal as mtl;
 use anyhow::{Context, Result};
 
+/// Size in bytes of a single GPU resource ID entry in the argument buffer.
+/// Each sampler is encoded as one `MTLResourceID` value which is 8 bytes on all
+/// Apple Silicon and Intel platforms.
+const GPU_RESOURCE_ID_BYTES: u64 = 8;
+
 /// Create a sampler.
 pub(super) fn create(
     state: &mut MetalState,
@@ -47,8 +52,8 @@ pub(super) fn create(
         encoding_index
     );
 
-    let offset = (encoding_index as u64) * 8;
-    if offset + 8 <= ARGUMENT_BUFFER_SIZE {
+    let offset = (encoding_index as u64) * GPU_RESOURCE_ID_BYTES;
+    if offset + GPU_RESOURCE_ID_BYTES <= ARGUMENT_BUFFER_SIZE {
         let gpu_id = sampler.gpu_resource_id();
         unsafe {
             let ptr = logical_device
@@ -61,6 +66,13 @@ pub(super) fn create(
             "Encoded sampler {} GPU ID at arg buffer offset {}",
             handle,
             offset
+        );
+    } else {
+        tracing::error!(
+            "Sampler {handle}: argument buffer overflow — \
+             offset {offset} + GPU_RESOURCE_ID_BYTES {GPU_RESOURCE_ID_BYTES} \
+             exceeds ARGUMENT_BUFFER_SIZE {ARGUMENT_BUFFER_SIZE}; \
+             sampler will not be encoded and shaders may see a stale binding"
         );
     }
 

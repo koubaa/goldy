@@ -64,6 +64,19 @@ pub struct PushLayout {
 
 const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
 
+impl PushLayout {
+    /// Reinterpret the layout as a raw byte slice suitable for Metal's `set_bytes`.
+    ///
+    /// # Safety
+    /// `PushLayout` is `#[repr(C)]` with a static size assertion (`TOTAL_PUSH_BYTES`),
+    /// so the cast is well-defined with no padding surprises.
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(self as *const _ as *const u8, TOTAL_PUSH_BYTES)
+        }
+    }
+}
+
 /// Minimum primary heap size (64 MB).
 const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 

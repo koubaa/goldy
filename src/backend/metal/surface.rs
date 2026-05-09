@@ -231,7 +231,10 @@ pub(super) fn acquire(
         bindless_slot,
     )?;
 
-    let surface_state = state.surfaces.get_mut(&surface).unwrap();
+    let surface_state = state
+        .surfaces
+        .get_mut(&surface)
+        .expect("surface must be registered before acquiring a frame");
     surface_state.current_texture_handle = Some(tex_handle);
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
@@ -410,7 +413,10 @@ pub(super) fn present(
     }
 
     // Clear the drawable state
-    let surface_state = state.surfaces.get_mut(&surface).unwrap();
+    let surface_state = state
+        .surfaces
+        .get_mut(&surface)
+        .expect("surface must be registered before presenting a frame");
     surface_state.current_drawable = None;
     surface_state.current_texture_handle = None;
 
@@ -541,7 +547,7 @@ pub(super) fn format(state: &MetalState, surface: SurfaceHandle) -> TextureForma
         .surfaces
         .get(&surface)
         .map(|s| s.format)
-        .unwrap_or(TextureFormat::Bgra8Unorm)
+        .unwrap_or(TextureFormat::Rgba8Unorm)
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +608,13 @@ fn register_surface_texture(
             logical_device
                 .storage_image_encoder
                 .set_texture(0, texture_owned.as_ref());
+        } else {
+            tracing::error!(
+                "register_surface_texture: argument buffer overflow — \
+                 offset {offset} + encoded_length {encoded_length} exceeds \
+                 ARGUMENT_BUFFER_SIZE {ARGUMENT_BUFFER_SIZE}; \
+                 drawable will not be encoded and compute shaders may see a stale binding"
+            );
         }
 
         global
