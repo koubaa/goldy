@@ -623,7 +623,7 @@ impl GpuBackend for MockBackend {
         self.surfaces.remove(&surface);
     }
 
-    fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle> {
+    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
         let surf = self
             .surfaces
             .get_mut(&surface)
@@ -633,7 +633,6 @@ impl GpuBackend for MockBackend {
         surf.next_image += 1;
         surf.pending_frame_compute.clear();
 
-        // Create a mock texture for the surface frame
         let tex_handle = self.next_texture_handle;
         self.next_texture_handle += 1;
         let bindless_index = self.next_bindless_index;
@@ -656,45 +655,15 @@ impl GpuBackend for MockBackend {
             },
         );
 
-        Ok(image)
+        Ok((FrameToken { surface, image }, tex_handle))
     }
 
-    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle> {
-        self.surfaces
-            .get(&surface)
-            .and_then(|s| s.current_texture_handle)
-    }
-
-    fn surface_render(
-        &mut self,
-        surface: SurfaceHandle,
-        _image: SwapchainImageHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
-        if !self.surfaces.contains_key(&surface) {
+    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
+        if !self.surfaces.contains_key(&frame.surface) {
             anyhow::bail!("Invalid surface handle");
         }
 
         self.recorded_commands.push(commands.to_vec());
-        Ok(())
-    }
-
-    fn surface_present(
-        &mut self,
-        surface: SurfaceHandle,
-        _image: SwapchainImageHandle,
-    ) -> Result<()> {
-        let surf = self
-            .surfaces
-            .get_mut(&surface)
-            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
-
-        // Clean up the transient surface texture
-        if let Some(tex_handle) = surf.current_texture_handle.take() {
-            self.textures.remove(&tex_handle);
-        }
-
-        self.surface_present_count += 1;
         Ok(())
     }
 
@@ -981,7 +950,14 @@ impl GpuBackend for MockBackend {
             self.compute_dispatch_count += 1;
         }
 
-        self.surface_present(frame.surface, frame.image)?;
+        let surf = self
+            .surfaces
+            .get_mut(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
+        if let Some(tex_handle) = surf.current_texture_handle.take() {
+            self.textures.remove(&tex_handle);
+        }
+        self.surface_present_count += 1;
 
         let next = self.device_timeline_next.entry(device).or_insert(0);
         *next += 1;

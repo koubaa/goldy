@@ -21,7 +21,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// Uniform buffer data — name and fields must match `struct TimeUniforms` in `shaders/checkerboard.slang`.
+/// Uniform buffer data — fields must match `struct TimeUniforms` in `shaders/checkerboard.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, LayoutCheckable)]
 struct TimeUniforms {

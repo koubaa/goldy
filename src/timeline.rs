@@ -4,7 +4,15 @@
 //! [`TimelineValue`] that the GPU signals when that work finishes. Use
 //! [`crate::Device::gpu_progress`] to query completion without blocking, and
 //! [`crate::Device::wait_until`] / [`crate::Device::wait_until_timeout`] to block.
+//!
+//! ## Resource lifetime vs the timeline
+//!
+//! Destroying a [`crate::Buffer`], [`crate::Texture`], or similar may be **deferred** on GPU
+//! backends: the handle becomes invalid immediately, but underlying GPU memory may be kept
+//! alive until all work **already submitted** before the destroy has finished (the same
+//! conservative rule as tagging with the latest scheduled timeline point). If you record
+//! commands that use a resource and destroy it **before** submitting that recording, the
+//! implementation cannot always detect the hazard — submit (or bracket a frame) before
+//! dropping resources that must outlive those commands.
 
-/// Monotonic completion handle returned from [`crate::Device::submit`],
-/// [`crate::surface::Frame::present`], and related APIs.
 pub type TimelineValue = u64;

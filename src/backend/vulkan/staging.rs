@@ -60,23 +60,18 @@ impl StagingBelt {
     /// `completed_timeline` is the current device timeline counter (from
     /// `vkGetSemaphoreCounterValue`).  Chunks tagged with timeline-semaphore values
     /// (i.e. tokens ≤ `completed_timeline`) are safe to recycle because the GPU has
-    /// executed past them.  Chunks tagged with fence-pool tokens (used by the legacy
-    /// deferred-compute path) are recycled only once the corresponding `VkFence` signals.
+    /// executed past them.  Chunks tagged with fence-pool tokens are recycled only
+    /// once the corresponding `VkFence` signals (if any remain in the pool).
     pub fn reclaim(
         &mut self,
         compute_fence_pool: &HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
         devices: &HashMap<DeviceHandle, LogicalDevice>,
-        deferred_pending_tokens: &HashMap<u64, Option<vk::Fence>>,
         completed_timeline: u64,
     ) -> Result<()> {
         let mut i = 0;
         while i < self.in_flight.len() {
             let (token, _) = &self.in_flight[i];
-            let done = if deferred_pending_tokens.contains_key(token) {
-                // Still waiting for a deferred-present fence — not done yet.
-                false
-            } else if let Some((device_handle, fence, _)) = compute_fence_pool.get(token) {
-                // Legacy fence-pool token (deferred compute path).
+            let done = if let Some((device_handle, fence, _)) = compute_fence_pool.get(token) {
                 let logical_device = devices
                     .get(device_handle)
                     .context("StagingBelt::reclaim: device missing")?;

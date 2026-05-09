@@ -277,13 +277,17 @@ pub(super) fn destroy(
                         );
                     }
                 }
-                // Queue for deferred deletion - the buffer may still be in use by in-flight commands
-                device.deletion_queue.queue(types::PendingDeletion::Buffer {
-                    buffer: buffer.buffer,
-                    memory: buffer.memory,
-                    staging_buffer: buffer.staging_buffer,
-                    staging_memory: buffer.staging_memory,
-                });
+                // Queue for deferred deletion - the buffer may still be in use by in-flight commands.
+                let barrier = device.timeline_next.saturating_sub(1);
+                device.deletion_queue.queue(
+                    barrier,
+                    types::PendingDeletion::Buffer {
+                        buffer: buffer.buffer,
+                        memory: buffer.memory,
+                        staging_buffer: buffer.staging_buffer,
+                        staging_memory: buffer.staging_memory,
+                    },
+                );
             }
         }
     }

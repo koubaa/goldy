@@ -127,52 +127,72 @@ pub struct StructFieldLayout {
 impl StructLayout {
     /// Compare this Slang layout against Rust `size_of` / `offset_of!` / per-field `size_of`.
     ///
-    /// `rust_fields` must be in declaration order and use the same field names as Slang.
+    /// Validation rules:
+    /// - Every field declared in the shader must exist in the Rust struct with a matching name,
+    ///   byte offset, and size. A missing or mismatched shader field is a hard error.
+    /// - The Rust struct must be large enough to cover all shader-declared data (i.e. ≥ the last
+    ///   shader field's end byte). Tail padding added by constant-buffer alignment rules is *not*
+    ///   required to be present in the Rust struct.
+    /// - Extra Rust fields that have no counterpart in the shader are allowed (they are padding or
+    ///   bookkeeping). A warning is emitted for non-`_`-prefixed extras so genuine "forgot to add
+    ///   this field to the shader" mistakes are visible. Prefix with `_` to silence the warning.
     pub fn validate(&self, rust_size: usize, rust_fields: &[(&str, usize, usize)]) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
 
-        if self.size != rust_size {
+        // Data extent: the last byte actually declared by the shader (excludes CB tail padding).
+        let slang_data_extent = self
+            .fields
+            .iter()
+            .map(|f| f.offset + f.size)
+            .max()
+            .unwrap_or(0);
+
+        if rust_size < slang_data_extent {
             errors.push(format!(
-                "struct size: Slang {} bytes vs Rust {} bytes",
-                self.size, rust_size
+                "Rust struct ({rust_size} bytes) is smaller than the shader's data extent \
+                 ({slang_data_extent} bytes); all shader fields must fit inside the Rust struct"
             ));
         }
-        if self.fields.len() != rust_fields.len() {
-            errors.push(format!(
-                "field count: Slang {} vs Rust {}",
-                self.fields.len(),
-                rust_fields.len()
-            ));
-        }
 
-        for (i, &(name, rust_offset, rust_size_field)) in rust_fields.iter().enumerate() {
-            match self.fields.get(i) {
-                Some(sf) => {
-                    if sf.name != name {
-                        errors.push(format!(
-                            "field[{i}]: expected name `{name}`, Slang has `{}`",
-                            sf.name
-                        ));
-                    }
+        // Direction 1: every Slang field must exist in Rust with matching offset and size.
+        for sf in &self.fields {
+            match rust_fields.iter().find(|&&(name, _, _)| name == sf.name) {
+                Some(&(_, rust_offset, rust_size_field)) => {
                     if sf.offset != rust_offset {
                         errors.push(format!(
-                            "field `{name}`: offset Slang {} vs Rust {}",
-                            sf.offset, rust_offset
+                            "field `{}`: offset Slang {} vs Rust {}",
+                            sf.name, sf.offset, rust_offset
                         ));
                     }
                     if sf.size != rust_size_field {
                         errors.push(format!(
-                            "field `{name}`: size Slang {} vs Rust {}",
-                            sf.size, rust_size_field
+                            "field `{}`: size Slang {} vs Rust {}",
+                            sf.name, sf.size, rust_size_field
                         ));
                     }
                 }
                 None => {
                     errors.push(format!(
-                        "field[{i}] (`{name}`): missing in Slang reflection"
+                        "field `{}` is declared in the shader but missing from the Rust struct",
+                        sf.name
                     ));
                 }
             }
+        }
+
+        // Direction 2: Rust fields absent from the shader — warn for non-`_`-prefixed ones.
+        for &(name, _, _) in rust_fields {
+            if !self.fields.iter().any(|sf| sf.name == name) && !name.starts_with('_') {
+                warnings.push(format!(
+                    "field `{name}` is in the Rust struct but not in the shader \
+                     (prefix with `_` to suppress this warning)"
+                ));
+            }
+        }
+
+        if !warnings.is_empty() {
+            tracing::warn!("Layout check for `{}`: {}", self.name, warnings.join("; "));
         }
 
         if errors.is_empty() {
@@ -1137,6 +1157,90 @@ mod struct_layout_validate_tests {
         }
     }
 
+    /// Slang CB layout: total size padded to 16 with one `float` field (GPU tail padding).
+    fn layout_time_only_cb_padded() -> StructLayout {
+        StructLayout {
+            name: "TimeUniforms".into(),
+            size: 16,
+            alignment: 16,
+            fields: vec![StructFieldLayout {
+                name: "time".into(),
+                offset: 0,
+                size: 4,
+                type_name: "float".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn validate_cb_padded_single_field_passes() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize)];
+        slang
+            .validate(4, &rust_fields)
+            .expect("Rust 4-byte struct should cover Slang data extent");
+    }
+
+    #[test]
+    fn validate_shader_field_missing_from_rust_errors() {
+        let slang = StructLayout {
+            name: "U".into(),
+            size: 8,
+            alignment: 4,
+            fields: vec![
+                StructFieldLayout {
+                    name: "time".into(),
+                    offset: 0,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+                StructFieldLayout {
+                    name: "brightness".into(),
+                    offset: 4,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+            ],
+        };
+        let rust_fields = [("time", 0usize, 4usize)];
+        let err = slang.validate(4, &rust_fields).unwrap_err();
+        let s = err.to_string();
+        assert!(
+            s.contains("brightness") && s.contains("missing"),
+            "expected missing-field error, got: {s}"
+        );
+    }
+
+    #[test]
+    fn validate_rust_too_small_for_data_extent_errors() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize)];
+        let err = slang.validate(2, &rust_fields).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("smaller than the shader's data extent"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_extra_rust_field_without_underscore_passes() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize), ("brightness", 4usize, 4usize)];
+        slang
+            .validate(8, &rust_fields)
+            .expect("extra Rust field is not an error");
+    }
+
+    #[test]
+    fn validate_extra_rust_field_with_underscore_passes() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize), ("_pad0", 4usize, 4usize)];
+        slang
+            .validate(8, &rust_fields)
+            .expect("_prefixed extra field is silent");
+    }
+
     #[test]
     fn validate_ok_when_matching() {
         two_float_layout()
@@ -1145,16 +1249,32 @@ mod struct_layout_validate_tests {
     }
 
     #[test]
-    fn validate_err_on_struct_size_mismatch() {
+    fn validate_does_not_require_rust_struct_to_match_slang_cb_padding() {
+        // Slang total `size` can be 16 due to cbuffer rules; Rust only needs to cover data bytes.
         let mut layout = two_float_layout();
         layout.size = 16;
-        let err = layout
+        layout
             .validate(8, &[("a", 0, 4), ("b", 4, 4)])
+            .expect("Slang padded size must not force Rust to pad");
+    }
+
+    #[test]
+    fn validate_err_on_field_count_mismatch() {
+        let err = two_float_layout()
+            .validate(8, &[("a", 0, 4)])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("size"), "expected size mismatch: {err}");
-        assert!(err.contains("16"), "expected Slang size 16: {err}");
-        assert!(err.contains("8"), "expected Rust size 8: {err}");
+        assert!(
+            err.contains("`b`") && err.contains("missing"),
+            "expected shader field b missing in Rust: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_extra_rust_fields_not_in_shader() {
+        two_float_layout()
+            .validate(12, &[("a", 0, 4), ("b", 4, 4), ("c", 8, 4)])
+            .expect("extra Rust-only field should not fail validation");
     }
 
     #[test]
@@ -1185,45 +1305,27 @@ mod struct_layout_validate_tests {
             .validate(8, &[("x", 0, 4), ("b", 4, 4)])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("`x`"), "expected name x in message: {err}");
-        assert!(err.contains("`a`"), "expected name a in message: {err}");
-    }
-
-    #[test]
-    fn validate_err_on_field_count_mismatch() {
-        let err = two_float_layout()
-            .validate(8, &[("a", 0, 4)])
-            .unwrap_err()
-            .to_string();
         assert!(
-            err.contains("field count"),
-            "expected field count mismatch: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_err_on_extra_rust_fields() {
-        let err = two_float_layout()
-            .validate(8, &[("a", 0, 4), ("b", 4, 4), ("c", 8, 4)])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("field count") || err.contains("missing"),
-            "expected field count or missing field error: {err}"
+            err.contains("`a`") && err.contains("missing"),
+            "expected shader field `a` missing from Rust (got `x` instead): {err}"
         );
     }
 
     #[test]
     fn validate_reports_multiple_errors() {
-        let mut layout = two_float_layout();
-        layout.size = 16;
-        let err = layout
-            .validate(8, &[("x", 0, 4), ("b", 0, 4)])
+        // Only `a` in Rust, wrong offset — missing `b` and offset error for `a`.
+        let err = two_float_layout()
+            .validate(8, &[("a", 4, 4)])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("size"), "expected size error: {err}");
-        assert!(err.contains("`x`"), "expected name error: {err}");
-        assert!(err.contains("offset"), "expected offset error: {err}");
+        assert!(
+            err.contains("offset") && err.contains("`a`"),
+            "expected offset error for a: {err}"
+        );
+        assert!(
+            err.contains("`b`") && err.contains("missing"),
+            "expected missing b: {err}"
+        );
     }
 
     #[test]

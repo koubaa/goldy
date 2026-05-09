@@ -38,7 +38,7 @@ use crate::types::{
     DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess,
     TextureFlags, TextureFormat, VertexBufferLayout,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
 /// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
@@ -140,9 +140,6 @@ pub type SurfaceHandle = u64;
 pub type SwapchainImageHandle = u64;
 pub type TextureHandle = u64;
 pub type SamplerHandle = u64;
-
-/// Legacy fence token for internal submissions (same numeric space as [`crate::timeline::TimelineValue`] on DX12).
-pub(crate) type FenceToken = u64;
 
 /// Opaque token tying surface work to an acquired swapchain frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -503,34 +500,6 @@ pub trait GpuBackend: Send + Sync {
     /// Destroy a surface.
     fn destroy_surface(&mut self, surface: SurfaceHandle);
 
-    /// Acquire the next swapchain image to render to.
-    ///
-    /// After acquire, the frame's texture is available via [`GpuBackend::surface_frame_texture`].
-    fn surface_acquire(&mut self, surface: SurfaceHandle) -> Result<SwapchainImageHandle>;
-
-    /// Get the texture handle for the currently acquired surface frame.
-    ///
-    /// Returns `None` if no frame is currently acquired (i.e. `surface_acquire`
-    /// has not been called or `surface_present` has already been called).
-    /// The returned texture is registered in the bindless descriptor set and
-    /// can be used with compute or render passes.
-    fn surface_frame_texture(&self, surface: SurfaceHandle) -> Option<TextureHandle>;
-
-    /// Render commands to a swapchain image.
-    fn surface_render(
-        &mut self,
-        surface: SurfaceHandle,
-        image: SwapchainImageHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()>;
-
-    /// Present a swapchain image to the screen.
-    fn surface_present(
-        &mut self,
-        surface: SurfaceHandle,
-        image: SwapchainImageHandle,
-    ) -> Result<()>;
-
     /// Resize the surface (recreates swapchain).
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()>;
 
@@ -556,7 +525,7 @@ pub trait GpuBackend: Send + Sync {
         PresentMode::Auto
     }
 
-    // --- Timeline + explicit frame bracket (preferred API) ---
+    // --- Timeline + explicit frame bracket ---
 
     /// Latest GPU completion point on this device's timeline (`value` is done when
     /// `gpu_progress() >= value`).
@@ -583,17 +552,9 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<crate::timeline::TimelineValue>;
 
     /// Acquire the next swapchain image and begin a frame bracket.
-    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
-        let image = self.surface_acquire(surface)?;
-        let tex = self
-            .surface_frame_texture(surface)
-            .context("begin_frame: surface frame texture unavailable")?;
-        Ok((FrameToken { surface, image }, tex))
-    }
+    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)>;
 
-    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
-        self.surface_render(frame.surface, frame.image, commands)
-    }
+    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()>;
 
     /// Record GPU work that must be ordered with the active surface frame (e.g. compute into the swapchain).
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()>;
@@ -619,39 +580,16 @@ pub trait GpuBackend: Send + Sync {
         self.wait_until(device, v)
     }
 
-    /// Submit compute commands without blocking.
-    fn submit_compute(
-        &mut self,
-        device: DeviceHandle,
-        commands: &[GpuCommand],
-    ) -> Result<FenceToken> {
-        self.submit_standalone(device, commands)
-    }
-
-    /// Check if the fence for the given token has signaled (work complete).
-    fn is_fence_complete(&self, device: DeviceHandle, token: FenceToken) -> bool {
-        self.gpu_progress(device) >= token
-    }
-
-    /// Block until the fence signals. Returns an error if the device was lost.
-    fn wait_fence(&mut self, device: DeviceHandle, token: FenceToken) -> Result<()> {
-        self.wait_until(device, token)
-    }
-
-    /// Wait with timeout.
-    fn wait_fence_timeout(
-        &mut self,
-        device: DeviceHandle,
-        token: FenceToken,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        self.wait_until_timeout(device, token, timeout_ms)
-    }
-
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap
     /// allocations. No-op by default.
     fn reset_buffer_heaps(&mut self, _device: DeviceHandle) {}
+
+    /// Resources queued for destruction after the GPU timeline advances (for tests).
+    #[doc(hidden)]
+    fn deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {
+        0
+    }
 }
 
 /// Create the default backend for the current platform.

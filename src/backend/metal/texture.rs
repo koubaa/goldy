@@ -301,6 +301,13 @@ pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
                         .release_texture_slot(texture.arg_buffer_index, !gpu_idle);
                 }
             }
+            let barrier = device.timeline_scheduled_max;
+            device.deletion_queue.queue(
+                barrier,
+                super::types::PendingDeletion::Texture {
+                    texture: texture.texture,
+                },
+            );
         }
     }
 }
