@@ -230,6 +230,114 @@ fn make_device() -> goldy::Device {
         .expect("Failed to create device")
 }
 
+/// Minimal compute shader for headless / validation tests (HLSL-style entry point).
+#[cfg(feature = "vulkan")]
+const MINIMAL_COMPUTE_FOR_VK_VALIDATION: &str = r#"
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+}
+"#;
+
+/// Re-run this integration test binary in a subprocess with Vulkan validation enabled.
+/// Parent process skips GPU work (avoids validation overhead + layer state on the shared harness).
+#[cfg(feature = "vulkan")]
+fn run_in_subprocess_with_vk_validation(test_name: &str) {
+    let exe = std::env::current_exe().expect("current_exe for subprocess");
+    let output = std::process::Command::new(exe)
+        .args([test_name, "--exact", "--nocapture"])
+        .env("GOLDY_SUBPROC", "1")
+        .env("GOLDY_VALIDATION", "api")
+        .env("GOLDY_BACKEND", "vk")
+        .env_remove("VK_LAYER_PATH")
+        .output()
+        .unwrap_or_else(|e| panic!("spawn subprocess for {test_name}: {e}"));
+
+    assert!(
+        output.status.success(),
+        "Vulkan validation subprocess for `{test_name}` failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Vulkan validation layer regression: timeline semaphores require `timelineSemaphore` device feature.
+#[test]
+#[cfg(feature = "vulkan")]
+fn vk_api_validation_timeline_semaphore() {
+    if std::env::var("GOLDY_SUBPROC").is_err() {
+        run_in_subprocess_with_vk_validation("vk_api_validation_timeline_semaphore");
+        return;
+    }
+
+    let instance = Instance::new().expect("instance");
+    let device = instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .expect("device");
+    let shader =
+        ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.dispatch(1, 1, 1);
+    }
+    let tv = encoder.submit(&device).expect("submit");
+
+    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+    drop(buf);
+
+    device.wait_until(tv).expect("wait_until");
+}
+
+/// Vulkan validation layer regression: per-device resource teardown (no cross-device pool key bugs).
+#[test]
+#[cfg(feature = "vulkan")]
+fn vk_api_validation_two_device_teardown() {
+    if std::env::var("GOLDY_SUBPROC").is_err() {
+        run_in_subprocess_with_vk_validation("vk_api_validation_two_device_teardown");
+        return;
+    }
+
+    let submit_minimal = |device: &goldy::Device| {
+        let shader =
+            ShaderModule::from_slang(device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
+        let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
+        let mut encoder = ComputeEncoder::new();
+        {
+            let mut pass = encoder.begin_compute_pass();
+            pass.set_pipeline(&pipeline);
+            pass.dispatch(1, 1, 1);
+        }
+        encoder.dispatch(device).expect("dispatch");
+    };
+
+    let i1 = Instance::new().expect("i1");
+    let d1 = i1
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| i1.create_device(DeviceType::IntegratedGpu))
+        .expect("d1");
+    let _b1 = Buffer::new(&d1, 256, DataAccess::Scattered).expect("b1");
+    submit_minimal(&d1);
+
+    let i2 = Instance::new().expect("i2");
+    let d2 = i2
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| i2.create_device(DeviceType::IntegratedGpu))
+        .expect("d2");
+    let _b2 = Buffer::new(&d2, 256, DataAccess::Scattered).expect("b2");
+    submit_minimal(&d2);
+
+    drop(d1);
+    drop(i1);
+    drop(d2);
+    drop(i2);
+}
+
 // ─── Buffer read_to_cpu / clear tests ────────────────────────────────────────
 
 /// Write data via a compute shader then read it back, verifying correctness

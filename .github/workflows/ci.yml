@@ -99,6 +99,7 @@ jobs:
             libvulkan1 \
             libvulkan-dev \
             vulkan-tools \
+            vulkan-validationlayers \
             mesa-vulkan-drivers \
             libxcb1-dev \
             libxcb-render0-dev \

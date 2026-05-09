@@ -1157,6 +1157,90 @@ mod struct_layout_validate_tests {
         }
     }
 
+    /// Slang CB layout: total size padded to 16 with one `float` field (GPU tail padding).
+    fn layout_time_only_cb_padded() -> StructLayout {
+        StructLayout {
+            name: "TimeUniforms".into(),
+            size: 16,
+            alignment: 16,
+            fields: vec![StructFieldLayout {
+                name: "time".into(),
+                offset: 0,
+                size: 4,
+                type_name: "float".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn validate_cb_padded_single_field_passes() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize)];
+        slang
+            .validate(4, &rust_fields)
+            .expect("Rust 4-byte struct should cover Slang data extent");
+    }
+
+    #[test]
+    fn validate_shader_field_missing_from_rust_errors() {
+        let slang = StructLayout {
+            name: "U".into(),
+            size: 8,
+            alignment: 4,
+            fields: vec![
+                StructFieldLayout {
+                    name: "time".into(),
+                    offset: 0,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+                StructFieldLayout {
+                    name: "brightness".into(),
+                    offset: 4,
+                    size: 4,
+                    type_name: "float".into(),
+                },
+            ],
+        };
+        let rust_fields = [("time", 0usize, 4usize)];
+        let err = slang.validate(4, &rust_fields).unwrap_err();
+        let s = err.to_string();
+        assert!(
+            s.contains("brightness") && s.contains("missing"),
+            "expected missing-field error, got: {s}"
+        );
+    }
+
+    #[test]
+    fn validate_rust_too_small_for_data_extent_errors() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize)];
+        let err = slang.validate(2, &rust_fields).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("smaller than the shader's data extent"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_extra_rust_field_without_underscore_passes() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize), ("brightness", 4usize, 4usize)];
+        slang
+            .validate(8, &rust_fields)
+            .expect("extra Rust field is not an error");
+    }
+
+    #[test]
+    fn validate_extra_rust_field_with_underscore_passes() {
+        let slang = layout_time_only_cb_padded();
+        let rust_fields = [("time", 0usize, 4usize), ("_pad0", 4usize, 4usize)];
+        slang
+            .validate(8, &rust_fields)
+            .expect("_prefixed extra field is silent");
+    }
+
     #[test]
     fn validate_ok_when_matching() {
         two_float_layout()
@@ -1165,16 +1249,32 @@ mod struct_layout_validate_tests {
     }
 
     #[test]
-    fn validate_err_on_struct_size_mismatch() {
+    fn validate_does_not_require_rust_struct_to_match_slang_cb_padding() {
+        // Slang total `size` can be 16 due to cbuffer rules; Rust only needs to cover data bytes.
         let mut layout = two_float_layout();
         layout.size = 16;
-        let err = layout
+        layout
             .validate(8, &[("a", 0, 4), ("b", 4, 4)])
+            .expect("Slang padded size must not force Rust to pad");
+    }
+
+    #[test]
+    fn validate_err_on_field_count_mismatch() {
+        let err = two_float_layout()
+            .validate(8, &[("a", 0, 4)])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("size"), "expected size mismatch: {err}");
-        assert!(err.contains("16"), "expected Slang size 16: {err}");
-        assert!(err.contains("8"), "expected Rust size 8: {err}");
+        assert!(
+            err.contains("`b`") && err.contains("missing"),
+            "expected shader field b missing in Rust: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_extra_rust_fields_not_in_shader() {
+        two_float_layout()
+            .validate(12, &[("a", 0, 4), ("b", 4, 4), ("c", 8, 4)])
+            .expect("extra Rust-only field should not fail validation");
     }
 
     #[test]
@@ -1205,45 +1305,27 @@ mod struct_layout_validate_tests {
             .validate(8, &[("x", 0, 4), ("b", 4, 4)])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("`x`"), "expected name x in message: {err}");
-        assert!(err.contains("`a`"), "expected name a in message: {err}");
-    }
-
-    #[test]
-    fn validate_err_on_field_count_mismatch() {
-        let err = two_float_layout()
-            .validate(8, &[("a", 0, 4)])
-            .unwrap_err()
-            .to_string();
         assert!(
-            err.contains("field count"),
-            "expected field count mismatch: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_err_on_extra_rust_fields() {
-        let err = two_float_layout()
-            .validate(8, &[("a", 0, 4), ("b", 4, 4), ("c", 8, 4)])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("field count") || err.contains("missing"),
-            "expected field count or missing field error: {err}"
+            err.contains("`a`") && err.contains("missing"),
+            "expected shader field `a` missing from Rust (got `x` instead): {err}"
         );
     }
 
     #[test]
     fn validate_reports_multiple_errors() {
-        let mut layout = two_float_layout();
-        layout.size = 16;
-        let err = layout
-            .validate(8, &[("x", 0, 4), ("b", 0, 4)])
+        // Only `a` in Rust, wrong offset — missing `b` and offset error for `a`.
+        let err = two_float_layout()
+            .validate(8, &[("a", 4, 4)])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("size"), "expected size error: {err}");
-        assert!(err.contains("`x`"), "expected name error: {err}");
-        assert!(err.contains("offset"), "expected offset error: {err}");
+        assert!(
+            err.contains("offset") && err.contains("`a`"),
+            "expected offset error for a: {err}"
+        );
+        assert!(
+            err.contains("`b`") && err.contains("missing"),
+            "expected missing b: {err}"
+        );
     }
 
     #[test]
