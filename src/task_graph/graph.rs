@@ -9,6 +9,7 @@ use crate::device::Device;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use anyhow::Result;
+use std::sync::Arc;
 
 /// A task graph that analyzes dependencies at submit time.
 ///
@@ -132,7 +133,7 @@ impl TaskGraph {
             kind: NodeKind::WriteBuffer {
                 buffer: buffer.gpu_buffer_handle(),
                 offset,
-                data,
+                data: Arc::from(data),
             },
         });
     }
@@ -162,7 +163,7 @@ impl TaskGraph {
             }],
             kind: NodeKind::WriteTexture {
                 texture: th,
-                data,
+                data: Arc::from(data),
                 width,
                 height,
             },
@@ -214,7 +215,7 @@ impl TaskGraph {
                 y,
                 width,
                 height,
-                data,
+                data: Arc::from(data),
             },
         });
         Ok(())

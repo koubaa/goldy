@@ -39,6 +39,7 @@ use crate::types::{
     TextureFlags, TextureFormat, VertexBufferLayout,
 };
 use anyhow::Result;
+use std::sync::Arc;
 
 /// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
 /// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
@@ -248,13 +249,13 @@ pub enum GpuCommand {
     WriteBuffer {
         buffer: BufferHandle,
         offset: u64,
-        data: Vec<u8>,
+        data: Arc<[u8]>,
     },
     /// Upload CPU pixel data into a texture (full image), batched with the same submission
     /// as surrounding GPU work.
     WriteTexture {
         texture: TextureHandle,
-        data: Vec<u8>,
+        data: Arc<[u8]>,
         width: u32,
         height: u32,
     },
@@ -265,7 +266,7 @@ pub enum GpuCommand {
         y: u32,
         width: u32,
         height: u32,
-        data: Vec<u8>,
+        data: Arc<[u8]>,
     },
     /// Memory barrier between compute dispatches.
     /// Ensures all prior shader writes are visible to subsequent reads.

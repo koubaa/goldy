@@ -22,7 +22,7 @@
 //!    `Vec<GpuCommand>` with `ResourceBarrier` commands between waves.
 //!    Each [`NodeKind`](super::ir::NodeKind) variant emits different commands.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::ir::{BarrierSet, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, Wave};
 // NodeAccess is used in the test module via `super::*`
@@ -92,24 +92,75 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
 /// Edges are created when two nodes access overlapping resources and at least
 /// one writes. Non-overlapping `BufferRange`s from the same parent produce no
 /// edge even though they share a backing allocation.
+///
+/// Uses a **resource-to-nodes index** to avoid the naïve O(N²) pair scan.
+/// Each binding is bucketed by its canonical resource key (parent buffer
+/// handle or texture handle). Only node pairs that share at least one bucket
+/// are checked for actual conflict, reducing complexity from O(N² × B²) to
+/// O(Σ_r K_r²) where K_r is the number of nodes touching resource r.
 pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
-    let mut edges = Vec::new();
     let n = ir.nodes.len();
+    if n == 0 {
+        return Vec::new();
+    }
 
-    for j in 0..n {
-        for i in 0..j {
-            let conflict = ir.nodes[i].bindings.iter().any(|bi| {
-                ir.nodes[j]
-                    .bindings
-                    .iter()
-                    .any(|bj| bindings_conflict(bi, bj))
-            });
-            if conflict {
-                edges.push((i, j));
+    // Canonical grouping key: buffers and buffer ranges map to the parent
+    // handle; textures map to their own handle in a separate namespace.
+    #[derive(Hash, Eq, PartialEq, Clone, Copy)]
+    enum GroupKey {
+        Buffer(u64),
+        Texture(u64),
+    }
+
+    fn group_key(r: &ResourceId) -> GroupKey {
+        match *r {
+            ResourceId::Buffer(h) => GroupKey::Buffer(h),
+            ResourceId::BufferRange { parent, .. } => GroupKey::Buffer(parent),
+            ResourceId::Texture(h) => GroupKey::Texture(h),
+        }
+    }
+
+    // Map each canonical key to the set of node indices that reference it.
+    let mut resource_nodes: HashMap<GroupKey, Vec<usize>> = HashMap::new();
+    for (idx, node) in ir.nodes.iter().enumerate() {
+        for binding in &node.bindings {
+            resource_nodes
+                .entry(group_key(&binding.resource))
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
+
+    for node_indices in resource_nodes.values() {
+        // Deduplicate (a node can appear multiple times if it has several
+        // bindings on the same canonical resource).
+        let mut unique = node_indices.clone();
+        unique.sort_unstable();
+        unique.dedup();
+
+        for (pos, &j) in unique.iter().enumerate() {
+            for &i in &unique[..pos] {
+                debug_assert!(i < j);
+                if edge_set.contains(&(i, j)) {
+                    continue;
+                }
+                let conflict = ir.nodes[i].bindings.iter().any(|bi| {
+                    ir.nodes[j]
+                        .bindings
+                        .iter()
+                        .any(|bj| bindings_conflict(bi, bj))
+                });
+                if conflict {
+                    edge_set.insert((i, j));
+                }
             }
         }
     }
 
+    let mut edges: Vec<_> = edge_set.into_iter().collect();
+    edges.sort_unstable();
     edges
 }
 
@@ -343,6 +394,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
 mod tests {
     use super::*;
     use crate::task_graph::ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
+    use std::sync::Arc;
 
     fn buf(id: u64) -> ResourceId {
         ResourceId::Buffer(id)
@@ -407,7 +459,7 @@ mod tests {
             kind: NodeKind::WriteBuffer {
                 buffer: buf_handle,
                 offset: 0,
-                data: vec![0u8; 4],
+                data: Arc::from(vec![0u8; 4]),
             },
         }
     }
@@ -421,7 +473,7 @@ mod tests {
             }],
             kind: NodeKind::WriteTexture {
                 texture: tex_handle,
-                data: vec![0u8; 4],
+                data: Arc::from(vec![0u8; 4]),
                 width: 1,
                 height: 1,
             },

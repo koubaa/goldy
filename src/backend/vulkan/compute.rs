@@ -228,7 +228,7 @@ pub(super) fn submit(
                 let belt_entry = state.staging_belts.entry(buf_device).or_insert_with(|| {
                     staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
                 });
-                let (stg_buf, stg_off) = belt_entry.write(&state.instance, dev, data.as_slice())?;
+                let (stg_buf, stg_off) = belt_entry.write(&state.instance, dev, &data)?;
                 belt_slices.push((stg_buf, stg_off));
             }
         }
@@ -285,7 +285,7 @@ pub(super) fn submit(
                     &state.devices,
                     &state.textures,
                     *texture,
-                    data.as_slice(),
+                    &data,
                     0,
                     0,
                     *width,
@@ -305,7 +305,7 @@ pub(super) fn submit(
                     &state.devices,
                     &state.textures,
                     *texture,
-                    data.as_slice(),
+                    &data,
                     *x,
                     *y,
                     *width,

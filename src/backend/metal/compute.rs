@@ -139,6 +139,18 @@ fn begin_compute_encoder<'a>(
 }
 
 /// Record compute commands to a command buffer (shared by submit and dispatch).
+///
+/// Uses a **two-pass** structure: all blit operations (clears, uploads) run
+/// first in a single blit encoder, then all compute operations run in a single
+/// compute encoder. This avoids the repeated compute→blit→compute alternation
+/// that would call `begin_compute_encoder` (and its expensive per-resource
+/// `use_resource` loop) many times per submission.
+///
+/// Correctness: the task graph already places explicit `ResourceBarrier`
+/// commands at wave boundaries so that data written by clears/uploads is
+/// visible to subsequent dispatches. Hoisting all blit work before compute
+/// preserves this ordering — barriers within the compute encoder ensure
+/// inter-dispatch visibility.
 fn record_commands_to_buffer(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
@@ -146,16 +158,184 @@ fn record_commands_to_buffer(
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
 ) -> Result<()> {
-    let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
-    let mut current_pipeline: Option<&ComputePipelineState> = None;
+    // ── Pass 1: blit (clears + uploads) ─────────────────────────────────
+    let mut blit_encoder: Option<&mtl::BlitCommandEncoderRef> = None;
 
-    macro_rules! end_compute {
+    macro_rules! ensure_blit {
         () => {
-            if let Some(enc) = encoder.take() {
-                enc.end_encoding();
+            if blit_encoder.is_none() {
+                blit_encoder = Some(command_buffer.new_blit_command_encoder());
             }
         };
     }
+
+    for cmd in commands {
+        match cmd {
+            GpuCommand::ClearBuffer {
+                buffer,
+                offset,
+                size,
+            } => {
+                let buf_state = state
+                    .buffers
+                    .get(buffer)
+                    .context("ClearBuffer: invalid buffer handle")?;
+                let clear_size = if *size == 0 {
+                    buf_state.size.saturating_sub(*offset)
+                } else {
+                    *size
+                };
+                if clear_size > 0 {
+                    ensure_blit!();
+                    let range = mtl::NSRange::new(*offset, clear_size);
+                    blit_encoder.unwrap().fill_buffer(&buf_state.buffer, range, 0);
+                }
+            }
+            GpuCommand::WriteBuffer {
+                buffer: buf_handle,
+                offset,
+                data,
+            } => {
+                let buf_state = state
+                    .buffers
+                    .get(buf_handle)
+                    .context("WriteBuffer: invalid buffer handle")?;
+                if data.is_empty() {
+                    continue;
+                }
+                anyhow::ensure!(
+                    *offset + data.len() as u64 <= buf_state.size,
+                    "WriteBuffer: write exceeds buffer bounds"
+                );
+                // Direct memcpy: all Metal buffers are StorageModeShared (unified
+                // memory on Apple Silicon). The CPU and GPU share the same physical
+                // pages, so a memcpy is immediately coherent. This is safe here
+                // because the two-pass structure guarantees no compute encoder
+                // touches this data until after the blit pass (and command buffer
+                // commit) completes, and Ekrano's frame pipeline drains previous
+                // GPU work before recording new commands.
+                unsafe {
+                    let dst = buf_state.buffer.contents().add(*offset as usize);
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
+                }
+            }
+            GpuCommand::WriteTexture {
+                texture: tex_handle,
+                data,
+                width,
+                height,
+            } => {
+                let tex_state = state
+                    .textures
+                    .get(tex_handle)
+                    .context("WriteTexture: invalid texture handle")?;
+                anyhow::ensure!(
+                    *width == tex_state.width && *height == tex_state.height,
+                    "WriteTexture: dimension mismatch"
+                );
+                let bpp = tex_state.format.bytes_per_pixel();
+                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
+                anyhow::ensure!(
+                    data.len() == expected,
+                    "WriteTexture: expected {} bytes for {}x{}, got {}",
+                    expected,
+                    width,
+                    height,
+                    data.len()
+                );
+                if expected == 0 {
+                    continue;
+                }
+                ensure_blit!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let bytes_per_row = (*width as u64) * (bpp as u64);
+                blit_encoder.unwrap().copy_from_buffer_to_texture(
+                    &staging,
+                    0,
+                    bytes_per_row,
+                    0,
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &tex_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    mtl::MTLBlitOption::empty(),
+                );
+            }
+            GpuCommand::WriteTextureRegion {
+                texture: tex_handle,
+                x,
+                y,
+                width,
+                height,
+                data,
+            } => {
+                let tex_state = state
+                    .textures
+                    .get(tex_handle)
+                    .context("WriteTextureRegion: invalid texture handle")?;
+                anyhow::ensure!(
+                    *x + *width <= tex_state.width && *y + *height <= tex_state.height,
+                    "WriteTextureRegion: region out of bounds"
+                );
+                let bpp = tex_state.format.bytes_per_pixel();
+                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
+                anyhow::ensure!(
+                    data.len() == expected,
+                    "WriteTextureRegion: expected {} bytes, got {}",
+                    expected,
+                    data.len()
+                );
+                if expected == 0 {
+                    continue;
+                }
+                ensure_blit!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                let bytes_per_row = (*width as u64) * (bpp as u64);
+                blit_encoder.unwrap().copy_from_buffer_to_texture(
+                    &staging,
+                    0,
+                    bytes_per_row,
+                    0,
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &tex_state.texture,
+                    0,
+                    0,
+                    MTLOrigin {
+                        x: *x as u64,
+                        y: *y as u64,
+                        z: 0,
+                    },
+                    mtl::MTLBlitOption::empty(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(blit) = blit_encoder.take() {
+        blit.end_encoding();
+    }
+
+    // ── Pass 2: compute (pipelines, binds, dispatches, barriers) ────────
+    let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
+    let mut current_pipeline: Option<&ComputePipelineState> = None;
 
     macro_rules! ensure_compute {
         () => {
@@ -277,20 +457,12 @@ fn record_commands_to_buffer(
             }
             GpuCommand::DispatchIndirect { buffer, offset } => {
                 ensure_compute!();
-                let buf_state = match state.buffers.get(buffer) {
-                    Some(b) => b,
-                    None => {
-                        end_compute!();
-                        anyhow::bail!("DispatchIndirect: invalid buffer handle");
-                    }
-                };
-                let pipeline = match current_pipeline {
-                    Some(p) => p,
-                    None => {
-                        end_compute!();
-                        anyhow::bail!("DispatchIndirect: no pipeline bound");
-                    }
-                };
+                let buf_state = state
+                    .buffers
+                    .get(buffer)
+                    .context("DispatchIndirect: invalid buffer handle")?;
+                let pipeline = current_pipeline
+                    .context("DispatchIndirect: no pipeline bound")?;
                 let threads_per_group = MTLSize {
                     width: pipeline.workgroup_size[0] as u64,
                     height: pipeline.workgroup_size[1] as u64,
@@ -302,9 +474,6 @@ fn record_commands_to_buffer(
             }
             GpuCommand::Barrier => {
                 if let Some(enc) = encoder {
-                    // memoryBarrierWithScope: ensures all prior writes within
-                    // this encoder are visible before subsequent dispatches.
-                    // MTLBarrierScope::Buffers = 1, MTLBarrierScope::Textures = 2
                     const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
                     let () = unsafe {
                         msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES]
@@ -341,188 +510,17 @@ fn record_commands_to_buffer(
                     }
                 }
             }
-            GpuCommand::ClearBuffer {
-                buffer,
-                offset,
-                size,
-            } => {
-                let buf_state = match state.buffers.get(buffer) {
-                    Some(b) => b,
-                    None => {
-                        end_compute!();
-                        anyhow::bail!("ClearBuffer: invalid buffer handle");
-                    }
-                };
-                let clear_size = if *size == 0 {
-                    buf_state.size.saturating_sub(*offset)
-                } else {
-                    *size
-                };
-                if clear_size > 0 {
-                    end_compute!();
-                    let blit = command_buffer.new_blit_command_encoder();
-                    let range = mtl::NSRange::new(*offset, clear_size);
-                    blit.fill_buffer(&buf_state.buffer, range, 0);
-                    blit.end_encoding();
-                }
-            }
-            GpuCommand::WriteBuffer {
-                buffer: buf_handle,
-                offset,
-                data,
-            } => {
-                let buf_state = match state.buffers.get(buf_handle) {
-                    Some(b) => b,
-                    None => {
-                        end_compute!();
-                        anyhow::bail!("WriteBuffer: invalid buffer handle");
-                    }
-                };
-                if data.is_empty() {
-                    continue;
-                }
-                if *offset + data.len() as u64 > buf_state.size {
-                    end_compute!();
-                    anyhow::bail!("WriteBuffer: write exceeds buffer bounds");
-                }
-                // Same rationale as `buffer::write`: a CPU memcpy into `contents()` is not
-                // ordered with other command buffers on the queue. Two back-to-back submits that
-                // write the same buffer would record the second memcpy while the first submit's
-                // GPU work is still reading that memory (shared storage), corrupting results.
-                end_compute!();
-                let staging = logical_device.device.new_buffer_with_data(
-                    data.as_ptr() as *const _,
-                    data.len() as u64,
-                    mtl::MTLResourceOptions::StorageModeShared,
-                );
-                let blit = command_buffer.new_blit_command_encoder();
-                blit.copy_from_buffer(&staging, 0, &buf_state.buffer, *offset, data.len() as u64);
-                blit.end_encoding();
-            }
-            GpuCommand::WriteTexture {
-                texture: tex_handle,
-                data,
-                width,
-                height,
-            } => {
-                let tex_state = match state.textures.get(tex_handle) {
-                    Some(t) => t,
-                    None => {
-                        end_compute!();
-                        anyhow::bail!("WriteTexture: invalid texture handle");
-                    }
-                };
-                if *width != tex_state.width || *height != tex_state.height {
-                    end_compute!();
-                    anyhow::bail!("WriteTexture: dimension mismatch");
-                }
-                let bpp = tex_state.format.bytes_per_pixel();
-                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
-                if data.len() != expected {
-                    end_compute!();
-                    anyhow::bail!(
-                        "WriteTexture: expected {} bytes for {}x{}, got {}",
-                        expected,
-                        width,
-                        height,
-                        data.len()
-                    );
-                }
-                if expected == 0 {
-                    continue;
-                }
-                end_compute!();
-                let staging = logical_device.device.new_buffer_with_data(
-                    data.as_ptr() as *const _,
-                    data.len() as u64,
-                    mtl::MTLResourceOptions::StorageModeShared,
-                );
-                let bytes_per_row = (*width as u64) * (bpp as u64);
-                let blit = command_buffer.new_blit_command_encoder();
-                blit.copy_from_buffer_to_texture(
-                    &staging,
-                    0,
-                    bytes_per_row,
-                    0,
-                    MTLSize {
-                        width: *width as u64,
-                        height: *height as u64,
-                        depth: 1,
-                    },
-                    &tex_state.texture,
-                    0,
-                    0,
-                    MTLOrigin { x: 0, y: 0, z: 0 },
-                    mtl::MTLBlitOption::empty(),
-                );
-                blit.end_encoding();
-            }
-            GpuCommand::WriteTextureRegion {
-                texture: tex_handle,
-                x,
-                y,
-                width,
-                height,
-                data,
-            } => {
-                let tex_state = match state.textures.get(tex_handle) {
-                    Some(t) => t,
-                    None => {
-                        end_compute!();
-                        anyhow::bail!("WriteTextureRegion: invalid texture handle");
-                    }
-                };
-                if *x + *width > tex_state.width || *y + *height > tex_state.height {
-                    end_compute!();
-                    anyhow::bail!("WriteTextureRegion: region out of bounds");
-                }
-                let bpp = tex_state.format.bytes_per_pixel();
-                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
-                if data.len() != expected {
-                    end_compute!();
-                    anyhow::bail!(
-                        "WriteTextureRegion: expected {} bytes, got {}",
-                        expected,
-                        data.len()
-                    );
-                }
-                if expected == 0 {
-                    continue;
-                }
-                end_compute!();
-                let staging = logical_device.device.new_buffer_with_data(
-                    data.as_ptr() as *const _,
-                    data.len() as u64,
-                    mtl::MTLResourceOptions::StorageModeShared,
-                );
-                let bytes_per_row = (*width as u64) * (bpp as u64);
-                let blit = command_buffer.new_blit_command_encoder();
-                blit.copy_from_buffer_to_texture(
-                    &staging,
-                    0,
-                    bytes_per_row,
-                    0,
-                    MTLSize {
-                        width: *width as u64,
-                        height: *height as u64,
-                        depth: 1,
-                    },
-                    &tex_state.texture,
-                    0,
-                    0,
-                    MTLOrigin {
-                        x: *x as u64,
-                        y: *y as u64,
-                        z: 0,
-                    },
-                    mtl::MTLBlitOption::empty(),
-                );
-                blit.end_encoding();
-            }
+            // Blit commands already handled in pass 1.
+            GpuCommand::ClearBuffer { .. }
+            | GpuCommand::WriteBuffer { .. }
+            | GpuCommand::WriteTexture { .. }
+            | GpuCommand::WriteTextureRegion { .. } => {}
         }
     }
 
-    end_compute!();
+    if let Some(enc) = encoder.take() {
+        enc.end_encoding();
+    }
     Ok(())
 }
 

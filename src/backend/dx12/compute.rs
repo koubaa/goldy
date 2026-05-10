@@ -228,7 +228,7 @@ pub(super) fn submit(
                 let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
                     staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
                 });
-                let (res, off) = belt_entry.write(ld, data.as_slice())?;
+                let (res, off) = belt_entry.write(ld, &data)?;
                 belt_slices.push((res, off));
             }
         }
@@ -246,7 +246,7 @@ pub(super) fn submit(
                 staged_texture_uploads.push(super::texture::stage_texture_upload_full(
                     state,
                     *texture,
-                    data.as_slice(),
+                    &data,
                     *width,
                     *height,
                 )?);
@@ -266,7 +266,7 @@ pub(super) fn submit(
                     *y,
                     *width,
                     *height,
-                    data.as_slice(),
+                    &data,
                 )?);
             }
             _ => {}

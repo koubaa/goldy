@@ -11,6 +11,7 @@
 
 use super::ResourceId;
 use crate::backend::{BufferHandle, ComputePipelineHandle, TextureHandle};
+use std::sync::Arc;
 
 /// Logical access a task node has on a resource, orthogonal to the
 /// resource's physical [`DataAccess`](crate::DataAccess) /
@@ -74,12 +75,12 @@ pub enum NodeKind {
     WriteBuffer {
         buffer: BufferHandle,
         offset: u64,
-        data: Vec<u8>,
+        data: Arc<[u8]>,
     },
     /// Upload CPU pixel data into a texture (full image), batched with the same GPU submission.
     WriteTexture {
         texture: TextureHandle,
-        data: Vec<u8>,
+        data: Arc<[u8]>,
         width: u32,
         height: u32,
     },
@@ -90,7 +91,7 @@ pub enum NodeKind {
         y: u32,
         width: u32,
         height: u32,
-        data: Vec<u8>,
+        data: Arc<[u8]>,
     },
 }
 
