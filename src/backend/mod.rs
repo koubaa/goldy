@@ -699,6 +699,14 @@ pub trait GpuBackend: Send + Sync {
     /// allocations. No-op by default.
     fn reset_buffer_heaps(&mut self, _device: DeviceHandle) {}
 
+    /// Process pending GPU deletions and reclaim bindless descriptor slots
+    /// whose GPU timeline barrier has been signaled.
+    ///
+    /// Normally called internally at acquire/present/submit, but consumers
+    /// that drop buffers between those points (e.g. during a non-blocking
+    /// frame drain) can call this explicitly to reclaim slots immediately.
+    fn flush_deferred_deletions(&mut self, _device: DeviceHandle) {}
+
     /// Resources queued for destruction after the GPU timeline advances (for tests).
     #[doc(hidden)]
     fn deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {

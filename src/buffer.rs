@@ -707,6 +707,107 @@ impl BufferPool {
     }
 }
 
+/// A fixed-size ring of [`BufferPool`]s for double- (or N-) buffered rendering.
+///
+/// Each frame calls [`advance`](Self::advance) to flip to the next pool, then
+/// [`prepare`](Self::prepare) to ensure it is large enough. The pool that was
+/// active N frames ago is now the current one; its GPU work has completed under
+/// normal pipelining, so `reset()` is safe.
+///
+/// ```ignore
+/// let mut ring = BufferPoolRing::new();
+/// // each frame:
+/// ring.advance();
+/// ring.prepare(&device, needed_bytes)?;
+/// let pool = ring.current_mut().unwrap();
+/// let view = pool.alloc_bytes(1024, Some(4))?;
+/// ```
+pub struct BufferPoolRing<const N: usize = 2> {
+    pools: [Option<BufferPool>; N],
+    clear_flags: [bool; N],
+    idx: usize,
+}
+
+impl<const N: usize> Default for BufferPoolRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> BufferPoolRing<N> {
+    /// Create an empty ring (all pool slots `None`).
+    pub fn new() -> Self {
+        Self {
+            pools: std::array::from_fn(|_| None),
+            clear_flags: [false; N],
+            idx: 0,
+        }
+    }
+
+    /// Advance to the next pool slot in the ring.
+    ///
+    /// Call this once at the start of each frame, **before** [`prepare`](Self::prepare).
+    pub fn advance(&mut self) {
+        self.idx = (self.idx + 1) % N;
+    }
+
+    /// Ensure the current pool slot has at least `size` bytes of capacity.
+    ///
+    /// If the existing pool is large enough it is reset (bump pointer back to 0).
+    /// If it is too small (or absent) a new pool is allocated and the clear flag
+    /// is set so the caller can zero-fill the backing buffer.
+    ///
+    /// Calls [`Device::reset_buffer_heaps`] when a new allocation is needed.
+    pub fn prepare(&mut self, device: &Device, size: u64) -> Result<()> {
+        let idx = self.idx;
+        let need_new = match &self.pools[idx] {
+            Some(pool) => pool.capacity() < size,
+            None => true,
+        };
+        if need_new {
+            self.pools[idx] = None;
+            device.reset_buffer_heaps();
+            let pool = BufferPool::new(device, size)?;
+            self.pools[idx] = Some(pool);
+            self.clear_flags[idx] = true;
+        } else {
+            self.pools[idx]
+                .as_mut()
+                .expect("pool must exist when need_new is false")
+                .reset();
+            self.clear_flags[idx] = false;
+        }
+        Ok(())
+    }
+
+    /// Mutable reference to the current pool (if allocated).
+    pub fn current_mut(&mut self) -> Option<&mut BufferPool> {
+        self.pools[self.idx].as_mut()
+    }
+
+    /// Shared reference to the current pool (if allocated).
+    pub fn current(&self) -> Option<&BufferPool> {
+        self.pools[self.idx].as_ref()
+    }
+
+    /// Check and consume the clear flag for the current pool.
+    ///
+    /// Returns `true` exactly once after [`prepare`](Self::prepare) allocates a
+    /// new backing buffer. The caller should issue a `clear_buffer` command for
+    /// the backing buffer when this returns `true`.
+    pub fn take_clear_flag(&mut self) -> bool {
+        let flag = self.clear_flags[self.idx];
+        self.clear_flags[self.idx] = false;
+        flag
+    }
+
+    /// Drop all pools and reset clear flags.
+    pub fn clear(&mut self) {
+        self.pools = std::array::from_fn(|_| None);
+        self.clear_flags = [false; N];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,5 +842,80 @@ mod tests {
             size < 400 + 800 + 50 * 52 + 75 * 52 + 4 * 8192,
             "padded_size should be tighter than naive + magic constant"
         );
+    }
+
+    // ── BufferPoolRing state-machine tests (no GPU required) ──────────────────
+
+    /// New ring has no current pool and clear flag is false.
+    #[test]
+    fn ring_starts_empty() {
+        let mut ring = BufferPoolRing::<2>::new();
+        assert!(ring.current().is_none());
+        assert!(ring.current_mut().is_none());
+        assert!(!ring.take_clear_flag());
+    }
+
+    /// `advance()` cycles through the N slots and wraps back to 0.
+    #[test]
+    fn ring_advance_wraps() {
+        // Use a 3-slot ring to test non-power-of-two wrap as well.
+        let mut ring = BufferPoolRing::<3>::new();
+        // idx starts at 0; each advance increments mod N.
+        // We can observe this indirectly via `current()` being None vs Some
+        // after `prepare` fills only one slot — but we don't have a device
+        // here, so we just track that take_clear_flag never fires without
+        // prepare and that the ring doesn't panic on many advances.
+        for _ in 0..9 {
+            ring.advance(); // 1,2,0,1,2,0,1,2,0
+        }
+        // After 9 advances on a 3-ring we're back at slot 0. Still no pool.
+        assert!(ring.current().is_none());
+        assert!(!ring.take_clear_flag());
+    }
+
+    /// `take_clear_flag` returns false on a fresh ring even after many advances.
+    #[test]
+    fn ring_clear_flag_false_without_prepare() {
+        let mut ring = BufferPoolRing::<2>::new();
+        ring.advance();
+        ring.advance();
+        assert!(!ring.take_clear_flag());
+        assert!(!ring.take_clear_flag()); // idempotent: still false
+    }
+
+    /// `take_clear_flag` is consumed: second call in the same slot returns false.
+    /// (Without a real device we verify by directly manipulating the flag via
+    /// the only public interface: we'd need `prepare` for the first call to be
+    /// true. This test is therefore duplicated in integration tests; here we
+    /// only test the false-after-false invariant.)
+    #[test]
+    fn ring_take_clear_flag_is_idempotent_false() {
+        let mut ring = BufferPoolRing::<2>::new();
+        assert!(!ring.take_clear_flag());
+        assert!(!ring.take_clear_flag());
+    }
+
+    /// `clear()` resets to all-empty, all-false state.
+    #[test]
+    fn ring_clear_resets_state() {
+        // We can't call prepare without a device, but we can verify that
+        // after clear() the ring looks like a freshly constructed one.
+        let mut ring = BufferPoolRing::<2>::new();
+        ring.advance();
+        ring.clear();
+        assert!(ring.current().is_none());
+        assert!(!ring.take_clear_flag());
+    }
+
+    /// Default and `new()` produce equivalent empty rings.
+    #[test]
+    fn ring_default_equivalent_to_new() {
+        let a = BufferPoolRing::<2>::new();
+        let b = BufferPoolRing::<2>::default();
+        // Both have no current pool and no clear flag.
+        let mut a = a;
+        let mut b = b;
+        assert_eq!(a.current().is_none(), b.current().is_none());
+        assert_eq!(a.take_clear_flag(), b.take_clear_flag());
     }
 }
