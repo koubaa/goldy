@@ -12,7 +12,7 @@
 
 use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle, TransientHeapHandle,
 };
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
@@ -423,6 +423,8 @@ pub(crate) struct BufferState {
     pub host_mapped: Option<usize>,
     /// Mirror of create-time flags.
     pub flags: crate::types::BufferFlags,
+    /// Sub-allocated from [`crate::backend::GpuBackend::create_transient_heap`]; `memory` is shared.
+    pub transient_heap_suballoc: bool,
 }
 
 /// Shader module state with cached compiled stages.
@@ -520,6 +522,8 @@ pub(crate) struct TextureState {
     pub bindless_index: Option<u32>,
     /// Current image layout (for subregion writes / transitions)
     pub current_layout: vk::ImageLayout,
+    /// Sub-allocated from a transient heap; `memory` is shared with the heap.
+    pub transient_heap_suballoc: bool,
 }
 
 /// GPU sampler state.
@@ -766,6 +770,16 @@ impl LogicalDevice {
     }
 }
 
+/// Single [`vk::DeviceMemory`] block sub-allocated for transient buffers/textures.
+pub(crate) struct TransientHeapEntry {
+    pub device_handle: DeviceHandle,
+    pub memory: vk::DeviceMemory,
+    #[allow(dead_code)]
+    pub size: u64,
+    pub buffers: Vec<BufferHandle>,
+    pub textures: Vec<TextureHandle>,
+}
+
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
 pub(super) struct VulkanState {
@@ -805,4 +819,6 @@ pub(super) struct VulkanState {
     /// Command buffers to free once the device timeline reaches the given value
     /// (one submit may register multiple buffers at the same timeline point).
     pub timeline_cmd_buffers: HashMap<u64, Vec<(DeviceHandle, vk::CommandBuffer)>>,
+    pub transient_heaps: HashMap<TransientHeapHandle, TransientHeapEntry>,
+    pub next_transient_heap_handle: TransientHeapHandle,
 }

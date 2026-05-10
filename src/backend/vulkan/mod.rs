@@ -22,6 +22,7 @@ mod shader;
 mod staging;
 mod surface;
 mod texture;
+mod transient;
 mod types;
 mod utils;
 
@@ -249,6 +250,8 @@ impl VulkanBackend {
             compute_texture_staging_pool: HashMap::new(),
             staging_belts: HashMap::new(),
             timeline_cmd_buffers: HashMap::new(),
+            transient_heaps: HashMap::new(),
+            next_transient_heap_handle: 1,
         };
 
         Ok(Self { state })
@@ -948,6 +951,52 @@ impl GpuBackend for VulkanBackend {
         compute::submit(&mut self.state, device_handle, commands, None)
     }
 
+    fn submit_graph(
+        &mut self,
+        device_handle: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(device_handle);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
+                    if !batch.is_empty() {
+                        last_tv = compute::submit(&mut self.state, device_handle, &batch, None)?;
+                        self.wait_until(device_handle, last_tv)?;
+                        batch.clear();
+                    }
+                    render_target::render_to(
+                        &self.state.devices,
+                        &mut self.state.render_targets,
+                        device_handle,
+                        *target,
+                        render_cmds,
+                        |cmd_buf, cmds, logical_device, current_pipeline| {
+                            render_commands::record(
+                                cmd_buf,
+                                cmds,
+                                logical_device,
+                                &self.state.pipelines,
+                                &self.state.buffers,
+                                current_pipeline,
+                            )
+                        },
+                    )?;
+                    last_tv = compute::submit(&mut self.state, device_handle, &[], None)?;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = compute::submit(&mut self.state, device_handle, &batch, None)?;
+        }
+        Ok(last_tv)
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .state
@@ -969,6 +1018,80 @@ impl GpuBackend for VulkanBackend {
         ) {
             unsafe { belt.trim(logical_device) };
         }
+    }
+
+    fn transient_texture_heap_footprint(
+        &self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        access: crate::types::SpatialAccess,
+        flags: crate::types::TextureFlags,
+    ) -> Result<(u64, u64)> {
+        transient::transient_texture_heap_footprint(
+            &self.state,
+            device,
+            width,
+            height,
+            format,
+            access,
+            flags,
+        )
+    }
+
+    fn create_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        size: u64,
+    ) -> Result<Option<TransientHeapHandle>> {
+        transient::create_transient_heap(&mut self.state, device, size)
+    }
+
+    fn place_buffer_in_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<BufferHandle> {
+        transient::place_buffer_in_transient_heap(&mut self.state, device, heap, offset, size)
+    }
+
+    fn place_texture_in_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+        offset: u64,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        access: crate::types::SpatialAccess,
+        flags: crate::types::TextureFlags,
+    ) -> Result<TextureHandle> {
+        transient::place_texture_in_transient_heap(
+            &mut self.state,
+            device,
+            heap,
+            offset,
+            width,
+            height,
+            format,
+            access,
+            flags,
+        )
+    }
+
+    fn destroy_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+    ) -> Result<()> {
+        transient::destroy_transient_heap(&mut self.state, device, heap)
+    }
+
+    fn transient_heap_alignment_hints(&self, device: DeviceHandle) -> TransientHeapAlignments {
+        transient::transient_heap_alignment_hints(&self.state, device)
     }
 
     fn deferred_deletion_pending_count(&self, device_handle: DeviceHandle) -> usize {

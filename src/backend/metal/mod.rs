@@ -21,6 +21,7 @@ mod sampler;
 mod shader;
 mod surface;
 mod texture;
+mod transient;
 mod types;
 mod utils;
 
@@ -116,6 +117,7 @@ impl MetalBackend {
                 next_texture_handle: 1,
                 samplers: std::collections::HashMap::new(),
                 next_sampler_handle: 1,
+                next_transient_heap_handle: 1,
                 slang_compiler,
             },
         })
@@ -562,6 +564,36 @@ impl GpuBackend for MetalBackend {
         compute::submit(&mut self.state, device, commands)
     }
 
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(device);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
+                    if !batch.is_empty() {
+                        last_tv = compute::submit(&mut self.state, device, &batch)?;
+                        self.wait_until(device, last_tv)?;
+                        batch.clear();
+                    }
+                    render_target::render_to(&mut self.state, device, *target, render_cmds)?;
+                    last_tv = compute::submit(&mut self.state, device, &[])?;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = compute::submit(&mut self.state, device, &batch)?;
+        }
+        Ok(last_tv)
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .state
@@ -578,6 +610,80 @@ impl GpuBackend for MetalBackend {
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
         compute::destroy(&mut self.state, pipeline);
+    }
+
+    fn transient_texture_heap_footprint(
+        &self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        access: crate::types::SpatialAccess,
+        flags: crate::types::TextureFlags,
+    ) -> Result<(u64, u64)> {
+        transient::transient_texture_heap_footprint(
+            &self.state,
+            device,
+            width,
+            height,
+            format,
+            access,
+            flags,
+        )
+    }
+
+    fn create_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        size: u64,
+    ) -> Result<Option<TransientHeapHandle>> {
+        transient::create_transient_heap(&mut self.state, device, size)
+    }
+
+    fn place_buffer_in_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<BufferHandle> {
+        transient::place_buffer_in_transient_heap(&mut self.state, device, heap, offset, size)
+    }
+
+    fn place_texture_in_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+        offset: u64,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        access: crate::types::SpatialAccess,
+        flags: crate::types::TextureFlags,
+    ) -> Result<TextureHandle> {
+        transient::place_texture_in_transient_heap(
+            &mut self.state,
+            device,
+            heap,
+            offset,
+            width,
+            height,
+            format,
+            access,
+            flags,
+        )
+    }
+
+    fn destroy_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+    ) -> Result<()> {
+        transient::destroy_transient_heap(&mut self.state, device, heap)
+    }
+
+    fn transient_heap_alignment_hints(&self, device: DeviceHandle) -> TransientHeapAlignments {
+        transient::transient_heap_alignment_hints(&self.state, device)
     }
 
     fn reset_buffer_heaps(&mut self, device: DeviceHandle) {

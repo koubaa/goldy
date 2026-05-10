@@ -12,7 +12,7 @@
 
 use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle, TransientHeapHandle,
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
@@ -461,6 +461,8 @@ pub(crate) struct BufferState {
     pub coherent_readback_mapped: Option<usize>,
     /// Creation-time flags.
     pub flags: crate::types::BufferFlags,
+    /// Created with [`crate::backend::GpuBackend::place_buffer_in_transient_heap`] (placed resource).
+    pub transient_placed: bool,
 }
 
 /// Shader module state with cached compiled bytecode.
@@ -556,6 +558,8 @@ pub(crate) struct TextureState {
     pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
     /// Whether this texture was created with UAV access (SpatialAccess::Direct).
     pub is_storage: bool,
+    /// Placed resource from a transient DX12 heap (`place_texture_in_transient_heap`).
+    pub transient_placed: bool,
 }
 
 /// GPU sampler state.
@@ -620,6 +624,14 @@ pub(crate) struct SurfaceState {
     pub pending_frame_compute: Vec<crate::backend::GpuCommand>,
 }
 
+/// Sub-heap for transient task-graph packing ([`GpuBackend::create_transient_heap`]).
+pub(crate) struct TransientHeapEntry {
+    pub device_handle: DeviceHandle,
+    pub heap: Direct3D12::ID3D12Heap,
+    pub buffers: Vec<BufferHandle>,
+    pub textures: Vec<TextureHandle>,
+}
+
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
 pub(super) struct Dx12State {
@@ -654,4 +666,6 @@ pub(super) struct Dx12State {
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-device upload belts for `GpuCommand::WriteBuffer`.
     pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
+    pub transient_heaps: HashMap<TransientHeapHandle, TransientHeapEntry>,
+    pub next_transient_heap_handle: TransientHeapHandle,
 }

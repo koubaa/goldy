@@ -41,6 +41,72 @@ fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
     }
 }
 
+/// Initial enhanced barrier for a storage 2D texture in COMMON → UAV layout (shared by committed + placed creates).
+pub(super) fn init_storage_texture_uav_layout(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    resource: &ID3D12Resource,
+) -> Result<D3D12_BARRIER_LAYOUT> {
+    let last_layout = D3D12_BARRIER_LAYOUT_COMMON;
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle for storage texture initial barrier")?;
+
+    unsafe { logical_device.command_allocator.Reset() }
+        .context("Failed to reset command allocator for texture init barrier")?;
+    let init_cmd: ID3D12GraphicsCommandList = unsafe {
+        logical_device.device.CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            &logical_device.command_allocator,
+            None,
+        )
+    }
+    .context("Failed to create init barrier command list")?;
+    let init_cmd7: ID3D12GraphicsCommandList7 =
+        init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
+
+    let b = barriers::texture_barrier_full(
+        resource,
+        D3D12_BARRIER_SYNC_NONE,
+        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+        D3D12_BARRIER_ACCESS_NO_ACCESS,
+        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        last_layout,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+    );
+    unsafe {
+        barriers::barrier_textures(&init_cmd7, &[b]);
+        init_cmd.Close()
+    }
+    .context("Failed to close init barrier command list")?;
+
+    let cmd_list: ID3D12CommandList = init_cmd
+        .cast()
+        .context("Failed to cast init command list")?;
+    unsafe {
+        logical_device
+            .command_queue
+            .ExecuteCommandLists(&[Some(cmd_list)]);
+    }
+
+    let fence_value = logical_device.fence_value;
+    unsafe {
+        logical_device
+            .command_queue
+            .Signal(&logical_device.fence, fence_value)
+    }
+    .context("Failed to signal fence for init barrier")?;
+    super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
+
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        dev.fence_value += 1;
+    }
+
+    Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
+}
+
 /// Create a texture.
 pub(super) fn create(
     state: &mut Dx12State,
@@ -103,8 +169,6 @@ pub(super) fn create(
     };
     hr.context("Failed to create texture")?;
     let resource = resource.context("CreateCommittedResource returned null")?;
-
-    let last_layout = D3D12_BARRIER_LAYOUT_COMMON;
 
     // Get texture handle first (needed for registry)
     let handle = state.next_texture_handle;
@@ -181,68 +245,11 @@ pub(super) fn create(
         Some(srv_offset)
     };
 
-    let last_layout =
-        if is_storage && last_layout != D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS {
-            let logical_device = state
-                .devices
-                .get(&device_handle)
-                .context("Invalid device handle for storage texture initial barrier")?;
-
-            unsafe { logical_device.command_allocator.Reset() }
-                .context("Failed to reset command allocator for texture init barrier")?;
-            let init_cmd: ID3D12GraphicsCommandList = unsafe {
-                logical_device.device.CreateCommandList(
-                    0,
-                    D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    &logical_device.command_allocator,
-                    None,
-                )
-            }
-            .context("Failed to create init barrier command list")?;
-            let init_cmd7: ID3D12GraphicsCommandList7 =
-                init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
-
-            let b = barriers::texture_barrier_full(
-                &resource,
-                D3D12_BARRIER_SYNC_NONE,
-                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                D3D12_BARRIER_ACCESS_NO_ACCESS,
-                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                last_layout,
-                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
-            );
-            unsafe {
-                barriers::barrier_textures(&init_cmd7, &[b]);
-                init_cmd.Close()
-            }
-            .context("Failed to close init barrier command list")?;
-
-            let cmd_list: ID3D12CommandList = init_cmd
-                .cast()
-                .context("Failed to cast init command list")?;
-            unsafe {
-                logical_device
-                    .command_queue
-                    .ExecuteCommandLists(&[Some(cmd_list)]);
-            }
-
-            let fence_value = logical_device.fence_value;
-            unsafe {
-                logical_device
-                    .command_queue
-                    .Signal(&logical_device.fence, fence_value)
-            }
-            .context("Failed to signal fence for init barrier")?;
-            super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
-
-            if let Some(dev) = state.devices.get_mut(&device_handle) {
-                dev.fence_value += 1;
-            }
-
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-        } else {
-            last_layout
-        };
+    let last_layout = if is_storage {
+        init_storage_texture_uav_layout(state, device_handle, &resource)?
+    } else {
+        D3D12_BARRIER_LAYOUT_COMMON
+    };
 
     state.textures.insert(
         handle,
@@ -256,6 +263,7 @@ pub(super) fn create(
             bindless_offset,
             last_layout,
             is_storage,
+            transient_placed: false,
         },
     );
 
@@ -1001,6 +1009,9 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.remove(&texture_handle) {
         if let Some(dev) = state.devices.get_mut(&tex.device_handle) {
             dev.resource_registry.unregister_texture(texture_handle);
+            if tex.transient_placed {
+                return;
+            }
             let last_fence = dev.fence_value.saturating_sub(1);
             dev.deletion_queue.queue(
                 last_fence,

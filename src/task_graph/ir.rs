@@ -10,7 +10,7 @@
 //! produce the final [`crate::backend::GpuCommand`] stream.
 
 use super::ResourceId;
-use crate::backend::{BufferHandle, ComputePipelineHandle, TextureHandle};
+use crate::backend::{BufferHandle, ComputePipelineHandle, RenderTargetHandle, TextureHandle};
 use std::sync::Arc;
 
 /// Logical access a task node has on a resource, orthogonal to the
@@ -93,6 +93,15 @@ pub enum NodeKind {
         height: u32,
         data: Arc<[u8]>,
     },
+    /// Offscreen render pass targeting a [`crate::RenderTarget`].
+    ///
+    /// Declare all buffers and textures read by draw commands via
+    /// [`super::graph::RenderPassBuilder`] so barriers serialize correctly
+    /// against compute work.
+    RenderPass {
+        target: RenderTargetHandle,
+        commands: Vec<crate::backend::RenderCommand>,
+    },
 }
 
 /// A single node in the task graph.
@@ -117,11 +126,17 @@ pub struct GraphIR {
 pub struct BarrierSet {
     pub buffers: Vec<BufferHandle>,
     pub textures: Vec<TextureHandle>,
+    /// Program buffer slots (see [`super::ResourceId::ProgramBuffer`]) pending resolution.
+    pub program_buffer_slots: Vec<u32>,
+    pub program_texture_slots: Vec<u32>,
 }
 
 impl BarrierSet {
     pub fn is_empty(&self) -> bool {
-        self.buffers.is_empty() && self.textures.is_empty()
+        self.buffers.is_empty()
+            && self.textures.is_empty()
+            && self.program_buffer_slots.is_empty()
+            && self.program_texture_slots.is_empty()
     }
 }
 

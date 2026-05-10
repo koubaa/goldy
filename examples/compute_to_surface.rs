@@ -96,6 +96,11 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
+    // TODO(#122): resources (Buffer, Surface, ComputePipeline) should hold Arc<Device> internally
+    // so the Device cannot be destroyed while any of its resources are still alive. Until that
+    // refactor lands, callers must keep an explicit Arc<Device> alive for the lifetime of all GPU
+    // resources created from it. See https://github.com/koubaa/goldy/issues/122
+    #[allow(dead_code)]
     device: Arc<goldy::Device>,
     surface: Surface,
     compute_pipeline: ComputePipeline,

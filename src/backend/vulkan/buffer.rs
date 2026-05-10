@@ -249,6 +249,7 @@ pub(super) fn create(
             is_view: false,
             host_mapped,
             flags,
+            transient_heap_suballoc: false,
         },
     );
 
@@ -269,6 +270,12 @@ pub(super) fn destroy(
             device.resource_registry.unregister_buffer(buffer_handle);
 
             if !buffer.is_view {
+                if buffer.transient_heap_suballoc {
+                    unsafe {
+                        device.device.destroy_buffer(buffer.buffer, None);
+                    }
+                    return;
+                }
                 if buffer.host_mapped.is_some() {
                     if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
                         tracing::warn!(
@@ -396,6 +403,7 @@ pub(super) fn create_view(
             is_view: true,
             host_mapped: None,
             flags: parent_flags,
+            transient_heap_suballoc: false,
         },
     );
 

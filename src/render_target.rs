@@ -145,6 +145,12 @@ impl RenderTarget {
         })
     }
 
+    /// Opaque backend handle for use with mixed compute+render task graphs.
+    #[inline]
+    pub(crate) fn backend_handle(&self) -> RenderTargetHandle {
+        self.handle
+    }
+
     /// Get the width in pixels.
     pub fn width(&self) -> u32 {
         self.width

@@ -8,6 +8,31 @@ use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 
+/// Recorded operations for tests that exercise native transient heaps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockTransientHeapOp {
+    Create {
+        heap: TransientHeapHandle,
+        size: u64,
+    },
+    PlaceBuffer {
+        heap: TransientHeapHandle,
+        offset: u64,
+        size: u64,
+        buffer: BufferHandle,
+    },
+    PlaceTexture {
+        heap: TransientHeapHandle,
+        offset: u64,
+        width: u32,
+        height: u32,
+        texture: TextureHandle,
+    },
+    Destroy {
+        heap: TransientHeapHandle,
+    },
+}
+
 /// Mock GPU backend for testing.
 ///
 /// Tracks resource creation/destruction and command recording
@@ -56,6 +81,9 @@ pub struct MockBackend {
     pub default_surface_format: TextureFormat,
     device_timeline_next: HashMap<DeviceHandle, u64>,
     device_timeline_completed: HashMap<DeviceHandle, u64>,
+    next_transient_heap: TransientHeapHandle,
+    transient_heap_sizes: HashMap<TransientHeapHandle, u64>,
+    pub transient_heap_ops: Vec<MockTransientHeapOp>,
 }
 
 #[allow(dead_code)]
@@ -171,6 +199,9 @@ impl MockBackend {
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
             device_timeline_completed: HashMap::new(),
+            next_transient_heap: 10_000,
+            transient_heap_sizes: HashMap::new(),
+            transient_heap_ops: Vec::new(),
         }
     }
 
@@ -193,6 +224,8 @@ impl MockBackend {
         self.textures_created = 0;
         self.samplers_created = 0;
         self.compute_dispatch_count = 0;
+        self.transient_heap_ops.clear();
+        self.transient_heap_sizes.clear();
     }
 }
 
@@ -225,6 +258,9 @@ impl GpuBackend for MockBackend {
 
     fn destroy_device(&mut self, device: DeviceHandle) {
         self.devices.remove(&device);
+
+        self.transient_heap_sizes.clear();
+        self.transient_heap_ops.clear();
 
         // Clean up resources owned by this device
         self.buffers.retain(|_, b| b.device_handle != device);
@@ -922,6 +958,39 @@ impl GpuBackend for MockBackend {
         Ok(tv)
     }
 
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(device);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
+                    if !batch.is_empty() {
+                        self.submit_standalone(device, &batch)?;
+                        batch.clear();
+                    }
+                    self.render_to_target(device, *target, render_cmds)?;
+                    last_tv = self.submit_standalone(device, &[])?;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = self.submit_standalone(device, &batch)?;
+        }
+        Ok(last_tv)
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .surfaces
@@ -966,6 +1035,111 @@ impl GpuBackend for MockBackend {
         Ok(tv)
     }
 
+    fn transient_texture_heap_footprint(
+        &self,
+        _device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        _access: SpatialAccess,
+        _flags: TextureFlags,
+    ) -> Result<(u64, u64)> {
+        let align = 256u64;
+        let bpp = format.bytes_per_pixel() as u64;
+        let sz = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(bpp);
+        let aligned = sz
+            .checked_add(align - 1)
+            .map(|x| x / align * align)
+            .unwrap_or(align)
+            .max(align);
+        Ok((align, aligned))
+    }
+
+    fn create_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        size: u64,
+    ) -> Result<Option<TransientHeapHandle>> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+        if size == 0 {
+            return Ok(None);
+        }
+        let h = self.next_transient_heap;
+        self.next_transient_heap += 1;
+        self.transient_heap_sizes.insert(h, size);
+        self.transient_heap_ops
+            .push(MockTransientHeapOp::Create { heap: h, size });
+        Ok(Some(h))
+    }
+
+    fn place_buffer_in_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<BufferHandle> {
+        self.transient_heap_sizes
+            .get(&heap)
+            .ok_or_else(|| anyhow::anyhow!("invalid transient heap {}", heap))?;
+        let buf = self.create_buffer(
+            device,
+            size,
+            DataAccess::Scattered,
+            None,
+            BufferFlags::empty(),
+        )?;
+        self.transient_heap_ops
+            .push(MockTransientHeapOp::PlaceBuffer {
+                heap,
+                offset,
+                size,
+                buffer: buf,
+            });
+        Ok(buf)
+    }
+
+    fn place_texture_in_transient_heap(
+        &mut self,
+        device: DeviceHandle,
+        heap: TransientHeapHandle,
+        offset: u64,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: SpatialAccess,
+        flags: TextureFlags,
+    ) -> Result<TextureHandle> {
+        self.transient_heap_sizes
+            .get(&heap)
+            .ok_or_else(|| anyhow::anyhow!("invalid transient heap {}", heap))?;
+        let tex = self.create_texture(device, width, height, format, access, flags)?;
+        self.transient_heap_ops
+            .push(MockTransientHeapOp::PlaceTexture {
+                heap,
+                offset,
+                width,
+                height,
+                texture: tex,
+            });
+        Ok(tex)
+    }
+
+    fn destroy_transient_heap(
+        &mut self,
+        _device: DeviceHandle,
+        heap: TransientHeapHandle,
+    ) -> Result<()> {
+        self.transient_heap_sizes.remove(&heap);
+        self.transient_heap_ops
+            .push(MockTransientHeapOp::Destroy { heap });
+        Ok(())
+    }
+
     // Compute pipeline management
     fn create_compute_pipeline(
         &mut self,
@@ -997,6 +1171,27 @@ impl GpuBackend for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_heap_api_records_ops() {
+        let mut m = MockBackend::new();
+        let d = m.create_device(0).unwrap();
+        let h = m.create_transient_heap(d, 4096).unwrap().unwrap();
+        let _b = m.place_buffer_in_transient_heap(d, h, 128, 256).unwrap();
+        m.destroy_transient_heap(d, h).unwrap();
+        assert!(matches!(
+            m.transient_heap_ops[0],
+            MockTransientHeapOp::Create { .. }
+        ));
+        assert!(matches!(
+            m.transient_heap_ops[1],
+            MockTransientHeapOp::PlaceBuffer { .. }
+        ));
+        assert!(matches!(
+            m.transient_heap_ops[2],
+            MockTransientHeapOp::Destroy { .. }
+        ));
+    }
 
     #[test]
     fn test_mock_backend_creation() {

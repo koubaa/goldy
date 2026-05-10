@@ -142,6 +142,27 @@ pub type SwapchainImageHandle = u64;
 pub type TextureHandle = u64;
 pub type SamplerHandle = u64;
 
+/// Opaque handle for a backend native transient memory heap ([`GpuBackend::create_transient_heap`]).
+pub type TransientHeapHandle = u64;
+
+/// Alignment and granularity hints for packing transient buffers and textures into one heap.
+#[derive(Debug, Clone, Copy)]
+pub struct TransientHeapAlignments {
+    pub buffer_base_align: u64,
+    pub texture_base_align: u64,
+    pub buffer_image_granularity: u64,
+}
+
+impl Default for TransientHeapAlignments {
+    fn default() -> Self {
+        Self {
+            buffer_base_align: 256,
+            texture_base_align: 65536,
+            buffer_image_granularity: 4096,
+        }
+    }
+}
+
 /// Opaque token tying surface work to an acquired swapchain frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameToken {
@@ -276,6 +297,18 @@ pub enum GpuCommand {
     ResourceBarrier {
         buffers: Vec<BufferHandle>,
         textures: Vec<TextureHandle>,
+    },
+}
+
+/// Mixed compute + offscreen render commands from [`crate::task_graph::TaskGraph`].
+#[derive(Debug, Clone)]
+pub enum GraphCommand {
+    /// Compute / upload / barrier from [`GpuCommand`].
+    Compute(GpuCommand),
+    /// Graphics work recorded against a [`RenderTargetHandle`] (offscreen render target).
+    Render {
+        target: RenderTargetHandle,
+        commands: Vec<RenderCommand>,
     },
 }
 
@@ -552,6 +585,17 @@ pub trait GpuBackend: Send + Sync {
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue>;
 
+    /// Submit an analyzed task graph with optional offscreen [`GraphCommand::Render`] segments.
+    ///
+    /// Compute batches run through [`submit_standalone`](Self::submit_standalone); each
+    /// [`GraphCommand::Render`] runs via [`render_to_target`](Self::render_to_target) after
+    /// waiting on the preceding compute timeline value so GPU ordering is preserved.
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue>;
+
     /// Acquire the next swapchain image and begin a frame bracket.
     fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)>;
 
@@ -579,6 +623,75 @@ pub trait GpuBackend: Send + Sync {
     fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[GpuCommand]) -> Result<()> {
         let v = self.submit_standalone(device, commands)?;
         self.wait_until(device, v)
+    }
+
+    /// Per-texture byte size and alignment for suballocation in a transient heap (conservative default).
+    fn transient_texture_heap_footprint(
+        &self,
+        _device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        _access: SpatialAccess,
+        _flags: TextureFlags,
+    ) -> Result<(u64, u64)> {
+        let align = 65536u64;
+        let bpp = format.bytes_per_pixel() as u64;
+        let sz = (width as u64)
+            .checked_mul(height as u64)
+            .and_then(|x| x.checked_mul(bpp))
+            .ok_or_else(|| anyhow::anyhow!("transient texture size overflow"))?;
+        let aligned = sz
+            .checked_add(align - 1)
+            .map(|x| x / align * align)
+            .ok_or_else(|| anyhow::anyhow!("transient texture alignment overflow"))?;
+        Ok((align, aligned.max(align)))
+    }
+
+    /// Returns `Ok(None)` to use committed [`Buffer`](crate::buffer::Buffer) / [`GpuBackend::create_texture`] transients instead.
+    fn create_transient_heap(
+        &mut self,
+        _device: DeviceHandle,
+        _size: u64,
+    ) -> Result<Option<TransientHeapHandle>> {
+        Ok(None)
+    }
+
+    fn place_buffer_in_transient_heap(
+        &mut self,
+        _device: DeviceHandle,
+        _heap: TransientHeapHandle,
+        _offset: u64,
+        _size: u64,
+    ) -> Result<BufferHandle> {
+        anyhow::bail!("place_buffer_in_transient_heap not implemented for this backend")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_texture_in_transient_heap(
+        &mut self,
+        _device: DeviceHandle,
+        _heap: TransientHeapHandle,
+        _offset: u64,
+        _width: u32,
+        _height: u32,
+        _format: TextureFormat,
+        _access: SpatialAccess,
+        _flags: TextureFlags,
+    ) -> Result<TextureHandle> {
+        anyhow::bail!("place_texture_in_transient_heap not implemented for this backend")
+    }
+
+    fn destroy_transient_heap(
+        &mut self,
+        _device: DeviceHandle,
+        _heap: TransientHeapHandle,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn transient_heap_alignment_hints(&self, _device: DeviceHandle) -> TransientHeapAlignments {
+        TransientHeapAlignments::default()
     }
 
     /// Notify the backend that a frame has completed and all transient buffers
