@@ -8,8 +8,8 @@ mod common;
 
 use goldy::{
     types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
-    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
-    ShaderModule, Texture,
+    Buffer, BufferPool, BufferPoolRing, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
+    Instance, ShaderModule, Texture,
 };
 
 /// Simple compute shader that doubles each value in a buffer.
@@ -1800,4 +1800,244 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         0,
         "wait_until should drain deferred destruction for completed timeline values"
     );
+}
+
+// ── flush_deferred_deletions ───────────────────────────────────────────────────
+
+/// After a submit+wait, `flush_deferred_deletions` reclaims all pending slots
+/// without requiring a second `wait_until` call.
+#[test]
+fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
+    let device = make_device();
+
+    // Allocate, submit some work, then drop the buffer so its slot enters
+    // the pending-free list.
+    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+    let tv = {
+        let encoder = ComputeEncoder::new();
+        encoder.submit(&device).expect("submit empty work")
+    };
+    device.wait_until(tv).expect("wait");
+
+    // Drop happens *after* wait_until, so the GPU is idle but the slot may
+    // still be in the pending list depending on when the backend last ran
+    // its internal cleanup. `flush_deferred_deletions` must drain it.
+    drop(buf);
+    device.flush_deferred_deletions();
+
+    assert_eq!(
+        device.deferred_deletion_pending_count(),
+        0,
+        "flush_deferred_deletions must reclaim all slots when GPU is idle"
+    );
+}
+
+/// A buffer dropped *between* submits has its slot reclaimed by
+/// `flush_deferred_deletions` once the matching timeline has been signaled.
+#[test]
+fn flush_deferred_deletions_respects_gpu_progress() {
+    let device = make_device();
+
+    // Submit work so the timeline advances past zero.
+    let tv = {
+        let encoder = ComputeEncoder::new();
+        encoder.submit(&device).expect("submit")
+    };
+
+    // Drop a buffer while GPU may still be in flight.
+    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+    drop(buf);
+
+    // Without waiting for the GPU, calling flush is safe (no panic/crash).
+    // Slots that haven't been signaled yet should remain pending.
+    device.flush_deferred_deletions();
+
+    // After waiting, flushing again must fully drain the queue.
+    device.wait_until(tv).expect("wait");
+    device.flush_deferred_deletions();
+
+    assert_eq!(
+        device.deferred_deletion_pending_count(),
+        0,
+        "pending slots must be zero after wait_until + flush_deferred_deletions"
+    );
+}
+
+/// Calling `flush_deferred_deletions` on a fresh device with no in-flight work
+/// is a no-op and must not panic.
+#[test]
+fn flush_deferred_deletions_noop_on_idle_device() {
+    let device = make_device();
+    device.flush_deferred_deletions();
+    assert_eq!(device.deferred_deletion_pending_count(), 0);
+}
+
+// ── BufferPoolRing integration tests ──────────────────────────────────────────
+
+/// `prepare` on an empty slot allocates a new pool and sets the clear flag
+/// exactly once; `take_clear_flag` is consumed on first call.
+#[test]
+fn ring_prepare_sets_clear_flag_once() {
+    let device = make_device();
+    let mut ring = BufferPoolRing::<2>::new();
+
+    ring.prepare(&device, 1024).expect("prepare");
+
+    assert!(
+        ring.take_clear_flag(),
+        "clear flag must be true after first allocation"
+    );
+    assert!(
+        !ring.take_clear_flag(),
+        "clear flag must be false after being consumed"
+    );
+}
+
+/// `prepare` with sufficient capacity resets the bump pointer and clears
+/// the clear flag (the backing buffer does not need re-zeroing).
+#[test]
+fn ring_prepare_reuse_clears_flag() {
+    let device = make_device();
+    let mut ring = BufferPoolRing::<2>::new();
+
+    // First prepare: new allocation → flag true.
+    ring.prepare(&device, 1024).expect("prepare initial");
+    assert!(ring.take_clear_flag());
+
+    // Advance and come back: second visit to same slot with same size.
+    ring.advance();
+    ring.prepare(&device, 512).expect("prepare slot 1");
+    ring.advance();
+    ring.prepare(&device, 1024).expect("prepare slot 0 again");
+
+    // Slot 0 already has 1024 bytes; no new allocation → flag false.
+    assert!(
+        !ring.take_clear_flag(),
+        "no clear flag when existing pool is reused"
+    );
+}
+
+/// `prepare` with insufficient capacity allocates a new pool (flag becomes true).
+#[test]
+fn ring_prepare_grows_pool_sets_flag() {
+    let device = make_device();
+    let mut ring = BufferPoolRing::<2>::new();
+
+    ring.prepare(&device, 512).expect("prepare small");
+    let _ = ring.take_clear_flag(); // consume
+
+    // Ask for more than the current capacity: must reallocate.
+    ring.prepare(&device, 4 * 1024 * 1024)
+        .expect("prepare large");
+    assert!(
+        ring.take_clear_flag(),
+        "clear flag must be set after capacity growth"
+    );
+    assert!(
+        ring.current().map(|p| p.capacity()).unwrap_or(0) >= 4 * 1024 * 1024,
+        "new pool must have at least the requested capacity"
+    );
+}
+
+/// `current_mut` allows sub-allocation after `prepare`.
+#[test]
+fn ring_current_mut_allocates_views() {
+    let device = make_device();
+    let mut ring = BufferPoolRing::<2>::new();
+
+    ring.prepare(&device, 2048).expect("prepare");
+    let pool = ring.current_mut().expect("pool must exist after prepare");
+    let view = pool.alloc::<u32>(64).expect("alloc");
+    assert_eq!(view.size(), 64 * 4);
+}
+
+/// Two pool slots hold independent backing buffers: allocations in slot 0
+/// and slot 1 return distinct bindless indices.
+#[test]
+fn ring_ping_pong_slots_are_independent() {
+    let device = make_device();
+    let mut ring = BufferPoolRing::<2>::new();
+
+    // Slot 0.
+    ring.prepare(&device, 1024).expect("prepare slot 0");
+    let idx0 = ring
+        .current_mut()
+        .unwrap()
+        .alloc::<u32>(4)
+        .expect("alloc slot 0")
+        .bindless_index()
+        .expect("bindless idx 0");
+
+    // Slot 1.
+    ring.advance();
+    ring.prepare(&device, 1024).expect("prepare slot 1");
+    let idx1 = ring
+        .current_mut()
+        .unwrap()
+        .alloc::<u32>(4)
+        .expect("alloc slot 1")
+        .bindless_index()
+        .expect("bindless idx 1");
+
+    assert_ne!(
+        idx0, idx1,
+        "ping-pong slots must have different bindless indices"
+    );
+}
+
+/// After `clear()`, all slots are empty and no clear flags are set.
+#[test]
+fn ring_clear_empties_all_slots() {
+    let device = make_device();
+    let mut ring = BufferPoolRing::<2>::new();
+
+    ring.prepare(&device, 1024).expect("prepare 0");
+    ring.advance();
+    ring.prepare(&device, 1024).expect("prepare 1");
+
+    ring.clear();
+
+    assert!(ring.current().is_none(), "slot 1 must be empty after clear");
+    assert!(!ring.take_clear_flag(), "no clear flag after ring::clear");
+
+    ring.advance();
+    assert!(ring.current().is_none(), "slot 0 must be empty after clear");
+    assert!(!ring.take_clear_flag());
+}
+
+/// A full 2-frame simulated ping-pong cycle: verify the bump pointer resets
+/// each time a slot is revisited and data written in one slot is not visible
+/// in the other.
+#[test]
+fn ring_two_frame_cycle_resets_bump() {
+    let device = make_device();
+    let mut ring = BufferPoolRing::<2>::new();
+
+    // Frame 1: slot 0.
+    ring.prepare(&device, 2048).expect("frame1 prepare");
+    {
+        let pool = ring.current_mut().unwrap();
+        let _v1 = pool.alloc::<u32>(64).expect("frame1 alloc");
+        assert!(pool.used() > 0, "used must be non-zero after alloc");
+    }
+
+    // Frame 2: slot 1.
+    ring.advance();
+    ring.prepare(&device, 2048).expect("frame2 prepare");
+    {
+        let pool = ring.current_mut().unwrap();
+        assert_eq!(pool.used(), 0, "fresh slot must start at 0");
+    }
+
+    // Frame 3: back to slot 0 — bump pointer must have been reset.
+    ring.advance();
+    ring.prepare(&device, 2048).expect("frame3 prepare");
+    {
+        let pool = ring.current_mut().unwrap();
+        assert_eq!(
+            pool.used(),
+            0,
+            "revisited slot must have bump pointer reset to 0"
+        );
+    }
 }
