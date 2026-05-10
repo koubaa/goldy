@@ -320,6 +320,18 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let timeline_semaphore = unsafe { device.create_semaphore(&timeline_sem_ci, None) }
         .context("Failed to create Vulkan timeline semaphore")?;
 
+    let initial_pipeline_cache_bytes = dirs::cache_dir()
+        .map(|d| {
+            d.join("goldy")
+                .join(format!("pipeline_cache_{adapter_id}.bin"))
+        })
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_default();
+    let pipeline_cache_ci =
+        vk::PipelineCacheCreateInfo::default().initial_data(&initial_pipeline_cache_bytes);
+    let pipeline_cache = unsafe { device.create_pipeline_cache(&pipeline_cache_ci, None) }
+        .context("Failed to create VkPipelineCache")?;
+
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
@@ -341,6 +353,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             deletion_queue: types::DeletionQueue::new(),
             timeline_semaphore,
             timeline_next: 1,
+            pipeline_cache,
         },
     );
 
@@ -521,6 +534,33 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                             .destroy_pipeline_layout(pipeline.layout, None);
                     }
                 }
+            }
+
+            // Serialize pipeline cache after all pipelines referencing it are destroyed.
+            let pipeline_cache_disk_path = dirs::cache_dir().map(|d| {
+                d.join("goldy")
+                    .join(format!("pipeline_cache_{}.bin", logical_device.adapter_id))
+            });
+            if logical_device.pipeline_cache != vk::PipelineCache::null() {
+                match logical_device
+                    .device
+                    .get_pipeline_cache_data(logical_device.pipeline_cache)
+                {
+                    Ok(data) => {
+                        if let Some(path) = pipeline_cache_disk_path.as_ref() {
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            if let Err(e) = std::fs::write(path, data) {
+                                tracing::warn!(?e, path = ?path, "failed to write VkPipelineCache");
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!(?e, "failed vkGetPipelineCacheData"),
+                }
+                logical_device
+                    .device
+                    .destroy_pipeline_cache(logical_device.pipeline_cache, None);
             }
 
             // Destroy render targets owned by this device

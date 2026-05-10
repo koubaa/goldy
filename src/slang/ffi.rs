@@ -358,7 +358,7 @@ pub enum SlangCompileTarget {
 
 /// Shader stage enum
 #[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SlangStage {
     None = 0,
     Vertex = 1,

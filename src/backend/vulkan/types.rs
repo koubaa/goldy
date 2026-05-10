@@ -370,6 +370,9 @@ pub(crate) struct LogicalDevice {
     pub timeline_semaphore: vk::Semaphore,
     /// Next timeline value to signal on `timeline_semaphore`.
     pub timeline_next: u64,
+
+    /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
+    pub pipeline_cache: vk::PipelineCache,
 }
 
 impl LogicalDevice {

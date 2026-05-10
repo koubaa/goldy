@@ -30,6 +30,7 @@ pub mod texture;
 pub mod texture_pool;
 pub mod types;
 
+pub mod shader_cache;
 pub mod slang;
 pub mod validation_env;
 

@@ -165,7 +165,7 @@ pub enum DataAccess {
 /// Capturing the category alongside the index lets the CPU API and the
 /// shader-side `goldy_exp` access functions be type-checked against each
 /// other — see [`BindlessHandle`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BindlessCategory {
     /// Storage-buffer slot. Used with `goldy_scattered<T>` / `goldy_buf_ro<T>`
     /// (both shader functions index the same pool).
@@ -486,7 +486,10 @@ pub enum DeviceType {
 /// Controls how aggressively the Slang compiler optimizes generated SPIR-V / DXIL / Metal IR.
 /// Use `None` to work around driver bugs in software renderers (e.g. lavapipe SSA corruption
 /// across barriers).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum OptimizationLevel {
     /// No optimization — preserves all loads and barriers exactly as written.
     None,

@@ -97,7 +97,7 @@ pub(super) fn create(
 
     let pipelines = unsafe {
         logical_device.device.create_compute_pipelines(
-            vk::PipelineCache::null(),
+            logical_device.pipeline_cache,
             &[pipeline_info],
             None,
         )

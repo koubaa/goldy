@@ -433,6 +433,12 @@ pub(crate) struct LogicalDevice {
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
     pub deletion_queue: DeletionQueue,
+    /// Cached graphics PSO blobs from [`ID3D12PipelineState::GetCachedBlob`] (cold-load via `CachedPSO`).
+    pub graphics_pso_blobs: HashMap<u64, Vec<u8>>,
+    /// Cached compute PSO blobs.
+    pub compute_pso_blobs: HashMap<u64, Vec<u8>>,
+    /// `true` if either blob map changed since loading from [`super::pso_cache`] disk file.
+    pub pso_disk_cache_dirty: bool,
 }
 
 /// GPU buffer state.
