@@ -1314,8 +1314,8 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     )
     .expect("texture");
 
-    let wg_x = (width + 7) / 8;
-    let wg_y = (height + 7) / 8;
+    let wg_x = width.div_ceil(8);
+    let wg_y = height.div_ceil(8);
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -1650,6 +1650,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
     let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
 
+    #[allow(clippy::approx_constant)]
     let value: f32 = 3.14159;
     let bits = value.to_bits();
 

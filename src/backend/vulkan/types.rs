@@ -35,22 +35,22 @@ pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
 pub mod bindless_bindings {
     /// Scattered access: any thread, any address, read/write
     /// Maps to: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-    /// Slang: StructuredBuffer<T>, RWStructuredBuffer<T>
+    /// Slang: `StructuredBuffer<T>`, `RWStructuredBuffer<T>`
     pub const SCATTERED: u32 = 0;
 
     /// Broadcast access: all threads same address, read-only (enables cache optimization)
     /// Maps to: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-    /// Slang: ConstantBuffer<T>
+    /// Slang: `ConstantBuffer<T>`
     pub const BROADCAST: u32 = 1;
 
     /// Interpolated access: hardware filtering between neighbors (texture units)
     /// Maps to: VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
-    /// Slang: Texture2D<T> (read with sampler)
+    /// Slang: `Texture2D<T>` (read with sampler)
     pub const INTERPOLATED: u32 = 2;
 
     /// Direct spatial access: 2D/3D indexing without filtering, read/write
     /// Maps to: VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-    /// Slang: RWTexture2D<T>
+    /// Slang: `RWTexture2D<T>`
     pub const DIRECT_SPATIAL: u32 = 3;
 
     /// Filter configuration: settings for interpolated access (not data)
@@ -366,7 +366,7 @@ pub(crate) struct LogicalDevice {
     pub resource_registry: ResourceRegistry,
     /// Deferred deletion queue for resources that are still in-flight
     pub deletion_queue: DeletionQueue,
-    /// Device timeline semaphore for monotonic GPU progress ([`GpuBackend::gpu_progress`]).
+    /// Device timeline semaphore for monotonic GPU progress ([`GpuBackend::gpu_progress`](crate::backend::GpuBackend::gpu_progress)).
     pub timeline_semaphore: vk::Semaphore,
     /// Next timeline value to signal on `timeline_semaphore`.
     pub timeline_next: u64,
@@ -563,10 +563,10 @@ pub(crate) struct FrameSync {
     /// Device timeline value signaled for this frame slot's last queue submission
     /// (render or compute+present batch). Consumed when presenting.
     pub frame_timeline_value: Option<u64>,
-    /// Compute command buffers recorded in [`GpuBackend::end_frame`] and submitted
+    /// Compute command buffers recorded in [`GpuBackend::end_frame`](crate::backend::GpuBackend::end_frame) and submitted
     /// with the present-barrier batch in [`super::surface::present`].
     pub deferred_compute_cbs: Vec<vk::CommandBuffer>,
-    /// Texture upload staging for [`deferred_compute_cbs`], merged into
+    /// Texture upload staging for `deferred_compute_cbs`, merged into
     /// [`VulkanState::compute_texture_staging_pool`] under the frame's timeline
     /// signal value at present time.
     pub pending_compute_texture_staging: Vec<(vk::Buffer, vk::DeviceMemory)>,
@@ -607,7 +607,7 @@ pub(crate) struct SurfaceState {
     /// registered in the bindless descriptor set as a storage image so compute
     /// shaders can write directly to the swapchain image.
     pub current_texture_handle: Option<super::TextureHandle>,
-    /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`]).
+    /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`](crate::backend::GpuBackend::record_gpu_work)).
     pub frame_pending_gpu_commands: Vec<super::GpuCommand>,
 }
 
@@ -809,7 +809,7 @@ pub(super) struct VulkanState {
     pub next_sampler_handle: SamplerHandle,
     /// Per-backend Slang compiler instance (avoids global state issues in tests)
     pub slang_compiler: crate::slang::SlangCompiler,
-    /// Per-submission fences for non-blocking compute; token -> (device, VkFence, Option<VkCommandBuffer>).
+    /// Per-submission fences for non-blocking compute; token -> (device, `VkFence`, `Option<VkCommandBuffer>`).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
     pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
     /// Texture upload staging (VkBuffer/VkDeviceMemory) freed when the matching compute fence

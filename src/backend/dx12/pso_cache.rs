@@ -253,3 +253,188 @@ pub(super) fn save_maps(
 
     std::fs::write(path, out)
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use crate::types::{
+        CompareFunction, DepthFormat, DepthStencilState, PrimitiveTopology, TextureFormat,
+        VertexAttribute, VertexBufferLayout, VertexFormat,
+    };
+    use tempfile::TempDir;
+
+    #[test]
+    fn fnv1a64_deterministic() {
+        let b = b"hello_dx12_pso_hash";
+        assert_eq!(fnv1a64(b), fnv1a64(b));
+    }
+
+    #[test]
+    fn fnv1a64_different_inputs_differ() {
+        let mut a = vec![7u8, 42, 1, 2, 3];
+        let h0 = fnv1a64(&a);
+        let last = usize::checked_sub(a.len(), 1).unwrap();
+        a[last] ^= 0xff;
+        assert_ne!(h0, fnv1a64(&a));
+    }
+
+    fn sample_vertex_layout() -> VertexBufferLayout {
+        VertexBufferLayout {
+            stride: 16,
+            attributes: vec![VertexAttribute {
+                location: 0,
+                format: VertexFormat::Float32x3,
+                offset: 0,
+            }],
+        }
+    }
+
+    fn base_gfx_key_args() -> (
+        &'static [u8],
+        &'static [u8],
+        VertexBufferLayout,
+        PrimitiveTopology,
+        TextureFormat,
+        Option<DepthStencilState>,
+    ) {
+        (
+            b"vs bytecode",
+            b"fs bytecode",
+            sample_vertex_layout(),
+            PrimitiveTopology::TriangleList,
+            TextureFormat::R8Unorm,
+            Some(DepthStencilState {
+                format: DepthFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+            }),
+        )
+    }
+
+    #[test]
+    fn graphics_pso_key_sensitive_to_vs() {
+        let (_, fs, vl, topo, tf, ds) = base_gfx_key_args();
+        let k0 = graphics_pso_key(b"vs_a", fs, &vl, topo, tf, ds.as_ref());
+        assert_ne!(
+            k0,
+            graphics_pso_key(b"vs_b", fs, &vl, topo, tf, ds.as_ref()),
+        );
+    }
+
+    #[test]
+    fn graphics_pso_key_sensitive_to_fs() {
+        let (vs, _, vl, topo, tf, ds) = base_gfx_key_args();
+        let k0 = graphics_pso_key(vs, b"fs_a", &vl, topo, tf, ds.as_ref());
+        assert_ne!(
+            k0,
+            graphics_pso_key(vs, b"fs_b", &vl, topo, tf, ds.as_ref()),
+        );
+    }
+
+    #[test]
+    fn graphics_pso_key_sensitive_to_topology() {
+        let (vs, fs, vl, _, tf, ds) = base_gfx_key_args();
+        let line = PrimitiveTopology::LineList;
+        let tri = PrimitiveTopology::TriangleList;
+        assert_ne!(
+            graphics_pso_key(vs, fs, &vl, tri, tf, ds.as_ref()),
+            graphics_pso_key(vs, fs, &vl, line, tf, ds.as_ref()),
+        );
+    }
+
+    #[test]
+    fn graphics_pso_key_sensitive_to_target_format() {
+        let (vs, fs, vl, topo, _, ds) = base_gfx_key_args();
+        assert_ne!(
+            graphics_pso_key(vs, fs, &vl, topo, TextureFormat::R8Unorm, ds.as_ref()),
+            graphics_pso_key(vs, fs, &vl, topo, TextureFormat::Rgba32Float, ds.as_ref(),),
+        );
+    }
+
+    #[test]
+    fn graphics_pso_key_sensitive_to_depth_stencil() {
+        let (vs, fs, vl, topo, tf, _) = base_gfx_key_args();
+        let ds = DepthStencilState {
+            format: DepthFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: CompareFunction::Always,
+        };
+        assert_ne!(
+            graphics_pso_key(vs, fs, &vl, topo, tf, None),
+            graphics_pso_key(vs, fs, &vl, topo, tf, Some(&ds)),
+        );
+    }
+
+    #[test]
+    fn compute_pso_key_deterministic() {
+        let cs = b"minimal_cs_blob";
+        assert_eq!(compute_pso_key(cs), compute_pso_key(cs));
+    }
+
+    #[test]
+    fn compute_pso_key_differs_with_cs_change() {
+        assert_ne!(compute_pso_key(b"aaa"), compute_pso_key(b"aab"));
+    }
+
+    #[test]
+    fn save_load_roundtrip_empty() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("pso.bin");
+        let g_in = HashMap::<u64, Vec<u8>>::new();
+        let c_in = HashMap::<u64, Vec<u8>>::new();
+        save_maps(&path, &g_in, &c_in).unwrap();
+        let (g_out, c_out) = load_maps(&path);
+        assert!(g_out.is_empty());
+        assert!(c_out.is_empty());
+    }
+
+    #[test]
+    fn save_load_roundtrip_populated() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("pso.bin");
+        let mut g = HashMap::new();
+        g.insert(1u64, vec![10, 20, 30]);
+        g.insert(9u64, vec![255]);
+        let mut c = HashMap::new();
+        c.insert(100u64, vec![1, 2, 3, 4]);
+        save_maps(&path, &g, &c).unwrap();
+        let (g2, c2) = load_maps(&path);
+        assert_eq!(g2, g);
+        assert_eq!(c2, c);
+    }
+
+    #[test]
+    fn load_maps_missing_file_returns_empty() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("never_written.bin");
+        let (g, c) = load_maps(&path);
+        assert!(g.is_empty());
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn parse_file_bad_magic() {
+        let mut data = vec![b'X'; 8];
+        data.extend_from_slice(&FILE_VERSION.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_file(&data).is_err());
+    }
+
+    #[test]
+    fn parse_file_wrong_version() {
+        let mut data = Vec::new();
+        data.extend_from_slice(FILE_MAGIC);
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_file(&data).is_err());
+    }
+
+    #[test]
+    fn parse_file_truncated() {
+        let mut data = Vec::new();
+        data.extend_from_slice(FILE_MAGIC);
+        data.extend_from_slice(&FILE_VERSION.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_file(&data).is_err());
+    }
+}

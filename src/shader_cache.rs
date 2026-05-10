@@ -1,6 +1,6 @@
 //! Persistent Slang compilation cache (`~/.cache/goldy/shader_cache.bin.zst`).
 //!
-//! Invalidated when [`GOLDY_CACHE_VERSION`] (from [`build.rs`](../../build.rs)) changes.
+//! Invalidated when [`GOLDY_CACHE_VERSION`] changes (defined in crate [`build.rs`](../build.rs)).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -11,10 +11,11 @@ use anyhow::Result;
 use crate::slang::{ffi::SlangStage, CompiledShaderWithReflection, OwnedLayoutCheck, ShaderTarget};
 use crate::types::OptimizationLevel;
 
-pub(crate) const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
+/// Leading bytes of the decompressed shader cache payload.
+pub const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
 
 /// Build-time fingerprint: package version + git short hash + bundled Slang version.
-pub(crate) const GOLDY_CACHE_VERSION: &str = env!("GOLDY_CACHE_VERSION");
+pub const GOLDY_CACHE_VERSION: &str = env!("GOLDY_CACHE_VERSION");
 
 const BINCODE_CFG: bincode::config::Configuration = bincode::config::standard();
 
@@ -112,7 +113,7 @@ fn empty_shader_cache_shell(disk_path: Option<PathBuf>) -> ShaderBytecodeDiskCac
     }
 }
 
-pub(crate) struct ShaderBytecodeDiskCache {
+pub struct ShaderBytecodeDiskCache {
     map: HashMap<u64, Vec<u8>>,
     dirty: bool,
     disk_path: Option<PathBuf>,
@@ -122,12 +123,7 @@ pub(crate) struct ShaderBytecodeDiskCache {
 
 impl ShaderBytecodeDiskCache {
     #[must_use]
-    pub(crate) fn new_load_or_empty() -> Self {
-        let Some(cache_root) = dirs::cache_dir() else {
-            return empty_shader_cache_shell(None);
-        };
-
-        let path = cache_root.join("goldy").join("shader_cache.bin.zst");
+    pub fn new_at_path(path: PathBuf) -> Self {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(_) => {
@@ -144,7 +140,8 @@ impl ShaderBytecodeDiskCache {
                 }
             };
 
-        let Some(body) = decompressed.strip_prefix(GOLDY_SHADER_CACHE_MAGIC) else {
+        let magic = GOLDY_SHADER_CACHE_MAGIC.as_slice();
+        let Some(body) = decompressed.strip_prefix(magic) else {
             tracing::warn!("shader cache magic mismatch — ignoring cached file");
             return empty_shader_cache_shell(Some(path));
         };
@@ -187,6 +184,15 @@ impl ShaderBytecodeDiskCache {
     }
 
     #[must_use]
+    pub(crate) fn new_load_or_empty() -> Self {
+        let Some(cache_root) = dirs::cache_dir() else {
+            return empty_shader_cache_shell(None);
+        };
+
+        Self::new_at_path(cache_root.join("goldy").join("shader_cache.bin.zst"))
+    }
+
+    #[must_use]
     pub(crate) fn get(&mut self, key: u64) -> Option<Result<CompiledShaderWithReflection>> {
         let blob = self.map.get(&key)?.clone();
         Some(decode_cached(&blob))
@@ -216,7 +222,7 @@ impl ShaderBytecodeDiskCache {
         };
 
         let mut uncompressed = Vec::new();
-        let _ = uncompressed.write_all(GOLDY_SHADER_CACHE_MAGIC);
+        let _ = uncompressed.write_all(GOLDY_SHADER_CACHE_MAGIC.as_slice());
         uncompressed
             .write_all(GOLDY_CACHE_VERSION.as_bytes())
             .unwrap();
@@ -243,10 +249,20 @@ impl ShaderBytecodeDiskCache {
         !self.dirty
     }
 
-    #[allow(dead_code)]
+    /// `true` when the backing file decoded with a version matching this build ([`GOLDY_CACHE_VERSION`]).
     #[must_use]
-    pub(crate) fn version_ok_on_disk(&self) -> bool {
+    pub fn version_ok_on_disk(&self) -> bool {
         self.version_ok_on_disk
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 
@@ -295,4 +311,268 @@ fn flatten_map_to_disk(dest: &mut Vec<u8>, map: &HashMap<u64, Vec<u8>>) -> Resul
         dest.write_all(blob)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slang::{
+        ffi::SlangStage, CompiledShader, CompiledShaderWithReflection, OwnedLayoutCheck,
+        ShaderReflection, ShaderTarget,
+    };
+    use crate::types::OptimizationLevel;
+    use tempfile::TempDir;
+
+    type BaseCompileArgs = (
+        &'static str,
+        ShaderTarget,
+        Vec<(&'static str, SlangStage)>,
+        Vec<(&'static str, &'static str)>,
+        Vec<OwnedLayoutCheck>,
+        OptimizationLevel,
+    );
+
+    fn dummy_compiled() -> CompiledShaderWithReflection {
+        CompiledShaderWithReflection {
+            shader: CompiledShader {
+                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                target: ShaderTarget::Spirv,
+            },
+            reflection: ShaderReflection::default(),
+        }
+    }
+
+    fn base_compile_args() -> BaseCompileArgs {
+        (
+            "float4 main() : SV_Target0 { return 0; }",
+            ShaderTarget::Spirv,
+            vec![("main", SlangStage::Fragment)],
+            vec![("A", "1"), ("B", "2")],
+            vec![OwnedLayoutCheck {
+                type_name: "Foo".to_string(),
+                rust_size: 16,
+                rust_fields: vec![("x".to_string(), 0, 4)],
+            }],
+            OptimizationLevel::default(),
+        )
+    }
+
+    #[test]
+    fn compile_cache_key_deterministic() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let k1 = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let k2 = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn compile_cache_key_define_order_independent() {
+        let (src, tgt, eps, _defs, layouts, opt) = base_compile_args();
+        let d1 = vec![("a", "x"), ("b", "y")];
+        let d2 = vec![("b", "y"), ("a", "x")];
+        assert_eq!(
+            compile_cache_key(src, tgt, &eps, &d1, &layouts, opt),
+            compile_cache_key(src, tgt, &eps, &d2, &layouts, opt),
+        );
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_source() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let alt = "float4 main() : SV_Target0 { return 1; }";
+        assert_ne!(
+            base_key,
+            compile_cache_key(alt, tgt, &eps, &defs, &layouts, opt)
+        );
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_target() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        assert_ne!(
+            base_key,
+            compile_cache_key(src, ShaderTarget::Dxil, &eps, &defs, &layouts, opt),
+        );
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_entry_point() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let eps2 = vec![("other", SlangStage::Fragment)];
+        assert_ne!(
+            base_key,
+            compile_cache_key(src, tgt, &eps2, &defs, &layouts, opt)
+        );
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_defines() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let defs2 = vec![("A", "2"), ("B", "2")];
+        assert_ne!(
+            base_key,
+            compile_cache_key(src, tgt, &eps, &defs2, &layouts, opt)
+        );
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_optimization_level() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        assert_ne!(
+            base_key,
+            compile_cache_key(src, tgt, &eps, &defs, &layouts, OptimizationLevel::Maximal,),
+        );
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_layout_checks() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let mut layouts2 = layouts.clone();
+        layouts2[0].rust_size = 32;
+        assert_ne!(
+            base_key,
+            compile_cache_key(src, tgt, &eps, &defs, &layouts2, opt)
+        );
+    }
+
+    #[test]
+    fn cache_cold_start_on_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let c = ShaderBytecodeDiskCache::new_at_path(path.clone());
+        assert!(c.should_skip_save_on_drop());
+        assert!(!path.exists());
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn insert_marks_dirty_get_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let v = dummy_compiled();
+        let mut c = ShaderBytecodeDiskCache::new_at_path(path);
+        assert!(c.should_skip_save_on_drop());
+        c.insert(7, &v).unwrap();
+        assert!(!c.should_skip_save_on_drop());
+        let got = c.get(7).unwrap().unwrap();
+        assert_eq!(got.shader.data, v.shader.data);
+        assert_eq!(got.shader.target, v.shader.target);
+    }
+
+    #[test]
+    fn insert_identical_blob_no_dirty_after_flush_and_re_insert() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let v = dummy_compiled();
+        let mut c = ShaderBytecodeDiskCache::new_at_path(path);
+        c.insert(1, &v).unwrap();
+        c.flush_to_disk_best_effort();
+        assert!(c.should_skip_save_on_drop());
+        c.insert(1, &v).unwrap();
+        assert!(c.should_skip_save_on_drop());
+    }
+
+    #[test]
+    fn flush_not_dirty_no_file_created() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let mut c = ShaderBytecodeDiskCache::new_at_path(path.clone());
+        c.flush_to_disk_best_effort();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn flush_writes_file_and_clears_dirty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let v = dummy_compiled();
+        let mut c = ShaderBytecodeDiskCache::new_at_path(path.clone());
+        c.insert(99, &v).unwrap();
+        assert!(!c.should_skip_save_on_drop());
+        c.flush_to_disk_best_effort();
+        assert!(c.should_skip_save_on_drop());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn drop_flushes_dirty_cache() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let v = dummy_compiled();
+        {
+            let mut c = ShaderBytecodeDiskCache::new_at_path(path.clone());
+            c.insert(123, &v).unwrap();
+        }
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn load_back_after_flush() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let v = dummy_compiled();
+        {
+            let mut c = ShaderBytecodeDiskCache::new_at_path(path.clone());
+            c.insert(42, &v).unwrap();
+            c.flush_to_disk_best_effort();
+        }
+        let mut c2 = ShaderBytecodeDiskCache::new_at_path(path.clone());
+        assert!(c2.version_ok_on_disk(), "fresh load should decode version");
+        let got = c2.get(42).unwrap().unwrap();
+        assert_eq!(got.shader.data, v.shader.data);
+        assert_eq!(got.shader.target, v.shader.target);
+    }
+
+    fn write_compressed_shader_blob(buf: &[u8]) -> Vec<u8> {
+        zstd::encode_all(buf, 10).unwrap()
+    }
+
+    #[test]
+    fn version_mismatch_starts_cold() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let mut uncompressed = Vec::new();
+        uncompressed.extend_from_slice(GOLDY_SHADER_CACHE_MAGIC.as_slice());
+        uncompressed.extend_from_slice(b"this-is-not-the-build-cache-version-string\n");
+        uncompressed.extend_from_slice(&0u64.to_le_bytes());
+        std::fs::write(&path, write_compressed_shader_blob(&uncompressed)).unwrap();
+        let c = ShaderBytecodeDiskCache::new_at_path(path);
+        assert!(!c.version_ok_on_disk());
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn wrong_magic_starts_cold() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let mut uncompressed = Vec::new();
+        uncompressed.extend_from_slice(b"BADMAGIC!!");
+        uncompressed.extend_from_slice(GOLDY_CACHE_VERSION.as_bytes());
+        uncompressed.push(b'\n');
+        uncompressed.extend_from_slice(&0u64.to_le_bytes());
+        std::fs::write(&path, write_compressed_shader_blob(&uncompressed)).unwrap();
+        let c = ShaderBytecodeDiskCache::new_at_path(path);
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn truncated_body_starts_cold() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let mut uncompressed = Vec::new();
+        uncompressed.extend_from_slice(GOLDY_SHADER_CACHE_MAGIC.as_slice());
+        uncompressed.extend_from_slice(GOLDY_CACHE_VERSION.as_bytes());
+        uncompressed.push(b'\n');
+        uncompressed.extend_from_slice(&1u64.to_le_bytes()); // claim 1 entry
+        uncompressed.extend_from_slice(&0u64.to_le_bytes()); // incomplete entry
+        std::fs::write(&path, write_compressed_shader_blob(&uncompressed)).unwrap();
+        let c = ShaderBytecodeDiskCache::new_at_path(path);
+        assert!(c.is_empty());
+    }
 }

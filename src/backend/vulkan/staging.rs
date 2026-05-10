@@ -55,7 +55,7 @@ impl StagingBelt {
     }
 
     /// Return completed chunks to the free list. Call at the start of each compute submit,
-    /// **before** [`super::compute::reap_signaled_fences`] so `VkFence` handles are valid.
+    /// **before** [`super::compute`] reaps signaled fences so `VkFence` handles are valid.
     ///
     /// `completed_timeline` is the current device timeline counter (from
     /// `vkGetSemaphoreCounterValue`).  Chunks tagged with timeline-semaphore values

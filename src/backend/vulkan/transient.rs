@@ -1,4 +1,5 @@
-//! One [`vk::DeviceMemory`] block with [`vkBindBufferMemory`] / [`vkBindImageMemory`] offsets.
+//! One [`vk::DeviceMemory`] block with sub-allocations bound via Vulkan `vkBindBufferMemory` /
+//! `vkBindImageMemory` at byte offsets.
 
 use super::texture;
 use super::types::{self, TransientHeapEntry};

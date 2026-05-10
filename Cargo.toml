@@ -76,6 +76,8 @@ foreign-types = { version = "0.5", optional = true }
 block = { version = "0.1", optional = true }
 
 [dev-dependencies]
+tempfile = "3"
+
 # PNG output for examples / integration tests that save images
 image = "0.25"
 
@@ -88,6 +90,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Windowing for interactive examples
 winit = "0.30"
+
+zstd = "0.13"
 
 [features]
 # Default enables all platform-appropriate backends

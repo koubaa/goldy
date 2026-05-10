@@ -216,6 +216,7 @@ impl ResourceRegistry {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod registry_tests {
     use super::*;
 
@@ -433,7 +434,7 @@ pub(crate) struct LogicalDevice {
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
     pub deletion_queue: DeletionQueue,
-    /// Cached graphics PSO blobs from [`ID3D12PipelineState::GetCachedBlob`] (cold-load via `CachedPSO`).
+    /// Cached graphics PSO blobs from `ID3D12PipelineState::GetCachedBlob` (cold-load via `CachedPSO`).
     pub graphics_pso_blobs: HashMap<u64, Vec<u8>>,
     /// Cached compute PSO blobs.
     pub compute_pso_blobs: HashMap<u64, Vec<u8>>,
@@ -630,7 +631,7 @@ pub(crate) struct SurfaceState {
     pub pending_frame_compute: Vec<crate::backend::GpuCommand>,
 }
 
-/// Sub-heap for transient task-graph packing ([`GpuBackend::create_transient_heap`]).
+/// Sub-heap for transient task-graph packing ([`GpuBackend::create_transient_heap`](crate::backend::GpuBackend::create_transient_heap)).
 pub(crate) struct TransientHeapEntry {
     pub device_handle: DeviceHandle,
     pub heap: Direct3D12::ID3D12Heap,
