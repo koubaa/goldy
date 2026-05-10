@@ -228,7 +228,7 @@ pub(super) fn submit(
                 let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
                     staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
                 });
-                let (res, off) = belt_entry.write(ld, &data)?;
+                let (res, off) = belt_entry.write(ld, data)?;
                 belt_slices.push((res, off));
             }
         }
@@ -244,11 +244,7 @@ pub(super) fn submit(
                 height,
             } => {
                 staged_texture_uploads.push(super::texture::stage_texture_upload_full(
-                    state,
-                    *texture,
-                    &data,
-                    *width,
-                    *height,
+                    state, *texture, data, *width, *height,
                 )?);
             }
             GpuCommand::WriteTextureRegion {
@@ -260,13 +256,7 @@ pub(super) fn submit(
                 data,
             } => {
                 staged_texture_uploads.push(super::texture::stage_texture_upload_region(
-                    state,
-                    *texture,
-                    *x,
-                    *y,
-                    *width,
-                    *height,
-                    &data,
+                    state, *texture, *x, *y, *width, *height, data,
                 )?);
             }
             _ => {}

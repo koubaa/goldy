@@ -189,7 +189,9 @@ fn record_commands_to_buffer(
                 if clear_size > 0 {
                     ensure_blit!();
                     let range = mtl::NSRange::new(*offset, clear_size);
-                    blit_encoder.unwrap().fill_buffer(&buf_state.buffer, range, 0);
+                    blit_encoder
+                        .unwrap()
+                        .fill_buffer(&buf_state.buffer, range, 0);
                 }
             }
             GpuCommand::WriteBuffer {
@@ -462,8 +464,7 @@ fn record_commands_to_buffer(
                     .buffers
                     .get(buffer)
                     .context("DispatchIndirect: invalid buffer handle")?;
-                let pipeline = current_pipeline
-                    .context("DispatchIndirect: no pipeline bound")?;
+                let pipeline = current_pipeline.context("DispatchIndirect: no pipeline bound")?;
                 let threads_per_group = MTLSize {
                     width: pipeline.workgroup_size[0] as u64,
                     height: pipeline.workgroup_size[1] as u64,

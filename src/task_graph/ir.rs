@@ -10,9 +10,7 @@
 //! produce the final [`crate::backend::GpuCommand`] stream.
 
 use super::ResourceId;
-use crate::backend::{
-    BufferHandle, ComputePipelineHandle, RenderTargetHandle, TextureHandle,
-};
+use crate::backend::{BufferHandle, ComputePipelineHandle, RenderTargetHandle, TextureHandle};
 use std::sync::Arc;
 
 /// Logical access a task node has on a resource, orthogonal to the
