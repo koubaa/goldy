@@ -1094,6 +1094,12 @@ impl GpuBackend for VulkanBackend {
         transient::transient_heap_alignment_hints(&self.state, device)
     }
 
+    fn flush_deferred_deletions(&mut self, device_handle: DeviceHandle) {
+        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to_gpu_progress();
+        }
+    }
+
     fn deferred_deletion_pending_count(&self, device_handle: DeviceHandle) -> usize {
         self.state
             .devices

@@ -945,6 +945,12 @@ impl GpuBackend for Dx12Backend {
         transient::transient_heap_alignment_hints(&self.state, device)
     }
 
+    fn flush_deferred_deletions(&mut self, device_handle: DeviceHandle) {
+        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+            ld.deletion_queue.process(&ld.fence);
+        }
+    }
+
     fn deferred_deletion_pending_count(&self, device_handle: DeviceHandle) -> usize {
         self.state
             .devices
