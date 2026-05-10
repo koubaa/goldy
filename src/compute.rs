@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct ComputePipeline {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ComputePipelineHandle,
 }
@@ -43,14 +44,15 @@ impl ComputePipeline {
     /// Create a new compute pipeline.
     pub fn new(device: &Device, compute_shader: &ShaderModule) -> Result<Self> {
         tracing::debug!("Creating compute pipeline");
-        let mut backend = device.backend.lock().unwrap();
+        let mut backend = device.inner.backend.lock().unwrap();
 
-        let handle = backend.create_compute_pipeline(device.handle, compute_shader.handle)?;
+        let handle = backend.create_compute_pipeline(device.inner.handle, compute_shader.handle)?;
 
         tracing::debug!("Compute pipeline created");
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
             handle,
         })
     }
@@ -117,16 +119,16 @@ impl ComputeEncoder {
             command_count = self.commands.len(),
             "Dispatching compute commands"
         );
-        let mut backend = device.backend.lock().unwrap();
-        backend.dispatch_compute(device.handle, &self.commands)
+        let mut backend = device.inner.backend.lock().unwrap();
+        backend.dispatch_compute(device.inner.handle, &self.commands)
     }
 
     /// Submit the recorded compute commands without blocking.
     ///
     /// Returns the device timeline value for use with [`Device::gpu_progress`] / [`Device::wait_until`].
     pub fn submit(&self, device: &Device) -> Result<crate::timeline::TimelineValue> {
-        let mut backend = device.backend.lock().unwrap();
-        backend.submit_standalone(device.handle, &self.commands)
+        let mut backend = device.inner.backend.lock().unwrap();
+        backend.submit_standalone(device.inner.handle, &self.commands)
     }
 }
 

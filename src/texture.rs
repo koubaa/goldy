@@ -16,18 +16,14 @@ use std::sync::{Arc, Mutex};
 /// for sampling operations (e.g., applying textures to 3D models).
 #[derive(Clone)]
 pub struct Texture {
+    _device: Option<Device>,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: TextureHandle,
     width: u32,
     height: u32,
     format: TextureFormat,
-    /// Access pattern chosen at creation time. Determines the bindless category
-    /// (`Interpolated` → `Texture`, `Direct` → `StorageImage`).
     access: SpatialAccess,
-    /// Creation flags ([`TextureFlags`]) passed to `create_texture`.
     flags: TextureFlags,
-    /// Whether this texture owns the underlying GPU resource.
-    /// Borrowed textures (e.g. surface frame drawables) skip destroy on drop.
     owned: bool,
 }
 
@@ -67,12 +63,13 @@ impl Texture {
     ) -> Result<Self> {
         tracing::debug!(width, height, ?format, ?access, ?flags, "Creating texture");
         let handle = {
-            let mut backend = device.backend.lock().unwrap();
-            backend.create_texture(device.handle, width, height, format, access, flags)?
+            let mut backend = device.inner.backend.lock().unwrap();
+            backend.create_texture(device.inner.handle, width, height, format, access, flags)?
         };
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
+            _device: Some(device.clone()),
+            backend: Arc::clone(&device.inner.backend),
             handle,
             width,
             height,
@@ -316,6 +313,7 @@ impl Texture {
     /// holds the original `Texture`.
     pub fn borrow(&self) -> Self {
         Self {
+            _device: self._device.clone(),
             backend: Arc::clone(&self.backend),
             handle: self.handle,
             width: self.width,
@@ -343,6 +341,7 @@ impl Texture {
         format: TextureFormat,
     ) -> Self {
         Self {
+            _device: None,
             backend,
             handle,
             width,

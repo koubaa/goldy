@@ -49,6 +49,7 @@ use std::sync::{Arc, Mutex};
 
 /// A compiled shader module.
 pub struct ShaderModule {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ShaderHandle,
 }
@@ -170,14 +171,14 @@ impl ShaderModule {
 
         let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
 
-        let mut backend = device.backend.lock().unwrap();
+        let mut backend = device.inner.backend.lock().unwrap();
         let handle = if validate {
             let owned_checks: Vec<OwnedLayoutCheck> = layout_checks
                 .iter()
                 .map(OwnedLayoutCheck::from_layout_check)
                 .collect();
             backend.create_shader_with_checks(
-                device.handle,
+                device.inner.handle,
                 source,
                 &path_refs,
                 defines,
@@ -186,7 +187,7 @@ impl ShaderModule {
             )?
         } else {
             backend.create_shader_with_paths(
-                device.handle,
+                device.inner.handle,
                 source,
                 &path_refs,
                 defines,
@@ -197,7 +198,8 @@ impl ShaderModule {
         tracing::debug!("Shader module created");
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
             handle,
         })
     }

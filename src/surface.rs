@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 /// A GPU surface for zero-copy presentation to a window.
 pub struct Surface {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     device_handle: crate::backend::DeviceHandle,
     handle: SurfaceHandle,
@@ -25,6 +26,7 @@ pub struct Surface {
 
 /// A frame acquired from a surface — explicit bracket for render/compute + present.
 pub struct Frame {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     device_handle: crate::backend::DeviceHandle,
     token: FrameToken,
@@ -65,17 +67,17 @@ impl Surface {
         W: HasWindowHandle + HasDisplayHandle,
     {
         let handle = {
-            let mut backend = device.backend.lock().unwrap();
-            backend.create_surface(device.handle, window, window, config.depth_format)?
+            let mut backend = device.inner.backend.lock().unwrap();
+            backend.create_surface(device.inner.handle, window, window, config.depth_format)?
         };
 
         let (width, height) = {
-            let backend = device.backend.lock().unwrap();
+            let backend = device.inner.backend.lock().unwrap();
             backend.surface_size(handle)
         };
 
         if config.present_mode != PresentMode::Auto {
-            let mut backend = device.backend.lock().unwrap();
+            let mut backend = device.inner.backend.lock().unwrap();
             backend.surface_set_present_mode(handle, config.present_mode)?;
         }
 
@@ -88,8 +90,9 @@ impl Surface {
         );
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
-            device_handle: device.handle,
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
+            device_handle: device.inner.handle,
             handle,
             width,
             height,
@@ -115,6 +118,7 @@ impl Surface {
         ));
 
         Ok(Frame {
+            _device: self._device.clone(),
             backend: Arc::clone(&self.backend),
             device_handle: self.device_handle,
             token,

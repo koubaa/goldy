@@ -60,6 +60,7 @@ impl Default for VertexBufferLayout {
 
 /// A render pipeline.
 pub struct RenderPipeline {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: PipelineHandle,
 }
@@ -79,11 +80,11 @@ impl RenderPipeline {
             "Creating render pipeline"
         );
 
-        let mut backend = device.backend.lock().unwrap();
+        let mut backend = device.inner.backend.lock().unwrap();
 
         let handle = if desc.depth_stencil.is_some() {
             backend.create_pipeline_with_depth(
-                device.handle,
+                device.inner.handle,
                 vertex_shader.handle,
                 fragment_shader.handle,
                 &desc.vertex_layout,
@@ -93,7 +94,7 @@ impl RenderPipeline {
             )?
         } else {
             backend.create_pipeline(
-                device.handle,
+                device.inner.handle,
                 vertex_shader.handle,
                 fragment_shader.handle,
                 &desc.vertex_layout,
@@ -105,7 +106,8 @@ impl RenderPipeline {
         tracing::debug!("Render pipeline created");
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
             handle,
         })
     }

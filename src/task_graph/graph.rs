@@ -150,7 +150,7 @@ impl TaskGraph {
 
         let tv = Self::submit_resolved_ir(device, backend, &ir)?;
         if self.needs_transient_gpu_wait() {
-            backend.wait_until(device.handle, tv)?;
+            backend.wait_until(device.inner.handle, tv)?;
         }
         Ok(tv)
     }
@@ -167,12 +167,12 @@ impl TaskGraph {
 
         if has_render {
             let g = Self::compile_graph_commands_for_ir(ir);
-            backend.submit_graph(device.handle, &g)
+            backend.submit_graph(device.inner.handle, &g)
         } else {
             let edges = analysis::build_edges(ir);
             let schedule = analysis::schedule_waves(ir, &edges);
             let cmds = analysis::emit_commands(ir, &schedule);
-            backend.submit_standalone(device.handle, &cmds)
+            backend.submit_standalone(device.inner.handle, &cmds)
         }
     }
 

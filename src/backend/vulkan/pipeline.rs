@@ -385,6 +385,9 @@ pub(super) fn destroy(
     if let Some(pipeline) = pipelines.remove(&pipeline_handle) {
         if let Some(device) = devices.get(&pipeline.device_handle) {
             unsafe {
+                // Wait for all in-flight work to finish before freeing a pipeline
+                // that may still be referenced by an in-flight command buffer.
+                device.device.device_wait_idle().ok();
                 if pipeline.pipeline != vk::Pipeline::null() {
                     device.device.destroy_pipeline(pipeline.pipeline, None);
                 }
