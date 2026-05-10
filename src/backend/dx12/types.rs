@@ -216,6 +216,7 @@ impl ResourceRegistry {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod registry_tests {
     use super::*;
 

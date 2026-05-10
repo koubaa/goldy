@@ -218,11 +218,11 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-            WindowEvent::Resized(new_size) => {
-                if new_size.width > 0 && new_size.height > 0 {
-                    let _ = state.surface.resize(new_size.width, new_size.height);
-                    state.window.request_redraw();
-                }
+            WindowEvent::Resized(new_size)
+                if new_size.width > 0 && new_size.height > 0 =>
+            {
+                let _ = state.surface.resize(new_size.width, new_size.height);
+                state.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = render_frame(state) {
