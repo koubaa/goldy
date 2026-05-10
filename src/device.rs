@@ -145,11 +145,13 @@ impl Instance {
         tracing::info!(adapter_id, ?device_type, "GPU device created");
 
         Ok(Device {
-            backend: Arc::clone(&self.backend),
-            handle,
-            adapter_id,
-            device_type,
-            library_registry: Arc::new(Mutex::new(registry)),
+            inner: Arc::new(DeviceInner {
+                backend: Arc::clone(&self.backend),
+                handle,
+                adapter_id,
+                device_type,
+                library_registry: Arc::new(Mutex::new(registry)),
+            }),
         })
     }
 
@@ -238,8 +240,10 @@ impl Default for DeviceCapabilities {
 
 /// A GPU device - used to create resources and render.
 ///
-/// The `Device` is the primary interface for GPU operations. It is `Send + Sync`,
-/// so it can be safely shared across threads (typically via `Arc<Device>`).
+/// `Device` is a lightweight, cloneable handle (internally reference-counted).
+/// Cloning a `Device` is cheap (`Arc` bump) and gives you another handle to the
+/// same underlying GPU device. The physical device is only torn down once every
+/// `Device` handle **and** every resource created from it have been dropped.
 ///
 /// # Thread Safety
 ///
@@ -266,12 +270,23 @@ impl Default for DeviceCapabilities {
 /// assert!(device.has_library("goldy"));
 /// ```
 pub struct Device {
+    pub(crate) inner: Arc<DeviceInner>,
+}
+
+pub(crate) struct DeviceInner {
     pub(crate) backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: DeviceHandle,
     adapter_id: u32,
     device_type: DeviceType,
-    /// Shader library registry
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
+}
+
+impl Clone for Device {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 /// Internal registry for shader libraries.
@@ -381,53 +396,57 @@ impl Drop for ShaderLibraryRegistry {
 impl Device {
     /// Get the adapter ID this device was created on.
     pub fn adapter_id(&self) -> u32 {
-        self.adapter_id
+        self.inner.adapter_id
     }
 
     /// Get the device type (discrete GPU, integrated GPU, CPU/software, etc.).
     pub fn device_type(&self) -> DeviceType {
-        self.device_type
+        self.inner.device_type
     }
 
     /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
     pub fn backend_type(&self) -> BackendType {
-        self.backend.lock().unwrap().backend_type()
+        self.inner.backend.lock().unwrap().backend_type()
     }
 
     /// Check if the device is still valid.
     pub fn is_valid(&self) -> bool {
-        self.backend.lock().unwrap().is_device_valid(self.handle)
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .is_device_valid(self.inner.handle)
     }
 
     /// Latest GPU completion counter on this device's timeline (`wait_until(value)` is valid once
     /// `gpu_progress() >= value`).
     pub fn gpu_progress(&self) -> TimelineValue {
-        let backend = self.backend.lock().unwrap();
-        backend.gpu_progress(self.handle)
+        let backend = self.inner.backend.lock().unwrap();
+        backend.gpu_progress(self.inner.handle)
     }
 
     /// Block until the device timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<()> {
-        let mut backend = self.backend.lock().unwrap();
-        backend.wait_until(self.handle, value)
+        let mut backend = self.inner.backend.lock().unwrap();
+        backend.wait_until(self.inner.handle, value)
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Ok(false)` on timeout.
     pub fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<bool> {
-        let mut backend = self.backend.lock().unwrap();
-        backend.wait_until_timeout(self.handle, value, timeout_ms)
+        let mut backend = self.inner.backend.lock().unwrap();
+        backend.wait_until_timeout(self.inner.handle, value, timeout_ms)
     }
 
     #[doc(hidden)]
     pub fn deferred_deletion_pending_count(&self) -> usize {
-        let backend = self.backend.lock().unwrap();
-        backend.deferred_deletion_pending_count(self.handle)
+        let backend = self.inner.backend.lock().unwrap();
+        backend.deferred_deletion_pending_count(self.inner.handle)
     }
 
     /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).
     pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
-        let mut backend = self.backend.lock().unwrap();
-        let hints = backend.transient_heap_alignment_hints(self.handle);
+        let mut backend = self.inner.backend.lock().unwrap();
+        let hints = backend.transient_heap_alignment_hints(self.inner.handle);
 
         if !graph.has_transient_resources() {
             return graph.submit_with_backend(self, backend.as_mut(), None, &HashMap::new());
@@ -435,16 +454,16 @@ impl Device {
 
         let total = {
             let b: &mut dyn GpuBackend = &mut **backend;
-            graph.transient_native_heap_total_size(b, self.handle, &hints)?
+            graph.transient_native_heap_total_size(b, self.inner.handle, &hints)?
         };
-        if let Some(heap) = backend.create_transient_heap(self.handle, total)? {
+        if let Some(heap) = backend.create_transient_heap(self.inner.handle, total)? {
             let (buf_map, tex_map) = {
                 let b: &mut dyn GpuBackend = &mut **backend;
-                graph.place_transients_on_native_heap(b, self.handle, heap, &hints)?
+                graph.place_transients_on_native_heap(b, self.inner.handle, heap, &hints)?
             };
             let tv =
                 graph.submit_with_backend(self, backend.as_mut(), buf_map.as_ref(), &tex_map)?;
-            backend.destroy_transient_heap(self.handle, heap)?;
+            backend.destroy_transient_heap(self.inner.handle, heap)?;
             return Ok(tv);
         }
 
@@ -464,7 +483,7 @@ impl Device {
             };
         let buf_ranges_ref = buffer_submit.as_ref().map(|(_, r)| r);
         let (_texture_keepalive, tex_handles) = graph.allocate_transient_textures(self)?;
-        let mut backend = self.backend.lock().unwrap();
+        let mut backend = self.inner.backend.lock().unwrap();
         graph.submit_with_backend(self, backend.as_mut(), buf_ranges_ref, &tex_handles)
     }
 
@@ -495,8 +514,8 @@ impl Device {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn capabilities(&self) -> DeviceCapabilities {
-        let backend = self.backend.lock().unwrap();
-        backend.device_capabilities(self.handle)
+        let backend = self.inner.backend.lock().unwrap();
+        backend.device_capabilities(self.inner.handle)
     }
 
     // --- Shader Library Management ---
@@ -526,7 +545,11 @@ impl Device {
     /// ```
     pub fn register_library(&self, library: ShaderLibrary) -> Result<()> {
         tracing::debug!(library_name = %library.name(), "Registering shader library");
-        self.library_registry.lock().unwrap().register(library)
+        self.inner
+            .library_registry
+            .lock()
+            .unwrap()
+            .register(library)
     }
 
     /// Unregister a shader library.
@@ -539,7 +562,7 @@ impl Device {
     /// Unregistering the built-in `goldy` library is allowed but not recommended,
     /// as many shader utilities depend on it.
     pub fn unregister_library(&self, name: &str) -> bool {
-        self.library_registry.lock().unwrap().unregister(name)
+        self.inner.library_registry.lock().unwrap().unregister(name)
     }
 
     /// Check if a shader library is registered.
@@ -551,14 +574,15 @@ impl Device {
     /// assert!(device.has_library("goldy"));
     /// ```
     pub fn has_library(&self, name: &str) -> bool {
-        self.library_registry.lock().unwrap().has(name)
+        self.inner.library_registry.lock().unwrap().has(name)
     }
 
     /// List all registered shader libraries.
     ///
     /// Returns the names of all currently registered libraries.
     pub fn list_libraries(&self) -> Vec<String> {
-        self.library_registry
+        self.inner
+            .library_registry
             .lock()
             .unwrap()
             .list()
@@ -584,7 +608,11 @@ impl Device {
     /// long-lived pool backing buffer) or at a natural steady-state boundary
     /// such as a resize or scene change.
     pub fn reset_buffer_heaps(&self) {
-        self.backend.lock().unwrap().reset_buffer_heaps(self.handle);
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .reset_buffer_heaps(self.inner.handle);
     }
 
     /// No-op: texture uploads are scheduled via [`crate::task_graph::TaskGraph`].
@@ -598,7 +626,11 @@ impl Device {
 
     /// Get search paths for shader compilation (internal use).
     pub(crate) fn get_shader_search_paths(&self) -> Result<Vec<PathBuf>> {
-        self.library_registry.lock().unwrap().get_search_paths()
+        self.inner
+            .library_registry
+            .lock()
+            .unwrap()
+            .get_search_paths()
     }
 
     /// Reflect the memory layout of a Slang `struct` by compiling `shader_source` once for reflection.
@@ -615,7 +647,7 @@ impl Device {
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
         let path_refs: Vec<&str> = path_strings.iter().map(|s| s.as_str()).collect();
-        let target = match self.backend.lock().unwrap().backend_type() {
+        let target = match self.inner.backend.lock().unwrap().backend_type() {
             BackendType::Vulkan => ShaderTarget::Spirv,
             BackendType::Dx12 => ShaderTarget::Dxil,
             BackendType::Metal => ShaderTarget::Metal,
@@ -637,21 +669,22 @@ impl Device {
             b.create_device(0)?
         };
 
-        // Create registry with built-in goldy_exp library
         let mut registry = ShaderLibraryRegistry::new();
         registry.register(ShaderLibrary::goldy_experimental())?;
 
         Ok(Self {
-            backend,
-            handle,
-            adapter_id: 0,
-            device_type: DeviceType::Other,
-            library_registry: Arc::new(Mutex::new(registry)),
+            inner: Arc::new(DeviceInner {
+                backend,
+                handle,
+                adapter_id: 0,
+                device_type: DeviceType::Other,
+                library_registry: Arc::new(Mutex::new(registry)),
+            }),
         })
     }
 }
 
-impl Drop for Device {
+impl Drop for DeviceInner {
     fn drop(&mut self) {
         tracing::debug!(
             %self.handle,

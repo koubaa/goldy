@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 /// }
 /// ```
 pub struct Sampler {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: SamplerHandle,
 }
@@ -54,12 +55,13 @@ impl Sampler {
             "Creating sampler"
         );
         let handle = {
-            let mut backend = device.backend.lock().unwrap();
-            backend.create_sampler(device.handle, desc)?
+            let mut backend = device.inner.backend.lock().unwrap();
+            backend.create_sampler(device.inner.handle, desc)?
         };
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
             handle,
         })
     }

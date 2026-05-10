@@ -47,6 +47,7 @@ impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T;
 
 /// A GPU buffer.
 pub struct Buffer {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
     size: u64,
@@ -91,11 +92,13 @@ impl Buffer {
         flags: BufferFlags,
     ) -> Result<Self> {
         tracing::debug!(size, ?access, element_stride, ?flags, "Creating buffer");
-        let mut backend = device.backend.lock().unwrap();
-        let handle = backend.create_buffer(device.handle, size, access, element_stride, flags)?;
+        let mut backend = device.inner.backend.lock().unwrap();
+        let handle =
+            backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
             handle,
             size,
             access,
@@ -132,9 +135,9 @@ impl Buffer {
     ) -> Result<Self> {
         let bytes = bytemuck::cast_slice(data);
         let element_stride = std::mem::size_of::<T>() as u32;
-        let mut backend = device.backend.lock().unwrap();
+        let mut backend = device.inner.backend.lock().unwrap();
         let handle = backend.create_buffer(
-            device.handle,
+            device.inner.handle,
             bytes.len() as u64,
             access,
             Some(element_stride),
@@ -143,7 +146,8 @@ impl Buffer {
         drop(backend);
 
         let buffer = Self {
-            backend: Arc::clone(&device.backend),
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
             handle,
             size: bytes.len() as u64,
             access,
@@ -194,9 +198,9 @@ impl Buffer {
         element_stride: u32,
         flags: BufferFlags,
     ) -> Result<Self> {
-        let mut backend = device.backend.lock().unwrap();
+        let mut backend = device.inner.backend.lock().unwrap();
         let handle = backend.create_buffer(
-            device.handle,
+            device.inner.handle,
             data.len() as u64,
             access,
             Some(element_stride),
@@ -205,7 +209,8 @@ impl Buffer {
         drop(backend);
 
         let buffer = Self {
-            backend: Arc::clone(&device.backend),
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
             handle,
             size: data.len() as u64,
             access,
@@ -300,13 +305,13 @@ impl Buffer {
     /// GPU copy into a READBACK heap and waits — query capabilities to branch on behavior.
     pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
-        backend.read_buffer_to_cpu(device.handle, self.handle, output)
+        backend.read_buffer_to_cpu(device.inner.handle, self.handle, output)
     }
 
     /// Clear the buffer (fill with zeros) from offset for size bytes.
     pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
-        backend.clear_buffer(device.handle, self.handle, offset, size)
+        backend.clear_buffer(device.inner.handle, self.handle, offset, size)
     }
 
     /// Create a view into a sub-region of this buffer.
@@ -326,6 +331,7 @@ impl Buffer {
         let mut backend = self.backend.lock().unwrap();
         let handle = backend.create_buffer_view(self.handle, offset, size, element_stride)?;
         Ok(BufferView {
+            _device: self._device.clone(),
             backend: Arc::clone(&self.backend),
             handle,
             parent_handle: self.handle,
@@ -390,6 +396,7 @@ impl BufferSource for Buffer {
 ///
 /// Dropping a `BufferView` unregisters its descriptor but does not free the parent's memory.
 pub struct BufferView {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
     parent_handle: BufferHandle,
@@ -462,7 +469,7 @@ impl BufferView {
         }
         let mut backend = self.backend.lock().unwrap();
         backend.clear_buffer(
-            device.handle,
+            device.inner.handle,
             self.parent_handle,
             self.offset + offset,
             clear_size,
@@ -487,7 +494,7 @@ impl BufferView {
         let mut backend = self.backend.lock().unwrap();
         let parent_size = backend.buffer_size(self.parent_handle);
         let mut full = vec![0u8; parent_size as usize];
-        backend.read_buffer_to_cpu(device.handle, self.parent_handle, &mut full)?;
+        backend.read_buffer_to_cpu(device.inner.handle, self.parent_handle, &mut full)?;
         output.copy_from_slice(
             &full[self.offset as usize..self.offset as usize + self.size as usize],
         );

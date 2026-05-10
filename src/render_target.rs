@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// Optionally includes a depth buffer for 3D rendering with depth testing.
 pub struct RenderTarget {
+    _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     device_handle: u64,
     handle: RenderTargetHandle,
@@ -124,9 +125,9 @@ impl RenderTarget {
             "Creating render target"
         );
         let handle = {
-            let mut backend = device.backend.lock().unwrap();
+            let mut backend = device.inner.backend.lock().unwrap();
             backend.create_render_target_with_depth(
-                device.handle,
+                device.inner.handle,
                 width,
                 height,
                 color_format,
@@ -135,8 +136,9 @@ impl RenderTarget {
         };
 
         Ok(Self {
-            backend: Arc::clone(&device.backend),
-            device_handle: device.handle,
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
+            device_handle: device.inner.handle,
             handle,
             width,
             height,
