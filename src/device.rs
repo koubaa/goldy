@@ -437,6 +437,18 @@ impl Device {
         backend.wait_until_timeout(self.inner.handle, value, timeout_ms)
     }
 
+    /// Reclaim bindless descriptor slots and process deferred GPU deletions
+    /// whose timeline barrier has been signaled.
+    ///
+    /// This is normally called internally at acquire / present / submit, but
+    /// consumers that drop buffers between those points (e.g. during a
+    /// non-blocking frame drain) can call this to reclaim slots immediately
+    /// rather than waiting for the next internal call.
+    pub fn flush_deferred_deletions(&self) {
+        let mut backend = self.inner.backend.lock().unwrap();
+        backend.flush_deferred_deletions(self.inner.handle);
+    }
+
     #[doc(hidden)]
     pub fn deferred_deletion_pending_count(&self) -> usize {
         let backend = self.inner.backend.lock().unwrap();

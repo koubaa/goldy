@@ -686,6 +686,12 @@ impl GpuBackend for MetalBackend {
         transient::transient_heap_alignment_hints(&self.state, device)
     }
 
+    fn flush_deferred_deletions(&mut self, device: DeviceHandle) {
+        if let Some(ld) = self.state.devices.get_mut(&device) {
+            ld.process_deletion_queue_up_to_signaled();
+        }
+    }
+
     fn reset_buffer_heaps(&mut self, device: DeviceHandle) {
         // Safety: dropping the old primary heap and clearing overflow heaps
         // is only sound once every command buffer that allocated buffers from

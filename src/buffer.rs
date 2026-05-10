@@ -707,6 +707,107 @@ impl BufferPool {
     }
 }
 
+/// A fixed-size ring of [`BufferPool`]s for double- (or N-) buffered rendering.
+///
+/// Each frame calls [`advance`](Self::advance) to flip to the next pool, then
+/// [`prepare`](Self::prepare) to ensure it is large enough. The pool that was
+/// active N frames ago is now the current one; its GPU work has completed under
+/// normal pipelining, so `reset()` is safe.
+///
+/// ```ignore
+/// let mut ring = BufferPoolRing::new();
+/// // each frame:
+/// ring.advance();
+/// ring.prepare(&device, needed_bytes)?;
+/// let pool = ring.current_mut().unwrap();
+/// let view = pool.alloc_bytes(1024, Some(4))?;
+/// ```
+pub struct BufferPoolRing<const N: usize = 2> {
+    pools: [Option<BufferPool>; N],
+    clear_flags: [bool; N],
+    idx: usize,
+}
+
+impl<const N: usize> Default for BufferPoolRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> BufferPoolRing<N> {
+    /// Create an empty ring (all pool slots `None`).
+    pub fn new() -> Self {
+        Self {
+            pools: std::array::from_fn(|_| None),
+            clear_flags: [false; N],
+            idx: 0,
+        }
+    }
+
+    /// Advance to the next pool slot in the ring.
+    ///
+    /// Call this once at the start of each frame, **before** [`prepare`](Self::prepare).
+    pub fn advance(&mut self) {
+        self.idx = (self.idx + 1) % N;
+    }
+
+    /// Ensure the current pool slot has at least `size` bytes of capacity.
+    ///
+    /// If the existing pool is large enough it is reset (bump pointer back to 0).
+    /// If it is too small (or absent) a new pool is allocated and the clear flag
+    /// is set so the caller can zero-fill the backing buffer.
+    ///
+    /// Calls [`Device::reset_buffer_heaps`] when a new allocation is needed.
+    pub fn prepare(&mut self, device: &Device, size: u64) -> Result<()> {
+        let idx = self.idx;
+        let need_new = match &self.pools[idx] {
+            Some(pool) => pool.capacity() < size,
+            None => true,
+        };
+        if need_new {
+            self.pools[idx] = None;
+            device.reset_buffer_heaps();
+            let pool = BufferPool::new(device, size)?;
+            self.pools[idx] = Some(pool);
+            self.clear_flags[idx] = true;
+        } else {
+            self.pools[idx]
+                .as_mut()
+                .expect("pool must exist when need_new is false")
+                .reset();
+            self.clear_flags[idx] = false;
+        }
+        Ok(())
+    }
+
+    /// Mutable reference to the current pool (if allocated).
+    pub fn current_mut(&mut self) -> Option<&mut BufferPool> {
+        self.pools[self.idx].as_mut()
+    }
+
+    /// Shared reference to the current pool (if allocated).
+    pub fn current(&self) -> Option<&BufferPool> {
+        self.pools[self.idx].as_ref()
+    }
+
+    /// Check and consume the clear flag for the current pool.
+    ///
+    /// Returns `true` exactly once after [`prepare`](Self::prepare) allocates a
+    /// new backing buffer. The caller should issue a `clear_buffer` command for
+    /// the backing buffer when this returns `true`.
+    pub fn take_clear_flag(&mut self) -> bool {
+        let flag = self.clear_flags[self.idx];
+        self.clear_flags[self.idx] = false;
+        flag
+    }
+
+    /// Drop all pools and reset clear flags.
+    pub fn clear(&mut self) {
+        self.pools = std::array::from_fn(|_| None);
+        self.clear_flags = [false; N];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
