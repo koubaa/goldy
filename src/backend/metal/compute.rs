@@ -139,19 +139,34 @@ fn begin_compute_encoder<'a>(
     encoder
 }
 
+/// Guard that ensures Metal command encoders are ended on all exit paths
+/// (including early `?` returns). Metal asserts at dealloc time if an encoder
+/// was never ended, so this prevents crashes on error paths.
+struct EncoderGuard<'a> {
+    compute: Option<&'a mtl::ComputeCommandEncoderRef>,
+    blit: Option<&'a mtl::BlitCommandEncoderRef>,
+}
+
+impl Drop for EncoderGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(enc) = self.blit.take() {
+            enc.end_encoding();
+        }
+        if let Some(enc) = self.compute.take() {
+            enc.end_encoding();
+        }
+    }
+}
+
 /// Record compute commands to a command buffer (shared by submit and dispatch).
 ///
-/// Uses a **two-pass** structure: all blit operations (clears, uploads) run
-/// first in a single blit encoder, then all compute operations run in a single
-/// compute encoder. This avoids the repeated compute→blit→compute alternation
-/// that would call `begin_compute_encoder` (and its expensive per-resource
-/// `use_resource` loop) many times per submission.
-///
-/// Correctness: the task graph already places explicit `ResourceBarrier`
-/// commands at wave boundaries so that data written by clears/uploads is
-/// visible to subsequent dispatches. Hoisting all blit work before compute
-/// preserves this ordering — barriers within the compute encoder ensure
-/// inter-dispatch visibility.
+/// Uses a **single-pass** structure that lazily transitions between blit and
+/// compute encoders as needed. Consecutive blit commands (clears, uploads)
+/// share one blit encoder; consecutive compute commands share one compute
+/// encoder. When a command of the other type is encountered, the active
+/// encoder is ended before the new one begins. Metal guarantees sequential
+/// execution of encoders within a command buffer, so this preserves the
+/// caller's intended ordering (e.g. dispatch → clear → dispatch).
 fn record_commands_to_buffer(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
@@ -159,13 +174,47 @@ fn record_commands_to_buffer(
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
 ) -> Result<()> {
-    // ── Pass 1: blit (clears + uploads) ─────────────────────────────────
-    let mut blit_encoder: Option<&mtl::BlitCommandEncoderRef> = None;
+    let mut guard = EncoderGuard {
+        compute: None,
+        blit: None,
+    };
+    let mut current_pipeline: Option<&ComputePipelineState> = None;
+
+    macro_rules! end_compute {
+        () => {
+            if let Some(enc) = guard.compute.take() {
+                enc.end_encoding();
+            }
+        };
+    }
+
+    macro_rules! end_blit {
+        () => {
+            if let Some(enc) = guard.blit.take() {
+                enc.end_encoding();
+            }
+        };
+    }
+
+    macro_rules! ensure_compute {
+        () => {
+            end_blit!();
+            if guard.compute.is_none() {
+                let enc =
+                    begin_compute_encoder(command_buffer, state, logical_device, device_handle);
+                if let Some(pipeline) = current_pipeline {
+                    enc.set_compute_pipeline_state(&pipeline.pipeline);
+                }
+                guard.compute = Some(enc);
+            }
+        };
+    }
 
     macro_rules! ensure_blit {
         () => {
-            if blit_encoder.is_none() {
-                blit_encoder = Some(command_buffer.new_blit_command_encoder());
+            end_compute!();
+            if guard.blit.is_none() {
+                guard.blit = Some(command_buffer.new_blit_command_encoder());
             }
         };
     }
@@ -189,9 +238,7 @@ fn record_commands_to_buffer(
                 if clear_size > 0 {
                     ensure_blit!();
                     let range = mtl::NSRange::new(*offset, clear_size);
-                    blit_encoder
-                        .unwrap()
-                        .fill_buffer(&buf_state.buffer, range, 0);
+                    guard.blit.unwrap().fill_buffer(&buf_state.buffer, range, 0);
                 }
             }
             GpuCommand::WriteBuffer {
@@ -210,17 +257,23 @@ fn record_commands_to_buffer(
                     *offset + data.len() as u64 <= buf_state.size,
                     "WriteBuffer: write exceeds buffer bounds"
                 );
-                // Direct memcpy: all Metal buffers are StorageModeShared (unified
-                // memory on Apple Silicon). The CPU and GPU share the same physical
-                // pages, so a memcpy is immediately coherent. This is safe here
-                // because the two-pass structure guarantees no compute encoder
-                // touches this data until after the blit pass (and command buffer
-                // commit) completes, and Ekrano's frame pipeline drains previous
-                // GPU work before recording new commands.
-                unsafe {
-                    let dst = buf_state.buffer.contents().add(*offset as usize);
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
-                }
+                // Use a staging buffer + blit copy so each submission's data is
+                // isolated. A direct CPU memcpy would race when two command
+                // buffers target the same destination: the second memcpy
+                // overwrites the buffer before the first GPU dispatch reads it.
+                ensure_blit!();
+                let staging = logical_device.device.new_buffer_with_data(
+                    data.as_ptr() as *const _,
+                    data.len() as u64,
+                    mtl::MTLResourceOptions::StorageModeShared,
+                );
+                guard.blit.unwrap().copy_from_buffer(
+                    &staging,
+                    0,
+                    &buf_state.buffer,
+                    *offset,
+                    data.len() as u64,
+                );
             }
             GpuCommand::WriteTexture {
                 texture: tex_handle,
@@ -256,7 +309,7 @@ fn record_commands_to_buffer(
                     mtl::MTLResourceOptions::StorageModeShared,
                 );
                 let bytes_per_row = (*width as u64) * (bpp as u64);
-                blit_encoder.unwrap().copy_from_buffer_to_texture(
+                guard.blit.unwrap().copy_from_buffer_to_texture(
                     &staging,
                     0,
                     bytes_per_row,
@@ -307,7 +360,7 @@ fn record_commands_to_buffer(
                     mtl::MTLResourceOptions::StorageModeShared,
                 );
                 let bytes_per_row = (*width as u64) * (bpp as u64);
-                blit_encoder.unwrap().copy_from_buffer_to_texture(
+                guard.blit.unwrap().copy_from_buffer_to_texture(
                     &staging,
                     0,
                     bytes_per_row,
@@ -328,37 +381,11 @@ fn record_commands_to_buffer(
                     mtl::MTLBlitOption::empty(),
                 );
             }
-            _ => {}
-        }
-    }
-
-    if let Some(blit) = blit_encoder.take() {
-        blit.end_encoding();
-    }
-
-    // ── Pass 2: compute (pipelines, binds, dispatches, barriers) ────────
-    let mut encoder: Option<&mtl::ComputeCommandEncoderRef> = None;
-    let mut current_pipeline: Option<&ComputePipelineState> = None;
-
-    macro_rules! ensure_compute {
-        () => {
-            if encoder.is_none() {
-                let enc =
-                    begin_compute_encoder(command_buffer, state, logical_device, device_handle);
-                if let Some(pipeline) = current_pipeline {
-                    enc.set_compute_pipeline_state(&pipeline.pipeline);
-                }
-                encoder = Some(enc);
-            }
-        };
-    }
-
-    for cmd in commands {
-        match cmd {
             GpuCommand::SetPipeline(handle) => {
                 ensure_compute!();
                 if let Some(pipeline) = state.compute_pipelines.get(handle) {
-                    encoder
+                    guard
+                        .compute
                         .expect("encoder must be set after ensure_compute!()")
                         .set_compute_pipeline_state(&pipeline.pipeline);
                     current_pipeline = Some(pipeline);
@@ -376,7 +403,8 @@ fn record_commands_to_buffer(
                     }
                 }
                 let layout_bytes = layout.as_bytes();
-                encoder
+                guard
+                    .compute
                     .expect("encoder must be set after ensure_compute!()")
                     .set_bytes(
                         RESOURCE_SLOT_BUFFER,
@@ -403,7 +431,8 @@ fn record_commands_to_buffer(
                     layout.user[i] = val;
                 }
                 let layout_bytes = layout.as_bytes();
-                encoder
+                guard
+                    .compute
                     .expect("encoder must be set after ensure_compute!()")
                     .set_bytes(
                         RESOURCE_SLOT_BUFFER,
@@ -428,7 +457,8 @@ fn record_commands_to_buffer(
                     layout.bindless[i] = handle.index() as u16;
                 }
                 let layout_bytes = layout.as_bytes();
-                encoder
+                guard
+                    .compute
                     .expect("encoder must be set after ensure_compute!()")
                     .set_bytes(
                         RESOURCE_SLOT_BUFFER,
@@ -453,7 +483,8 @@ fn record_commands_to_buffer(
                         height: *workgroups_y as u64,
                         depth: *workgroups_z as u64,
                     };
-                    encoder
+                    guard
+                        .compute
                         .expect("encoder must be set after ensure_compute!()")
                         .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
@@ -470,12 +501,13 @@ fn record_commands_to_buffer(
                     height: pipeline.workgroup_size[1] as u64,
                     depth: pipeline.workgroup_size[2] as u64,
                 };
-                encoder
+                guard
+                    .compute
                     .expect("encoder must be set after ensure_compute!()")
                     .dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
             }
             GpuCommand::Barrier => {
-                if let Some(enc) = encoder {
+                if let Some(enc) = guard.compute {
                     const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
                     let () = unsafe {
                         msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES]
@@ -486,7 +518,7 @@ fn record_commands_to_buffer(
                 buffers: buf_handles,
                 textures: tex_handles,
             } => {
-                if let Some(enc) = encoder {
+                if let Some(enc) = guard.compute {
                     let mut resources: Vec<&mtl::ResourceRef> = Vec::new();
                     for handle in buf_handles {
                         if let Some(buf_state) = state.buffers.get(handle) {
@@ -512,17 +544,12 @@ fn record_commands_to_buffer(
                     }
                 }
             }
-            // Blit commands already handled in pass 1.
-            GpuCommand::ClearBuffer { .. }
-            | GpuCommand::WriteBuffer { .. }
-            | GpuCommand::WriteTexture { .. }
-            | GpuCommand::WriteTextureRegion { .. } => {}
         }
     }
 
-    if let Some(enc) = encoder.take() {
-        enc.end_encoding();
-    }
+    // Explicit cleanup (guard's Drop also handles early-return paths).
+    end_blit!();
+    end_compute!();
     Ok(())
 }
 
