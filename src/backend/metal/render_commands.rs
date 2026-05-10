@@ -5,7 +5,6 @@
 use super::super::{BufferHandle, PipelineHandle, RenderCommand};
 use super::types::{
     PipelineState, PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS, RESOURCE_SLOT_BUFFER,
-    TOTAL_PUSH_BYTES,
 };
 use super::utils::index_format_to_mtl;
 use crate::types::IndexFormat;
@@ -46,6 +45,10 @@ pub(super) fn record(
                 if let Some(buf) = buffers.get(buffer) {
                     let metal_slot = (*slot as u64) + super::types::VERTEX_BUFFER_START_SLOT;
                     encoder.set_vertex_buffer(metal_slot, Some(&buf.buffer), *offset);
+                } else {
+                    tracing::error!(
+                        "SetVertexBuffer: buffer handle {buffer} not found; vertex binding will be missing"
+                    );
                 }
             }
             RenderCommand::SetIndexBuffer {
@@ -67,9 +70,7 @@ pub(super) fn record(
                         layout.bindless[i] = buf.arg_buffer_index as u16;
                     }
                 }
-                let layout_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
-                };
+                let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,
                     layout_bytes.len() as u64,
@@ -98,9 +99,7 @@ pub(super) fn record(
                     }
                     layout.user[i] = val;
                 }
-                let layout_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
-                };
+                let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,
                     layout_bytes.len() as u64,
@@ -129,9 +128,7 @@ pub(super) fn record(
                     }
                     layout.bindless[i] = handle.index() as u16;
                 }
-                let layout_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
-                };
+                let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,
                     layout_bytes.len() as u64,
@@ -181,6 +178,10 @@ pub(super) fn record(
                             index_offset,
                             *instance_count as u64,
                         );
+                    } else {
+                        tracing::error!(
+                            "DrawIndexed: index buffer handle {buffer_handle} not found; draw call skipped"
+                        );
                     }
                 }
             }
@@ -199,7 +200,10 @@ pub(super) fn create_render_pass<'a>(
 ) -> &'a mtl::RenderPassDescriptorRef {
     let descriptor = mtl::RenderPassDescriptor::new();
 
-    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    let color_attachment = descriptor
+        .color_attachments()
+        .object_at(0)
+        .expect("Metal render pass descriptor must have at least one color attachment");
     color_attachment.set_texture(Some(texture));
 
     if let Some(color) = clear_color {
@@ -216,7 +220,9 @@ pub(super) fn create_render_pass<'a>(
     color_attachment.set_store_action(mtl::MTLStoreAction::Store);
 
     if let Some(depth) = depth_texture {
-        let depth_attachment = descriptor.depth_attachment().unwrap();
+        let depth_attachment = descriptor.depth_attachment().expect(
+            "Metal render pass descriptor must have a depth attachment when depth texture is set",
+        );
         depth_attachment.set_texture(Some(depth));
         if let Some(depth_value) = clear_depth {
             depth_attachment.set_load_action(mtl::MTLLoadAction::Clear);

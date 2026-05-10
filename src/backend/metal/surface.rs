@@ -3,6 +3,13 @@
 //! The acquire/render/present cycle is decoupled:
 //! - `acquire()` calls `nextDrawable` and registers the drawable's texture for bindless access
 //! - `frame_texture()` returns the registered texture handle
+//!
+//! ## Deprecation note
+//! This file uses `cocoa::base::id`, `NSRect`, and related types from the
+//! `cocoa`/`objc` 0.2.x ecosystem, which are deprecated in favour of the
+//! `objc2` crate. Migration is deferred until the `metal` and `cocoa` crates
+//! offer stable `objc2`-compatible bindings for `CAMetalLayer`.
+#![allow(deprecated)]
 //! - `render()` uses the already-acquired drawable (does NOT call `nextDrawable` again)
 //! - `present()` presents the drawable and unregisters the temporary texture
 //!
@@ -159,10 +166,12 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let (Some(dev), Some(slot_arr)) = (device_handle, slots) {
         if let Some(logical_device) = state.devices.get_mut(&dev) {
+            let barrier = logical_device.timeline_scheduled_max;
+            let slot_barrier = if gpu_idle { None } else { Some(barrier) };
             for &local in &slot_arr {
                 logical_device
                     .resource_registry
-                    .release_storage_image_slot(local, !gpu_idle);
+                    .release_storage_image_slot(local, slot_barrier);
             }
         }
     }
@@ -231,7 +240,10 @@ pub(super) fn acquire(
         bindless_slot,
     )?;
 
-    let surface_state = state.surfaces.get_mut(&surface).unwrap();
+    let surface_state = state
+        .surfaces
+        .get_mut(&surface)
+        .expect("surface must be registered before acquiring a frame");
     surface_state.current_texture_handle = Some(tex_handle);
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
@@ -387,6 +399,13 @@ pub(super) fn present(
     let command_buffer = logical_device.command_queue.new_command_buffer();
     command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
 
+    let waiter = logical_device.timeline_waiter.clone();
+    let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+        waiter.signal(signal_value);
+    })
+    .copy();
+    command_buffer.add_completed_handler(&handler);
+
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
     command_buffer.present_drawable(drawable_ref);
@@ -403,7 +422,10 @@ pub(super) fn present(
     }
 
     // Clear the drawable state
-    let surface_state = state.surfaces.get_mut(&surface).unwrap();
+    let surface_state = state
+        .surfaces
+        .get_mut(&surface)
+        .expect("surface must be registered before presenting a frame");
     surface_state.current_drawable = None;
     surface_state.current_texture_handle = None;
 
@@ -534,7 +556,7 @@ pub(super) fn format(state: &MetalState, surface: SurfaceHandle) -> TextureForma
         .surfaces
         .get(&surface)
         .map(|s| s.format)
-        .unwrap_or(TextureFormat::Bgra8Unorm)
+        .unwrap_or(TextureFormat::Rgba8Unorm)
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +617,13 @@ fn register_surface_texture(
             logical_device
                 .storage_image_encoder
                 .set_texture(0, texture_owned.as_ref());
+        } else {
+            tracing::error!(
+                "register_surface_texture: argument buffer overflow — \
+                 offset {offset} + encoded_length {encoded_length} exceeds \
+                 ARGUMENT_BUFFER_SIZE {ARGUMENT_BUFFER_SIZE}; \
+                 drawable will not be encoded and compute shaders may see a stale binding"
+            );
         }
 
         global

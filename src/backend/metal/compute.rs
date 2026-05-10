@@ -5,9 +5,12 @@ use super::shader::parse_numthreads;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{
     ComputePipelineState, MetalState, PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS,
-    TOTAL_PUSH_BYTES,
 };
 use crate::slang::SlangStage;
+
+/// Fallback workgroup size used when a compute shader's `[numthreads]` annotation
+/// cannot be parsed. Matches the Metal/Slang default used elsewhere in the codebase.
+const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -39,9 +42,20 @@ pub(super) fn create(
         .get(&compute_shader)
         .context("Invalid compute shader")?;
 
-    let workgroup_size = parse_numthreads(&shader.slang_source).unwrap_or([64, 1, 1]);
+    let workgroup_size = parse_numthreads(&shader.slang_source).unwrap_or_else(|| {
+        tracing::warn!(
+            "Could not parse [numthreads] annotation for compute shader {}; \
+             using default workgroup {:?}",
+            compute_shader,
+            DEFAULT_WORKGROUP
+        );
+        DEFAULT_WORKGROUP
+    });
 
-    let library = shader.compute_library.as_ref().unwrap();
+    let library = shader
+        .compute_library
+        .as_ref()
+        .expect("compute library must be compiled before pipeline creation");
 
     let function = library
         .get_function("cs_main", None)
@@ -162,7 +176,7 @@ fn record_commands_to_buffer(
                 ensure_compute!();
                 if let Some(pipeline) = state.compute_pipelines.get(handle) {
                     encoder
-                        .unwrap()
+                        .expect("encoder must be set after ensure_compute!()")
                         .set_compute_pipeline_state(&pipeline.pipeline);
                     current_pipeline = Some(pipeline);
                 }
@@ -178,14 +192,14 @@ fn record_commands_to_buffer(
                         layout.bindless[i] = buf.arg_buffer_index as u16;
                     }
                 }
-                let layout_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
-                };
-                encoder.unwrap().set_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
+                let layout_bytes = layout.as_bytes();
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        layout_bytes.len() as u64,
+                        layout_bytes.as_ptr() as *const _,
+                    );
             }
             GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
@@ -205,14 +219,14 @@ fn record_commands_to_buffer(
                     }
                     layout.user[i] = val;
                 }
-                let layout_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
-                };
-                encoder.unwrap().set_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
+                let layout_bytes = layout.as_bytes();
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        layout_bytes.len() as u64,
+                        layout_bytes.as_ptr() as *const _,
+                    );
             }
             GpuCommand::BindResourcesTyped { handles } => {
                 ensure_compute!();
@@ -230,14 +244,14 @@ fn record_commands_to_buffer(
                     }
                     layout.bindless[i] = handle.index() as u16;
                 }
-                let layout_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(&layout as *const _ as *const u8, TOTAL_PUSH_BYTES)
-                };
-                encoder.unwrap().set_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
+                let layout_bytes = layout.as_bytes();
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        layout_bytes.len() as u64,
+                        layout_bytes.as_ptr() as *const _,
+                    );
             }
             GpuCommand::Dispatch {
                 workgroups_x,
@@ -257,7 +271,7 @@ fn record_commands_to_buffer(
                         depth: *workgroups_z as u64,
                     };
                     encoder
-                        .unwrap()
+                        .expect("encoder must be set after ensure_compute!()")
                         .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
             }
@@ -282,19 +296,19 @@ fn record_commands_to_buffer(
                     height: pipeline.workgroup_size[1] as u64,
                     depth: pipeline.workgroup_size[2] as u64,
                 };
-                encoder.unwrap().dispatch_thread_groups_indirect(
-                    &buf_state.buffer,
-                    *offset,
-                    threads_per_group,
-                );
+                encoder
+                    .expect("encoder must be set after ensure_compute!()")
+                    .dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
             }
             GpuCommand::Barrier => {
                 if let Some(enc) = encoder {
                     // memoryBarrierWithScope: ensures all prior writes within
                     // this encoder are visible before subsequent dispatches.
-                    // MTLBarrierScope: Buffers = 1, Textures = 2
-                    let scope: mtl::NSUInteger = 1 | 2;
-                    let () = unsafe { msg_send![enc, memoryBarrierWithScope: scope] };
+                    // MTLBarrierScope::Buffers = 1, MTLBarrierScope::Textures = 2
+                    const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
+                    let () = unsafe {
+                        msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES]
+                    };
                 }
             }
             GpuCommand::ResourceBarrier {
@@ -550,6 +564,13 @@ pub(super) fn submit(
         v
     };
 
+    let waiter = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .timeline_waiter
+        .clone();
+
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {
@@ -561,6 +582,7 @@ pub(super) fn submit(
                 description
             );
         }
+        waiter.signal(signal_value);
     })
     .copy();
     command_buffer_ref.add_completed_handler(&handler);

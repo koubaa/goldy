@@ -12,6 +12,10 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 
 /// Create a graphics pipeline (with optional depth stencil).
+///
+/// The argument count mirrors the Vulkan and DX12 backends for cross-backend navigability.
+/// If this function is ever refactored to a `PipelineDesc` struct, update all three backends
+/// simultaneously to keep the API surface consistent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_with_depth(
     state: &mut MetalState,
@@ -52,8 +56,14 @@ pub(super) fn create_with_depth(
         .get(&fragment_shader)
         .context("Invalid fragment shader")?;
 
-    let vs_library = vs_shader.vertex_library.as_ref().unwrap();
-    let fs_library = fs_shader.fragment_library.as_ref().unwrap();
+    let vs_library = vs_shader
+        .vertex_library
+        .as_ref()
+        .expect("vertex library must be compiled before pipeline creation");
+    let fs_library = fs_shader
+        .fragment_library
+        .as_ref()
+        .expect("fragment library must be compiled before pipeline creation");
 
     let vs_function = vs_library
         .get_function("vs_main", None)
@@ -67,7 +77,10 @@ pub(super) fn create_with_depth(
     descriptor.set_vertex_function(Some(&vs_function));
     descriptor.set_fragment_function(Some(&fs_function));
 
-    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    let color_attachment = descriptor
+        .color_attachments()
+        .object_at(0)
+        .expect("Metal render pipeline descriptor must have at least one color attachment");
     color_attachment.set_pixel_format(format_to_mtl(target_format));
 
     if !vertex_layout.attributes.is_empty() {
@@ -75,7 +88,7 @@ pub(super) fn create_with_depth(
         let layout = vertex_descriptor
             .layouts()
             .object_at(super::types::VERTEX_BUFFER_START_SLOT)
-            .unwrap();
+            .expect("Metal vertex descriptor layout slot must be accessible");
         layout.set_stride(vertex_layout.stride as u64);
         layout.set_step_function(mtl::MTLVertexStepFunction::PerVertex);
 
@@ -83,7 +96,7 @@ pub(super) fn create_with_depth(
             let attr_desc = vertex_descriptor
                 .attributes()
                 .object_at(attr.location as u64)
-                .unwrap();
+                .expect("Metal vertex attribute slot must be accessible");
             attr_desc.set_format(vertex_format_to_mtl(attr.format));
             attr_desc.set_offset(attr.offset as u64);
             attr_desc.set_buffer_index(super::types::VERTEX_BUFFER_START_SLOT);
