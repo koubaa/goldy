@@ -131,6 +131,10 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     enum GroupKey {
         Buffer(u64),
         Texture(u64),
+        ProgramBuffer(u32),
+        ProgramTexture(u32),
+        TransientBuffer(u32),
+        TransientTexture(u32),
     }
 
     fn group_key(r: &ResourceId) -> GroupKey {
@@ -138,6 +142,12 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::Buffer(h) => GroupKey::Buffer(h),
             ResourceId::BufferRange { parent, .. } => GroupKey::Buffer(parent),
             ResourceId::Texture(h) => GroupKey::Texture(h),
+            ResourceId::ProgramBuffer(slot) | ResourceId::ProgramBufferRange { slot, .. } => {
+                GroupKey::ProgramBuffer(slot)
+            }
+            ResourceId::ProgramTexture(slot) => GroupKey::ProgramTexture(slot),
+            ResourceId::TransientBuffer(t) => GroupKey::TransientBuffer(t.0),
+            ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
         }
     }
 
