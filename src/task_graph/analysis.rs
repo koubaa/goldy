@@ -29,7 +29,8 @@ use super::ir::{BarrierSet, CompiledSchedule, GraphIR, NodeKind, ResourceBinding
 #[cfg(test)]
 use super::ir::NodeAccess;
 use super::ResourceId;
-use crate::backend::GpuCommand;
+use crate::backend::{GpuCommand, GraphCommand};
+use anyhow::Result;
 
 /// Returns true if byte range `[o1, o1+l1)` overlaps `[o2, o2+l2)`.
 ///
@@ -82,6 +83,35 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceId::Texture(x), ResourceId::Texture(y)) => x == y,
+        ( ResourceId::ProgramBuffer(x), ResourceId::ProgramBuffer(y)) => x == y,
+        (ResourceId::ProgramTexture(x), ResourceId::ProgramTexture(y)) => x == y,
+        (
+            ResourceId::ProgramBuffer(h),
+            ResourceId::ProgramBufferRange {
+                slot: parent,
+                ..
+            },
+        )
+        | (
+            ResourceId::ProgramBufferRange {
+                slot: parent,
+                ..
+            },
+            ResourceId::ProgramBuffer(h),
+        ) => h == parent,
+        (
+            ResourceId::ProgramBufferRange {
+                slot: p1,
+                offset: o1,
+                len: l1,
+            },
+            ResourceId::ProgramBufferRange {
+                slot: p2,
+                offset: o2,
+                len: l2,
+            },
+        ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
+        (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
         _ => false,
     }
 }
@@ -162,6 +192,51 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     let mut edges: Vec<_> = edge_set.into_iter().collect();
     edges.sort_unstable();
     edges
+}
+
+/// For each [`ResourceId::TransientBuffer`](super::ResourceId), the inclusive
+/// range of wave indices where that transient appears in node bindings.
+///
+/// Used to pack transient heap allocations: non-overlapping wave intervals may
+/// alias the same memory.
+pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
+    let n = ir.nodes.len();
+    if n == 0 {
+        return Ok(HashMap::new());
+    }
+    let edges = build_edges(ir);
+    let schedule = schedule_waves(ir, &edges);
+    let mut node_to_wave: Vec<Option<u32>> = vec![None; n];
+    for (w, wave) in schedule.waves.iter().enumerate() {
+        let w = u32::try_from(w).map_err(|_| anyhow::anyhow!("wave index overflow"))?;
+        for &ni in &wave.node_indices {
+            node_to_wave[ni] = Some(w);
+        }
+    }
+    for (i, slot) in node_to_wave.iter().enumerate() {
+        if slot.is_none() {
+            anyhow::bail!("internal: task node {} was not assigned a wave", i);
+        }
+    }
+
+    let mut first: HashMap<u32, u32> = HashMap::new();
+    let mut last: HashMap<u32, u32> = HashMap::new();
+    for (ni, node) in ir.nodes.iter().enumerate() {
+        let w = node_to_wave[ni].unwrap();
+        for b in &node.bindings {
+            if let ResourceId::TransientBuffer(tid) = b.resource {
+                let id = tid.0;
+                first.entry(id).and_modify(|e| *e = (*e).min(w)).or_insert(w);
+                last.entry(id).and_modify(|e| *e = (*e).max(w)).or_insert(w);
+            }
+        }
+    }
+    let mut out = HashMap::with_capacity(first.len());
+    for (id, s) in first {
+        let e = last[&id];
+        out.insert(id, (s, e));
+    }
+    Ok(out)
 }
 
 /// Schedule nodes into waves using a longest-path (depth) assignment.
@@ -249,6 +324,8 @@ fn compute_barriers(
     let wave_set: HashSet<usize> = wave_nodes.iter().copied().collect();
     let mut barrier_buffers: HashSet<BufferHandle> = HashSet::new();
     let mut barrier_textures: HashSet<TextureHandle> = HashSet::new();
+    let mut barrier_prog_buf: HashSet<u32> = HashSet::new();
+    let mut barrier_prog_tex: HashSet<u32> = HashSet::new();
 
     // Any edge crossing into this wave means the conflicting resource needs a barrier.
     for &(from, to) in edges {
@@ -264,6 +341,10 @@ fn compute_barriers(
                             None => {
                                 if let ResourceId::Texture(h) = bi.resource {
                                     barrier_textures.insert(h);
+                                } else if let Some(s) = bi.resource.program_buffer_slot() {
+                                    barrier_prog_buf.insert(s);
+                                } else if let Some(s) = bi.resource.program_texture_slot() {
+                                    barrier_prog_tex.insert(s);
                                 }
                             }
                         }
@@ -275,10 +356,19 @@ fn compute_barriers(
 
     let mut buffers: Vec<_> = barrier_buffers.into_iter().collect();
     let mut textures: Vec<_> = barrier_textures.into_iter().collect();
+    let mut program_buffer_slots: Vec<_> = barrier_prog_buf.into_iter().collect();
+    let mut program_texture_slots: Vec<_> = barrier_prog_tex.into_iter().collect();
     buffers.sort();
     textures.sort();
+    program_buffer_slots.sort();
+    program_texture_slots.sort();
 
-    BarrierSet { buffers, textures }
+    BarrierSet {
+        buffers,
+        textures,
+        program_buffer_slots,
+        program_texture_slots,
+    }
 }
 
 /// Emit a flat `Vec<GpuCommand>` from a graph IR and its compiled schedule.
@@ -288,11 +378,22 @@ fn compute_barriers(
 /// - `ClearBuffer` → `ClearBuffer`
 /// - `WriteBuffer` → `WriteBuffer`
 /// - `WriteTexture` / `WriteTextureRegion` → matching `GpuCommand` variants
+///
+/// # Panics
+///
+/// If the graph contains [`NodeKind::RenderPass`], use [`emit_graph_commands`] instead.
 pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuCommand> {
     let mut commands = Vec::new();
 
     for wave in &schedule.waves {
         if !wave.barriers_before.is_empty() {
+            if !wave.barriers_before.program_buffer_slots.is_empty()
+                || !wave.barriers_before.program_texture_slots.is_empty()
+            {
+                panic!(
+                    "emit_commands: unresolved program barrier slots; use ComputeProgram::specialize"
+                );
+            }
             commands.push(GpuCommand::ResourceBarrier {
                 buffers: wave.barriers_before.buffers.clone(),
                 textures: wave.barriers_before.textures.clone(),
@@ -381,6 +482,127 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
                         width: *width,
                         height: *height,
                         data: data.clone(),
+                    });
+                }
+                NodeKind::RenderPass { .. } => {
+                    panic!(
+                        "emit_commands: graph contains render_pass; use emit_graph_commands / TaskGraph::compile_graph_commands"
+                    );
+                }
+            }
+        }
+    }
+
+    commands
+}
+
+/// Emit [`GraphCommand`]s (compute + optional offscreen render) from the analyzed graph.
+pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GraphCommand> {
+    let mut commands = Vec::new();
+
+    for wave in &schedule.waves {
+        if !wave.barriers_before.is_empty() {
+            if !wave.barriers_before.program_buffer_slots.is_empty()
+                || !wave.barriers_before.program_texture_slots.is_empty()
+            {
+                panic!(
+                    "emit_graph_commands: unresolved program barrier slots; use ComputeProgram::specialize"
+                );
+            }
+            commands.push(GraphCommand::Compute(GpuCommand::ResourceBarrier {
+                buffers: wave.barriers_before.buffers.clone(),
+                textures: wave.barriers_before.textures.clone(),
+            }));
+        }
+
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            match &node.kind {
+                NodeKind::Dispatch {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    dispatch,
+                } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
+                    if !resource_slots.is_empty() || !user_slots.is_empty() {
+                        commands.push(GraphCommand::Compute(GpuCommand::BindResourcesRaw {
+                            indices: resource_slots.clone(),
+                            user: user_slots.clone(),
+                        }));
+                    }
+                    match dispatch {
+                        super::ir::DispatchDim::Direct { x, y, z } => {
+                            commands.push(GraphCommand::Compute(GpuCommand::Dispatch {
+                                workgroups_x: *x,
+                                workgroups_y: *y,
+                                workgroups_z: *z,
+                            }));
+                        }
+                        super::ir::DispatchDim::Indirect { buffer, offset } => {
+                            commands.push(GraphCommand::Compute(GpuCommand::DispatchIndirect {
+                                buffer: *buffer,
+                                offset: *offset,
+                            }));
+                        }
+                    }
+                }
+                NodeKind::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::ClearBuffer {
+                        buffer: *buffer,
+                        offset: *offset,
+                        size: *size,
+                    }));
+                }
+                NodeKind::WriteBuffer {
+                    buffer,
+                    offset,
+                    data,
+                } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::WriteBuffer {
+                        buffer: *buffer,
+                        offset: *offset,
+                        data: data.clone(),
+                    }));
+                }
+                NodeKind::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::WriteTexture {
+                        texture: *texture,
+                        data: data.clone(),
+                        width: *width,
+                        height: *height,
+                    }));
+                }
+                NodeKind::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::WriteTextureRegion {
+                        texture: *texture,
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
+                        data: data.clone(),
+                    }));
+                }
+                NodeKind::RenderPass { target, commands: render_cmds } => {
+                    commands.push(GraphCommand::Render {
+                        target: *target,
+                        commands: render_cmds.clone(),
                     });
                 }
             }

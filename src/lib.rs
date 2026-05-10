@@ -57,7 +57,11 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
-pub use task_graph::{NodeAccess, NodeBuilder, TaskGraph};
+pub use task_graph::{
+    ComputeProgram, NodeAccess, NodeBuilder, ProgramBuilder, ProgramResolution, RenderPassBuilder,
+    TaskGraph, TransientId,
+};
+pub use backend::GraphCommand;
 pub use texture::Texture;
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use types::*;

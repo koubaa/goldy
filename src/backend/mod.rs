@@ -279,6 +279,18 @@ pub enum GpuCommand {
     },
 }
 
+/// Mixed compute + offscreen render commands from [`crate::task_graph::TaskGraph`].
+#[derive(Debug, Clone)]
+pub enum GraphCommand {
+    /// Compute / upload / barrier from [`GpuCommand`].
+    Compute(GpuCommand),
+    /// Graphics work recorded against a [`RenderTargetHandle`] (offscreen render target).
+    Render {
+        target: RenderTargetHandle,
+        commands: Vec<RenderCommand>,
+    },
+}
+
 /// Deprecated alias for [`GpuCommand`].
 #[deprecated(since = "0.1.0", note = "renamed to GpuCommand")]
 pub type ComputeCommand = GpuCommand;
@@ -550,6 +562,17 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         device: DeviceHandle,
         commands: &[GpuCommand],
+    ) -> Result<crate::timeline::TimelineValue>;
+
+    /// Submit an analyzed task graph with optional offscreen [`GraphCommand::Render`] segments.
+    ///
+    /// Compute batches run through [`submit_standalone`](Self::submit_standalone); each
+    /// [`GraphCommand::Render`] runs via [`render_to_target`](Self::render_to_target) after
+    /// waiting on the preceding compute timeline value so GPU ordering is preserved.
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue>;
 
     /// Acquire the next swapchain image and begin a frame bracket.

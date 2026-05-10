@@ -424,9 +424,22 @@ impl Device {
 
     /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).
     pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
-        let commands = graph.compile_commands();
+        // Transient heap allocation uses `Buffer::new`, which locks the backend mutex.
+        // Allocate before `submit_with_backend` so we never nest the same device's lock
+        // (would deadlock: `submit` holds the lock while creating the heap buffer).
+        let transient_heap: Option<crate::buffer::Buffer> =
+            if graph.transient_specs.is_empty() {
+                None
+            } else {
+                let (total, _) = graph.transient_heap_size_and_layout()?;
+                Some(crate::buffer::Buffer::new(
+                    self,
+                    total,
+                    crate::DataAccess::Scattered,
+                )?)
+            };
         let mut backend = self.backend.lock().unwrap();
-        backend.submit_standalone(self.handle, &commands)
+        graph.submit_with_backend(self, backend.as_mut(), transient_heap.as_ref())
     }
 
     /// Submit a task graph and block until it completes.

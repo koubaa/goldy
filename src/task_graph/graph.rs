@@ -2,13 +2,17 @@
 
 use super::analysis;
 use super::ir::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
-use super::ResourceId;
+use super::{ResourceId, TransientBufferSpec, TransientId};
+use crate::backend::{GpuBackend, GraphCommand, RenderCommand, RenderTargetHandle};
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
+use crate::encoder::CommandEncoder;
+use crate::render_target::RenderTarget;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A task graph that analyzes dependencies at submit time.
@@ -42,13 +46,237 @@ use std::sync::Arc;
 /// ```
 pub struct TaskGraph {
     ir: GraphIR,
+    pub(crate) transient_specs: Vec<TransientBufferSpec>,
+    next_transient_id: u32,
 }
 
 impl TaskGraph {
     pub fn new() -> Self {
         Self {
             ir: GraphIR::default(),
+            transient_specs: Vec::new(),
+            next_transient_id: 0,
         }
+    }
+
+    /// Register a transient GPU buffer suballocation for this graph.
+    ///
+    /// The backing memory is a single device buffer allocated for the duration of
+    /// [`crate::Device::submit`]. Transients whose live ranges (in the compiled wave
+    /// schedule) do not overlap may alias within that heap to reduce allocation size.
+    /// Graphs using transients **block until the submit completes** so the staging
+    /// heap can be freed.
+    pub fn transient_buffer(&mut self, size: u64) -> TransientId {
+        let id = self.next_transient_id;
+        self.next_transient_id += 1;
+        self.transient_specs.push(TransientBufferSpec { id, size });
+        TransientId(id)
+    }
+
+    /// Total bytes and per-transient byte offsets for the graph's transient heap.
+    pub(crate) fn transient_heap_size_and_layout(
+        &self,
+    ) -> Result<(u64, HashMap<u32, u64>)> {
+        Self::transient_heap_layout(&self.transient_specs, &self.ir)
+    }
+
+    pub(crate) fn submit_with_backend(
+        &self,
+        device: &Device,
+        backend: &mut dyn GpuBackend,
+        transient_heap: Option<&Buffer>,
+    ) -> Result<TimelineValue> {
+        if self.transient_specs.is_empty() {
+            debug_assert!(
+                transient_heap.is_none(),
+                "transient heap must be None when graph has no transients"
+            );
+            Self::submit_resolved_ir(device, backend, &self.ir)
+        } else {
+            let heap = transient_heap.ok_or_else(|| {
+                anyhow::anyhow!("internal: transient heap required for graphs with transients")
+            })?;
+            let (_, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
+            let ir = Self::lower_transients(&self.ir, heap, &layout, &self.transient_specs)?;
+            let tv = Self::submit_resolved_ir(device, backend, &ir)?;
+            backend.wait_until(device.handle, tv)?;
+            Ok(tv)
+        }
+    }
+
+    fn submit_resolved_ir(
+        device: &Device,
+        backend: &mut dyn GpuBackend,
+        ir: &GraphIR,
+    ) -> Result<TimelineValue> {
+        let has_render = ir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
+
+        if has_render {
+            let g = Self::compile_graph_commands_for_ir(ir);
+            backend.submit_graph(device.handle, &g)
+        } else {
+            let edges = analysis::build_edges(ir);
+            let schedule = analysis::schedule_waves(ir, &edges);
+            let cmds = analysis::emit_commands(ir, &schedule);
+            backend.submit_standalone(device.handle, &cmds)
+        }
+    }
+
+    /// Pack transient buffers into a heap using wave live ranges: transients whose
+    /// lifetimes do not overlap (in the compiled wave schedule) may alias the same bytes.
+    fn transient_heap_layout(
+        specs: &[TransientBufferSpec],
+        ir: &GraphIR,
+    ) -> Result<(u64, HashMap<u32, u64>)> {
+        if specs.is_empty() {
+            return Ok((0, HashMap::new()));
+        }
+
+        let intervals = analysis::transient_wave_intervals(ir)?;
+        for s in specs {
+            if !intervals.contains_key(&s.id) {
+                anyhow::bail!(
+                    "transient_buffer id {} is never referenced by any graph node",
+                    s.id
+                );
+            }
+        }
+
+        #[derive(Clone)]
+        struct Item {
+            id: u32,
+            start: u32,
+            end: u32,
+        }
+
+        let mut items: Vec<Item> = specs
+            .iter()
+            .map(|s| {
+                let (st, en) = intervals[&s.id];
+                Item {
+                    id: s.id,
+                    start: st,
+                    end: en,
+                }
+            })
+            .collect();
+        items.sort_by_key(|i| (i.end, i.start));
+
+        fn wave_intervals_overlap(a: (u32, u32), b: (u32, u32)) -> bool {
+            !(a.1 < b.0 || b.1 < a.0)
+        }
+
+        let mut colors: Vec<Vec<(u32, u32)>> = Vec::new();
+        let mut id_to_color: HashMap<u32, usize> = HashMap::new();
+
+        for it in items {
+            let iv = (it.start, it.end);
+            let mut chosen = None;
+            for (c, assigned) in colors.iter().enumerate() {
+                if assigned.iter().all(|&other| !wave_intervals_overlap(iv, other)) {
+                    chosen = Some(c);
+                    break;
+                }
+            }
+            let c = match chosen {
+                Some(c) => c,
+                None => {
+                    colors.push(Vec::new());
+                    colors.len() - 1
+                }
+            };
+            colors[c].push(iv);
+            id_to_color.insert(it.id, c);
+        }
+
+        let mut color_max: Vec<u64> = vec![0; colors.len()];
+        for s in specs {
+            let c = id_to_color[&s.id];
+            color_max[c] = color_max[c].max(s.size);
+        }
+
+        let mut next_off = 0u64;
+        let mut color_base: Vec<u64> = vec![0; colors.len()];
+        for c in 0..colors.len() {
+            next_off = (next_off + 255) & !255u64;
+            color_base[c] = next_off;
+            next_off = next_off.checked_add(color_max[c]).ok_or_else(|| {
+                anyhow::anyhow!("transient heap layout overflow")
+            })?;
+        }
+
+        let mut m = HashMap::new();
+        for s in specs {
+            let c = id_to_color[&s.id];
+            m.insert(s.id, color_base[c]);
+        }
+
+        Ok((next_off, m))
+    }
+
+    fn lower_transients(
+        ir: &GraphIR,
+        heap: &Buffer,
+        layout: &HashMap<u32, u64>,
+        specs: &[TransientBufferSpec],
+    ) -> Result<GraphIR> {
+        let size_by_id: HashMap<u32, u64> = specs.iter().map(|s| (s.id, s.size)).collect();
+        let parent = heap.gpu_buffer_handle();
+        let mut nodes = Vec::with_capacity(ir.nodes.len());
+        for n in &ir.nodes {
+            let bindings: Result<Vec<ResourceBinding>> = n
+                .bindings
+                .iter()
+                .map(|b| {
+                    let resource = match b.resource {
+                        ResourceId::TransientBuffer(t) => {
+                            let off = layout
+                                .get(&t.0)
+                                .copied()
+                                .ok_or_else(|| anyhow::anyhow!("unknown transient id {}", t.0))?;
+                            let sz = size_by_id.get(&t.0).copied().ok_or_else(|| {
+                                anyhow::anyhow!("unknown transient size for id {}", t.0)
+                            })?;
+                            ResourceId::BufferRange {
+                                parent,
+                                offset: off,
+                                len: sz,
+                            }
+                        }
+                        o => o,
+                    };
+                    Ok(ResourceBinding {
+                        resource,
+                        access: b.access,
+                    })
+                })
+                .collect();
+            nodes.push(TaskNode {
+                label: n.label.clone(),
+                bindings: bindings?,
+                kind: n.kind.clone(),
+            });
+        }
+        Ok(GraphIR { nodes })
+    }
+
+    pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        analysis::emit_graph_commands(ir, &schedule)
+    }
+
+    fn has_render_passes_in_ir(ir: &GraphIR) -> bool {
+        ir.nodes
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::RenderPass { .. }))
+    }
+
+    pub fn has_render_passes(&self) -> bool {
+        Self::has_render_passes_in_ir(&self.ir)
     }
 
     /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
@@ -221,6 +449,20 @@ impl TaskGraph {
         Ok(())
     }
 
+    /// Begin building an offscreen [`crate::RenderTarget`] render pass node.
+    pub fn render_pass<'a>(
+        &'a mut self,
+        label: &str,
+        target: &RenderTarget,
+    ) -> RenderPassBuilder<'a> {
+        RenderPassBuilder {
+            graph: self,
+            label: label.to_string(),
+            target: target.backend_handle(),
+            bindings: Vec::new(),
+        }
+    }
+
     /// Analyze the graph and submit all tasks with optimal barriers.
     /// Returns the device [`TimelineValue`] to pass to [`Device::wait_until`].
     pub fn submit(&self, device: &Device) -> Result<TimelineValue> {
@@ -245,10 +487,33 @@ impl TaskGraph {
     ///
     /// Runs the dependency analyzer, schedules waves, inserts `ResourceBarrier`
     /// commands at wave boundaries, and emits the final [`GpuCommand`](crate::backend::GpuCommand) sequence.
+    ///
+    /// # Panics
+    ///
+    /// If the graph contains [`NodeKind::RenderPass`] or transient buffers, use
+    /// [`Self::compile_graph_commands`] or [`Device::submit`](crate::Device::submit) instead.
     pub fn compile_commands(&self) -> Vec<crate::backend::GpuCommand> {
+        assert!(
+            self.transient_specs.is_empty(),
+            "compile_commands: graph uses transient_buffer; use Device::submit"
+        );
+        if Self::has_render_passes_in_ir(&self.ir) {
+            panic!("compile_commands: graph contains render_pass; use compile_graph_commands or Device::submit");
+        }
         let edges = analysis::build_edges(&self.ir);
         let schedule = analysis::schedule_waves(&self.ir, &edges);
         analysis::emit_commands(&self.ir, &schedule)
+    }
+
+    /// Like [`Self::compile_commands`] but allows [`NodeKind::RenderPass`] nodes.
+    pub fn compile_graph_commands(&self) -> Vec<GraphCommand> {
+        assert!(
+            self.transient_specs.is_empty(),
+            "compile_graph_commands: graph uses transient_buffer; use Device::submit"
+        );
+        let edges = analysis::build_edges(&self.ir);
+        let schedule = analysis::schedule_waves(&self.ir, &edges);
+        analysis::emit_graph_commands(&self.ir, &schedule)
     }
 }
 
@@ -311,6 +576,14 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
+    pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::TransientBuffer(id),
+            access,
+        });
+        self
+    }
+
     /// Set the bindless resource slot indices for this node's dispatch (region A).
     pub fn bind_resources_raw(mut self, indices: &[u32]) -> Self {
         self.resource_slots = indices.to_vec();
@@ -358,14 +631,81 @@ impl<'a> NodeBuilder<'a> {
     }
 }
 
+/// Builder for a render pass targeting an offscreen [`crate::RenderTarget`].
+pub struct RenderPassBuilder<'a> {
+    graph: &'a mut TaskGraph,
+    label: String,
+    target: RenderTargetHandle,
+    bindings: Vec<ResourceBinding>,
+}
+
+impl<'a> RenderPassBuilder<'a> {
+    pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Buffer(buf.handle),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::BufferRange {
+                parent: view.parent_handle(),
+                offset: view.offset(),
+                len: view.size(),
+            },
+            access,
+        });
+        self
+    }
+
+    pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Texture(tex.handle),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::TransientBuffer(id),
+            access,
+        });
+        self
+    }
+
+    /// Finalize the node with recorded [`RenderCommand`]s (e.g. from [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish)).
+    pub fn finish(self, commands: Vec<RenderCommand>) {
+        self.graph.ir.nodes.push(TaskNode {
+            label: self.label,
+            bindings: self.bindings,
+            kind: NodeKind::RenderPass {
+                target: self.target,
+                commands,
+            },
+        });
+    }
+
+    /// Convenience: [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish) then [`Self::finish`].
+    pub fn finish_encoder(self, encoder: CommandEncoder) {
+        self.finish(encoder.finish())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
     use crate::backend::GpuCommand;
+    use crate::backend::GraphCommand;
     use crate::buffer::BufferPool;
     use crate::device::Device;
+    use crate::encoder::CommandEncoder;
+    use crate::render_target::RenderTarget;
     use crate::shader::ShaderModule;
+    use crate::types::{Color, TextureFormat};
     use crate::Texture;
 
     fn mock_device() -> Device {
@@ -378,6 +718,115 @@ mod tests {
 
     fn mock_pipeline(device: &Device, shader: &ShaderModule) -> crate::compute::ComputePipeline {
         crate::compute::ComputePipeline::new(device, shader).unwrap()
+    }
+
+    #[test]
+    fn compile_mixed_compute_render_inserts_barrier_and_submits_graph() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("compute_write", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw(&[1])
+            .dispatch(1, 1, 1);
+
+        let mut enc = CommandEncoder::new();
+        {
+            let mut pass = enc.begin_render_pass();
+            pass.clear(Color::RED);
+        }
+        graph
+            .render_pass("draw", &target)
+            .bind_buffer(&buf, NodeAccess::Read)
+            .finish_encoder(enc);
+
+        let gcs = graph.compile_graph_commands();
+        assert!(
+            gcs.iter()
+                .any(|c| matches!(c, GraphCommand::Compute(GpuCommand::ResourceBarrier { .. }))),
+            "expected ResourceBarrier between compute write and render read"
+        );
+
+        graph.submit(&device).unwrap();
+    }
+
+    #[test]
+    fn transient_buffer_submit_succeeds_on_mock() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let mut graph = TaskGraph::new();
+        let t = graph.transient_buffer(256);
+        graph
+            .node("touch", &pipeline)
+            .bind_transient_buffer(t, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+        graph.submit(&device).unwrap();
+    }
+
+    #[test]
+    fn transient_heap_aliases_non_overlapping_waves() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = Buffer::new(&device, 4, crate::DataAccess::Scattered).unwrap();
+
+        let mut graph = TaskGraph::new();
+        let t0 = graph.transient_buffer(256);
+        let t1 = graph.transient_buffer(256);
+        graph
+            .node("wave0", &pipeline)
+            .bind_transient_buffer(t0, NodeAccess::Write)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+        graph
+            .node("wave1", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Read)
+            .bind_transient_buffer(t1, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+
+        let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
+        assert_eq!(total, 256, "sequential transients should pack into one 256-byte slot");
+        assert_eq!(layout[&t0.0], layout[&t1.0]);
+        graph.submit(&device).unwrap();
+    }
+
+    #[test]
+    fn transient_heap_separates_concurrent_waves() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        let t0 = graph.transient_buffer(256);
+        let t1 = graph.transient_buffer(256);
+        graph
+            .node("a", &pipeline)
+            .bind_transient_buffer(t0, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+        graph
+            .node("b", &pipeline)
+            .bind_transient_buffer(t1, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+
+        let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
+        assert!(
+            total >= 512,
+            "concurrent transients need disjoint heap regions, got {}",
+            total
+        );
+        assert_ne!(layout[&t0.0], layout[&t1.0]);
+        graph.submit(&device).unwrap();
     }
 
     #[test]

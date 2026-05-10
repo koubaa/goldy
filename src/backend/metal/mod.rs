@@ -562,6 +562,36 @@ impl GpuBackend for MetalBackend {
         compute::submit(&mut self.state, device, commands)
     }
 
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(device);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
+                    if !batch.is_empty() {
+                        last_tv = compute::submit(&mut self.state, device, &batch)?;
+                        self.wait_until(device, last_tv)?;
+                        batch.clear();
+                    }
+                    render_target::render_to(&mut self.state, device, *target, render_cmds)?;
+                    last_tv = compute::submit(&mut self.state, device, &[])?;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = compute::submit(&mut self.state, device, &batch)?;
+        }
+        Ok(last_tv)
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .state

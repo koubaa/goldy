@@ -922,6 +922,39 @@ impl GpuBackend for MockBackend {
         Ok(tv)
     }
 
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(device);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
+                    if !batch.is_empty() {
+                        self.submit_standalone(device, &batch)?;
+                        batch.clear();
+                    }
+                    self.render_to_target(device, *target, render_cmds)?;
+                    last_tv = self.submit_standalone(device, &[])?;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = self.submit_standalone(device, &batch)?;
+        }
+        Ok(last_tv)
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .surfaces
