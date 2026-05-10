@@ -176,10 +176,10 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
+            let barrier = device.timeline_scheduled_max;
             device
                 .resource_registry
-                .unregister_buffer(buffer_handle, !gpu_idle);
-            let barrier = device.timeline_scheduled_max;
+                .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });
             device.deletion_queue.queue(
                 barrier,
                 super::types::PendingDeletion::Buffer {

@@ -483,9 +483,19 @@ pub(crate) struct LogicalDevice {
 }
 
 impl LogicalDevice {
+    /// Process pending GPU deletions and recycle bindless registry slots.
+    ///
+    /// Called on every `acquire_frame` and `present` to reclaim both Metal
+    /// objects (via [`DeletionQueue`]) and argument-buffer slot indices (via
+    /// [`ResourceRegistry::drain_pending_slots_up_to`]) whose GPU timeline
+    /// barrier has been signaled. Both advance together so slots are recycled
+    /// as soon as the GPU catches up, without requiring a full blocking
+    /// `wait_all_in_flight`. This is what prevents the 64-slot `pending_free`
+    /// list from filling up in long-running or multi-window scenarios.
     pub(crate) fn process_deletion_queue_up_to_signaled(&mut self) {
         let signaled = self.timeline_event.as_ref().signaled_value();
         self.deletion_queue.process_up_to(signaled);
+        self.resource_registry.drain_pending_slots_up_to(signaled);
     }
 }
 
@@ -556,10 +566,13 @@ pub(crate) struct ResourceRegistry {
     /// straight to the free list above. Otherwise they park here until
     /// `wait_fence()` succeeds, at which point `drain_pending_slots()`
     /// promotes them to the free list.
-    pending_free_storage_buffer_slots: Vec<u32>,
-    pending_free_uniform_buffer_slots: Vec<u32>,
-    pending_free_texture_slots: Vec<u32>,
-    pending_free_storage_image_slots: Vec<u32>,
+    /// Each entry is `(local_index, barrier)` where `barrier` is the
+    /// `timeline_scheduled_max` recorded at destroy time. The slot becomes
+    /// safe to recycle once `timeline_event.signaled_value() >= barrier`.
+    pending_free_storage_buffer_slots: Vec<(u32, TimelineValue)>,
+    pending_free_uniform_buffer_slots: Vec<(u32, TimelineValue)>,
+    pending_free_texture_slots: Vec<(u32, TimelineValue)>,
+    pending_free_storage_image_slots: Vec<(u32, TimelineValue)>,
     /// (local_index, access) for each live buffer handle. The access is
     /// needed at `unregister_buffer()` time to know which free list the slot
     /// should be returned to.
@@ -706,11 +719,10 @@ impl ResourceRegistry {
     /// next successful `drain_pending_slots()`. Callers should pass `true`
     /// whenever any GPU command buffer is still in-flight that might still
     /// reference this slot's descriptor.
-    pub fn release_texture_slot(&mut self, local_index: u32, defer: bool) {
-        if defer {
-            self.pending_free_texture_slots.push(local_index);
-        } else {
-            self.free_texture_slots.push(local_index);
+    pub fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
+        match barrier {
+            Some(b) => self.pending_free_texture_slots.push((local_index, b)),
+            None => self.free_texture_slots.push(local_index),
         }
     }
 
@@ -749,12 +761,11 @@ impl ResourceRegistry {
     /// Return a storage-image LOCAL index to the free list so it can be
     /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
     ///
-    /// See [`Self::release_texture_slot`] for the `defer` semantics.
-    pub fn release_storage_image_slot(&mut self, local_index: u32, defer: bool) {
-        if defer {
-            self.pending_free_storage_image_slots.push(local_index);
-        } else {
-            self.free_storage_image_slots.push(local_index);
+    /// See [`Self::release_texture_slot`] for the `barrier` semantics.
+    pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
+        match barrier {
+            Some(b) => self.pending_free_storage_image_slots.push((local_index, b)),
+            None => self.free_storage_image_slots.push(local_index),
         }
     }
 
@@ -796,22 +807,24 @@ impl ResourceRegistry {
     /// argument-buffer window in ~9 seconds and the shader starts reading
     /// into corrupt / out-of-range descriptors.
     ///
-    /// If `defer` is true, the slot is parked in the pending list rather
-    /// than the free list. See the `pending_free_*` fields for rationale.
-    pub fn unregister_buffer(&mut self, handle: BufferHandle, defer: bool) {
+    /// Pass `Some(barrier)` when any GPU command buffer that may still reference
+    /// this slot's descriptor is still in-flight; the slot parks in the pending
+    /// list and is promoted by `drain_pending_slots_up_to(signaled)` once
+    /// `signaled >= barrier`. Pass `None` when the GPU is known idle.
+    pub fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>) {
         if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
-            match (access, defer) {
-                (DataAccess::Scattered, false) => {
+            match (access, barrier) {
+                (DataAccess::Scattered, None) => {
                     self.free_storage_buffer_slots.push(local_index);
                 }
-                (DataAccess::Scattered, true) => {
-                    self.pending_free_storage_buffer_slots.push(local_index);
+                (DataAccess::Scattered, Some(b)) => {
+                    self.pending_free_storage_buffer_slots.push((local_index, b));
                 }
-                (DataAccess::Broadcast, false) => {
+                (DataAccess::Broadcast, None) => {
                     self.free_uniform_buffer_slots.push(local_index);
                 }
-                (DataAccess::Broadcast, true) => {
-                    self.pending_free_uniform_buffer_slots.push(local_index);
+                (DataAccess::Broadcast, Some(b)) => {
+                    self.pending_free_uniform_buffer_slots.push((local_index, b));
                 }
             }
         }
@@ -825,23 +838,52 @@ impl ResourceRegistry {
         self.sampler_indices.remove(&handle);
     }
 
-    /// Promote every pending slot to its corresponding free list.
+    /// Promote pending slots whose GPU barrier has been signaled.
     ///
-    /// Called by the Metal backend after a successful `wait_fence()` (or any
-    /// other synchronization that establishes "all previously-submitted GPU
-    /// work has completed"). At that point the argument buffer descriptors
-    /// the pending slots used to hold are no longer reachable from any
-    /// in-flight command buffer, so the slots are safe to overwrite on the
-    /// next `register_*` call.
+    /// Only entries where `barrier <= signaled` are moved to the free list;
+    /// entries that are still waiting for a higher timeline value stay in
+    /// the pending list. This is the per-frame call path — invoked from
+    /// `process_deletion_queue_up_to_signaled` on every `acquire_frame` /
+    /// `present` so slots are recycled as soon as the GPU catches up, without
+    /// requiring a full `wait_all_in_flight`.
+    pub fn drain_pending_slots_up_to(&mut self, signaled: TimelineValue) {
+        macro_rules! drain_category {
+            ($pending:expr, $free:expr) => {
+                $pending.retain(|&(slot, barrier)| {
+                    if barrier <= signaled {
+                        $free.push(slot);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            };
+        }
+        drain_category!(
+            self.pending_free_storage_buffer_slots,
+            self.free_storage_buffer_slots
+        );
+        drain_category!(
+            self.pending_free_uniform_buffer_slots,
+            self.free_uniform_buffer_slots
+        );
+        drain_category!(
+            self.pending_free_texture_slots,
+            self.free_texture_slots
+        );
+        drain_category!(
+            self.pending_free_storage_image_slots,
+            self.free_storage_image_slots
+        );
+    }
+
+    /// Promote all pending slots unconditionally.
+    ///
+    /// Only safe to call after `wait_all_in_flight` has confirmed that no
+    /// GPU command buffers are in-flight. For the per-frame path use
+    /// `drain_pending_slots_up_to(signaled)` instead.
     pub fn drain_pending_slots(&mut self) {
-        self.free_storage_buffer_slots
-            .append(&mut self.pending_free_storage_buffer_slots);
-        self.free_uniform_buffer_slots
-            .append(&mut self.pending_free_uniform_buffer_slots);
-        self.free_texture_slots
-            .append(&mut self.pending_free_texture_slots);
-        self.free_storage_image_slots
-            .append(&mut self.pending_free_storage_image_slots);
+        self.drain_pending_slots_up_to(TimelineValue::MAX);
     }
 
     /// Number of buffer slots currently waiting for GPU idle before reuse.
@@ -1053,7 +1095,7 @@ mod tests {
             all_indices.push(idx);
             // defer=false: simulate the "GPU idle when destroy fires" case,
             // e.g. ekrano's end-of-frame deferred_free_buffers after flush.
-            reg.unregister_buffer(handle, false);
+            reg.unregister_buffer(handle, None);
         }
 
         assert!(
@@ -1074,7 +1116,7 @@ mod tests {
         for handle in 0..(MAX_RESOURCES_PER_CATEGORY as u64 * 4) {
             let idx = reg.register_uniform_buffer(handle);
             all_indices.push(idx);
-            reg.unregister_buffer(handle, false);
+            reg.unregister_buffer(handle, None);
         }
         assert!(
             all_indices.iter().all(|&i| i < MAX_RESOURCES_PER_CATEGORY),
@@ -1099,8 +1141,8 @@ mod tests {
 
         let _ = reg.register_uniform_buffer(h_uni);
         let _ = reg.register_storage_buffer(h_sto);
-        reg.unregister_buffer(h_uni, false);
-        reg.unregister_buffer(h_sto, false);
+        reg.unregister_buffer(h_uni, None);
+        reg.unregister_buffer(h_sto, None);
 
         assert_eq!(
             reg.free_uniform_buffer_slots.len(),
@@ -1128,8 +1170,8 @@ mod tests {
         assert_eq!(i0, 0);
         assert_eq!(i1, 1);
 
-        reg.unregister_buffer(h0, false);
-        reg.unregister_buffer(h1, false);
+        reg.unregister_buffer(h0, None);
+        reg.unregister_buffer(h1, None);
 
         let h2: BufferHandle = 3;
         let i2 = reg.register_storage_buffer(h2);
@@ -1149,7 +1191,7 @@ mod tests {
         assert_eq!(i0, 0);
 
         // GPU is "busy" → park on pending.
-        reg.unregister_buffer(h0, true);
+        reg.unregister_buffer(h0, Some(1));
         assert_eq!(
             reg.pending_buffer_slot_count(),
             1,
@@ -1168,7 +1210,7 @@ mod tests {
         reg.drain_pending_slots();
         assert_eq!(reg.pending_buffer_slot_count(), 0);
 
-        reg.unregister_buffer(h1, false);
+        reg.unregister_buffer(h1, None);
         let h2: BufferHandle = 3;
         let i2 = reg.register_storage_buffer(h2);
         assert_eq!(i2, 1, "LIFO pick from free list after drain");
@@ -1185,8 +1227,8 @@ mod tests {
         let _ = reg.register_storage_buffer(h_sto);
         let _ = reg.register_uniform_buffer(h_uni);
 
-        reg.unregister_buffer(h_sto, true);
-        reg.unregister_buffer(h_uni, true);
+        reg.unregister_buffer(h_sto, Some(1));
+        reg.unregister_buffer(h_uni, Some(1));
         reg.drain_pending_slots();
 
         assert_eq!(reg.free_storage_buffer_slots.len(), 1);
@@ -1203,7 +1245,7 @@ mod tests {
         let mut reg = ResourceRegistry::new();
         let h0: TextureHandle = 100;
         let i0 = reg.register_texture(h0);
-        reg.release_texture_slot(i0, true);
+        reg.release_texture_slot(i0, Some(1));
 
         let h1: TextureHandle = 101;
         let i1 = reg.register_texture(h1);
@@ -1213,7 +1255,7 @@ mod tests {
         );
 
         reg.drain_pending_slots();
-        reg.release_texture_slot(i1, false);
+        reg.release_texture_slot(i1, None);
         let h2: TextureHandle = 102;
         let i2 = reg.register_texture(h2);
         // Either the just-released i1 or the drained i0 is acceptable; the

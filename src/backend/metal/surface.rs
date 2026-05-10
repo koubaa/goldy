@@ -166,10 +166,12 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let (Some(dev), Some(slot_arr)) = (device_handle, slots) {
         if let Some(logical_device) = state.devices.get_mut(&dev) {
+            let barrier = logical_device.timeline_scheduled_max;
+            let slot_barrier = if gpu_idle { None } else { Some(barrier) };
             for &local in &slot_arr {
                 logical_device
                     .resource_registry
-                    .release_storage_image_slot(local, !gpu_idle);
+                    .release_storage_image_slot(local, slot_barrier);
             }
         }
     }
