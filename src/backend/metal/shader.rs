@@ -181,6 +181,20 @@ fn compile_stage_with_reflection(
         msl_source.len()
     );
 
+    if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static DUMP_IDX: AtomicU32 = AtomicU32::new(0);
+        let idx = DUMP_IDX.fetch_add(1, Ordering::Relaxed);
+        let dir = std::path::Path::new(&dump_dir);
+        let _ = std::fs::create_dir_all(dir);
+        let filename = format!("{:03}_{}.metal", idx, entry_point);
+        if let Ok(mut f) = std::fs::File::create(dir.join(&filename)) {
+            let _ = f.write_all(msl_source.as_bytes());
+            tracing::info!("Dumped MSL to {}/{}", dump_dir, filename);
+        }
+    }
+
     let library = device
         .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
         .map_err(|e| {
