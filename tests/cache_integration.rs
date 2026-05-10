@@ -43,6 +43,10 @@ fn vk_pipeline_cache_file_written_on_drop() {
         ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
     let _pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
 
+    // Drop pipeline and shader first so their Arc<DeviceInner> refs are released,
+    // allowing `drop(device)` to actually trigger DeviceInner::drop → backend destroy.
+    drop(_pipeline);
+    drop(shader);
     drop(device);
 
     assert!(
@@ -63,6 +67,8 @@ fn vk_pipeline_cache_survives_reload() {
     let shader =
         ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
     let _pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
+    drop(_pipeline);
+    drop(shader);
     drop(device);
 
     let device2 = instance
@@ -103,6 +109,8 @@ fn shader_cache_file_written_after_compile() {
         ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
     let _pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
 
+    drop(_pipeline);
+    drop(shader);
     drop(device);
     drop(instance);
 
