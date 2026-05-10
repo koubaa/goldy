@@ -96,7 +96,6 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    device: Arc<goldy::Device>,
     surface: Surface,
     compute_pipeline: ComputePipeline,
     uniform_buffer: Buffer,
@@ -142,7 +141,6 @@ impl App {
 
         self.state = Some(RenderState {
             window,
-            device,
             surface,
             compute_pipeline,
             uniform_buffer,
