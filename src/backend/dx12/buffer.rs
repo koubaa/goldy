@@ -308,6 +308,7 @@ pub(super) fn create(
             coherent_readback,
             coherent_readback_mapped,
             flags,
+            transient_placed: false,
         },
     );
 
@@ -324,6 +325,11 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
             device.resource_registry.unregister_buffer(buffer_handle);
 
             if !buffer.is_view {
+                if buffer.transient_placed {
+                    // GPU work must be complete (caller destroys heap after `wait_until`).
+                    device.resource_registry.unregister_buffer(buffer_handle);
+                    return;
+                }
                 if buffer.coherent_readback_mapped.is_some() {
                     if let Some(ref rb) = buffer.coherent_readback {
                         let no_write = D3D12_RANGE { Begin: 0, End: 0 };
@@ -500,6 +506,7 @@ pub(super) fn create_view(
             coherent_readback: None,
             coherent_readback_mapped: None,
             flags: parent_flags,
+            transient_placed: false,
         },
     );
 

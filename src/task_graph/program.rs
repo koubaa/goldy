@@ -100,8 +100,15 @@ impl ProgramBuilder {
             if matches!(n.kind, NodeKind::RenderPass { .. }) {
                 anyhow::bail!("ComputeProgram does not support render_pass nodes");
             }
-            if n.bindings.iter().any(|b| matches!(b.resource, ResourceId::TransientBuffer(_))) {
-                anyhow::bail!("ComputeProgram does not support transient_buffer resources");
+            if n.bindings.iter().any(|b| {
+                matches!(
+                    b.resource,
+                    ResourceId::TransientBuffer(_) | ResourceId::TransientTexture(_)
+                )
+            }) {
+                anyhow::bail!(
+                    "ComputeProgram does not support transient_buffer/transient_texture resources"
+                );
             }
         }
         let edges = analysis::build_edges(&self.ir);

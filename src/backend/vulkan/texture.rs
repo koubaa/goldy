@@ -210,6 +210,7 @@ pub(super) fn create(
             staging_memory: None,
             bindless_index,
             current_layout: initial_layout,
+            transient_heap_suballoc: false,
         },
     );
 
@@ -968,6 +969,14 @@ pub(super) fn destroy(
                 .resource_registry
                 .unregister_texture(texture_handle);
 
+            if texture.transient_heap_suballoc {
+                unsafe {
+                    logical_device.device.destroy_image_view(texture.view, None);
+                    logical_device.device.destroy_image(texture.image, None);
+                }
+                return;
+            }
+
             let barrier = logical_device.timeline_next.saturating_sub(1);
             logical_device.deletion_queue.queue(
                 barrier,
@@ -984,7 +993,7 @@ pub(super) fn destroy(
 }
 
 /// Transition an image between layouts using a one-shot command buffer.
-fn transition_image_layout(
+pub(super) fn transition_image_layout(
     logical_device: &types::LogicalDevice,
     image: vk::Image,
     old_layout: vk::ImageLayout,

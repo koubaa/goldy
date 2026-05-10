@@ -424,22 +424,54 @@ impl Device {
 
     /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).
     pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
-        // Transient heap allocation uses `Buffer::new`, which locks the backend mutex.
-        // Allocate before `submit_with_backend` so we never nest the same device's lock
-        // (would deadlock: `submit` holds the lock while creating the heap buffer).
-        let transient_heap: Option<crate::buffer::Buffer> =
-            if graph.transient_specs.is_empty() {
-                None
-            } else {
-                let (total, _) = graph.transient_heap_size_and_layout()?;
-                Some(crate::buffer::Buffer::new(
-                    self,
-                    total,
-                    crate::DataAccess::Scattered,
-                )?)
-            };
         let mut backend = self.backend.lock().unwrap();
-        graph.submit_with_backend(self, backend.as_mut(), transient_heap.as_ref())
+        let hints = backend.transient_heap_alignment_hints(self.handle);
+
+        if !graph.has_transient_resources() {
+            return graph.submit_with_backend(self, backend.as_mut(), None, &HashMap::new());
+        }
+
+        let total = {
+            let b: &mut dyn GpuBackend = &mut **backend;
+            graph.transient_native_heap_total_size(b, self.handle, &hints)?
+        };
+        if let Some(heap) = backend.create_transient_heap(self.handle, total)? {
+            let (buf_map, tex_map) = {
+                let b: &mut dyn GpuBackend = &mut **backend;
+                graph.place_transients_on_native_heap(b, self.handle, heap, &hints)?
+            };
+            let tv = graph.submit_with_backend(self, backend.as_mut(), buf_map.as_ref(), &tex_map)?;
+            backend.destroy_transient_heap(self.handle, heap)?;
+            return Ok(tv);
+        }
+
+        drop(backend);
+
+        // Committed fallback: allocate a single buffer and/or textures before acquiring the lock
+        // for `submit_with_backend` (mirrors the historical transient buffer path).
+        let buffer_submit: Option<(
+            crate::buffer::Buffer,
+            std::collections::HashMap<u32, (crate::backend::BufferHandle, u64, u64)>,
+        )> = if graph.transient_specs.is_empty() {
+            None
+        } else {
+            let (total, layout) = graph.transient_heap_size_and_layout()?;
+            let heap = crate::buffer::Buffer::new(
+                self,
+                total,
+                crate::DataAccess::Scattered,
+            )?;
+            let ranges = TaskGraph::transient_buffer_range_map(
+                &heap,
+                &layout,
+                &graph.transient_specs,
+            );
+            Some((heap, ranges))
+        };
+        let buf_ranges_ref = buffer_submit.as_ref().map(|(_, r)| r);
+        let (_texture_keepalive, tex_handles) = graph.allocate_transient_textures(self)?;
+        let mut backend = self.backend.lock().unwrap();
+        graph.submit_with_backend(self, backend.as_mut(), buf_ranges_ref, &tex_handles)
     }
 
     /// Submit a task graph and block until it completes.

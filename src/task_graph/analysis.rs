@@ -112,6 +112,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
+        (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         _ => false,
     }
 }
@@ -194,15 +195,11 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     edges
 }
 
-/// For each [`ResourceId::TransientBuffer`](super::ResourceId), the inclusive
-/// range of wave indices where that transient appears in node bindings.
-///
-/// Used to pack transient heap allocations: non-overlapping wave intervals may
-/// alias the same memory.
-pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
+/// Wave index for each task node (same order as [`GraphIR::nodes`]).
+pub(crate) fn graph_node_waves(ir: &GraphIR) -> Result<Vec<u32>> {
     let n = ir.nodes.len();
     if n == 0 {
-        return Ok(HashMap::new());
+        return Ok(Vec::new());
     }
     let edges = build_edges(ir);
     let schedule = schedule_waves(ir, &edges);
@@ -218,13 +215,53 @@ pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32
             anyhow::bail!("internal: task node {} was not assigned a wave", i);
         }
     }
+    Ok(node_to_wave.into_iter().map(|x| x.unwrap()).collect())
+}
 
+/// For each [`ResourceId::TransientBuffer`](super::ResourceId), the inclusive
+/// range of wave indices where that transient appears in node bindings.
+///
+/// Used to pack transient heap allocations: non-overlapping wave intervals may
+/// alias the same memory.
+pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
+    let n = ir.nodes.len();
+    if n == 0 {
+        return Ok(HashMap::new());
+    }
+    let waves = graph_node_waves(ir)?;
     let mut first: HashMap<u32, u32> = HashMap::new();
     let mut last: HashMap<u32, u32> = HashMap::new();
     for (ni, node) in ir.nodes.iter().enumerate() {
-        let w = node_to_wave[ni].unwrap();
+        let w = waves[ni];
         for b in &node.bindings {
             if let ResourceId::TransientBuffer(tid) = b.resource {
+                let id = tid.0;
+                first.entry(id).and_modify(|e| *e = (*e).min(w)).or_insert(w);
+                last.entry(id).and_modify(|e| *e = (*e).max(w)).or_insert(w);
+            }
+        }
+    }
+    let mut out = HashMap::with_capacity(first.len());
+    for (id, s) in first {
+        let e = last[&id];
+        out.insert(id, (s, e));
+    }
+    Ok(out)
+}
+
+/// For each [`ResourceId::TransientTexture`](super::ResourceId), inclusive wave range.
+pub(crate) fn transient_texture_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
+    let n = ir.nodes.len();
+    if n == 0 {
+        return Ok(HashMap::new());
+    }
+    let waves = graph_node_waves(ir)?;
+    let mut first: HashMap<u32, u32> = HashMap::new();
+    let mut last: HashMap<u32, u32> = HashMap::new();
+    for (ni, node) in ir.nodes.iter().enumerate() {
+        let w = waves[ni];
+        for b in &node.bindings {
+            if let ResourceId::TransientTexture(tid) = b.resource {
                 let id = tid.0;
                 first.entry(id).and_modify(|e| *e = (*e).min(w)).or_insert(w);
                 last.entry(id).and_modify(|e| *e = (*e).max(w)).or_insert(w);

@@ -111,6 +111,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             timeline_next: 1,
             timeline_scheduled_max: 0,
             deletion_queue: DeletionQueue::new(),
+            transient_heaps: std::collections::HashMap::new(),
         },
     );
 
@@ -198,6 +199,7 @@ fn create_argument_encoders(
 
 /// Destroy a logical device and clean up resources owned by it.
 pub(super) fn destroy(state: &mut MetalState, device_handle: DeviceHandle) {
+    super::transient::destroy_transient_heaps_for_device(state, device_handle);
     if let Some(mut ld) = state.devices.remove(&device_handle) {
         ld.deletion_queue.flush_all();
         state

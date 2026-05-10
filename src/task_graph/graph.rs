@@ -2,8 +2,11 @@
 
 use super::analysis;
 use super::ir::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
-use super::{ResourceId, TransientBufferSpec, TransientId};
-use crate::backend::{GpuBackend, GraphCommand, RenderCommand, RenderTargetHandle};
+use super::{
+    ResourceId, TransientBufferSpec, TransientId, TransientTextureId, TransientTextureKey,
+    TransientTextureSpec,
+};
+use crate::backend::{GpuBackend, GraphCommand, RenderCommand, RenderTargetHandle, BufferHandle, TextureHandle};
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
@@ -11,6 +14,7 @@ use crate::encoder::CommandEncoder;
 use crate::render_target::RenderTarget;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
+use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,6 +52,8 @@ pub struct TaskGraph {
     ir: GraphIR,
     pub(crate) transient_specs: Vec<TransientBufferSpec>,
     next_transient_id: u32,
+    pub(crate) transient_texture_specs: Vec<TransientTextureSpec>,
+    next_transient_texture_id: u32,
 }
 
 impl TaskGraph {
@@ -56,6 +62,8 @@ impl TaskGraph {
             ir: GraphIR::default(),
             transient_specs: Vec::new(),
             next_transient_id: 0,
+            transient_texture_specs: Vec::new(),
+            next_transient_texture_id: 0,
         }
     }
 
@@ -73,7 +81,31 @@ impl TaskGraph {
         TransientId(id)
     }
 
-    /// Total bytes and per-transient byte offsets for the graph's transient heap.
+    /// Register a transient texture (same dimensions and format) for this graph.
+    ///
+    /// Non-overlapping wave lifetimes may alias onto one backing texture; see
+    /// [`Self::transient_buffer`] for scheduling behavior. Submits **wait until
+    /// completion** when transients are used.
+    pub fn transient_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> TransientTextureId {
+        let id = self.next_transient_texture_id;
+        self.next_transient_texture_id += 1;
+        self.transient_texture_specs.push(TransientTextureSpec {
+            id,
+            width,
+            height,
+            format,
+        });
+        TransientTextureId(id)
+    }
+
+    fn needs_transient_gpu_wait(&self) -> bool {
+        !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
+    }
     pub(crate) fn transient_heap_size_and_layout(
         &self,
     ) -> Result<(u64, HashMap<u32, u64>)> {
@@ -84,24 +116,41 @@ impl TaskGraph {
         &self,
         device: &Device,
         backend: &mut dyn GpuBackend,
-        transient_heap: Option<&Buffer>,
+        transient_buffer_ranges: Option<&HashMap<u32, (BufferHandle, u64, u64)>>,
+        transient_texture_handles: &HashMap<u32, TextureHandle>,
     ) -> Result<TimelineValue> {
-        if self.transient_specs.is_empty() {
-            debug_assert!(
-                transient_heap.is_none(),
-                "transient heap must be None when graph has no transients"
-            );
-            Self::submit_resolved_ir(device, backend, &self.ir)
-        } else {
-            let heap = transient_heap.ok_or_else(|| {
-                anyhow::anyhow!("internal: transient heap required for graphs with transients")
-            })?;
-            let (_, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
-            let ir = Self::lower_transients(&self.ir, heap, &layout, &self.transient_specs)?;
-            let tv = Self::submit_resolved_ir(device, backend, &ir)?;
-            backend.wait_until(device.handle, tv)?;
-            Ok(tv)
+        if !self.transient_texture_specs.is_empty() {
+            for s in &self.transient_texture_specs {
+                if !transient_texture_handles.contains_key(&s.id) {
+                    anyhow::bail!("internal: missing transient texture handle for id {}", s.id);
+                }
+            }
         }
+
+        let mut ir = if self.transient_specs.is_empty() {
+            debug_assert!(
+                transient_buffer_ranges.is_none(),
+                "transient buffer map must be None when graph has no transient buffers"
+            );
+            self.ir.clone()
+        } else {
+            let map = transient_buffer_ranges.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "internal: transient buffer ranges required for graphs with transient buffers"
+                )
+            })?;
+            Self::lower_transient_buffers(&self.ir, map)?
+        };
+
+        if !self.transient_texture_specs.is_empty() {
+            ir = Self::lower_transient_textures(&ir, transient_texture_handles)?;
+        }
+
+        let tv = Self::submit_resolved_ir(device, backend, &ir)?;
+        if self.needs_transient_gpu_wait() {
+            backend.wait_until(device.handle, tv)?;
+        }
+        Ok(tv)
     }
 
     fn submit_resolved_ir(
@@ -217,14 +266,22 @@ impl TaskGraph {
         Ok((next_off, m))
     }
 
-    fn lower_transients(
-        ir: &GraphIR,
+    pub(crate) fn transient_buffer_range_map(
         heap: &Buffer,
         layout: &HashMap<u32, u64>,
         specs: &[TransientBufferSpec],
-    ) -> Result<GraphIR> {
-        let size_by_id: HashMap<u32, u64> = specs.iter().map(|s| (s.id, s.size)).collect();
+    ) -> HashMap<u32, (BufferHandle, u64, u64)> {
         let parent = heap.gpu_buffer_handle();
+        specs
+            .iter()
+            .map(|s| (s.id, (parent, layout[&s.id], s.size)))
+            .collect()
+    }
+
+    fn lower_transient_buffers(
+        ir: &GraphIR,
+        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
+    ) -> Result<GraphIR> {
         let mut nodes = Vec::with_capacity(ir.nodes.len());
         for n in &ir.nodes {
             let bindings: Result<Vec<ResourceBinding>> = n
@@ -233,17 +290,14 @@ impl TaskGraph {
                 .map(|b| {
                     let resource = match b.resource {
                         ResourceId::TransientBuffer(t) => {
-                            let off = layout
-                                .get(&t.0)
-                                .copied()
-                                .ok_or_else(|| anyhow::anyhow!("unknown transient id {}", t.0))?;
-                            let sz = size_by_id.get(&t.0).copied().ok_or_else(|| {
-                                anyhow::anyhow!("unknown transient size for id {}", t.0)
-                            })?;
+                            let (parent, offset, len) =
+                                range_map.get(&t.0).copied().ok_or_else(|| {
+                                    anyhow::anyhow!("unknown transient buffer id {}", t.0)
+                                })?;
                             ResourceId::BufferRange {
                                 parent,
-                                offset: off,
-                                len: sz,
+                                offset,
+                                len,
                             }
                         }
                         o => o,
@@ -261,6 +315,280 @@ impl TaskGraph {
             });
         }
         Ok(GraphIR { nodes })
+    }
+
+    /// Create one GPU texture per aliasing color; map every transient texture id to its handle.
+    /// Returns textures that must be kept alive until the graph submit completes on the GPU.
+    pub(crate) fn allocate_transient_textures(
+        &self,
+        device: &Device,
+    ) -> Result<(Vec<Texture>, HashMap<u32, TextureHandle>)> {
+        if self.transient_texture_specs.is_empty() {
+            return Ok((Vec::new(), HashMap::new()));
+        }
+        let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
+        for s in &self.transient_texture_specs {
+            if !intervals.contains_key(&s.id) {
+                anyhow::bail!(
+                    "transient_texture id {} is never referenced by any graph node",
+                    s.id
+                );
+            }
+        }
+        let (id_to_color, color_keys) =
+            Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
+        let mut keep_alive: Vec<Texture> = Vec::with_capacity(color_keys.len());
+        let mut per_color_handle: Vec<TextureHandle> = Vec::with_capacity(color_keys.len());
+        for k in &color_keys {
+            let tex = Texture::new(
+                device,
+                k.width,
+                k.height,
+                k.format,
+                SpatialAccess::Direct,
+                TextureFlags::COPY_DST,
+            )?;
+            per_color_handle.push(tex.handle());
+            keep_alive.push(tex);
+        }
+        let mut out = HashMap::new();
+        for s in &self.transient_texture_specs {
+            let c = id_to_color[&s.id];
+            out.insert(s.id, per_color_handle[c]);
+        }
+        Ok((keep_alive, out))
+    }
+
+    fn transient_texture_key(spec: &TransientTextureSpec) -> TransientTextureKey {
+        TransientTextureKey {
+            width: spec.width,
+            height: spec.height,
+            format: spec.format,
+        }
+    }
+
+    fn transient_texture_coloring(
+        specs: &[TransientTextureSpec],
+        intervals: &HashMap<u32, (u32, u32)>,
+    ) -> Result<(HashMap<u32, usize>, Vec<TransientTextureKey>)> {
+        #[derive(Clone)]
+        struct Item {
+            id: u32,
+            start: u32,
+            end: u32,
+            key: TransientTextureKey,
+        }
+        let mut items: Vec<Item> = specs
+            .iter()
+            .map(|s| {
+                let (st, en) = intervals[&s.id];
+                Item {
+                    id: s.id,
+                    start: st,
+                    end: en,
+                    key: Self::transient_texture_key(s),
+                }
+            })
+            .collect();
+        items.sort_by_key(|i| (i.end, i.start));
+        fn wave_intervals_overlap(a: (u32, u32), b: (u32, u32)) -> bool {
+            !(a.1 < b.0 || b.1 < a.0)
+        }
+        let mut colors: Vec<Vec<(u32, u32)>> = Vec::new();
+        let mut color_keys: Vec<TransientTextureKey> = Vec::new();
+        let mut id_to_color: HashMap<u32, usize> = HashMap::new();
+        for it in items {
+            let iv = (it.start, it.end);
+            let mut chosen = None;
+            for (c, assigned) in colors.iter().enumerate() {
+                if color_keys[c] != it.key {
+                    continue;
+                }
+                if assigned.iter().all(|&other| !wave_intervals_overlap(iv, other)) {
+                    chosen = Some(c);
+                    break;
+                }
+            }
+            let c = match chosen {
+                Some(c) => c,
+                None => {
+                    colors.push(Vec::new());
+                    color_keys.push(it.key);
+                    colors.len() - 1
+                }
+            };
+            colors[c].push(iv);
+            id_to_color.insert(it.id, c);
+        }
+        Ok((id_to_color, color_keys))
+    }
+
+    fn lower_transient_textures(
+        ir: &GraphIR,
+        handles: &HashMap<u32, TextureHandle>,
+    ) -> Result<GraphIR> {
+        let mut nodes = Vec::with_capacity(ir.nodes.len());
+        for n in &ir.nodes {
+            let bindings: Result<Vec<ResourceBinding>> = n
+                .bindings
+                .iter()
+                .map(|b| {
+                    let resource = match b.resource {
+                        ResourceId::TransientTexture(t) => {
+                            let h = handles.get(&t.0).copied().ok_or_else(|| {
+                                anyhow::anyhow!("unknown transient texture id {}", t.0)
+                            })?;
+                            ResourceId::Texture(h)
+                        }
+                        o => o,
+                    };
+                    Ok(ResourceBinding {
+                        resource,
+                        access: b.access,
+                    })
+                })
+                .collect();
+            nodes.push(TaskNode {
+                label: n.label.clone(),
+                bindings: bindings?,
+                kind: n.kind.clone(),
+            });
+        }
+        Ok(GraphIR { nodes })
+    }
+
+    pub(crate) fn has_transient_resources(&self) -> bool {
+        !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
+    }
+
+    /// Total bytes for a single native transient heap (buffers + textures).
+    pub(crate) fn transient_native_heap_total_size(
+        &self,
+        backend: &mut dyn GpuBackend,
+        device: crate::backend::DeviceHandle,
+        hints: &crate::backend::TransientHeapAlignments,
+    ) -> Result<u64> {
+        let mut total = 0u64;
+        if !self.transient_specs.is_empty() {
+            let (buf_total, _) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
+            total = buf_total;
+        }
+        if !self.transient_texture_specs.is_empty() {
+            if !self.transient_specs.is_empty() {
+                let g = hints
+                    .buffer_base_align
+                    .max(hints.buffer_image_granularity);
+                total = Self::align_up_u64(total, g)?;
+            }
+            let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
+            let (_, color_keys) =
+                Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
+            for k in &color_keys {
+                let (a, sz) = backend.transient_texture_heap_footprint(
+                    device,
+                    k.width,
+                    k.height,
+                    k.format,
+                    SpatialAccess::Direct,
+                    TextureFlags::COPY_DST,
+                )?;
+                total = Self::align_up_u64(total, a)?;
+                total = total
+                    .checked_add(sz)
+                    .ok_or_else(|| anyhow::anyhow!("transient native heap overflow"))?;
+            }
+        }
+        Ok(total)
+    }
+
+    pub(crate) fn place_transients_on_native_heap(
+        &self,
+        backend: &mut dyn GpuBackend,
+        device: crate::backend::DeviceHandle,
+        heap: crate::backend::TransientHeapHandle,
+        hints: &crate::backend::TransientHeapAlignments,
+    ) -> Result<(
+        Option<HashMap<u32, (BufferHandle, u64, u64)>>,
+        HashMap<u32, TextureHandle>,
+    )> {
+        let buf_map = if self.transient_specs.is_empty() {
+            None
+        } else {
+            let (_, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
+            let mut by_base: HashMap<u64, Vec<&TransientBufferSpec>> = HashMap::new();
+            for s in &self.transient_specs {
+                by_base.entry(layout[&s.id]).or_default().push(s);
+            }
+            let mut out = HashMap::new();
+            for (base, specs_g) in by_base {
+                let max_sz = specs_g.iter().map(|s| s.size).max().unwrap();
+                let h =
+                    backend.place_buffer_in_transient_heap(device, heap, base, max_sz)?;
+                for s in specs_g {
+                    out.insert(s.id, (h, 0, s.size));
+                }
+            }
+            Some(out)
+        };
+
+        let mut tex_map = HashMap::new();
+        if !self.transient_texture_specs.is_empty() {
+            let buf_total = if self.transient_specs.is_empty() {
+                0u64
+            } else {
+                Self::transient_heap_layout(&self.transient_specs, &self.ir)?.0
+            };
+            let mut off = buf_total;
+            if !self.transient_specs.is_empty() {
+                let g = hints
+                    .buffer_base_align
+                    .max(hints.buffer_image_granularity);
+                off = Self::align_up_u64(off, g)?;
+            }
+            let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
+            let (id_to_color, color_keys) =
+                Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
+            let mut per_color_th: Vec<TextureHandle> = Vec::with_capacity(color_keys.len());
+            for k in &color_keys {
+                let (a, footprint) = backend.transient_texture_heap_footprint(
+                    device,
+                    k.width,
+                    k.height,
+                    k.format,
+                    SpatialAccess::Direct,
+                    TextureFlags::COPY_DST,
+                )?;
+                off = Self::align_up_u64(off, a)?;
+                let th = backend.place_texture_in_transient_heap(
+                    device,
+                    heap,
+                    off,
+                    k.width,
+                    k.height,
+                    k.format,
+                    SpatialAccess::Direct,
+                    TextureFlags::COPY_DST,
+                )?;
+                per_color_th.push(th);
+                off = off.checked_add(footprint).ok_or_else(|| {
+                    anyhow::anyhow!("transient native heap texture placement overflow")
+                })?;
+            }
+            for s in &self.transient_texture_specs {
+                let c = id_to_color[&s.id];
+                tex_map.insert(s.id, per_color_th[c]);
+            }
+        }
+        Ok((buf_map, tex_map))
+    }
+
+    fn align_up_u64(x: u64, a: u64) -> Result<u64> {
+        if a == 0 {
+            return Ok(x);
+        }
+        x.div_ceil(a)
+            .checked_mul(a)
+            .ok_or_else(|| anyhow::anyhow!("align overflow"))
     }
 
     pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
@@ -497,6 +825,10 @@ impl TaskGraph {
             self.transient_specs.is_empty(),
             "compile_commands: graph uses transient_buffer; use Device::submit"
         );
+        assert!(
+            self.transient_texture_specs.is_empty(),
+            "compile_commands: graph uses transient_texture; use Device::submit"
+        );
         if Self::has_render_passes_in_ir(&self.ir) {
             panic!("compile_commands: graph contains render_pass; use compile_graph_commands or Device::submit");
         }
@@ -510,6 +842,10 @@ impl TaskGraph {
         assert!(
             self.transient_specs.is_empty(),
             "compile_graph_commands: graph uses transient_buffer; use Device::submit"
+        );
+        assert!(
+            self.transient_texture_specs.is_empty(),
+            "compile_graph_commands: graph uses transient_texture; use Device::submit"
         );
         let edges = analysis::build_edges(&self.ir);
         let schedule = analysis::schedule_waves(&self.ir, &edges);
@@ -579,6 +915,14 @@ impl<'a> NodeBuilder<'a> {
     pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientBuffer(id),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::TransientTexture(id),
             access,
         });
         self
@@ -676,6 +1020,14 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
+    pub fn bind_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::TransientTexture(id),
+            access,
+        });
+        self
+    }
+
     /// Finalize the node with recorded [`RenderCommand`]s (e.g. from [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish)).
     pub fn finish(self, commands: Vec<RenderCommand>) {
         self.graph.ir.nodes.push(TaskNode {
@@ -765,6 +1117,45 @@ mod tests {
         graph
             .node("touch", &pipeline)
             .bind_transient_buffer(t, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+        graph.submit(&device).unwrap();
+    }
+
+    #[test]
+    fn transient_texture_submit_succeeds_on_mock() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let mut graph = TaskGraph::new();
+        let tt = graph.transient_texture(4, 4, TextureFormat::Rgba8Unorm);
+        graph
+            .node("touch_tex", &pipeline)
+            .bind_transient_texture(tt, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+        graph.submit(&device).unwrap();
+    }
+
+    #[test]
+    fn transient_texture_heap_aliases_non_overlapping_waves() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = Buffer::new(&device, 4, crate::DataAccess::Scattered).unwrap();
+        let mut graph = TaskGraph::new();
+        let t0 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
+        let t1 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
+        graph
+            .node("w0", &pipeline)
+            .bind_transient_texture(t0, NodeAccess::Write)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+        graph
+            .node("w1", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Read)
+            .bind_transient_texture(t1, NodeAccess::Write)
             .bind_resources_raw(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&device).unwrap();

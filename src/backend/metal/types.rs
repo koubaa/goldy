@@ -12,7 +12,7 @@
 
 use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle, TransientHeapHandle,
 };
 use crate::backend::DataAccess;
 use crate::timeline::TimelineValue;
@@ -480,6 +480,8 @@ pub(crate) struct LogicalDevice {
     pub timeline_scheduled_max: u64,
     /// Deferred GPU resource teardown until [`SharedEvent`] reaches the queued barrier.
     pub deletion_queue: DeletionQueue,
+    /// Per-submit aliasable heaps ([`GpuBackend::create_transient_heap`]).
+    pub transient_heaps: std::collections::HashMap<TransientHeapHandle, TransientHeapTracking>,
 }
 
 impl LogicalDevice {
@@ -1036,6 +1038,13 @@ pub(crate) struct SurfaceState {
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
 
+/// One transient sub-heap created for a [`TaskGraph`](crate::task_graph::TaskGraph) submit.
+pub(crate) struct TransientHeapTracking {
+    pub heap: Heap,
+    pub placed_buffers: Vec<BufferHandle>,
+    pub placed_textures: Vec<TextureHandle>,
+}
+
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
@@ -1063,6 +1072,7 @@ pub(super) struct MetalState {
     pub next_texture_handle: TextureHandle,
     pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
     pub next_sampler_handle: SamplerHandle,
+    pub next_transient_heap_handle: TransientHeapHandle,
     pub slang_compiler: crate::slang::SlangCompiler,
 }
 

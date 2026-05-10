@@ -92,15 +92,35 @@ pub use ir::NodeAccess;
 pub use program::{ComputeProgram, ProgramBuilder, ProgramResolution, ProgramStepBuilder};
 
 use crate::backend::{BufferHandle, TextureHandle};
+use crate::types::TextureFormat;
 
 /// Opaque id for a [`TaskGraph::transient_buffer`] allocation (graph-scoped bump heap).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransientId(pub u32);
 
+/// Opaque id for a [`TaskGraph::transient_texture`] allocation (graph-scoped transient).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransientTextureId(pub u32);
+
 #[derive(Debug, Clone)]
 pub(crate) struct TransientBufferSpec {
     pub id: u32,
     pub size: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TransientTextureKey {
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TransientTextureSpec {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
 }
 
 /// Identifies a GPU resource within a task graph.
@@ -140,6 +160,8 @@ pub(crate) enum ResourceId {
     },
     /// Graph-scoped transient; lowered to [`BufferRange`] before submission.
     TransientBuffer(TransientId),
+    /// Graph-scoped transient texture; lowered to [`Texture`] before submission.
+    TransientTexture(TransientTextureId),
 }
 
 impl ResourceId {
@@ -155,6 +177,7 @@ impl ResourceId {
             ResourceId::ProgramBuffer(_) | ResourceId::ProgramBufferRange { .. } => None,
             ResourceId::ProgramTexture(_) => None,
             ResourceId::TransientBuffer(_) => None,
+            ResourceId::TransientTexture(_) => None,
         }
     }
 

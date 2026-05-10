@@ -128,6 +128,7 @@ pub(super) fn render_to(
     logical_device
         .texture_heap
         .use_heaps_for_render(encoder, render_stages);
+    super::transient::use_transient_heaps_for_render(logical_device, encoder, render_stages);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == render_target.device_handle {
             encoder.use_resource_at(

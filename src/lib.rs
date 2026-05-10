@@ -59,7 +59,7 @@ pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, Struc
 pub use surface::{Frame, Surface};
 pub use task_graph::{
     ComputeProgram, NodeAccess, NodeBuilder, ProgramBuilder, ProgramResolution, RenderPassBuilder,
-    TaskGraph, TransientId,
+    TaskGraph, TransientId, TransientTextureId,
 };
 pub use backend::GraphCommand;
 pub use texture::Texture;
