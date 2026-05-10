@@ -818,13 +818,15 @@ impl ResourceRegistry {
                     self.free_storage_buffer_slots.push(local_index);
                 }
                 (DataAccess::Scattered, Some(b)) => {
-                    self.pending_free_storage_buffer_slots.push((local_index, b));
+                    self.pending_free_storage_buffer_slots
+                        .push((local_index, b));
                 }
                 (DataAccess::Broadcast, None) => {
                     self.free_uniform_buffer_slots.push(local_index);
                 }
                 (DataAccess::Broadcast, Some(b)) => {
-                    self.pending_free_uniform_buffer_slots.push((local_index, b));
+                    self.pending_free_uniform_buffer_slots
+                        .push((local_index, b));
                 }
             }
         }
@@ -867,10 +869,7 @@ impl ResourceRegistry {
             self.pending_free_uniform_buffer_slots,
             self.free_uniform_buffer_slots
         );
-        drain_category!(
-            self.pending_free_texture_slots,
-            self.free_texture_slots
-        );
+        drain_category!(self.pending_free_texture_slots, self.free_texture_slots);
         drain_category!(
             self.pending_free_storage_image_slots,
             self.free_storage_image_slots
