@@ -45,13 +45,16 @@ fn pick_heap_memory_type(
         )
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
-    let image = unsafe { device.create_image(&image_info, None) }
-        .context("transient heap probe image")?;
+    let image =
+        unsafe { device.create_image(&image_info, None) }.context("transient heap probe image")?;
     let img_req = unsafe { device.get_image_memory_requirements(image) };
     unsafe { device.destroy_image(image, None) };
 
     let mask = buf_req.memory_type_bits & img_req.memory_type_bits;
-    anyhow::ensure!(mask != 0, "no Vulkan memory type for both buffer and image in transient heap");
+    anyhow::ensure!(
+        mask != 0,
+        "no Vulkan memory type for both buffer and image in transient heap"
+    );
 
     find_memory_type(
         instance,
@@ -62,11 +65,19 @@ fn pick_heap_memory_type(
     .context("transient heap memory type")
 }
 
-pub(super) fn transient_heap_alignment_hints(state: &VulkanState, device: DeviceHandle) -> crate::backend::TransientHeapAlignments {
+pub(super) fn transient_heap_alignment_hints(
+    state: &VulkanState,
+    device: DeviceHandle,
+) -> crate::backend::TransientHeapAlignments {
     let Some(ld) = state.devices.get(&device) else {
         return crate::backend::TransientHeapAlignments::default();
     };
-    let limits = unsafe { state.instance.get_physical_device_properties(ld.physical_device) }.limits;
+    let limits = unsafe {
+        state
+            .instance
+            .get_physical_device_properties(ld.physical_device)
+    }
+    .limits;
     crate::backend::TransientHeapAlignments {
         buffer_base_align: 256u64.max(limits.min_storage_buffer_offset_alignment as u64),
         texture_base_align: 4096,
@@ -83,7 +94,10 @@ pub(super) fn transient_texture_heap_footprint(
     access: SpatialAccess,
     flags: TextureFlags,
 ) -> Result<(u64, u64)> {
-    let logical = state.devices.get(&device).context("Invalid device handle")?;
+    let logical = state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?;
     let mut vk_usage = vk::ImageUsageFlags::TRANSFER_DST;
     match access {
         SpatialAccess::Interpolated => {
@@ -130,7 +144,10 @@ pub(super) fn create_transient_heap(
     if size == 0 {
         return Ok(None);
     }
-    let ld = state.devices.get(&device).context("Invalid device handle")?;
+    let ld = state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?;
     let mt = pick_heap_memory_type(&state.instance, &ld.device, ld.physical_device)?;
     let alloc = vk::MemoryAllocateInfo::default()
         .allocation_size(size)
@@ -168,7 +185,10 @@ pub(super) fn place_buffer_in_transient_heap(
         e.memory
     };
 
-    let logical = state.devices.get(&device).context("Invalid device handle")?;
+    let logical = state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?;
     let bindless_descriptor_set = logical.bindless_descriptor_set;
 
     let mut vk_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
@@ -187,13 +207,17 @@ pub(super) fn place_buffer_in_transient_heap(
         .context("transient placed buffer")?;
     let mem_reqs = unsafe { logical.device.get_buffer_memory_requirements(buffer) };
     anyhow::ensure!(
-        offset % mem_reqs.alignment == 0,
+        offset.is_multiple_of(mem_reqs.alignment),
         "transient buffer offset {} not aligned to {}",
         offset,
         mem_reqs.alignment
     );
-    unsafe { logical.device.bind_buffer_memory(buffer, shared_mem, offset) }
-        .context("vkBindBufferMemory transient")?;
+    unsafe {
+        logical
+            .device
+            .bind_buffer_memory(buffer, shared_mem, offset)
+    }
+    .context("vkBindBufferMemory transient")?;
 
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
@@ -250,6 +274,7 @@ pub(super) fn place_buffer_in_transient_heap(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_texture_in_transient_heap(
     state: &mut VulkanState,
     device: DeviceHandle,
@@ -270,7 +295,10 @@ pub(super) fn place_texture_in_transient_heap(
         e.memory
     };
 
-    let logical = state.devices.get(&device).context("Invalid device handle")?;
+    let logical = state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?;
     let bindless_descriptor_set = logical.bindless_descriptor_set;
 
     let mut vk_usage = vk::ImageUsageFlags::TRANSFER_DST;
@@ -309,7 +337,7 @@ pub(super) fn place_texture_in_transient_heap(
         .context("transient placed image")?;
     let mem_reqs = unsafe { logical.device.get_image_memory_requirements(image) };
     anyhow::ensure!(
-        offset % mem_reqs.alignment == 0,
+        offset.is_multiple_of(mem_reqs.alignment),
         "transient texture offset {} not aligned to {}",
         offset,
         mem_reqs.alignment
@@ -427,7 +455,11 @@ pub(super) fn destroy_transient_heap(
     for t in entry.textures.drain(..) {
         super::texture::destroy(&mut state.devices, &mut state.textures, t);
     }
-    let vk_dev = &state.devices.get(&device).context("Invalid device handle")?.device;
+    let vk_dev = &state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?
+        .device;
     unsafe {
         vk_dev.free_memory(entry.memory, None);
     }

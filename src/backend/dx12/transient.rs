@@ -28,7 +28,10 @@ pub(super) fn transient_texture_heap_footprint(
     access: SpatialAccess,
     _flags: TextureFlags,
 ) -> Result<(u64, u64)> {
-    let ld = state.devices.get(&device).context("Invalid device handle")?;
+    let ld = state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?;
     let is_storage = matches!(access, SpatialAccess::Direct);
     let resource_flags = if is_storage {
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
@@ -51,7 +54,7 @@ pub(super) fn transient_texture_heap_footprint(
         Flags: resource_flags,
     };
     let info = unsafe { ld.device.GetResourceAllocationInfo(0, &[desc]) };
-    Ok((info.Alignment as u64, info.SizeInBytes))
+    Ok((info.Alignment, info.SizeInBytes))
 }
 
 pub(super) fn create_transient_heap(
@@ -62,7 +65,10 @@ pub(super) fn create_transient_heap(
     if size == 0 {
         return Ok(None);
     }
-    let ld = state.devices.get(&device).context("Invalid device handle")?;
+    let ld = state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?;
     let heap_props = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_DEFAULT,
         CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
@@ -174,12 +180,8 @@ pub(super) fn place_buffer_in_transient_heap(
         cpu_handle
     };
     unsafe {
-        ld.device.CreateUnorderedAccessView(
-            &resource,
-            None,
-            Some(&uav_desc),
-            uav_cpu_handle,
-        );
+        ld.device
+            .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
     }
     let srv_offset = ld.resource_registry.register_buffer_srv(handle);
     let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
@@ -205,7 +207,12 @@ pub(super) fn place_buffer_in_transient_heap(
             .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
     }
 
-    state.transient_heaps.get_mut(&heap_h).unwrap().buffers.push(handle);
+    state
+        .transient_heaps
+        .get_mut(&heap_h)
+        .unwrap()
+        .buffers
+        .push(handle);
     state.buffers.insert(
         handle,
         BufferState {
@@ -227,6 +234,7 @@ pub(super) fn place_buffer_in_transient_heap(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_texture_in_transient_heap(
     state: &mut Dx12State,
     device: DeviceHandle,
@@ -356,7 +364,12 @@ pub(super) fn place_texture_in_transient_heap(
         D3D12_BARRIER_LAYOUT_COMMON
     };
 
-    state.transient_heaps.get_mut(&heap_h).unwrap().textures.push(handle);
+    state
+        .transient_heaps
+        .get_mut(&heap_h)
+        .unwrap()
+        .textures
+        .push(handle);
     state.textures.insert(
         handle,
         TextureState {

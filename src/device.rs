@@ -36,6 +36,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+type TransientSubmitBufferRanges = HashMap<u32, (backend::BufferHandle, u64, u64)>;
+
 /// Unique ID generator for temp directories
 static REGISTRY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -440,7 +442,8 @@ impl Device {
                 let b: &mut dyn GpuBackend = &mut **backend;
                 graph.place_transients_on_native_heap(b, self.handle, heap, &hints)?
             };
-            let tv = graph.submit_with_backend(self, backend.as_mut(), buf_map.as_ref(), &tex_map)?;
+            let tv =
+                graph.submit_with_backend(self, backend.as_mut(), buf_map.as_ref(), &tex_map)?;
             backend.destroy_transient_heap(self.handle, heap)?;
             return Ok(tv);
         }
@@ -449,25 +452,16 @@ impl Device {
 
         // Committed fallback: allocate a single buffer and/or textures before acquiring the lock
         // for `submit_with_backend` (mirrors the historical transient buffer path).
-        let buffer_submit: Option<(
-            crate::buffer::Buffer,
-            std::collections::HashMap<u32, (crate::backend::BufferHandle, u64, u64)>,
-        )> = if graph.transient_specs.is_empty() {
-            None
-        } else {
-            let (total, layout) = graph.transient_heap_size_and_layout()?;
-            let heap = crate::buffer::Buffer::new(
-                self,
-                total,
-                crate::DataAccess::Scattered,
-            )?;
-            let ranges = TaskGraph::transient_buffer_range_map(
-                &heap,
-                &layout,
-                &graph.transient_specs,
-            );
-            Some((heap, ranges))
-        };
+        let buffer_submit: Option<(crate::buffer::Buffer, TransientSubmitBufferRanges)> =
+            if graph.transient_specs.is_empty() {
+                None
+            } else {
+                let (total, layout) = graph.transient_heap_size_and_layout()?;
+                let heap = crate::buffer::Buffer::new(self, total, crate::DataAccess::Scattered)?;
+                let ranges =
+                    TaskGraph::transient_buffer_range_map(&heap, &layout, &graph.transient_specs);
+                Some((heap, ranges))
+            };
         let buf_ranges_ref = buffer_submit.as_ref().map(|(_, r)| r);
         let (_texture_keepalive, tex_handles) = graph.allocate_transient_textures(self)?;
         let mut backend = self.backend.lock().unwrap();

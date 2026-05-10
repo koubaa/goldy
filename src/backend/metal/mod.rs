@@ -622,7 +622,13 @@ impl GpuBackend for MetalBackend {
         flags: crate::types::TextureFlags,
     ) -> Result<(u64, u64)> {
         transient::transient_texture_heap_footprint(
-            &self.state, device, width, height, format, access, flags,
+            &self.state,
+            device,
+            width,
+            height,
+            format,
+            access,
+            flags,
         )
     }
 
@@ -656,7 +662,15 @@ impl GpuBackend for MetalBackend {
         flags: crate::types::TextureFlags,
     ) -> Result<TextureHandle> {
         transient::place_texture_in_transient_heap(
-            &mut self.state, device, heap, offset, width, height, format, access, flags,
+            &mut self.state,
+            device,
+            heap,
+            offset,
+            width,
+            height,
+            format,
+            access,
+            flags,
         )
     }
 

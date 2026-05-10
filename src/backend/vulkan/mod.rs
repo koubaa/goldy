@@ -966,8 +966,7 @@ impl GpuBackend for VulkanBackend {
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
-                        last_tv =
-                            compute::submit(&mut self.state, device_handle, &batch, None)?;
+                        last_tv = compute::submit(&mut self.state, device_handle, &batch, None)?;
                         self.wait_until(device_handle, last_tv)?;
                         batch.clear();
                     }
@@ -1031,7 +1030,13 @@ impl GpuBackend for VulkanBackend {
         flags: crate::types::TextureFlags,
     ) -> Result<(u64, u64)> {
         transient::transient_texture_heap_footprint(
-            &self.state, device, width, height, format, access, flags,
+            &self.state,
+            device,
+            width,
+            height,
+            format,
+            access,
+            flags,
         )
     }
 
@@ -1065,7 +1070,15 @@ impl GpuBackend for VulkanBackend {
         flags: crate::types::TextureFlags,
     ) -> Result<TextureHandle> {
         transient::place_texture_in_transient_heap(
-            &mut self.state, device, heap, offset, width, height, format, access, flags,
+            &mut self.state,
+            device,
+            heap,
+            offset,
+            width,
+            height,
+            format,
+            access,
+            flags,
         )
     }
 

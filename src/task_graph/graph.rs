@@ -6,7 +6,9 @@ use super::{
     ResourceId, TransientBufferSpec, TransientId, TransientTextureId, TransientTextureKey,
     TransientTextureSpec,
 };
-use crate::backend::{GpuBackend, GraphCommand, RenderCommand, RenderTargetHandle, BufferHandle, TextureHandle};
+use crate::backend::{
+    BufferHandle, GpuBackend, GraphCommand, RenderCommand, RenderTargetHandle, TextureHandle,
+};
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
@@ -18,6 +20,8 @@ use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+type TransientNativeBufferMap = HashMap<u32, (BufferHandle, u64, u64)>;
 
 /// A task graph that analyzes dependencies at submit time.
 ///
@@ -106,9 +110,7 @@ impl TaskGraph {
     fn needs_transient_gpu_wait(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
     }
-    pub(crate) fn transient_heap_size_and_layout(
-        &self,
-    ) -> Result<(u64, HashMap<u32, u64>)> {
+    pub(crate) fn transient_heap_size_and_layout(&self) -> Result<(u64, HashMap<u32, u64>)> {
         Self::transient_heap_layout(&self.transient_specs, &self.ir)
     }
 
@@ -225,7 +227,10 @@ impl TaskGraph {
             let iv = (it.start, it.end);
             let mut chosen = None;
             for (c, assigned) in colors.iter().enumerate() {
-                if assigned.iter().all(|&other| !wave_intervals_overlap(iv, other)) {
+                if assigned
+                    .iter()
+                    .all(|&other| !wave_intervals_overlap(iv, other))
+                {
                     chosen = Some(c);
                     break;
                 }
@@ -252,9 +257,9 @@ impl TaskGraph {
         for c in 0..colors.len() {
             next_off = (next_off + 255) & !255u64;
             color_base[c] = next_off;
-            next_off = next_off.checked_add(color_max[c]).ok_or_else(|| {
-                anyhow::anyhow!("transient heap layout overflow")
-            })?;
+            next_off = next_off
+                .checked_add(color_max[c])
+                .ok_or_else(|| anyhow::anyhow!("transient heap layout overflow"))?;
         }
 
         let mut m = HashMap::new();
@@ -404,7 +409,10 @@ impl TaskGraph {
                 if color_keys[c] != it.key {
                     continue;
                 }
-                if assigned.iter().all(|&other| !wave_intervals_overlap(iv, other)) {
+                if assigned
+                    .iter()
+                    .all(|&other| !wave_intervals_overlap(iv, other))
+                {
                     chosen = Some(c);
                     break;
                 }
@@ -475,9 +483,7 @@ impl TaskGraph {
         }
         if !self.transient_texture_specs.is_empty() {
             if !self.transient_specs.is_empty() {
-                let g = hints
-                    .buffer_base_align
-                    .max(hints.buffer_image_granularity);
+                let g = hints.buffer_base_align.max(hints.buffer_image_granularity);
                 total = Self::align_up_u64(total, g)?;
             }
             let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
@@ -508,7 +514,7 @@ impl TaskGraph {
         heap: crate::backend::TransientHeapHandle,
         hints: &crate::backend::TransientHeapAlignments,
     ) -> Result<(
-        Option<HashMap<u32, (BufferHandle, u64, u64)>>,
+        Option<TransientNativeBufferMap>,
         HashMap<u32, TextureHandle>,
     )> {
         let buf_map = if self.transient_specs.is_empty() {
@@ -522,8 +528,7 @@ impl TaskGraph {
             let mut out = HashMap::new();
             for (base, specs_g) in by_base {
                 let max_sz = specs_g.iter().map(|s| s.size).max().unwrap();
-                let h =
-                    backend.place_buffer_in_transient_heap(device, heap, base, max_sz)?;
+                let h = backend.place_buffer_in_transient_heap(device, heap, base, max_sz)?;
                 for s in specs_g {
                     out.insert(s.id, (h, 0, s.size));
                 }
@@ -540,9 +545,7 @@ impl TaskGraph {
             };
             let mut off = buf_total;
             if !self.transient_specs.is_empty() {
-                let g = hints
-                    .buffer_base_align
-                    .max(hints.buffer_image_granularity);
+                let g = hints.buffer_base_align.max(hints.buffer_image_granularity);
                 off = Self::align_up_u64(off, g)?;
             }
             let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
@@ -818,7 +821,7 @@ impl TaskGraph {
     ///
     /// # Panics
     ///
-    /// If the graph contains [`NodeKind::RenderPass`] or transient buffers, use
+    /// If the graph contains render-pass nodes or transient buffers, use
     /// [`Self::compile_graph_commands`] or [`Device::submit`](crate::Device::submit) instead.
     pub fn compile_commands(&self) -> Vec<crate::backend::GpuCommand> {
         assert!(
@@ -837,7 +840,7 @@ impl TaskGraph {
         analysis::emit_commands(&self.ir, &schedule)
     }
 
-    /// Like [`Self::compile_commands`] but allows [`NodeKind::RenderPass`] nodes.
+    /// Like [`Self::compile_commands`] but allows graphs that include render-pass nodes.
     pub fn compile_graph_commands(&self) -> Vec<GraphCommand> {
         assert!(
             self.transient_specs.is_empty(),
@@ -1185,7 +1188,10 @@ mod tests {
             .dispatch(1, 1, 1);
 
         let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
-        assert_eq!(total, 256, "sequential transients should pack into one 256-byte slot");
+        assert_eq!(
+            total, 256,
+            "sequential transients should pack into one 256-byte slot"
+        );
         assert_eq!(layout[&t0.0], layout[&t1.0]);
         graph.submit(&device).unwrap();
     }

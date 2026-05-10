@@ -64,7 +64,8 @@ pub(super) fn init_storage_texture_uav_layout(
         )
     }
     .context("Failed to create init barrier command list")?;
-    let init_cmd7: ID3D12GraphicsCommandList7 = init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
+    let init_cmd7: ID3D12GraphicsCommandList7 =
+        init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
     let b = barriers::texture_barrier_full(
         resource,
@@ -81,7 +82,9 @@ pub(super) fn init_storage_texture_uav_layout(
     }
     .context("Failed to close init barrier command list")?;
 
-    let cmd_list: ID3D12CommandList = init_cmd.cast().context("Failed to cast init command list")?;
+    let cmd_list: ID3D12CommandList = init_cmd
+        .cast()
+        .context("Failed to cast init command list")?;
     unsafe {
         logical_device
             .command_queue

@@ -6,8 +6,8 @@
 
 use super::analysis;
 use super::ir::{
-    CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, BarrierSet, TaskNode,
-    Wave,
+    BarrierSet, CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding,
+    TaskNode, Wave,
 };
 use super::ResourceId;
 use crate::backend::{BufferHandle, ComputePipelineHandle, TextureHandle};
@@ -83,7 +83,11 @@ impl ProgramBuilder {
     }
 
     /// Start a compute step (dispatch node).
-    pub fn step<'a>(&'a mut self, label: &str, pipeline: &ComputePipeline) -> ProgramStepBuilder<'a> {
+    pub fn step<'a>(
+        &'a mut self,
+        label: &str,
+        pipeline: &ComputePipeline,
+    ) -> ProgramStepBuilder<'a> {
         ProgramStepBuilder {
             builder: self,
             label: label.to_string(),
@@ -145,7 +149,13 @@ impl ProgramStepBuilder<'_> {
         self
     }
 
-    pub fn bind_buffer_range_slot(mut self, slot: u32, offset: u64, len: u64, access: NodeAccess) -> Self {
+    pub fn bind_buffer_range_slot(
+        mut self,
+        slot: u32,
+        offset: u64,
+        len: u64,
+        access: NodeAccess,
+    ) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::ProgramBufferRange { slot, offset, len },
             access,

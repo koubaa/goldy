@@ -1093,12 +1093,13 @@ impl GpuBackend for MockBackend {
             None,
             BufferFlags::empty(),
         )?;
-        self.transient_heap_ops.push(MockTransientHeapOp::PlaceBuffer {
-            heap,
-            offset,
-            size,
-            buffer: buf,
-        });
+        self.transient_heap_ops
+            .push(MockTransientHeapOp::PlaceBuffer {
+                heap,
+                offset,
+                size,
+                buffer: buf,
+            });
         Ok(buf)
     }
 
@@ -1117,17 +1118,22 @@ impl GpuBackend for MockBackend {
             .get(&heap)
             .ok_or_else(|| anyhow::anyhow!("invalid transient heap {}", heap))?;
         let tex = self.create_texture(device, width, height, format, access, flags)?;
-        self.transient_heap_ops.push(MockTransientHeapOp::PlaceTexture {
-            heap,
-            offset,
-            width,
-            height,
-            texture: tex,
-        });
+        self.transient_heap_ops
+            .push(MockTransientHeapOp::PlaceTexture {
+                heap,
+                offset,
+                width,
+                height,
+                texture: tex,
+            });
         Ok(tex)
     }
 
-    fn destroy_transient_heap(&mut self, _device: DeviceHandle, heap: TransientHeapHandle) -> Result<()> {
+    fn destroy_transient_heap(
+        &mut self,
+        _device: DeviceHandle,
+        heap: TransientHeapHandle,
+    ) -> Result<()> {
         self.transient_heap_sizes.remove(&heap);
         self.transient_heap_ops
             .push(MockTransientHeapOp::Destroy { heap });
@@ -1173,7 +1179,10 @@ mod tests {
         let h = m.create_transient_heap(d, 4096).unwrap().unwrap();
         let _b = m.place_buffer_in_transient_heap(d, h, 128, 256).unwrap();
         m.destroy_transient_heap(d, h).unwrap();
-        assert!(matches!(m.transient_heap_ops[0], MockTransientHeapOp::Create { .. }));
+        assert!(matches!(
+            m.transient_heap_ops[0],
+            MockTransientHeapOp::Create { .. }
+        ));
         assert!(matches!(
             m.transient_heap_ops[1],
             MockTransientHeapOp::PlaceBuffer { .. }

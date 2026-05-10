@@ -648,7 +648,7 @@ pub trait GpuBackend: Send + Sync {
         Ok((align, aligned.max(align)))
     }
 
-    /// Returns `Ok(None)` to use committed [`Buffer`] / [`GpuBackend::create_texture`] transients instead.
+    /// Returns `Ok(None)` to use committed [`Buffer`](crate::buffer::Buffer) / [`GpuBackend::create_texture`] transients instead.
     fn create_transient_heap(
         &mut self,
         _device: DeviceHandle,
@@ -667,6 +667,7 @@ pub trait GpuBackend: Send + Sync {
         anyhow::bail!("place_buffer_in_transient_heap not implemented for this backend")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn place_texture_in_transient_heap(
         &mut self,
         _device: DeviceHandle,
@@ -681,14 +682,15 @@ pub trait GpuBackend: Send + Sync {
         anyhow::bail!("place_texture_in_transient_heap not implemented for this backend")
     }
 
-    fn destroy_transient_heap(&mut self, _device: DeviceHandle, _heap: TransientHeapHandle) -> Result<()> {
+    fn destroy_transient_heap(
+        &mut self,
+        _device: DeviceHandle,
+        _heap: TransientHeapHandle,
+    ) -> Result<()> {
         Ok(())
     }
 
-    fn transient_heap_alignment_hints(
-        &self,
-        _device: DeviceHandle,
-    ) -> TransientHeapAlignments {
+    fn transient_heap_alignment_hints(&self, _device: DeviceHandle) -> TransientHeapAlignments {
         TransientHeapAlignments::default()
     }
 

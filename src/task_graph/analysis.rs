@@ -83,22 +83,12 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceId::Texture(x), ResourceId::Texture(y)) => x == y,
-        ( ResourceId::ProgramBuffer(x), ResourceId::ProgramBuffer(y)) => x == y,
+        (ResourceId::ProgramBuffer(x), ResourceId::ProgramBuffer(y)) => x == y,
         (ResourceId::ProgramTexture(x), ResourceId::ProgramTexture(y)) => x == y,
-        (
-            ResourceId::ProgramBuffer(h),
-            ResourceId::ProgramBufferRange {
-                slot: parent,
-                ..
-            },
-        )
-        | (
-            ResourceId::ProgramBufferRange {
-                slot: parent,
-                ..
-            },
-            ResourceId::ProgramBuffer(h),
-        ) => h == parent,
+        (ResourceId::ProgramBuffer(h), ResourceId::ProgramBufferRange { slot: parent, .. })
+        | (ResourceId::ProgramBufferRange { slot: parent, .. }, ResourceId::ProgramBuffer(h)) => {
+            h == parent
+        }
         (
             ResourceId::ProgramBufferRange {
                 slot: p1,
@@ -236,7 +226,10 @@ pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32
         for b in &node.bindings {
             if let ResourceId::TransientBuffer(tid) = b.resource {
                 let id = tid.0;
-                first.entry(id).and_modify(|e| *e = (*e).min(w)).or_insert(w);
+                first
+                    .entry(id)
+                    .and_modify(|e| *e = (*e).min(w))
+                    .or_insert(w);
                 last.entry(id).and_modify(|e| *e = (*e).max(w)).or_insert(w);
             }
         }
@@ -263,7 +256,10 @@ pub(crate) fn transient_texture_wave_intervals(ir: &GraphIR) -> Result<HashMap<u
         for b in &node.bindings {
             if let ResourceId::TransientTexture(tid) = b.resource {
                 let id = tid.0;
-                first.entry(id).and_modify(|e| *e = (*e).min(w)).or_insert(w);
+                first
+                    .entry(id)
+                    .and_modify(|e| *e = (*e).min(w))
+                    .or_insert(w);
                 last.entry(id).and_modify(|e| *e = (*e).max(w)).or_insert(w);
             }
         }
@@ -636,7 +632,10 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         data: data.clone(),
                     }));
                 }
-                NodeKind::RenderPass { target, commands: render_cmds } => {
+                NodeKind::RenderPass {
+                    target,
+                    commands: render_cmds,
+                } => {
                     commands.push(GraphCommand::Render {
                         target: *target,
                         commands: render_cmds.clone(),

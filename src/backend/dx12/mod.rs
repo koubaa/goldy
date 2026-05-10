@@ -721,12 +721,7 @@ impl GpuBackend for Dx12Backend {
                         self.wait_until(device_handle, last_tv)?;
                         batch.clear();
                     }
-                    render_target::render(
-                        &mut self.state,
-                        device_handle,
-                        *target,
-                        render_cmds,
-                    )?;
+                    render_target::render(&mut self.state, device_handle, *target, render_cmds)?;
                     last_tv = compute::submit(&mut self.state, device_handle, &[])?;
                 }
             }
@@ -886,7 +881,13 @@ impl GpuBackend for Dx12Backend {
         flags: crate::types::TextureFlags,
     ) -> Result<(u64, u64)> {
         transient::transient_texture_heap_footprint(
-            &self.state, device, width, height, format, access, flags,
+            &self.state,
+            device,
+            width,
+            height,
+            format,
+            access,
+            flags,
         )
     }
 
@@ -920,7 +921,15 @@ impl GpuBackend for Dx12Backend {
         flags: crate::types::TextureFlags,
     ) -> Result<TextureHandle> {
         transient::place_texture_in_transient_heap(
-            &mut self.state, device, heap, offset, width, height, format, access, flags,
+            &mut self.state,
+            device,
+            heap,
+            offset,
+            width,
+            height,
+            format,
+            access,
+            flags,
         )
     }
 

@@ -55,7 +55,10 @@ pub(super) fn transient_texture_heap_footprint(
     access: SpatialAccess,
     flags: TextureFlags,
 ) -> Result<(u64, u64)> {
-    let logical = state.devices.get(&device).context("Invalid device handle")?;
+    let logical = state
+        .devices
+        .get(&device)
+        .context("Invalid device handle")?;
     let descriptor = transient_texture_descriptor(width, height, format, access, flags);
     let sa = logical.device.heap_texture_size_and_align(&descriptor);
     Ok((sa.align, sa.size))
@@ -175,6 +178,7 @@ pub(super) fn place_buffer_in_transient_heap(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_texture_in_transient_heap(
     state: &mut MetalState,
     device: DeviceHandle,
