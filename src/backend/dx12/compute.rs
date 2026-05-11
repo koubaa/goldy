@@ -1,5 +1,6 @@
 //! Compute pipeline and dispatch logic.
 
+use super::super::shared;
 use super::barriers;
 use super::pso_cache;
 use super::shader;
@@ -333,21 +334,22 @@ pub(super) fn submit(
             }
             GpuCommand::BindResources { buffers } => {
                 let mut layout = types::PushLayout::default();
-                for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    if let Some(buf_state) = state.buffers.get(buffer_handle) {
-                        let offset = buf_state.bindless_offset.unwrap_or(0);
-                        layout.bindless[i] = offset as u16;
+                shared::fill_bindless(
+                    &mut layout,
+                    buffers.iter().map(|h| {
+                        let offset = state
+                            .buffers
+                            .get(h)
+                            .and_then(|b| b.bindless_offset)
+                            .unwrap_or(0);
                         tracing::trace!(
-                            "Compute resource slot [{}]: buffer {} -> UAV offset {}",
-                            i,
-                            buffer_handle,
+                            "Compute BindResources: buffer {} -> UAV offset {}",
+                            h,
                             offset
                         );
-                    }
-                }
+                        offset
+                    }),
+                );
                 tracing::trace!(
                     "Setting compute root constants (bindless): {:?}",
                     &layout.bindless[..buffers.len().min(types::MAX_BINDLESS_SLOTS)]
@@ -366,18 +368,7 @@ pub(super) fn submit(
                 user: raw_user,
             } => {
                 let mut layout = types::PushLayout::default();
-                for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = idx as u16;
-                }
-                for (i, &val) in raw_user.iter().enumerate() {
-                    if i >= types::MAX_USER_SLOTS {
-                        break;
-                    }
-                    layout.user[i] = val;
-                }
+                shared::fill_raw(&mut layout, raw_indices, raw_user);
                 unsafe {
                     command_list.SetComputeRoot32BitConstants(
                         0,
@@ -400,12 +391,7 @@ pub(super) fn submit(
                     )?;
                 }
                 let mut layout = types::PushLayout::default();
-                for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = handle.index() as u16;
-                }
+                shared::fill_typed(&mut layout, typed_handles.iter().copied());
                 unsafe {
                     command_list.SetComputeRoot32BitConstants(
                         0,

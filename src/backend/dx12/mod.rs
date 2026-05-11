@@ -726,36 +726,6 @@ impl GpuBackend for Dx12Backend {
         compute::submit(&mut self.state, device_handle, commands)
     }
 
-    fn submit_graph(
-        &mut self,
-        device_handle: DeviceHandle,
-        commands: &[GraphCommand],
-    ) -> Result<crate::timeline::TimelineValue> {
-        let mut batch: Vec<GpuCommand> = Vec::new();
-        let mut last_tv = self.gpu_progress(device_handle);
-        for cmd in commands {
-            match cmd {
-                GraphCommand::Compute(c) => batch.push(c.clone()),
-                GraphCommand::Render {
-                    target,
-                    commands: render_cmds,
-                } => {
-                    if !batch.is_empty() {
-                        last_tv = compute::submit(&mut self.state, device_handle, &batch)?;
-                        self.wait_until(device_handle, last_tv)?;
-                        batch.clear();
-                    }
-                    render_target::render(&mut self.state, device_handle, *target, render_cmds)?;
-                    last_tv = compute::submit(&mut self.state, device_handle, &[])?;
-                }
-            }
-        }
-        if !batch.is_empty() {
-            last_tv = compute::submit(&mut self.state, device_handle, &batch)?;
-        }
-        Ok(last_tv)
-    }
-
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         surface::record_gpu_work(&mut self.state, frame.surface, commands)
     }

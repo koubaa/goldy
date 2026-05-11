@@ -1,11 +1,10 @@
 //! Compute pipeline and dispatch logic.
 
+use super::super::shared;
 use super::super::{ComputePipelineHandle, DeviceHandle, GpuCommand, ShaderHandle};
-use super::shader::parse_numthreads;
 use super::types::RESOURCE_SLOT_BUFFER;
-use super::types::{
-    ComputePipelineState, MetalState, PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS,
-};
+use super::types::{ComputePipelineState, MetalState, PushLayout};
+use crate::slang::parse_numthreads;
 use crate::slang::SlangStage;
 
 /// Fallback workgroup size used when a compute shader's `[numthreads]` annotation
@@ -394,14 +393,16 @@ fn record_commands_to_buffer(
             GpuCommand::BindResources { buffers } => {
                 ensure_compute!();
                 let mut layout = PushLayout::default();
-                for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    if let Some(buf) = state.buffers.get(buffer_handle) {
-                        layout.bindless[i] = buf.arg_buffer_index as u16;
-                    }
-                }
+                shared::fill_bindless(
+                    &mut layout,
+                    buffers.iter().map(|h| {
+                        state
+                            .buffers
+                            .get(h)
+                            .map(|b| b.arg_buffer_index)
+                            .unwrap_or(0)
+                    }),
+                );
                 let layout_bytes = layout.as_bytes();
                 guard
                     .compute
@@ -418,18 +419,7 @@ fn record_commands_to_buffer(
             } => {
                 ensure_compute!();
                 let mut layout = PushLayout::default();
-                for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = idx as u16;
-                }
-                for (i, &val) in raw_user.iter().enumerate() {
-                    if i >= MAX_USER_SLOTS {
-                        break;
-                    }
-                    layout.user[i] = val;
-                }
+                shared::fill_raw(&mut layout, raw_indices, raw_user);
                 let layout_bytes = layout.as_bytes();
                 guard
                     .compute
@@ -450,12 +440,7 @@ fn record_commands_to_buffer(
                     )?;
                 }
                 let mut layout = PushLayout::default();
-                for (i, handle) in handles.iter().enumerate() {
-                    if i >= MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = handle.index() as u16;
-                }
+                shared::fill_typed(&mut layout, handles.iter().copied());
                 let layout_bytes = layout.as_bytes();
                 guard
                     .compute

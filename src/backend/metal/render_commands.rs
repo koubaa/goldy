@@ -2,10 +2,9 @@
 //!
 //! Used by both render_target and surface to avoid code duplication.
 
+use super::super::shared;
 use super::super::{BufferHandle, PipelineHandle, RenderCommand};
-use super::types::{
-    PipelineState, PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS, RESOURCE_SLOT_BUFFER,
-};
+use super::types::{PipelineState, PushLayout, RESOURCE_SLOT_BUFFER};
 use super::utils::index_format_to_mtl;
 use crate::types::IndexFormat;
 use ::metal as mtl;
@@ -62,14 +61,12 @@ pub(super) fn record(
                 buffers: buf_handles,
             } => {
                 let mut layout = PushLayout::default();
-                for (i, buffer_handle) in buf_handles.iter().enumerate() {
-                    if i >= MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    if let Some(buf) = buffers.get(buffer_handle) {
-                        layout.bindless[i] = buf.arg_buffer_index as u16;
-                    }
-                }
+                shared::fill_bindless(
+                    &mut layout,
+                    buf_handles
+                        .iter()
+                        .map(|h| buffers.get(h).map(|b| b.arg_buffer_index).unwrap_or(0)),
+                );
                 let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,
@@ -87,18 +84,7 @@ pub(super) fn record(
                 user: raw_user,
             } => {
                 let mut layout = PushLayout::default();
-                for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = idx as u16;
-                }
-                for (i, &val) in raw_user.iter().enumerate() {
-                    if i >= MAX_USER_SLOTS {
-                        break;
-                    }
-                    layout.user[i] = val;
-                }
+                shared::fill_raw(&mut layout, raw_indices, raw_user);
                 let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,
@@ -122,12 +108,7 @@ pub(super) fn record(
                     )?;
                 }
                 let mut layout = PushLayout::default();
-                for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = handle.index() as u16;
-                }
+                shared::fill_typed(&mut layout, typed_handles.iter().copied());
                 let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,

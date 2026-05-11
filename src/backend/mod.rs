@@ -33,6 +33,14 @@ pub mod mock;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 
+/// Shared primitives reused across Vulkan, DX12, and Metal backends.
+#[cfg(any(
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos")
+))]
+pub(crate) mod shared;
+
 use crate::types::{
     BackendType, BindlessHandle, BufferFlags, Color, DataAccess, DepthFormat, DepthStencilState,
     DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess,
@@ -590,11 +598,37 @@ pub trait GpuBackend: Send + Sync {
     /// Compute batches run through [`submit_standalone`](Self::submit_standalone); each
     /// [`GraphCommand::Render`] runs via [`render_to_target`](Self::render_to_target) after
     /// waiting on the preceding compute timeline value so GPU ordering is preserved.
+    ///
+    /// The default implementation is correct for all three backends and should not be overridden.
     fn submit_graph(
         &mut self,
         device: DeviceHandle,
         commands: &[GraphCommand],
-    ) -> Result<crate::timeline::TimelineValue>;
+    ) -> Result<crate::timeline::TimelineValue> {
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(device);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
+                    if !batch.is_empty() {
+                        last_tv = self.submit_standalone(device, &batch)?;
+                        self.wait_until(device, last_tv)?;
+                        batch.clear();
+                    }
+                    self.render_to_target(device, *target, render_cmds)?;
+                    last_tv = self.submit_standalone(device, &[])?;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = self.submit_standalone(device, &batch)?;
+        }
+        Ok(last_tv)
+    }
 
     /// Acquire the next swapchain image and begin a frame bracket.
     fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)>;

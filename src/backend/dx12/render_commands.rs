@@ -3,6 +3,7 @@
 //! This module contains `record` which is used by both
 //! `render_to_target` and `surface_render` to avoid code duplication.
 
+use super::super::shared;
 use super::types::{self, Dx12State};
 use super::utils::{index_format_to_dxgi, topology_to_d3d12};
 use super::{DeviceHandle, RenderCommand};
@@ -71,15 +72,16 @@ pub(super) fn record(
             }
             RenderCommand::BindResources { buffers } => {
                 let mut layout = types::PushLayout::default();
-                for (i, buffer_handle) in buffers.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    if let Some(buf_state) = state.buffers.get(buffer_handle) {
-                        let offset = buf_state.bindless_offset.unwrap_or(0);
-                        layout.bindless[i] = offset as u16;
-                    }
-                }
+                shared::fill_bindless(
+                    &mut layout,
+                    buffers.iter().map(|h| {
+                        state
+                            .buffers
+                            .get(h)
+                            .and_then(|b| b.bindless_offset)
+                            .unwrap_or(0)
+                    }),
+                );
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
@@ -94,18 +96,7 @@ pub(super) fn record(
                 user: raw_user,
             } => {
                 let mut layout = types::PushLayout::default();
-                for (i, &idx) in raw_indices.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = idx as u16;
-                }
-                for (i, &val) in raw_user.iter().enumerate() {
-                    if i >= types::MAX_USER_SLOTS {
-                        break;
-                    }
-                    layout.user[i] = val;
-                }
+                shared::fill_raw(&mut layout, raw_indices, raw_user);
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
@@ -128,12 +119,7 @@ pub(super) fn record(
                     )?;
                 }
                 let mut layout = types::PushLayout::default();
-                for (i, handle) in typed_handles.iter().enumerate() {
-                    if i >= types::MAX_BINDLESS_SLOTS {
-                        break;
-                    }
-                    layout.bindless[i] = handle.index() as u16;
-                }
+                shared::fill_typed(&mut layout, typed_handles.iter().copied());
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,

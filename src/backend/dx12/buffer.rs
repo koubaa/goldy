@@ -1203,11 +1203,7 @@ pub(super) fn clear(
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;
 
-    let clear_size = if size == 0 {
-        buffer.size.saturating_sub(offset)
-    } else {
-        size
-    };
+    let clear_size = super::super::shared::resolve_clear_size(buffer.size, offset, size);
 
     if offset + clear_size > buffer.size {
         anyhow::bail!("Clear would exceed buffer bounds");

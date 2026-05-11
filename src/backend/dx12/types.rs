@@ -40,33 +40,10 @@ pub const MAX_BINDLESS_CBV_SRV_UAV: u32 = 16384;
 #[allow(dead_code)]
 pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
 
-/// Maximum number of bindless resource indices in region A.
-pub const MAX_BINDLESS_SLOTS: usize = 16;
-/// Maximum number of u32 user parameters in region B.
-pub const MAX_USER_SLOTS: usize = 8;
-/// Total root constant size in bytes.
-pub const TOTAL_PUSH_BYTES: usize = 128;
-
-/// Packed 128-byte root constant layout.
-///
-/// ```text
-/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
-/// Bytes 32–63:  8  × u32  user parameters            (region B)
-/// Bytes 64–127: 64 × u8   reserved / future           (region C)
-/// ```
-#[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
-pub struct PushLayout {
-    pub bindless: [u16; MAX_BINDLESS_SLOTS],
-    pub user: [u32; MAX_USER_SLOTS],
-    pub _reserved: [u32; 16],
-}
-
-const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
-
-// Safety: PushLayout is a POD type with known layout
-unsafe impl bytemuck::Pod for PushLayout {}
-unsafe impl bytemuck::Zeroable for PushLayout {}
+// PushLayout and its constants live in the shared module so all three backends
+// use one definition. Re-export them here so internal code keeps using the
+// same unqualified names as before.
+pub use super::super::shared::{PushLayout, MAX_BINDLESS_SLOTS, TOTAL_PUSH_BYTES};
 
 /// Registry for tracking bindless resource descriptor heap offsets.
 ///
@@ -81,14 +58,11 @@ unsafe impl bytemuck::Zeroable for PushLayout {}
 /// out-of-bounds, corrupting the heap and causing GPU hangs / device loss.
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    /// Monotonic fallback counter: only advanced when the free list is empty.
-    next_cbv_srv_uav_offset: u32,
-    next_sampler_offset: u32,
-    /// Recycled CBV/SRV/UAV heap slots returned by `unregister_buffer` /
-    /// `unregister_texture`. Popped first by every `register_*` call.
-    free_cbv_srv_uav_slots: Vec<u32>,
-    /// Recycled sampler heap slots returned by `unregister_sampler`.
-    free_sampler_slots: Vec<u32>,
+    /// Unified CBV/SRV/UAV slot allocator. All buffer and texture descriptors
+    /// share the same heap, so a single allocator prevents offset collisions.
+    cbv_srv_uav: super::super::shared::SlotAllocator,
+    /// Separate sampler heap allocator.
+    sampler: super::super::shared::SlotAllocator,
     /// Maps buffer handle to its primary descriptor offset (UAV for storage, CBV for uniform)
     pub buffer_offsets: HashMap<BufferHandle, u32>,
     /// Maps buffer handle to its secondary SRV offset (for storage buffers that need read access)
@@ -102,71 +76,42 @@ pub(crate) struct ResourceRegistry {
 #[allow(dead_code)]
 impl ResourceRegistry {
     pub fn new() -> Self {
-        Self {
-            next_cbv_srv_uav_offset: 0,
-            next_sampler_offset: 0,
-            free_cbv_srv_uav_slots: Vec::new(),
-            free_sampler_slots: Vec::new(),
-            buffer_offsets: HashMap::new(),
-            buffer_srv_offsets: HashMap::new(),
-            texture_offsets: HashMap::new(),
-            texture_uav_offsets: HashMap::new(),
-            sampler_offsets: HashMap::new(),
-        }
-    }
-
-    /// Pop a recycled CBV/SRV/UAV slot or mint a fresh one.
-    fn alloc_cbv_srv_uav(&mut self) -> u32 {
-        self.free_cbv_srv_uav_slots.pop().unwrap_or_else(|| {
-            let offset = self.next_cbv_srv_uav_offset;
-            self.next_cbv_srv_uav_offset += 1;
-            offset
-        })
-    }
-
-    /// Pop a recycled sampler slot or mint a fresh one.
-    fn alloc_sampler(&mut self) -> u32 {
-        self.free_sampler_slots.pop().unwrap_or_else(|| {
-            let offset = self.next_sampler_offset;
-            self.next_sampler_offset += 1;
-            offset
-        })
+        Self::default()
     }
 
     pub fn register_buffer_cbv(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.alloc_cbv_srv_uav();
+        let offset = self.cbv_srv_uav.alloc();
         self.buffer_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_buffer_srv(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.alloc_cbv_srv_uav();
-        // Store in secondary map since buffer may already have a UAV offset
+        let offset = self.cbv_srv_uav.alloc();
         self.buffer_srv_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_buffer_uav(&mut self, handle: BufferHandle) -> u32 {
-        let offset = self.alloc_cbv_srv_uav();
+        let offset = self.cbv_srv_uav.alloc();
         self.buffer_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
-        let offset = self.alloc_cbv_srv_uav();
+        let offset = self.cbv_srv_uav.alloc();
         self.texture_offsets.insert(handle, offset);
         offset
     }
 
     /// Register a UAV descriptor for a texture (e.g. storage image / SpatialAccess::Direct).
     pub fn register_texture_uav(&mut self, handle: TextureHandle) -> u32 {
-        let offset = self.alloc_cbv_srv_uav();
+        let offset = self.cbv_srv_uav.alloc();
         self.texture_uav_offsets.insert(handle, offset);
         offset
     }
 
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
-        let offset = self.alloc_sampler();
+        let offset = self.sampler.alloc();
         self.sampler_offsets.insert(handle, offset);
         offset
     }
@@ -179,7 +124,7 @@ impl ResourceRegistry {
     /// Allocate a raw descriptor slot not tied to any resource handle.
     /// Used for permanent device-lifetime slots (e.g. `scratch_clear_uav_offset`).
     pub fn alloc_cbv_srv_uav_slot(&mut self) -> u32 {
-        self.alloc_cbv_srv_uav()
+        self.cbv_srv_uav.alloc()
     }
 
     /// Unregister a buffer, returning all of its descriptor slots to the free list.
@@ -189,10 +134,10 @@ impl ResourceRegistry {
     /// heap in seconds and subsequent descriptor writes corrupt adjacent entries.
     pub fn unregister_buffer(&mut self, handle: BufferHandle) {
         if let Some(offset) = self.buffer_offsets.remove(&handle) {
-            self.free_cbv_srv_uav_slots.push(offset);
+            self.cbv_srv_uav.free(offset);
         }
         if let Some(offset) = self.buffer_srv_offsets.remove(&handle) {
-            self.free_cbv_srv_uav_slots.push(offset);
+            self.cbv_srv_uav.free(offset);
         }
     }
 
@@ -201,16 +146,16 @@ impl ResourceRegistry {
     /// Storage textures may occupy two slots (SRV + UAV); both are recycled here.
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
         if let Some(offset) = self.texture_offsets.remove(&handle) {
-            self.free_cbv_srv_uav_slots.push(offset);
+            self.cbv_srv_uav.free(offset);
         }
         if let Some(offset) = self.texture_uav_offsets.remove(&handle) {
-            self.free_cbv_srv_uav_slots.push(offset);
+            self.cbv_srv_uav.free(offset);
         }
     }
 
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
         if let Some(offset) = self.sampler_offsets.remove(&handle) {
-            self.free_sampler_slots.push(offset);
+            self.sampler.free(offset);
         }
     }
 }
@@ -231,12 +176,12 @@ mod registry_tests {
             reg.register_buffer_uav(handle);
             reg.unregister_buffer(handle);
         }
-        // Only one slot should ever have been minted (slot 0), now sitting in the free list.
         assert_eq!(
-            reg.next_cbv_srv_uav_offset, 1,
+            reg.cbv_srv_uav.next_fresh(),
+            1,
             "UAV counter grew; slot recycling not working"
         );
-        assert_eq!(reg.free_cbv_srv_uav_slots.len(), 1);
+        assert_eq!(reg.cbv_srv_uav.free_count(), 1);
     }
 
     /// Storage buffers register two slots (UAV primary + SRV secondary).
@@ -251,11 +196,12 @@ mod registry_tests {
             reg.unregister_buffer(handle);
         }
         assert_eq!(
-            reg.next_cbv_srv_uav_offset, 2,
+            reg.cbv_srv_uav.next_fresh(),
+            2,
             "counter should only have advanced twice (one UAV + one SRV slot ever minted)"
         );
         assert_eq!(
-            reg.free_cbv_srv_uav_slots.len(),
+            reg.cbv_srv_uav.free_count(),
             2,
             "both slots must be in the free list"
         );
@@ -271,8 +217,8 @@ mod registry_tests {
             reg.register_texture_uav(handle);
             reg.unregister_texture(handle);
         }
-        assert_eq!(reg.next_cbv_srv_uav_offset, 2);
-        assert_eq!(reg.free_cbv_srv_uav_slots.len(), 2);
+        assert_eq!(reg.cbv_srv_uav.next_fresh(), 2);
+        assert_eq!(reg.cbv_srv_uav.free_count(), 2);
     }
 
     /// Sampler slots are in a separate heap; verify they recycle independently.
@@ -284,8 +230,8 @@ mod registry_tests {
             reg.register_sampler(handle);
             reg.unregister_sampler(handle);
         }
-        assert_eq!(reg.next_sampler_offset, 1);
-        assert_eq!(reg.free_sampler_slots.len(), 1);
+        assert_eq!(reg.sampler.next_fresh(), 1);
+        assert_eq!(reg.sampler.free_count(), 1);
     }
 
     /// Simultaneously-live resources must receive distinct slots.
@@ -313,19 +259,17 @@ mod registry_tests {
         const LIVE: u64 = 8;
         const ROUNDS: u64 = 10_000;
 
-        // Prime with LIVE simultaneous resources.
         for i in 0..LIVE {
             reg.register_buffer_uav(i as BufferHandle);
         }
-        // Repeatedly destroy the oldest and create a new one.
         for i in LIVE..LIVE + ROUNDS {
             reg.unregister_buffer((i - LIVE) as BufferHandle);
             reg.register_buffer_uav(i as BufferHandle);
         }
         assert!(
-            reg.next_cbv_srv_uav_offset <= LIVE as u32,
+            reg.cbv_srv_uav.next_fresh() <= LIVE as u32,
             "counter ({}) exceeded live count ({LIVE}); slot recycling broken",
-            reg.next_cbv_srv_uav_offset
+            reg.cbv_srv_uav.next_fresh()
         );
     }
 }
@@ -368,45 +312,37 @@ pub(crate) enum PendingDeletion {
 }
 
 /// Deferred deletion queue for a DX12 device.
-/// Mirrors the Vulkan backend's `DeletionQueue`.
 pub(crate) struct DeletionQueue {
-    pending: Vec<(u64, PendingDeletion)>,
+    inner: super::super::shared::DeferredQueue<u64, PendingDeletion>,
 }
 
 impl DeletionQueue {
     pub fn new() -> Self {
         Self {
-            pending: Vec::new(),
+            inner: super::super::shared::DeferredQueue::new(),
         }
     }
 
     pub fn queue(&mut self, fence_value: u64, resource: PendingDeletion) {
-        self.pending.push((fence_value, resource));
+        self.inner.push(fence_value, resource);
     }
 
     /// Drop resources whose associated fence value has been reached by the GPU.
     pub fn process(&mut self, fence: &Direct3D12::ID3D12Fence, registry: &mut ResourceRegistry) {
         let completed = unsafe { fence.GetCompletedValue() };
-        let (to_delete, to_keep): (Vec<_>, Vec<_>) =
-            self.pending.drain(..).partition(|(fv, _)| *fv <= completed);
-
-        self.pending = to_keep;
-
-        for (_, resource) in to_delete {
+        for resource in self.inner.drain_up_to(completed) {
             Self::unregister(registry, &resource);
-            drop(resource);
         }
     }
 
     pub(crate) fn pending_len(&self) -> usize {
-        self.pending.len()
+        self.inner.len()
     }
 
     /// Flush all pending deletions unconditionally (device teardown).
     pub fn flush_all(&mut self, registry: &mut ResourceRegistry) {
-        for (_, resource) in self.pending.drain(..) {
+        for resource in self.inner.flush_all() {
             Self::unregister(registry, &resource);
-            drop(resource);
         }
     }
 

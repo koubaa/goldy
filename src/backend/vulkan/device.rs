@@ -390,7 +390,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // always valid and implicitly reclaims all child objects, so skip
             // individual cleanup and jump straight to it.
             if matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
-                let pending = logical_device.deletion_queue.pending.len();
+                let pending = logical_device.deletion_queue.len();
                 tracing::warn!(
                     %device_handle,
                     pending_deferred = pending,
