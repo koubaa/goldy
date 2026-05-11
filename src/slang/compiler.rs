@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::ffi::*;
 use super::loader::SlangLibrary;
-use super::virtual_main::transform_virtual_main;
+use super::virtual_main::effective_slang_source_for_compile;
 use crate::types::OptimizationLevel;
 use crate::{goldy_event, goldy_span};
 
@@ -427,6 +427,10 @@ impl SlangCompiler {
     }
 
     /// Shared session + compile path; invokes `f` with the live compile request after `spCompile` succeeds.
+    ///
+    /// `source` must be the effective Slang translation-unit text (after
+    /// [`super::virtual_main::effective_slang_source_for_compile`] when applicable). Virtual-main
+    /// rewriting is not applied here so it runs once per logical compile.
     #[allow(clippy::too_many_arguments)] // mirrors public compile entry points
     fn with_compiled_request<R>(
         &self,
@@ -550,18 +554,6 @@ impl SlangCompiler {
             anyhow::bail!("Failed to add translation unit");
         }
 
-        // Apply virtual-main transform: [goldy_*] entry points → [shader(...)] wrappers.
-        let transformed_source;
-        let source = if source.contains("[goldy_compute]")
-            || source.contains("[goldy_vertex]")
-            || source.contains("[goldy_fragment]")
-        {
-            transformed_source = transform_virtual_main(source);
-            &transformed_source as &str
-        } else {
-            source
-        };
-
         let source_path = CString::new("shader.slang").unwrap();
         let source_cstr = CString::new(source).context("Source contains null bytes")?;
         unsafe {
@@ -633,8 +625,11 @@ impl SlangCompiler {
         layout_checks: &[OwnedLayoutCheck],
         optimization_level: OptimizationLevel,
     ) -> Result<CompiledShaderWithReflection> {
+        // Hash the same string Slang compiles (post virtual-main transform). This runs on cache
+        // hits too; a micro-optimization could cache keys per `(Arc<str>, …)` if needed.
+        let effective = effective_slang_source_for_compile(source);
         let cache_key = crate::shader_cache::compile_cache_key(
-            source,
+            effective.as_ref(),
             target,
             entry_points,
             defines,
@@ -653,7 +648,7 @@ impl SlangCompiler {
         }
 
         let out = self.with_compiled_request(
-            source,
+            effective.as_ref(),
             target,
             entry_points,
             search_paths,
@@ -728,8 +723,9 @@ impl SlangCompiler {
     ) -> Result<StructLayout> {
         let defines = Self::bindless_defines_for_target(target);
         let entry_points = &[("vs_main", SlangStage::Vertex)];
+        let effective = effective_slang_source_for_compile(shader_source);
         self.with_compiled_request(
-            shader_source,
+            effective.as_ref(),
             target,
             entry_points,
             search_paths,
