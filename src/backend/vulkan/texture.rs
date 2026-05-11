@@ -1106,7 +1106,8 @@ pub(super) struct ComputeTextureScratch {
     pub height: u32,
 }
 
-/// Allocate and CPU-fill staging for [`GpuCommand::WriteTexture`] / [`GpuCommand::WriteTextureRegion`].
+/// Allocate and CPU-fill staging for [`GpuCommand::WriteTexture`](crate::backend::GpuCommand::WriteTexture)
+/// / [`GpuCommand::WriteTextureRegion`](crate::backend::GpuCommand::WriteTextureRegion).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn allocate_compute_texture_staging(
     instance: &ash::Instance,

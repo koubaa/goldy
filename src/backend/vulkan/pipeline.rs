@@ -145,7 +145,7 @@ pub(super) fn create(
 
     let vk_pipelines = unsafe {
         logical_device.device.create_graphics_pipelines(
-            vk::PipelineCache::null(),
+            logical_device.pipeline_cache,
             std::slice::from_ref(&pipeline_info),
             None,
         )
@@ -349,7 +349,7 @@ pub(super) fn create_with_depth(
 
     let vk_pipelines = unsafe {
         logical_device.device.create_graphics_pipelines(
-            vk::PipelineCache::null(),
+            logical_device.pipeline_cache,
             std::slice::from_ref(&pipeline_info),
             None,
         )

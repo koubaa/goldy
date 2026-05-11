@@ -28,6 +28,7 @@ mod diagnostic;
 pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod pipeline;
+mod pso_cache;
 mod render_commands;
 mod render_target;
 mod sampler;
@@ -288,6 +289,25 @@ impl Dx12Backend {
         if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
             logical_device.deletion_queue.flush_all();
+
+            if logical_device.pso_disk_cache_dirty {
+                if let Some(cache_root) = dirs::cache_dir() {
+                    let path = cache_root
+                        .join("goldy")
+                        .join(format!("dx12_pso_{}.bin", logical_device.adapter_id));
+                    if let Err(e) = pso_cache::save_maps(
+                        &path,
+                        &logical_device.graphics_pso_blobs,
+                        &logical_device.compute_pso_blobs,
+                    ) {
+                        tracing::warn!(
+                            error = ?e,
+                            path = ?path,
+                            "failed to save DX12 PSO disk cache"
+                        );
+                    }
+                }
+            }
 
             if let Some(mut belt) = self.state.staging_belts.remove(&device_handle) {
                 unsafe {

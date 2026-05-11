@@ -1,9 +1,11 @@
 //! Device management logic.
 
+use super::pso_cache;
 use super::types::{self, DxgiAdapterInfo, LogicalDevice};
 use super::{utils, DeviceHandle, Dx12State};
 use crate::backend::{AdapterInfo, BackendType};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D::*, Direct3D12::*, Dxgi::*};
 
@@ -261,6 +263,17 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let mut resource_registry = types::ResourceRegistry::new();
     let scratch_clear_uav_offset = resource_registry.alloc_cbv_srv_uav_slot();
 
+    let (graphics_pso_blobs, compute_pso_blobs) = dirs::cache_dir().map_or_else(
+        || (HashMap::new(), HashMap::new()),
+        |cache_root| {
+            pso_cache::load_maps(
+                &cache_root
+                    .join("goldy")
+                    .join(format!("dx12_pso_{adapter_id}.bin")),
+            )
+        },
+    );
+
     state.devices.insert(
         handle,
         LogicalDevice {
@@ -285,6 +298,9 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             cpu_clear_heap,
             scratch_clear_uav_offset,
             deletion_queue: super::types::DeletionQueue::new(),
+            graphics_pso_blobs,
+            compute_pso_blobs,
+            pso_disk_cache_dirty: false,
         },
     );
 

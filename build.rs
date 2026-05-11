@@ -22,7 +22,30 @@ struct PlatformInfo {
     primary: String,
 }
 
+/// `GOLDY_CACHE_VERSION` for on-disk shader bytecode cache invalidation.
+fn emit_goldy_cache_version(slang_semver_label: Option<&str>) {
+    let pkg = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    let git = std::process::Command::new("git")
+        .current_dir(&manifest_dir)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "nogit".into());
+
+    let sl = slang_semver_label.unwrap_or("noslang");
+    println!("cargo:rustc-env=GOLDY_CACHE_VERSION=v{pkg}-g{git}-slang{sl}");
+}
+
 fn main() {
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+    println!("cargo:rerun-if-changed=.git/logs/HEAD");
     println!("cargo:rerun-if-env-changed=GOLDY_SLANG_PATH");
     println!("cargo:rerun-if-changed=slang/manifest.json");
 
@@ -35,6 +58,7 @@ fn main() {
         Err(e) => {
             println!("cargo:warning=Failed to load slang/manifest.json: {}", e);
             generate_empty_embedded_module();
+            emit_goldy_cache_version(None);
             return;
         }
     };
@@ -45,6 +69,7 @@ fn main() {
         None => {
             println!("cargo:warning=Platform {} not in manifest", platform_dir);
             generate_empty_embedded_module();
+            emit_goldy_cache_version(Some(manifest.version.as_str()));
             return;
         }
     };
@@ -78,12 +103,14 @@ fn main() {
             println!("cargo:warning=Failed to download Slang: {}", e);
             println!("cargo:warning=Run: cd slang && ./download.sh");
             generate_empty_embedded_module();
+            emit_goldy_cache_version(Some(manifest.version.as_str()));
             return;
         }
     }
 
     // Generate the embedded module
     generate_embedded_module(&manifest.version, &vendored_dir, platform_info);
+    emit_goldy_cache_version(Some(manifest.version.as_str()));
 }
 
 /// Generate an empty embedded module (for unsupported platforms or missing binaries)

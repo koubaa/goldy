@@ -158,9 +158,9 @@ pub(crate) enum ResourceId {
         offset: u64,
         len: u64,
     },
-    /// Graph-scoped transient; lowered to [`BufferRange`] before submission.
+    /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
     TransientBuffer(TransientId),
-    /// Graph-scoped transient texture; lowered to [`Texture`] before submission.
+    /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
     TransientTexture(TransientTextureId),
 }
 

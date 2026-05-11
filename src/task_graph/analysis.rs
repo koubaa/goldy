@@ -20,7 +20,7 @@
 //!
 //! 4. **Command emission**: waves are serialized into a flat
 //!    `Vec<GpuCommand>` with `ResourceBarrier` commands between waves.
-//!    Each [`NodeKind`](super::ir::NodeKind) variant emits different commands.
+//!    Each [`NodeKind`] variant emits different commands.
 
 use std::collections::{HashMap, HashSet};
 

@@ -34,7 +34,7 @@ pub fn layout_validation_enabled() -> bool {
 // ============================================================================
 
 /// Kind of resource in a parameter block field
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceKind {
     /// A buffer (StructuredBuffer, RWStructuredBuffer, etc.)
     Buffer,
@@ -55,7 +55,7 @@ pub enum ResourceKind {
 }
 
 /// Layout information for a single field within a ParameterBlock
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FieldLayout {
     /// Name of the field
     pub name: String,
@@ -70,7 +70,7 @@ pub struct FieldLayout {
 }
 
 /// Layout information for a ParameterBlock
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ParameterBlockLayout {
     /// Name of the parameter (from shader)
     pub name: String,
@@ -87,7 +87,7 @@ pub struct ParameterBlockLayout {
 }
 
 /// Complete reflection information for a compiled shader
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShaderReflection {
     /// All parameter blocks found in the shader
     pub parameter_blocks: Vec<ParameterBlockLayout>,
@@ -219,7 +219,7 @@ pub struct LayoutCheck<'a> {
 }
 
 /// Stored on backend [`ShaderState`](crate::backend) for deferred per-stage compilation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnedLayoutCheck {
     pub type_name: String,
     pub rust_size: usize,
@@ -241,7 +241,7 @@ impl OwnedLayoutCheck {
 }
 
 /// Compiled shader output with optional reflection data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompiledShaderWithReflection {
     /// The compiled shader
     pub shader: CompiledShader,
@@ -250,7 +250,8 @@ pub struct CompiledShaderWithReflection {
 }
 
 /// Shader compilation target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ShaderTarget {
     /// SPIR-V bytecode for Vulkan
     Spirv,
@@ -276,7 +277,7 @@ impl ShaderTarget {
 }
 
 /// Compiled shader output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompiledShader {
     /// The compiled bytecode or source code
     pub data: Vec<u8>,
@@ -318,6 +319,7 @@ impl CompiledShader {
 pub struct SlangCompiler {
     library: Arc<SlangLibrary>,
     global_session: *mut IGlobalSession,
+    shader_disk_cache: std::sync::Mutex<crate::shader_cache::ShaderBytecodeDiskCache>,
 }
 
 // SlangCompiler is Send + Sync because each compilation creates its own request
@@ -355,6 +357,9 @@ impl SlangCompiler {
         Ok(Self {
             library,
             global_session,
+            shader_disk_cache: std::sync::Mutex::new(
+                crate::shader_cache::ShaderBytecodeDiskCache::new_load_or_empty(),
+            ),
         })
     }
 
@@ -628,7 +633,26 @@ impl SlangCompiler {
         layout_checks: &[OwnedLayoutCheck],
         optimization_level: OptimizationLevel,
     ) -> Result<CompiledShaderWithReflection> {
-        self.with_compiled_request(
+        let cache_key = crate::shader_cache::compile_cache_key(
+            source,
+            target,
+            entry_points,
+            defines,
+            layout_checks,
+            optimization_level,
+        );
+
+        {
+            let mut disk = self
+                .shader_disk_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(hit) = disk.get(cache_key) {
+                return hit.with_context(|| "decode shader disk cache");
+            }
+        }
+
+        let out = self.with_compiled_request(
             source,
             target,
             entry_points,
@@ -660,7 +684,19 @@ impl SlangCompiler {
                     reflection,
                 })
             },
-        )
+        )?;
+
+        {
+            let mut disk = self
+                .shader_disk_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Err(e) = disk.insert(cache_key, &out) {
+                tracing::warn!(?e, "failed to serialize shader disk cache entry");
+            }
+        }
+
+        Ok(out)
     }
 
     fn validate_owned_layout_checks(

@@ -1,12 +1,11 @@
 //! Pipeline creation and management.
 
 use super::types::PipelineState;
-use super::{shader, utils, DeviceHandle, Dx12State, PipelineHandle, ShaderHandle};
+use super::{pso_cache, shader, utils, DeviceHandle, Dx12State, PipelineHandle, ShaderHandle};
 use crate::types::{DepthStencilState, PrimitiveTopology, TextureFormat, VertexBufferLayout};
 use anyhow::{Context, Result};
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
-/// Create a graphics pipeline state object.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) fn create(
     state: &mut Dx12State,
@@ -25,9 +24,18 @@ pub(super) fn create(
 
     let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
+    let key = pso_cache::graphics_pso_key(
+        &vs_bytecode,
+        &fs_bytecode,
+        vertex_layout,
+        topology,
+        target_format,
+        None,
+    );
+
     let logical_device = state
         .devices
-        .get(&device_handle)
+        .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
     // Use the shared bindless root signature from the device
@@ -84,8 +92,13 @@ pub(super) fn create(
         })
         .collect();
 
-    // Create PSO
-    let pso_desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+    let disk_blob = logical_device.graphics_pso_blobs.get(&key);
+    let mut try_drop_stale_cached_blob = disk_blob.is_some();
+    let cached_pso = disk_blob
+        .map(|b| pso_cache::d3d12_cached_pso(b.as_slice()))
+        .unwrap_or_default();
+
+    let mut pso_desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
         pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
         VS: D3D12_SHADER_BYTECODE {
             pShaderBytecode: vs_bytecode.as_ptr() as *const _,
@@ -154,12 +167,42 @@ pub(super) fn create(
             Count: 1,
             Quality: 0,
         },
+        CachedPSO: cached_pso,
         ..Default::default()
     };
 
-    let pipeline_state: ID3D12PipelineState =
-        unsafe { logical_device.device.CreateGraphicsPipelineState(&pso_desc) }
-            .context("Failed to create pipeline state")?;
+    let pipeline_state: ID3D12PipelineState = loop {
+        match unsafe { logical_device.device.CreateGraphicsPipelineState(&pso_desc) } {
+            Ok(p) => break p,
+            Err(e) if try_drop_stale_cached_blob => {
+                tracing::warn!(
+                    device = device_handle,
+                    error = ?e,
+                    "discarding stale DX12 graphics PSO blob; rebuilding without cache entry"
+                );
+                logical_device.graphics_pso_blobs.remove(&key);
+                logical_device.pso_disk_cache_dirty = true;
+                pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
+                try_drop_stale_cached_blob = false;
+            }
+            Err(e) => anyhow::bail!("Failed to create DX12 graphics pipeline state: {:?}", e),
+        }
+    };
+
+    let blob = unsafe {
+        pipeline_state
+            .GetCachedBlob()
+            .context("GetCachedBlob (graphics PSO)")?
+    };
+    let new_blob = unsafe { pso_cache::id3dblob_to_vec(&blob) };
+
+    match logical_device.graphics_pso_blobs.get(&key) {
+        Some(prev) if *prev == new_blob => {}
+        _ => {
+            logical_device.graphics_pso_blobs.insert(key, new_blob);
+            logical_device.pso_disk_cache_dirty = true;
+        }
+    }
 
     let handle = state.next_pipeline_handle;
     state.next_pipeline_handle += 1;
@@ -201,9 +244,18 @@ pub(super) fn create_with_depth(
 
     let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
+    let key = pso_cache::graphics_pso_key(
+        &vs_bytecode,
+        &fs_bytecode,
+        vertex_layout,
+        topology,
+        target_format,
+        depth_stencil,
+    );
+
     let logical_device = state
         .devices
-        .get(&device_handle)
+        .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
     let root_signature = logical_device
@@ -271,7 +323,13 @@ pub(super) fn create_with_depth(
         )
     };
 
-    let pso_desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+    let disk_blob = logical_device.graphics_pso_blobs.get(&key);
+    let mut try_drop_stale_cached_blob = disk_blob.is_some();
+    let cached_pso = disk_blob
+        .map(|b| pso_cache::d3d12_cached_pso(b.as_slice()))
+        .unwrap_or_default();
+
+    let mut pso_desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
         pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
         VS: D3D12_SHADER_BYTECODE {
             pShaderBytecode: vs_bytecode.as_ptr() as *const _,
@@ -342,12 +400,45 @@ pub(super) fn create_with_depth(
             Count: 1,
             Quality: 0,
         },
+        CachedPSO: cached_pso,
         ..Default::default()
     };
 
-    let pipeline_state: ID3D12PipelineState =
-        unsafe { logical_device.device.CreateGraphicsPipelineState(&pso_desc) }
-            .context("Failed to create depth pipeline state")?;
+    let pipeline_state: ID3D12PipelineState = loop {
+        match unsafe { logical_device.device.CreateGraphicsPipelineState(&pso_desc) } {
+            Ok(p) => break p,
+            Err(e) if try_drop_stale_cached_blob => {
+                tracing::warn!(
+                    device = device_handle,
+                    error = ?e,
+                    "discarding stale DX12 graphics depth-PSO blob; rebuilding without cache entry"
+                );
+                logical_device.graphics_pso_blobs.remove(&key);
+                logical_device.pso_disk_cache_dirty = true;
+                pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
+                try_drop_stale_cached_blob = false;
+            }
+            Err(e) => anyhow::bail!(
+                "Failed to create DX12 depth graphics pipeline state: {:?}",
+                e
+            ),
+        }
+    };
+
+    let blob = unsafe {
+        pipeline_state
+            .GetCachedBlob()
+            .context("GetCachedBlob (graphics depth PSO)")?
+    };
+    let new_blob = unsafe { pso_cache::id3dblob_to_vec(&blob) };
+
+    match logical_device.graphics_pso_blobs.get(&key) {
+        Some(prev) if *prev == new_blob => {}
+        _ => {
+            logical_device.graphics_pso_blobs.insert(key, new_blob);
+            logical_device.pso_disk_cache_dirty = true;
+        }
+    }
 
     let handle = state.next_pipeline_handle;
     state.next_pipeline_handle += 1;
