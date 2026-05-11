@@ -156,13 +156,20 @@ impl SlotAllocator {
     }
 
     /// Number of slots currently on the free list.
+    ///
+    /// Only compiled for tests and the Metal backend, which exercise slot
+    /// recycling; other backends' production code uses [`Self::alloc`] /
+    /// [`Self::free`] only.
+    #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
     #[inline]
     pub fn free_count(&self) -> usize {
         self.free.len()
     }
 
     /// The next fresh slot that would be minted if the free list were empty.
-    /// Useful for asserting that recycling is working under churn.
+    ///
+    /// See [`Self::free_count`].
+    #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
     #[inline]
     pub fn next_fresh(&self) -> u32 {
         self.next

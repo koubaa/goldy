@@ -419,7 +419,7 @@ pub(super) fn submit(
                                 pipeline.layout,
                                 vk::ShaderStageFlags::ALL,
                                 0,
-                                bytemuck::bytes_of(&layout),
+                                layout.as_bytes(),
                             );
                         }
                     }
@@ -438,7 +438,7 @@ pub(super) fn submit(
                                 pipeline.layout,
                                 vk::ShaderStageFlags::ALL,
                                 0,
-                                bytemuck::bytes_of(&layout),
+                                layout.as_bytes(),
                             );
                         }
                     }
@@ -461,7 +461,7 @@ pub(super) fn submit(
                                 pipeline.layout,
                                 vk::ShaderStageFlags::ALL,
                                 0,
-                                bytemuck::bytes_of(&layout),
+                                layout.as_bytes(),
                             );
                         }
                     }

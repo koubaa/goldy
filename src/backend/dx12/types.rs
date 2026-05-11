@@ -43,7 +43,7 @@ pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
 // PushLayout and its constants live in the shared module so all three backends
 // use one definition. Re-export them here so internal code keeps using the
 // same unqualified names as before.
-pub use super::super::shared::{PushLayout, MAX_BINDLESS_SLOTS, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
+pub use super::super::shared::{PushLayout, MAX_BINDLESS_SLOTS, TOTAL_PUSH_BYTES};
 
 /// Registry for tracking bindless resource descriptor heap offsets.
 ///
