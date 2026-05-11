@@ -1131,7 +1131,9 @@ fn present_args(mode: crate::types::PresentMode, allow_tearing: bool) -> (u32, D
             if allow_tearing {
                 (0, DXGI_PRESENT_ALLOW_TEARING)
             } else {
-                (0, DXGI_PRESENT(0))
+                // Flip-model swapchains without DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING: Present(0,0)
+                // without ALLOW_TEARING has triggered DXGI_ERROR_DEVICE_REMOVED on some drivers.
+                (1, DXGI_PRESENT(0))
             }
         }
     }

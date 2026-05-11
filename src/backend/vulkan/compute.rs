@@ -238,11 +238,9 @@ pub(super) fn submit(
         let signal_value = {
             let ld = state
                 .devices
-                .get_mut(&device_handle)
+                .get(&device_handle)
                 .context("Invalid device handle")?;
-            let v = ld.timeline_next;
-            ld.timeline_next += 1;
-            v
+            ld.timeline_next
         };
         let ld = state
             .devices
@@ -254,15 +252,16 @@ pub(super) fn submit(
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
         let submit_info2 =
             vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
-        unsafe {
+        let r = unsafe {
             ld.device.queue_submit2(
                 ld.queue,
                 std::slice::from_ref(&submit_info2),
                 vk::Fence::null(),
             )
-        }
-        .context("Failed queue_submit2 for empty compute submit")?;
+        };
+        r.context("Failed queue_submit2 for empty compute submit")?;
         if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.timeline_next = signal_value.saturating_add(1);
             ld.process_deletion_queue_up_to_gpu_progress();
         }
         return Ok(signal_value);
@@ -700,11 +699,9 @@ pub(super) fn submit(
     let signal_value = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
-        let v = ld.timeline_next;
-        ld.timeline_next += 1;
-        v
+        ld.timeline_next
     };
 
     let submit_device_core = state
@@ -736,6 +733,10 @@ pub(super) fn submit(
             "Failed to queue_submit2 command buffer: {:?}",
             e
         ));
+    }
+
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.timeline_next = signal_value.saturating_add(1);
     }
 
     state
