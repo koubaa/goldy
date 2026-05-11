@@ -699,6 +699,11 @@ pub trait GpuBackend: Send + Sync {
     /// allocations. No-op by default.
     fn reset_buffer_heaps(&mut self, _device: DeviceHandle) {}
 
+    /// Ensure the internal heap/allocator can service a single allocation of
+    /// at least `min_capacity` bytes without overflow. Call *after*
+    /// `reset_buffer_heaps` and *before* large allocations. No-op by default.
+    fn ensure_buffer_heap_capacity(&mut self, _device: DeviceHandle, _min_capacity: u64) {}
+
     /// Process pending GPU deletions and reclaim bindless descriptor slots
     /// whose GPU timeline barrier has been signaled.
     ///

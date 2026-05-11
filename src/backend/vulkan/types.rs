@@ -629,12 +629,19 @@ pub(crate) struct PendingBuffer {
 #[allow(dead_code)]
 pub(crate) enum PendingDeletion {
     Buffer {
+        buffer_handle: BufferHandle,
         buffer: vk::Buffer,
         memory: vk::DeviceMemory,
         staging_buffer: Option<vk::Buffer>,
         staging_memory: Option<vk::DeviceMemory>,
     },
+    /// A buffer view whose Vk resources belong to the parent buffer; only the
+    /// bindless descriptor index needs deregistration.
+    BufferView {
+        buffer_handle: BufferHandle,
+    },
     Texture {
+        texture_handle: TextureHandle,
         image: vk::Image,
         view: vk::ImageView,
         memory: vk::DeviceMemory,
@@ -667,7 +674,12 @@ impl DeletionQueue {
     }
 
     /// Drop resources whose barrier has been reached (`completed` is latest GPU timeline counter).
-    pub fn process_up_to(&mut self, device: &ash::Device, completed: TimelineValue) {
+    pub fn process_up_to(
+        &mut self,
+        device: &ash::Device,
+        registry: &mut ResourceRegistry,
+        completed: TimelineValue,
+    ) {
         let (to_delete, to_keep): (Vec<_>, Vec<_>) = self
             .pending
             .drain(..)
@@ -676,88 +688,65 @@ impl DeletionQueue {
         self.pending = to_keep;
 
         for (_, resource) in to_delete {
-            unsafe {
-                match resource {
-                    PendingDeletion::Buffer {
-                        buffer,
-                        memory,
-                        staging_buffer,
-                        staging_memory,
-                    } => {
-                        device.destroy_buffer(buffer, None);
-                        device.free_memory(memory, None);
-                        if let Some(buf) = staging_buffer {
-                            device.destroy_buffer(buf, None);
-                        }
-                        if let Some(mem) = staging_memory {
-                            device.free_memory(mem, None);
-                        }
-                    }
-                    PendingDeletion::Texture {
-                        image,
-                        view,
-                        memory,
-                        staging_buffer,
-                        staging_memory,
-                    } => {
-                        device.destroy_image_view(view, None);
-                        device.destroy_image(image, None);
-                        device.free_memory(memory, None);
-                        if let Some(buf) = staging_buffer {
-                            device.destroy_buffer(buf, None);
-                        }
-                        if let Some(mem) = staging_memory {
-                            device.free_memory(mem, None);
-                        }
-                    }
-                    PendingDeletion::Sampler { sampler } => {
-                        device.destroy_sampler(sampler, None);
-                    }
-                }
-            }
+            Self::destroy_one(device, registry, resource);
         }
     }
 
-    /// Flush all pending deletions immediately (used when destroying the device)
-    pub fn flush_all(&mut self, device: &ash::Device) {
+    /// Flush all pending deletions immediately (used when destroying the device).
+    pub fn flush_all(&mut self, device: &ash::Device, registry: &mut ResourceRegistry) {
         for (_, resource) in self.pending.drain(..) {
-            unsafe {
-                match resource {
-                    PendingDeletion::Buffer {
-                        buffer,
-                        memory,
-                        staging_buffer,
-                        staging_memory,
-                    } => {
-                        device.destroy_buffer(buffer, None);
-                        device.free_memory(memory, None);
-                        if let Some(buf) = staging_buffer {
-                            device.destroy_buffer(buf, None);
-                        }
-                        if let Some(mem) = staging_memory {
-                            device.free_memory(mem, None);
-                        }
+            Self::destroy_one(device, registry, resource);
+        }
+    }
+
+    fn destroy_one(
+        device: &ash::Device,
+        registry: &mut ResourceRegistry,
+        resource: PendingDeletion,
+    ) {
+        unsafe {
+            match resource {
+                PendingDeletion::Buffer {
+                    buffer_handle,
+                    buffer,
+                    memory,
+                    staging_buffer,
+                    staging_memory,
+                } => {
+                    registry.unregister_buffer(buffer_handle);
+                    device.destroy_buffer(buffer, None);
+                    device.free_memory(memory, None);
+                    if let Some(buf) = staging_buffer {
+                        device.destroy_buffer(buf, None);
                     }
-                    PendingDeletion::Texture {
-                        image,
-                        view,
-                        memory,
-                        staging_buffer,
-                        staging_memory,
-                    } => {
-                        device.destroy_image_view(view, None);
-                        device.destroy_image(image, None);
-                        device.free_memory(memory, None);
-                        if let Some(buf) = staging_buffer {
-                            device.destroy_buffer(buf, None);
-                        }
-                        if let Some(mem) = staging_memory {
-                            device.free_memory(mem, None);
-                        }
+                    if let Some(mem) = staging_memory {
+                        device.free_memory(mem, None);
                     }
-                    PendingDeletion::Sampler { sampler } => {
-                        device.destroy_sampler(sampler, None);
+                }
+                PendingDeletion::BufferView { buffer_handle } => {
+                    registry.unregister_buffer(buffer_handle);
+                }
+                PendingDeletion::Texture {
+                    texture_handle,
+                    image,
+                    view,
+                    memory,
+                    staging_buffer,
+                    staging_memory,
+                } => {
+                    registry.unregister_texture(texture_handle);
+                    device.destroy_image_view(view, None);
+                    device.destroy_image(image, None);
+                    device.free_memory(memory, None);
+                    if let Some(buf) = staging_buffer {
+                        device.destroy_buffer(buf, None);
                     }
+                    if let Some(mem) = staging_memory {
+                        device.free_memory(mem, None);
+                    }
+                }
+                PendingDeletion::Sampler { sampler } => {
+                    device.destroy_sampler(sampler, None);
                 }
             }
         }
@@ -772,7 +761,8 @@ impl LogicalDevice {
                 .get_semaphore_counter_value(self.timeline_semaphore)
                 .unwrap_or(0)
         };
-        self.deletion_queue.process_up_to(&self.device, completed);
+        self.deletion_queue
+            .process_up_to(&self.device, &mut self.resource_registry, completed);
     }
 }
 

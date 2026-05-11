@@ -231,6 +231,36 @@ impl HeapAllocator {
         self.high_water_mark = 0;
     }
 
+    /// Ensure the primary heap is right-sized for `min_capacity` bytes.
+    /// Grows the heap if it's too small. Also shrinks if it's more than 4x
+    /// the requested capacity (avoids holding a 1 GB heap when 64 MB suffices).
+    /// Call *after* all old buffers have been freed and the GPU is idle, but
+    /// *before* allocating the next large buffer.
+    pub fn ensure_primary_capacity(&mut self, min_capacity: u64) {
+        let min_capacity = min_capacity.min(MAX_HEAP_SIZE);
+        let recommended_max = self.device.recommended_max_working_set_size();
+        let target = min_capacity
+            .next_power_of_two()
+            .max(MIN_HEAP_SIZE)
+            .min(recommended_max / 2);
+
+        let too_small = self.primary_size < min_capacity;
+        let too_large = self.primary_size > target.saturating_mul(4);
+
+        if too_small || too_large {
+            let new_primary = self.create_heap(target);
+            tracing::info!(
+                "{} primary buffer heap: {}MB -> {}MB (requested={}MB)",
+                if too_small { "Grew" } else { "Shrank" },
+                self.primary_size / 1024 / 1024,
+                target / 1024 / 1024,
+                min_capacity / 1024 / 1024,
+            );
+            self.primary = new_primary;
+            self.primary_size = target;
+        }
+    }
+
     fn update_high_water_mark(&mut self) {
         let mut total = self.primary.used_size();
         for heap in &self.overflow {

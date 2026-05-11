@@ -757,16 +757,33 @@ impl<const N: usize> BufferPoolRing<N> {
     /// If it is too small (or absent) a new pool is allocated and the clear flag
     /// is set so the caller can zero-fill the backing buffer.
     ///
+    /// If `max_size` is `Some(max)` and the current pool is larger than `max`,
+    /// the pool is reallocated at `size` (enabling shrinking with hysteresis).
+    ///
     /// Calls [`Device::reset_buffer_heaps`] when a new allocation is needed.
     pub fn prepare(&mut self, device: &Device, size: u64) -> Result<()> {
+        self.prepare_bounded(device, size, None)
+    }
+
+    /// Like [`prepare`](Self::prepare) but with an optional upper bound for shrinking.
+    pub fn prepare_bounded(
+        &mut self,
+        device: &Device,
+        size: u64,
+        max_size: Option<u64>,
+    ) -> Result<()> {
         let idx = self.idx;
-        let need_new = match &self.pools[idx] {
-            Some(pool) => pool.capacity() < size,
-            None => true,
+        let (too_small, too_large) = match &self.pools[idx] {
+            Some(pool) => {
+                let cap = pool.capacity();
+                (cap < size, max_size.is_some_and(|max| cap > max))
+            }
+            None => (true, false),
         };
-        if need_new {
+        if too_small || too_large {
             self.pools[idx] = None;
             device.reset_buffer_heaps();
+            device.ensure_buffer_heap_capacity(size);
             let pool = BufferPool::new(device, size)?;
             self.pools[idx] = Some(pool);
             self.clear_flags[idx] = true;
@@ -799,6 +816,11 @@ impl<const N: usize> BufferPoolRing<N> {
         let flag = self.clear_flags[self.idx];
         self.clear_flags[self.idx] = false;
         flag
+    }
+
+    /// Returns the capacity of the current pool slot, or `None` if unallocated.
+    pub fn current_capacity(&self) -> Option<u64> {
+        self.pools[self.idx].as_ref().map(|p| p.capacity())
     }
 
     /// Drop all pools and reset clear flags.

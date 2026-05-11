@@ -964,12 +964,10 @@ pub(super) fn destroy(
 ) {
     if let Some(texture) = textures.remove(&texture_handle) {
         if let Some(logical_device) = devices.get_mut(&texture.device_handle) {
-            // Unregister from bindless registry
-            logical_device
-                .resource_registry
-                .unregister_texture(texture_handle);
-
             if texture.transient_heap_suballoc {
+                logical_device
+                    .resource_registry
+                    .unregister_texture(texture_handle);
                 unsafe {
                     logical_device.device.destroy_image_view(texture.view, None);
                     logical_device.device.destroy_image(texture.image, None);
@@ -981,6 +979,7 @@ pub(super) fn destroy(
             logical_device.deletion_queue.queue(
                 barrier,
                 types::PendingDeletion::Texture {
+                    texture_handle,
                     image: texture.image,
                     view: texture.view,
                     memory: texture.memory,

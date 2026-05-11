@@ -353,11 +353,16 @@ pub(crate) struct ComputeAllocatorSlot {
 #[allow(dead_code)]
 pub(crate) enum PendingDeletion {
     Buffer {
+        buffer_handle: BufferHandle,
         resource: Direct3D12::ID3D12Resource,
         upload_buffer: Option<Direct3D12::ID3D12Resource>,
         coherent_readback: Option<Direct3D12::ID3D12Resource>,
     },
+    /// A buffer view whose D3D12 resource belongs to the parent; only the
+    /// bindless descriptor slots need deregistration.
+    BufferView { buffer_handle: BufferHandle },
     Texture {
+        texture_handle: TextureHandle,
         resource: Direct3D12::ID3D12Resource,
     },
 }
@@ -380,9 +385,17 @@ impl DeletionQueue {
     }
 
     /// Drop resources whose associated fence value has been reached by the GPU.
-    pub fn process(&mut self, fence: &Direct3D12::ID3D12Fence) {
+    pub fn process(&mut self, fence: &Direct3D12::ID3D12Fence, registry: &mut ResourceRegistry) {
         let completed = unsafe { fence.GetCompletedValue() };
-        self.pending.retain(|(fv, _)| *fv > completed);
+        let (to_delete, to_keep): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|(fv, _)| *fv <= completed);
+
+        self.pending = to_keep;
+
+        for (_, resource) in to_delete {
+            Self::unregister(registry, &resource);
+            drop(resource);
+        }
     }
 
     pub(crate) fn pending_len(&self) -> usize {
@@ -390,8 +403,23 @@ impl DeletionQueue {
     }
 
     /// Flush all pending deletions unconditionally (device teardown).
-    pub fn flush_all(&mut self) {
-        self.pending.clear();
+    pub fn flush_all(&mut self, registry: &mut ResourceRegistry) {
+        for (_, resource) in self.pending.drain(..) {
+            Self::unregister(registry, &resource);
+            drop(resource);
+        }
+    }
+
+    fn unregister(registry: &mut ResourceRegistry, resource: &PendingDeletion) {
+        match resource {
+            PendingDeletion::Buffer { buffer_handle, .. }
+            | PendingDeletion::BufferView { buffer_handle } => {
+                registry.unregister_buffer(*buffer_handle);
+            }
+            PendingDeletion::Texture { texture_handle, .. } => {
+                registry.unregister_texture(*texture_handle);
+            }
+        }
     }
 }
 

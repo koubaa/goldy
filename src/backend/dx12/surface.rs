@@ -372,7 +372,9 @@ pub(super) fn acquire(
 
     // Process deferred deletions now that the fence wait has completed.
     if let Some(device) = state.devices.get_mut(&device_handle) {
-        device.deletion_queue.process(&device.fence);
+        device
+            .deletion_queue
+            .process(&device.fence, &mut device.resource_registry);
     }
 
     let surface = state

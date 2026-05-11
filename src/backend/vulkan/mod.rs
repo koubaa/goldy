@@ -908,7 +908,8 @@ impl GpuBackend for VulkanBackend {
         unsafe { dev.wait_semaphores(&wait, u64::MAX) }.context("wait_semaphores failed")?;
         compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            ld.deletion_queue.process_up_to(&ld.device, value);
+            ld.deletion_queue
+                .process_up_to(&ld.device, &mut ld.resource_registry, value);
         }
         Ok(())
     }
@@ -934,7 +935,8 @@ impl GpuBackend for VulkanBackend {
             Ok(()) => {
                 compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
                 if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-                    ld.deletion_queue.process_up_to(&ld.device, value);
+                    ld.deletion_queue
+                        .process_up_to(&ld.device, &mut ld.resource_registry, value);
                 }
                 Ok(true)
             }
