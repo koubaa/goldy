@@ -288,7 +288,9 @@ impl Dx12Backend {
         transient::destroy_all_for_device(&mut self.state, device_handle);
         if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
-            logical_device.deletion_queue.flush_all();
+            logical_device
+                .deletion_queue
+                .flush_all(&mut logical_device.resource_registry);
 
             if logical_device.pso_disk_cache_dirty {
                 if let Some(cache_root) = dirs::cache_dir() {
@@ -687,7 +689,8 @@ impl GpuBackend for Dx12Backend {
             .clone();
         utils::wait_for_fence(&fence, value)?;
         if let Some(dev) = self.state.devices.get_mut(&device_handle) {
-            dev.deletion_queue.process(&dev.fence);
+            dev.deletion_queue
+                .process(&dev.fence, &mut dev.resource_registry);
         }
         Ok(())
     }
@@ -708,7 +711,8 @@ impl GpuBackend for Dx12Backend {
         let ok = utils::wait_for_fence_timeout(&fence, value, timeout_ms)?;
         if ok {
             if let Some(dev) = self.state.devices.get_mut(&device_handle) {
-                dev.deletion_queue.process(&dev.fence);
+                dev.deletion_queue
+                    .process(&dev.fence, &mut dev.resource_registry);
             }
         }
         Ok(ok)
@@ -967,7 +971,8 @@ impl GpuBackend for Dx12Backend {
 
     fn flush_deferred_deletions(&mut self, device_handle: DeviceHandle) {
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            ld.deletion_queue.process(&ld.fence);
+            ld.deletion_queue
+                .process(&ld.fence, &mut ld.resource_registry);
         }
     }
 

@@ -552,9 +552,11 @@ pub(super) fn acquire(
             .devices
             .get_mut(&device_handle)
             .context("Surface's device is invalid")?;
-        logical_device
-            .deletion_queue
-            .process_up_to(&logical_device.device, completed);
+        logical_device.deletion_queue.process_up_to(
+            &logical_device.device,
+            &mut logical_device.resource_registry,
+            completed,
+        );
     }
 
     let logical_device = state

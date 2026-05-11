@@ -256,9 +256,10 @@ pub(super) fn create(
     Ok(handle)
 }
 
-/// Destroy a buffer, unregistering it from bindless and queueing for deferred deletion.
-/// For views, only the descriptor is unregistered — the underlying VkBuffer/memory belongs
-/// to the parent and is not freed.
+/// Destroy a buffer, queueing both the Vk resources and the bindless descriptor
+/// index for deferred deletion after in-flight GPU work completes.
+/// For views, only the descriptor index is deferred — the underlying VkBuffer/memory
+/// belongs to the parent and is not freed.
 pub(super) fn destroy(
     devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
@@ -266,36 +267,43 @@ pub(super) fn destroy(
 ) {
     if let Some(buffer) = buffers.remove(&buffer_handle) {
         if let Some(device) = devices.get_mut(&buffer.device_handle) {
-            // Unregister from bindless registry
-            device.resource_registry.unregister_buffer(buffer_handle);
+            let barrier = device.timeline_next.saturating_sub(1);
 
-            if !buffer.is_view {
-                if buffer.transient_heap_suballoc {
-                    unsafe {
-                        device.device.destroy_buffer(buffer.buffer, None);
-                    }
-                    return;
-                }
-                if buffer.host_mapped.is_some() {
-                    if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
-                        tracing::warn!(
-                            ?e,
-                            "unmap_memory2 failed for CPU_READABLE buffer on destroy"
-                        );
-                    }
-                }
-                // Queue for deferred deletion - the buffer may still be in use by in-flight commands.
-                let barrier = device.timeline_next.saturating_sub(1);
+            if buffer.is_view {
                 device.deletion_queue.queue(
                     barrier,
-                    types::PendingDeletion::Buffer {
-                        buffer: buffer.buffer,
-                        memory: buffer.memory,
-                        staging_buffer: buffer.staging_buffer,
-                        staging_memory: buffer.staging_memory,
-                    },
+                    types::PendingDeletion::BufferView { buffer_handle },
                 );
+                return;
             }
+
+            if buffer.transient_heap_suballoc {
+                device
+                    .resource_registry
+                    .unregister_buffer(buffer_handle);
+                unsafe {
+                    device.device.destroy_buffer(buffer.buffer, None);
+                }
+                return;
+            }
+            if buffer.host_mapped.is_some() {
+                if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
+                    tracing::warn!(
+                        ?e,
+                        "unmap_memory2 failed for CPU_READABLE buffer on destroy"
+                    );
+                }
+            }
+            device.deletion_queue.queue(
+                barrier,
+                types::PendingDeletion::Buffer {
+                    buffer_handle,
+                    buffer: buffer.buffer,
+                    memory: buffer.memory,
+                    staging_buffer: buffer.staging_buffer,
+                    staging_memory: buffer.staging_memory,
+                },
+            );
         }
     }
 }

@@ -315,37 +315,41 @@ pub(super) fn create(
     Ok(handle)
 }
 
-/// Destroy a buffer, unregistering it from bindless.
-/// For views, only the descriptor is unregistered — the underlying resource belongs
-/// to the parent and is not freed.
-/// Non-view resources are deferred until the GPU finishes the last submitted command list.
+/// Destroy a buffer, queueing both the D3D12 resources and the bindless
+/// descriptor slots for deferred deletion after in-flight GPU work completes.
+/// For views, only the descriptor slots are deferred.
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
-            device.resource_registry.unregister_buffer(buffer_handle);
+            let last_fence = device.fence_value.saturating_sub(1);
 
-            if !buffer.is_view {
-                if buffer.transient_placed {
-                    // GPU work must be complete (caller destroys heap after `wait_until`).
-                    device.resource_registry.unregister_buffer(buffer_handle);
-                    return;
-                }
-                if buffer.coherent_readback_mapped.is_some() {
-                    if let Some(ref rb) = buffer.coherent_readback {
-                        let no_write = D3D12_RANGE { Begin: 0, End: 0 };
-                        unsafe { rb.Unmap(0, Some(&no_write)) };
-                    }
-                }
-                let last_fence = device.fence_value.saturating_sub(1);
+            if buffer.is_view {
                 device.deletion_queue.queue(
                     last_fence,
-                    super::types::PendingDeletion::Buffer {
-                        resource: buffer.resource,
-                        upload_buffer: buffer.upload_buffer,
-                        coherent_readback: buffer.coherent_readback,
-                    },
+                    super::types::PendingDeletion::BufferView { buffer_handle },
                 );
+                return;
             }
+
+            if buffer.transient_placed {
+                device.resource_registry.unregister_buffer(buffer_handle);
+                return;
+            }
+            if buffer.coherent_readback_mapped.is_some() {
+                if let Some(ref rb) = buffer.coherent_readback {
+                    let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                    unsafe { rb.Unmap(0, Some(&no_write)) };
+                }
+            }
+            device.deletion_queue.queue(
+                last_fence,
+                super::types::PendingDeletion::Buffer {
+                    buffer_handle,
+                    resource: buffer.resource,
+                    upload_buffer: buffer.upload_buffer,
+                    coherent_readback: buffer.coherent_readback,
+                },
+            );
         }
     }
 }

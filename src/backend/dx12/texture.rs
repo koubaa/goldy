@@ -1004,18 +1004,20 @@ pub(super) fn read_to_cpu(
     Ok(())
 }
 
-/// Destroy a texture.
+/// Destroy a texture, queueing the D3D12 resource and bindless descriptor slots
+/// for deferred deletion after in-flight GPU work completes.
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.remove(&texture_handle) {
         if let Some(dev) = state.devices.get_mut(&tex.device_handle) {
-            dev.resource_registry.unregister_texture(texture_handle);
             if tex.transient_placed {
+                dev.resource_registry.unregister_texture(texture_handle);
                 return;
             }
             let last_fence = dev.fence_value.saturating_sub(1);
             dev.deletion_queue.queue(
                 last_fence,
                 PendingDeletion::Texture {
+                    texture_handle,
                     resource: tex.resource,
                 },
             );
