@@ -77,24 +77,6 @@ pub(super) fn patch_vertex_msl_entry_point_params(msl: &str) -> String {
     patched
 }
 
-/// Parse `[numthreads(x, y, z)]` from Slang shader source.
-///
-/// Returns `None` if the attribute is absent; the caller falls back to `[64, 1, 1]`.
-pub(super) fn parse_numthreads(source: &str) -> Option<[u32; 3]> {
-    let kw_pos = source.find("numthreads")?;
-    let after_kw = source[kw_pos + "numthreads".len()..].trim_start();
-    let args_str = after_kw.strip_prefix('(')?;
-    let close = args_str.find(')')?;
-    let parts: Vec<&str> = args_str[..close].split(',').map(str::trim).collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let x = parts[0].parse().ok()?;
-    let y = parts[1].parse().ok()?;
-    let z = parts[2].parse().ok()?;
-    Some([x, y, z])
-}
-
 /// Compile a shader stage to MSL and create a Metal library.
 ///
 /// The argument count reflects the Slang compile API surface: each parameter

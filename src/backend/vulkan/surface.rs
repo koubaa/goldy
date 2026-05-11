@@ -489,7 +489,7 @@ pub(super) fn acquire(
     let pending_deferred_len = state
         .devices
         .get(&device_handle)
-        .map(|d| d.deletion_queue.pending.len())
+        .map(|d| d.deletion_queue.len())
         .unwrap_or(0);
 
     let wait_result = {

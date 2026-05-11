@@ -1413,20 +1413,7 @@ fn find_numthreads_in_range(
 
 /// Parse `numthreads(X, Y, Z)` from the inner content of `[numthreads(...)]`.
 fn parse_numthreads(s: &str) -> Option<(u32, u32, u32)> {
-    // s might be "numthreads(64, 1, 1)" or already stripped to "64, 1, 1".
-    let inner = if let Some(i) = s.find('(') {
-        let close = s.rfind(')')?;
-        &s[i + 1..close]
-    } else {
-        s
-    };
-    let parts: Vec<&str> = inner.split(',').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    let x: u32 = parts[0].trim().parse().ok()?;
-    let y: u32 = parts[1].trim().parse().ok()?;
-    let z: u32 = parts[2].trim().parse().ok()?;
+    let [x, y, z] = super::parse_numthreads(s)?;
     Some((x, y, z))
 }
 

@@ -1,7 +1,8 @@
 //! Compute pipeline and dispatch logic.
 
+use super::super::shared;
 use super::staging;
-use super::types::{self, ComputePipelineState, LogicalDevice, PushLayout};
+use super::types::{ComputePipelineState, LogicalDevice, PushLayout};
 use super::{ComputePipelineHandle, DeviceHandle, SurfaceHandle};
 use crate::backend::GpuCommand;
 use crate::timeline::TimelineValue;
@@ -406,16 +407,12 @@ pub(super) fn submit(
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
                     {
                         let mut layout = PushLayout::default();
-                        for (i, buffer_handle) in buffer_handles.iter().enumerate() {
-                            if i >= types::MAX_BINDLESS_SLOTS {
-                                break;
-                            }
-                            layout.bindless[i] = buffers
-                                .get(buffer_handle)
-                                .and_then(|b| b.bindless_index)
-                                .unwrap_or(0)
-                                as u16;
-                        }
+                        shared::fill_bindless(
+                            &mut layout,
+                            buffer_handles.iter().map(|h| {
+                                buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)
+                            }),
+                        );
                         unsafe {
                             logical_device.device.cmd_push_constants(
                                 cmd,
@@ -434,18 +431,7 @@ pub(super) fn submit(
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
                     {
                         let mut layout = PushLayout::default();
-                        for (i, &idx) in raw_indices.iter().enumerate() {
-                            if i >= types::MAX_BINDLESS_SLOTS {
-                                break;
-                            }
-                            layout.bindless[i] = idx as u16;
-                        }
-                        for (i, &val) in raw_user.iter().enumerate() {
-                            if i >= types::MAX_USER_SLOTS {
-                                break;
-                            }
-                            layout.user[i] = val;
-                        }
+                        shared::fill_raw(&mut layout, raw_indices, raw_user);
                         unsafe {
                             logical_device.device.cmd_push_constants(
                                 cmd,
@@ -468,12 +454,7 @@ pub(super) fn submit(
                             &pipeline.shader_debug_name,
                         )?;
                         let mut layout = PushLayout::default();
-                        for (i, handle) in typed_handles.iter().enumerate() {
-                            if i >= types::MAX_BINDLESS_SLOTS {
-                                break;
-                            }
-                            layout.bindless[i] = handle.index() as u16;
-                        }
+                        shared::fill_typed(&mut layout, typed_handles.iter().copied());
                         unsafe {
                             logical_device.device.cmd_push_constants(
                                 cmd,

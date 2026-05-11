@@ -66,56 +66,25 @@ pub mod bindless_bindings {
     pub const SAMPLERS: u32 = FILTER_CONFIG;
 }
 
-/// Maximum number of bindless resource indices in region A.
-pub const MAX_BINDLESS_SLOTS: usize = 16;
-/// Maximum number of u32 user parameters in region B.
-pub const MAX_USER_SLOTS: usize = 8;
-/// Total push constant size in bytes.
-pub const TOTAL_PUSH_BYTES: usize = 128;
+// PushLayout and its constants live in the shared module so all three backends
+// use one definition. Re-export them here so internal code keeps using the
+// same unqualified names as before.
+pub use super::super::shared::{PushLayout, TOTAL_PUSH_BYTES};
 
-/// Packed 128-byte push constant layout.
-///
-/// ```text
-/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
-/// Bytes 32–63:  8  × u32  user parameters            (region B)
-/// Bytes 64–127: 64 × u8   reserved / future           (region C)
-/// ```
-///
-/// - Region A: bindless heap indices for `Scattered<T>`, `BufRO<T>`, textures, samplers, etc.
-/// - Region B: per-dispatch scalar user params (uint, float, int …).
-/// - Region C: zero-filled, reserved for future extension.
-#[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
-pub struct PushLayout {
-    pub bindless: [u16; MAX_BINDLESS_SLOTS],
-    pub user: [u32; MAX_USER_SLOTS],
-    pub _reserved: [u32; 16],
-}
-
-const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
-
-// Safety: PushLayout is a POD type with known layout
-unsafe impl bytemuck::Pod for PushLayout {}
-unsafe impl bytemuck::Zeroable for PushLayout {}
+use super::super::shared::SlotAllocator;
 
 /// Registry for tracking bindless resource indices.
 ///
-/// Each resource type has a monotonically-allocated counter plus a free list of
-/// slots reclaimed by `unregister_*`. Registration prefers a recycled slot so the
-/// total live + free count stays bounded by `MAX_BINDLESS_RESOURCES` rather than
-/// growing unbounded with creation churn.
+/// Each resource type has a [`SlotAllocator`] that prefers recycled free-list
+/// slots before minting new indices, keeping the live counter bounded by
+/// `MAX_BINDLESS_RESOURCES` under create/destroy churn.
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    next_storage_buffer_index: u32,
-    next_uniform_buffer_index: u32,
-    next_sampled_texture_index: u32,
-    next_storage_image_index: u32,
-    next_sampler_index: u32,
-    free_storage_buffer_indices: Vec<u32>,
-    free_uniform_buffer_indices: Vec<u32>,
-    free_sampled_texture_indices: Vec<u32>,
-    free_storage_image_indices: Vec<u32>,
-    free_sampler_indices: Vec<u32>,
+    storage_buffer: SlotAllocator,
+    uniform_buffer: SlotAllocator,
+    sampled_texture: SlotAllocator,
+    storage_image: SlotAllocator,
+    sampler: SlotAllocator,
     /// Map BufferHandle -> (bindless_index, is_storage)
     pub buffer_indices: HashMap<BufferHandle, (u32, bool)>,
     /// Map TextureHandle -> (bindless_index, is_storage_image)
@@ -125,36 +94,14 @@ pub(crate) struct ResourceRegistry {
 
 impl ResourceRegistry {
     pub fn new() -> Self {
-        Self {
-            next_storage_buffer_index: 0,
-            next_uniform_buffer_index: 0,
-            next_sampled_texture_index: 0,
-            next_storage_image_index: 0,
-            next_sampler_index: 0,
-            free_storage_buffer_indices: Vec::new(),
-            free_uniform_buffer_indices: Vec::new(),
-            free_sampled_texture_indices: Vec::new(),
-            free_storage_image_indices: Vec::new(),
-            free_sampler_indices: Vec::new(),
-            buffer_indices: HashMap::new(),
-            texture_indices: HashMap::new(),
-            sampler_indices: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn register_buffer(&mut self, handle: BufferHandle, is_storage: bool) -> u32 {
         let index = if is_storage {
-            self.free_storage_buffer_indices.pop().unwrap_or_else(|| {
-                let idx = self.next_storage_buffer_index;
-                self.next_storage_buffer_index += 1;
-                idx
-            })
+            self.storage_buffer.alloc()
         } else {
-            self.free_uniform_buffer_indices.pop().unwrap_or_else(|| {
-                let idx = self.next_uniform_buffer_index;
-                self.next_uniform_buffer_index += 1;
-                idx
-            })
+            self.uniform_buffer.alloc()
         };
         self.buffer_indices.insert(handle, (index, is_storage));
         index
@@ -162,17 +109,9 @@ impl ResourceRegistry {
 
     pub fn register_texture(&mut self, handle: TextureHandle, is_storage_image: bool) -> u32 {
         let index = if is_storage_image {
-            self.free_storage_image_indices.pop().unwrap_or_else(|| {
-                let idx = self.next_storage_image_index;
-                self.next_storage_image_index += 1;
-                idx
-            })
+            self.storage_image.alloc()
         } else {
-            self.free_sampled_texture_indices.pop().unwrap_or_else(|| {
-                let idx = self.next_sampled_texture_index;
-                self.next_sampled_texture_index += 1;
-                idx
-            })
+            self.sampled_texture.alloc()
         };
         self.texture_indices
             .insert(handle, (index, is_storage_image));
@@ -180,11 +119,7 @@ impl ResourceRegistry {
     }
 
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
-        let index = self.free_sampler_indices.pop().unwrap_or_else(|| {
-            let idx = self.next_sampler_index;
-            self.next_sampler_index += 1;
-            idx
-        });
+        let index = self.sampler.alloc();
         self.sampler_indices.insert(handle, index);
         index
     }
@@ -192,9 +127,9 @@ impl ResourceRegistry {
     pub fn unregister_buffer(&mut self, handle: BufferHandle) {
         if let Some((index, is_storage)) = self.buffer_indices.remove(&handle) {
             if is_storage {
-                self.free_storage_buffer_indices.push(index);
+                self.storage_buffer.free(index);
             } else {
-                self.free_uniform_buffer_indices.push(index);
+                self.uniform_buffer.free(index);
             }
         }
     }
@@ -202,16 +137,16 @@ impl ResourceRegistry {
     pub fn unregister_texture(&mut self, handle: TextureHandle) {
         if let Some((index, is_storage_image)) = self.texture_indices.remove(&handle) {
             if is_storage_image {
-                self.free_storage_image_indices.push(index);
+                self.storage_image.free(index);
             } else {
-                self.free_sampled_texture_indices.push(index);
+                self.sampled_texture.free(index);
             }
         }
     }
 
     pub fn unregister_sampler(&mut self, handle: SamplerHandle) {
         if let Some(index) = self.sampler_indices.remove(&handle) {
-            self.free_sampler_indices.push(index);
+            self.sampler.free(index);
         }
     }
 }
@@ -232,10 +167,11 @@ mod registry_tests {
             reg.unregister_buffer(handle);
         }
         assert_eq!(
-            reg.next_storage_buffer_index, 1,
+            reg.storage_buffer.next_fresh(),
+            1,
             "storage buffer counter grew; slot recycling not working"
         );
-        assert_eq!(reg.free_storage_buffer_indices.len(), 1);
+        assert_eq!(reg.storage_buffer.free_count(), 1);
     }
 
     /// Uniform buffer (non-storage) slots must recycle independently.
@@ -248,7 +184,8 @@ mod registry_tests {
             reg.unregister_buffer(handle);
         }
         assert_eq!(
-            reg.next_uniform_buffer_index, 1,
+            reg.uniform_buffer.next_fresh(),
+            1,
             "uniform buffer counter grew; slot recycling not working"
         );
     }
@@ -262,8 +199,8 @@ mod registry_tests {
             reg.register_texture(handle, false);
             reg.unregister_texture(handle);
         }
-        assert_eq!(reg.next_sampled_texture_index, 1);
-        assert_eq!(reg.free_sampled_texture_indices.len(), 1);
+        assert_eq!(reg.sampled_texture.next_fresh(), 1);
+        assert_eq!(reg.sampled_texture.free_count(), 1);
     }
 
     /// Storage images (RWTexture2D) must recycle their indices.
@@ -275,8 +212,8 @@ mod registry_tests {
             reg.register_texture(handle, true);
             reg.unregister_texture(handle);
         }
-        assert_eq!(reg.next_storage_image_index, 1);
-        assert_eq!(reg.free_storage_image_indices.len(), 1);
+        assert_eq!(reg.storage_image.next_fresh(), 1);
+        assert_eq!(reg.storage_image.free_count(), 1);
     }
 
     /// Sampler slots must recycle independently.
@@ -288,8 +225,8 @@ mod registry_tests {
             reg.register_sampler(handle);
             reg.unregister_sampler(handle);
         }
-        assert_eq!(reg.next_sampler_index, 1);
-        assert_eq!(reg.free_sampler_indices.len(), 1);
+        assert_eq!(reg.sampler.next_fresh(), 1);
+        assert_eq!(reg.sampler.free_count(), 1);
     }
 
     /// Simultaneously-live resources must receive distinct indices.
@@ -325,9 +262,9 @@ mod registry_tests {
             reg.register_buffer(i as BufferHandle, true);
         }
         assert!(
-            reg.next_storage_buffer_index <= LIVE as u32,
+            reg.storage_buffer.next_fresh() <= LIVE as u32,
             "counter ({}) exceeded live count ({LIVE}); slot recycling broken",
-            reg.next_storage_buffer_index
+            reg.storage_buffer.next_fresh()
         );
     }
 }
@@ -656,21 +593,19 @@ pub(crate) enum PendingDeletion {
 /// Deferred deletion queue for a device.
 /// Tracks resources waiting to be deleted after GPU work completes.
 pub(crate) struct DeletionQueue {
-    /// Resources pending deletion, tagged with a [`TimelineValue`] barrier:
-    /// safe to destroy once `gpu_progress >= barrier`.
-    pub pending: Vec<(TimelineValue, PendingDeletion)>,
+    inner: super::super::shared::DeferredQueue<TimelineValue, PendingDeletion>,
 }
 
 impl DeletionQueue {
     pub fn new() -> Self {
         Self {
-            pending: Vec::new(),
+            inner: super::super::shared::DeferredQueue::new(),
         }
     }
 
     /// Queue a resource for deferred deletion once the device timeline reaches `barrier`.
     pub fn queue(&mut self, barrier: TimelineValue, resource: PendingDeletion) {
-        self.pending.push((barrier, resource));
+        self.inner.push(barrier, resource);
     }
 
     /// Drop resources whose barrier has been reached (`completed` is latest GPU timeline counter).
@@ -680,21 +615,14 @@ impl DeletionQueue {
         registry: &mut ResourceRegistry,
         completed: TimelineValue,
     ) {
-        let (to_delete, to_keep): (Vec<_>, Vec<_>) = self
-            .pending
-            .drain(..)
-            .partition(|(barrier, _)| *barrier <= completed);
-
-        self.pending = to_keep;
-
-        for (_, resource) in to_delete {
+        for resource in self.inner.drain_up_to(completed) {
             Self::destroy_one(device, registry, resource);
         }
     }
 
     /// Flush all pending deletions immediately (used when destroying the device).
     pub fn flush_all(&mut self, device: &ash::Device, registry: &mut ResourceRegistry) {
-        for (_, resource) in self.pending.drain(..) {
+        for resource in self.inner.flush_all() {
             Self::destroy_one(device, registry, resource);
         }
     }
@@ -750,6 +678,11 @@ impl DeletionQueue {
                 }
             }
         }
+    }
+
+    /// Number of resources currently pending deletion.
+    pub fn len(&self) -> usize {
+        self.inner.len()
     }
 }
 

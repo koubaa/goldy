@@ -51,3 +51,32 @@ pub use compiler::{
     ShaderTarget, SlangCompiler, StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;
+
+/// Parse `[numthreads(x, y, z)]` from Slang shader source.
+///
+/// The input may be the full source string or just the inner content of the
+/// `[numthreads(...)]` attribute (e.g. `"numthreads(64, 1, 1)"` or `"64, 1, 1"`).
+///
+/// Returns `None` if the attribute is absent or cannot be parsed; callers
+/// should fall back to a suitable default (e.g. `[64, 1, 1]`).
+pub fn parse_numthreads(source: &str) -> Option<[u32; 3]> {
+    // Locate the `numthreads` keyword anywhere in the input.
+    let kw_pos = source.find("numthreads")?;
+    let after_kw = source[kw_pos + "numthreads".len()..].trim_start();
+    // Accept both `numthreads(x,y,z)` and bare `x,y,z` (already inside parens).
+    let inner = if let Some(stripped) = after_kw.strip_prefix('(') {
+        let close = stripped.find(')')?;
+        &stripped[..close]
+    } else {
+        // Input was already the content between parens.
+        after_kw
+    };
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let x: u32 = parts[0].parse().ok()?;
+    let y: u32 = parts[1].parse().ok()?;
+    let z: u32 = parts[2].parse().ok()?;
+    Some([x, y, z])
+}

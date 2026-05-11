@@ -40,40 +40,11 @@ pub const RESOURCE_SLOT_BUFFER: u64 = 1;
 /// Vertex data must use higher indices to avoid collisions.
 pub const VERTEX_BUFFER_START_SLOT: u64 = 2;
 
-/// Maximum number of bindless resource indices in region A.
-pub const MAX_BINDLESS_SLOTS: usize = 16;
-/// Maximum number of u32 user parameters in region B.
-pub const MAX_USER_SLOTS: usize = 8;
-/// Total set_bytes size in bytes.
-pub const TOTAL_PUSH_BYTES: usize = 128;
-
-/// Packed 128-byte buffer layout passed via Metal `set_bytes`.
-///
-/// ```text
-/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
-/// Bytes 32–63:  8  × u32  user parameters            (region B)
-/// Bytes 64–127: 64 × u8   reserved / future           (region C)
-/// ```
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct PushLayout {
-    pub bindless: [u16; MAX_BINDLESS_SLOTS],
-    pub user: [u32; MAX_USER_SLOTS],
-    pub _reserved: [u32; 16],
-}
-
-const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
-
-impl PushLayout {
-    /// Reinterpret the layout as a raw byte slice suitable for Metal's `set_bytes`.
-    ///
-    /// # Safety
-    /// `PushLayout` is `#[repr(C)]` with a static size assertion (`TOTAL_PUSH_BYTES`),
-    /// so the cast is well-defined with no padding surprises.
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, TOTAL_PUSH_BYTES) }
-    }
-}
+// PushLayout and its constants live in the shared module so all three backends
+// use one definition. Re-export them here so internal code keeps using the
+// same unqualified names as before.
+pub use super::super::shared::PushLayout;
+// TOTAL_PUSH_BYTES is available at crate::backend::shared::TOTAL_PUSH_BYTES if needed.
 
 /// Minimum primary heap size (64 MB).
 const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;
@@ -394,34 +365,32 @@ pub(crate) enum PendingDeletion {
 }
 
 pub(crate) struct DeletionQueue {
-    pending: Vec<(TimelineValue, PendingDeletion)>,
+    inner: super::super::shared::DeferredQueue<TimelineValue, PendingDeletion>,
 }
 
 impl DeletionQueue {
     pub fn new() -> Self {
         Self {
-            pending: Vec::new(),
+            inner: super::super::shared::DeferredQueue::new(),
         }
     }
 
     pub fn queue(&mut self, barrier: TimelineValue, resource: PendingDeletion) {
-        self.pending.push((barrier, resource));
+        self.inner.push(barrier, resource);
     }
 
     /// Destroy resources whose `barrier` has been signaled by the GPU (`signaled_value >= barrier`).
+    /// The variants are dropped here which releases the MTL objects.
     pub fn process_up_to(&mut self, signaled: TimelineValue) {
-        let (done, rest): (Vec<_>, Vec<_>) =
-            self.pending.drain(..).partition(|(b, _)| *b <= signaled);
-        self.pending = rest;
-        drop(done);
+        drop(self.inner.drain_up_to(signaled));
     }
 
     pub fn flush_all(&mut self) {
-        self.pending.clear();
+        drop(self.inner.flush_all().collect::<Vec<_>>());
     }
 
     pub(crate) fn pending_len(&self) -> usize {
-        self.pending.len()
+        self.inner.len()
     }
 }
 
@@ -534,6 +503,8 @@ impl LogicalDevice {
 /// Maximum resources per access pattern category (must match GOLDY_MAX_RESOURCES in shaders)
 pub const MAX_RESOURCES_PER_CATEGORY: u32 = 64;
 
+use super::super::shared::SlotAllocator;
+
 /// Registry for tracking bindless resource indices
 ///
 /// The layout matches GoldyBindlessResources in bindless_resources.slang:
@@ -542,45 +513,21 @@ pub const MAX_RESOURCES_PER_CATEGORY: u32 = 64;
 /// - textures[64] at indices 128-191      (Interpolated / Texture2D)
 /// - storageImages[64] at indices 192-255 (Direct / RWTexture2D)
 /// - samplers[64] at indices 256-319      (Filter config)
+///
+/// Each category uses a [`SlotAllocator`] that recycles freed LOCAL indices
+/// (0-63) before minting new ones. The global argument-buffer encoding offset
+/// is computed by adding the category's base (`*_global_index` helpers).
+/// Metal's two-phase recycle (slots parked in `pending_free_*_slots` until the
+/// GPU timeline advances past the barrier) is layered on top: pending slots are
+/// promoted to the `SlotAllocator` free list by `drain_pending_slots_up_to`.
 #[derive(Default)]
 pub(crate) struct ResourceRegistry {
-    next_storage_buffer_index: u32,
-    next_uniform_buffer_index: u32,
-    next_texture_index: u32,
-    next_storage_image_index: u32,
-    next_sampler_index: u32,
-    /// Free list of previously-released storage-image LOCAL indices.
-    ///
-    /// Populated by `release_storage_image_slot()` (used when a Surface is
-    /// destroyed). `register_storage_image()` / `reserve_storage_image_slot()`
-    /// pop from this list before bumping `next_storage_image_index`, so
-    /// transient bindless slots (per-frame swapchain drawables) don't leak
-    /// across the 64-slot storage-image window.
-    free_storage_image_slots: Vec<u32>,
-    /// Symmetric free list for sampled (Interpolated / `Texture2D`) slots.
-    ///
-    /// Populated by `release_texture_slot()` when a regular texture is
-    /// destroyed; `register_texture()` consults it before bumping
-    /// `next_texture_index`. Prevents slot exhaustion when textures are
-    /// created and destroyed repeatedly at runtime.
-    free_texture_slots: Vec<u32>,
-    /// Free list of previously-released storage-buffer LOCAL indices.
-    ///
-    /// Without this list, `register_storage_buffer()` monotonically bumps
-    /// `next_storage_buffer_index` forever. In workloads that allocate
-    /// transient pool views every frame (e.g. ekrano's per-frame
-    /// `BufferPool::alloc_bytes` calls, each of which creates a buffer view),
-    /// the counter grows past the 64-slot storage-buffer window within
-    /// seconds, then past 128 it writes descriptors into the uniform-buffer
-    /// region of the argument buffer, past 192 into the storage-image region
-    /// (corrupting the surface drawable!), and eventually past the whole
-    /// argument buffer — at which point `set_argument_buffer` silently skips
-    /// the encode (bounds check) and the shader reads a zero pointer,
-    /// producing empty frames or a wedged GPU.
-    free_storage_buffer_slots: Vec<u32>,
-    /// Free list of previously-released uniform-buffer LOCAL indices.
-    /// Same rationale as `free_storage_buffer_slots`.
-    free_uniform_buffer_slots: Vec<u32>,
+    /// Slot allocators per resource category (all return LOCAL 0-based indices).
+    storage_buffer: SlotAllocator,
+    uniform_buffer: SlotAllocator,
+    texture: SlotAllocator,
+    storage_image: SlotAllocator,
+    sampler: SlotAllocator,
     /// Slots released while at least one GPU command buffer was in-flight.
     ///
     /// Metal's argument buffer is **just CPU-writable memory**: the descriptor
@@ -615,32 +562,10 @@ pub(crate) struct ResourceRegistry {
 
 impl ResourceRegistry {
     pub fn new() -> Self {
-        Self {
-            // Storage buffers (Scattered) at indices 0-63, bytes 0-511
-            next_storage_buffer_index: 0,
-            // Uniform buffers (Broadcast) at indices 64-127, bytes 512-1023
-            next_uniform_buffer_index: MAX_RESOURCES_PER_CATEGORY,
-            // Textures (Interpolated) at indices 128-191, bytes 1024-1535
-            next_texture_index: 2 * MAX_RESOURCES_PER_CATEGORY,
-            // Storage images (Direct) at indices 192-255, bytes 1536-2047
-            next_storage_image_index: 3 * MAX_RESOURCES_PER_CATEGORY,
-            // Samplers at indices 256-319, bytes 2048-2559
-            next_sampler_index: 4 * MAX_RESOURCES_PER_CATEGORY,
-            free_storage_image_slots: Vec::new(),
-            free_texture_slots: Vec::new(),
-            free_storage_buffer_slots: Vec::new(),
-            free_uniform_buffer_slots: Vec::new(),
-            pending_free_storage_buffer_slots: Vec::new(),
-            pending_free_uniform_buffer_slots: Vec::new(),
-            pending_free_texture_slots: Vec::new(),
-            pending_free_storage_image_slots: Vec::new(),
-            buffer_indices: HashMap::new(),
-            texture_indices: HashMap::new(),
-            sampler_indices: HashMap::new(),
-        }
+        Self::default()
     }
 
-    /// Register a storage buffer (Scattered access) - indices 0-63.
+    /// Register a storage buffer (Scattered access) - LOCAL indices 0-63.
     ///
     /// Reuses a freed slot if available (see `unregister_buffer`). Without
     /// this reuse, long-running apps that churn transient buffers every frame
@@ -656,44 +581,37 @@ impl ResourceRegistry {
     /// `config.lines_size == 0` and a spurious `STAGE_FLATTEN` overflow.
     /// Failing fast surfaces the leak instead of producing corrupt frames.
     pub fn register_storage_buffer(&mut self, handle: BufferHandle) -> u32 {
-        let local_index = if let Some(free) = self.free_storage_buffer_slots.pop() {
-            free
-        } else {
-            let index = self.next_storage_buffer_index;
-            assert!(
-                index < MAX_RESOURCES_PER_CATEGORY,
-                "storage-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
-                 next_index={} free={} pending_free={} live_indices={} \
-                 (Scattered={}, Broadcast={}). \
-                 Likely a per-frame leak in bind_map; check that all transient buffers \
-                 (config_buf, scene_buf, indirect_buf, etc.) are explicitly freed via \
-                 `recording.free_buffer(...)` and that `run_recording` evicts them at \
-                 the end of the frame.",
-                self.next_storage_buffer_index,
-                self.free_storage_buffer_slots.len(),
-                self.pending_free_storage_buffer_slots.len(),
-                self.buffer_indices.len(),
-                self.buffer_indices
-                    .values()
-                    .filter(|(_, a)| *a == DataAccess::Scattered)
-                    .count(),
-                self.buffer_indices
-                    .values()
-                    .filter(|(_, a)| *a == DataAccess::Broadcast)
-                    .count(),
-            );
-            self.next_storage_buffer_index += 1;
-            index
-        };
+        assert!(
+            self.storage_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY
+                || self.storage_buffer.free_count() > 0,
+            "storage-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
+             next_index={} free={} pending_free={} live_indices={} \
+             (Scattered={}, Broadcast={}). \
+             Likely a per-frame leak in bind_map; check that all transient buffers \
+             (config_buf, scene_buf, indirect_buf, etc.) are explicitly freed via \
+             `recording.free_buffer(...)` and that `run_recording` evicts them at \
+             the end of the frame.",
+            self.storage_buffer.next_fresh(),
+            self.storage_buffer.free_count(),
+            self.pending_free_storage_buffer_slots.len(),
+            self.buffer_indices.len(),
+            self.buffer_indices
+                .values()
+                .filter(|(_, a)| *a == DataAccess::Scattered)
+                .count(),
+            self.buffer_indices
+                .values()
+                .filter(|(_, a)| *a == DataAccess::Broadcast)
+                .count(),
+        );
+        let local_index = self.storage_buffer.alloc();
         self.buffer_indices
             .insert(handle, (local_index, DataAccess::Scattered));
         local_index
     }
 
-    /// Register a uniform buffer (Broadcast access) - local indices 0-63 (shader slot),
-    /// global indices 64-127 (argument buffer encoding offset).
-    /// Returns the LOCAL index so resource slots pass 0-63 to the shader
-    /// (which indexes into uniformBuffers[0..63]).
+    /// Register a uniform buffer (Broadcast access) — returns the LOCAL index (0-63).
+    /// The global argument-buffer encoding offset is `uniform_global_index(local)`.
     ///
     /// Reuses a freed slot if available (see `unregister_buffer`).
     ///
@@ -703,19 +621,13 @@ impl ResourceRegistry {
     /// a uniform-slot overflow would alias into the texture-index region
     /// and cause silent shader-side garbage reads.
     pub fn register_uniform_buffer(&mut self, handle: BufferHandle) -> u32 {
-        let local_index = if let Some(free) = self.free_uniform_buffer_slots.pop() {
-            free
-        } else {
-            let global_index = self.next_uniform_buffer_index;
-            let local = global_index - MAX_RESOURCES_PER_CATEGORY;
-            assert!(
-                local < MAX_RESOURCES_PER_CATEGORY,
-                "uniform-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
-                 Likely a per-frame leak in bind_map for Broadcast buffers."
-            );
-            self.next_uniform_buffer_index += 1;
-            local
-        };
+        assert!(
+            self.uniform_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY
+                || self.uniform_buffer.free_count() > 0,
+            "uniform-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
+             Likely a per-frame leak in bind_map for Broadcast buffers."
+        );
+        let local_index = self.uniform_buffer.alloc();
         self.buffer_indices
             .insert(handle, (local_index, DataAccess::Broadcast));
         local_index
@@ -732,14 +644,7 @@ impl ResourceRegistry {
     ///
     /// Reuses a freed slot if available (see `release_texture_slot`).
     pub fn register_texture(&mut self, handle: TextureHandle) -> u32 {
-        let local_index = if let Some(free) = self.free_texture_slots.pop() {
-            free
-        } else {
-            let global_index = self.next_texture_index;
-            let local = global_index - 2 * MAX_RESOURCES_PER_CATEGORY;
-            self.next_texture_index += 1;
-            local
-        };
+        let local_index = self.texture.alloc();
         self.texture_indices.insert(handle, local_index);
         local_index
     }
@@ -747,14 +652,14 @@ impl ResourceRegistry {
     /// Return a sampled-texture LOCAL index to the free list so it can be
     /// reused by a subsequent `register_texture`.
     ///
-    /// If `defer` is true, the slot is parked in the pending list until the
-    /// next successful `drain_pending_slots()`. Callers should pass `true`
-    /// whenever any GPU command buffer is still in-flight that might still
-    /// reference this slot's descriptor.
+    /// Pass `Some(barrier)` when any GPU command buffer is still in-flight
+    /// that might still reference this slot's descriptor; the slot parks in
+    /// the pending list until `drain_pending_slots_up_to(signaled)` promotes
+    /// it. Pass `None` when the GPU is known idle.
     pub fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
         match barrier {
             Some(b) => self.pending_free_texture_slots.push((local_index, b)),
-            None => self.free_texture_slots.push(local_index),
+            None => self.texture.free(local_index),
         }
     }
 
@@ -768,7 +673,7 @@ impl ResourceRegistry {
     ///
     /// Reuses a freed slot if available (see `release_storage_image_slot`).
     pub fn register_storage_image(&mut self, handle: TextureHandle) -> u32 {
-        let local_index = self.allocate_storage_image_local();
+        let local_index = self.storage_image.alloc();
         self.texture_indices.insert(handle, local_index);
         local_index
     }
@@ -780,7 +685,7 @@ impl ResourceRegistry {
     /// fresh drawable into the same slot every frame). The owner must release
     /// the slot via [`Self::release_storage_image_slot`] when destroyed.
     pub fn reserve_storage_image_slot(&mut self) -> u32 {
-        self.allocate_storage_image_local()
+        self.storage_image.alloc()
     }
 
     /// Associate a TextureHandle with a previously-reserved storage-image
@@ -797,19 +702,8 @@ impl ResourceRegistry {
     pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
         match barrier {
             Some(b) => self.pending_free_storage_image_slots.push((local_index, b)),
-            None => self.free_storage_image_slots.push(local_index),
+            None => self.storage_image.free(local_index),
         }
-    }
-
-    /// Pop a free slot if any, otherwise bump the monotonic counter.
-    fn allocate_storage_image_local(&mut self) -> u32 {
-        if let Some(local) = self.free_storage_image_slots.pop() {
-            return local;
-        }
-        let global_index = self.next_storage_image_index;
-        let local_index = global_index - 3 * MAX_RESOURCES_PER_CATEGORY;
-        self.next_storage_image_index += 1;
-        local_index
     }
 
     /// Returns the global argument buffer index for a storage image.
@@ -820,9 +714,7 @@ impl ResourceRegistry {
     /// Register a sampler — returns the LOCAL index (0-63) for resource slots.
     /// Use `sampler_global_index()` to get the argument buffer encoding offset.
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
-        let global_index = self.next_sampler_index;
-        let local_index = global_index - 4 * MAX_RESOURCES_PER_CATEGORY;
-        self.next_sampler_index += 1;
+        let local_index = self.sampler.alloc();
         self.sampler_indices.insert(handle, local_index);
         local_index
     }
@@ -847,14 +739,14 @@ impl ResourceRegistry {
         if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
             match (access, barrier) {
                 (DataAccess::Scattered, None) => {
-                    self.free_storage_buffer_slots.push(local_index);
+                    self.storage_buffer.free(local_index);
                 }
                 (DataAccess::Scattered, Some(b)) => {
                     self.pending_free_storage_buffer_slots
                         .push((local_index, b));
                 }
                 (DataAccess::Broadcast, None) => {
-                    self.free_uniform_buffer_slots.push(local_index);
+                    self.uniform_buffer.free(local_index);
                 }
                 (DataAccess::Broadcast, Some(b)) => {
                     self.pending_free_uniform_buffer_slots
@@ -874,38 +766,29 @@ impl ResourceRegistry {
 
     /// Promote pending slots whose GPU barrier has been signaled.
     ///
-    /// Only entries where `barrier <= signaled` are moved to the free list;
-    /// entries that are still waiting for a higher timeline value stay in
-    /// the pending list. This is the per-frame call path — invoked from
-    /// `process_deletion_queue_up_to_signaled` on every `acquire_frame` /
-    /// `present` so slots are recycled as soon as the GPU catches up, without
-    /// requiring a full `wait_all_in_flight`.
+    /// Only entries where `barrier <= signaled` are moved to the [`SlotAllocator`]
+    /// free list; entries still waiting for a higher timeline value stay pending.
+    /// This is the per-frame call path — invoked on every `acquire_frame` /
+    /// `present` so slots are recycled as soon as the GPU catches up.
     pub fn drain_pending_slots_up_to(&mut self, signaled: TimelineValue) {
-        macro_rules! drain_category {
-            ($pending:expr, $free:expr) => {
-                $pending.retain(|&(slot, barrier)| {
+        macro_rules! drain_to_allocator {
+            ($pending:expr, $alloc:expr) => {{
+                let mut i = 0;
+                while i < $pending.len() {
+                    let (slot, barrier) = $pending[i];
                     if barrier <= signaled {
-                        $free.push(slot);
-                        false
+                        $pending.swap_remove(i);
+                        $alloc.free(slot);
                     } else {
-                        true
+                        i += 1;
                     }
-                });
-            };
+                }
+            }};
         }
-        drain_category!(
-            self.pending_free_storage_buffer_slots,
-            self.free_storage_buffer_slots
-        );
-        drain_category!(
-            self.pending_free_uniform_buffer_slots,
-            self.free_uniform_buffer_slots
-        );
-        drain_category!(self.pending_free_texture_slots, self.free_texture_slots);
-        drain_category!(
-            self.pending_free_storage_image_slots,
-            self.free_storage_image_slots
-        );
+        drain_to_allocator!(self.pending_free_storage_buffer_slots, self.storage_buffer);
+        drain_to_allocator!(self.pending_free_uniform_buffer_slots, self.uniform_buffer);
+        drain_to_allocator!(self.pending_free_texture_slots, self.texture);
+        drain_to_allocator!(self.pending_free_storage_image_slots, self.storage_image);
     }
 
     /// Promote all pending slots unconditionally.
@@ -922,6 +805,19 @@ impl ResourceRegistry {
     #[cfg(test)]
     pub fn pending_buffer_slot_count(&self) -> usize {
         self.pending_free_storage_buffer_slots.len() + self.pending_free_uniform_buffer_slots.len()
+    }
+
+    /// Number of free storage-buffer slots ready for immediate reuse.
+    /// Exposed for tests to verify recycling without touching internals.
+    #[cfg(test)]
+    pub fn free_storage_buffer_count(&self) -> usize {
+        self.storage_buffer.free_count()
+    }
+
+    /// Number of free uniform-buffer slots ready for immediate reuse.
+    #[cfg(test)]
+    pub fn free_uniform_buffer_count(&self) -> usize {
+        self.uniform_buffer.free_count()
     }
 }
 
@@ -1184,12 +1080,12 @@ mod tests {
         reg.unregister_buffer(h_sto, None);
 
         assert_eq!(
-            reg.free_uniform_buffer_slots.len(),
+            reg.free_uniform_buffer_count(),
             1,
             "uniform free list should have reclaimed the uniform slot"
         );
         assert_eq!(
-            reg.free_storage_buffer_slots.len(),
+            reg.free_storage_buffer_count(),
             1,
             "storage free list should have reclaimed the storage slot"
         );
@@ -1270,8 +1166,8 @@ mod tests {
         reg.unregister_buffer(h_uni, Some(1));
         reg.drain_pending_slots();
 
-        assert_eq!(reg.free_storage_buffer_slots.len(), 1);
-        assert_eq!(reg.free_uniform_buffer_slots.len(), 1);
+        assert_eq!(reg.free_storage_buffer_count(), 1);
+        assert_eq!(reg.free_uniform_buffer_count(), 1);
         assert_eq!(reg.pending_buffer_slot_count(), 0);
     }
 
