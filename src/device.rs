@@ -627,6 +627,17 @@ impl Device {
             .reset_buffer_heaps(self.inner.handle);
     }
 
+    /// Ensure the internal heap can accommodate at least `min_capacity` bytes
+    /// in a single allocation without overflow. Call after `reset_buffer_heaps`
+    /// and before creating large pool backing buffers.
+    pub fn ensure_buffer_heap_capacity(&self, min_capacity: u64) {
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .ensure_buffer_heap_capacity(self.inner.handle, min_capacity);
+    }
+
     /// No-op: texture uploads are scheduled via [`crate::task_graph::TaskGraph`].
     #[deprecated(
         since = "0.1.0",
