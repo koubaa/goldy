@@ -712,7 +712,9 @@ impl GpuBackend for MetalBackend {
 
     fn ensure_buffer_heap_capacity(&mut self, device: DeviceHandle, min_capacity: u64) {
         if let Some(logical_device) = self.state.devices.get_mut(&device) {
-            logical_device.heap_allocator.ensure_primary_capacity(min_capacity);
+            logical_device
+                .heap_allocator
+                .ensure_primary_capacity(min_capacity);
         }
     }
 
