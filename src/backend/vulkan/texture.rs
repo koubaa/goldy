@@ -1078,14 +1078,14 @@ pub(super) fn transition_image_layout(
 
         let cmd_buffers_arr = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
-        logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
-            .context("Failed to submit layout transition")?;
-        logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
-            .context("Failed to wait for layout transition")?;
+        let sub = logical_device.device.queue_submit(
+            logical_device.queue,
+            &[submit_info],
+            vk::Fence::null(),
+        );
+        sub.context("Failed to submit layout transition")?;
+        let wait = logical_device.device.queue_wait_idle(logical_device.queue);
+        wait.context("Failed to wait for layout transition")?;
 
         logical_device
             .device

@@ -544,10 +544,10 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 pub(crate) struct FrameSync {
     pub command_buffer: vk::CommandBuffer,
     /// Dedicated command buffer for the acquire-time "prep" submit that transitions
-    /// the newly-acquired swapchain image from `UNDEFINED` to `GENERAL` so that compute
-    /// shaders can write it via `RWTexture2D`. Consumes `image_available_semaphore`
-    /// and signals `image_ready_semaphore`; later render/present submits wait on the
-    /// latter.
+    /// the newly-acquired swapchain image to `GENERAL` (`UNDEFINED → GENERAL` on first
+    /// use, `PRESENT_SRC_KHR → GENERAL` after that image has been presented). Consumes
+    /// `image_available_semaphore` and signals `image_ready_semaphore`; later render/present
+    /// submits wait on the latter.
     pub prep_command_buffer: vk::CommandBuffer,
     pub image_available_semaphore: vk::Semaphore,
     /// Signaled by the acquire-time prep submit once the swapchain image is in
@@ -582,6 +582,9 @@ pub(crate) struct SurfaceState {
     pub surface: vk::SurfaceKHR,
     pub swapchain: vk::SwapchainKHR,
     pub swapchain_images: Vec<vk::Image>,
+    /// After an image is successfully presented, the next acquire sees it in
+    /// `PRESENT_SRC_KHR` and must use that as `oldLayout` in the prep barrier.
+    pub swapchain_image_was_presented: Vec<bool>,
     pub swapchain_image_views: Vec<vk::ImageView>,
     pub width: u32,
     pub height: u32,

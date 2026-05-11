@@ -326,6 +326,8 @@ pub(super) fn create(
     let handle = *next_surface_handle;
     *next_surface_handle += 1;
 
+    let swapchain_image_was_presented = vec![false; swapchain_images.len()];
+
     surfaces.insert(
         handle,
         SurfaceState {
@@ -333,6 +335,7 @@ pub(super) fn create(
             surface,
             swapchain,
             swapchain_images,
+            swapchain_image_was_presented,
             swapchain_image_views,
             width: extent.width,
             height: extent.height,
@@ -631,26 +634,58 @@ pub(super) fn acquire(
             }
             .context("Failed to begin acquire prep command buffer")?;
 
-            let prep_barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                .src_access_mask(vk::AccessFlags2::NONE)
-                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                .dst_access_mask(
-                    vk::AccessFlags2::SHADER_WRITE
-                        | vk::AccessFlags2::SHADER_READ
-                        | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
-                        | vk::AccessFlags2::TRANSFER_WRITE,
-                )
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::GENERAL)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
+            let was_presented = {
+                let surface_state = state.surfaces.get(&surface_handle).unwrap();
+                surface_state
+                    .swapchain_image_was_presented
+                    .get(image_index as usize)
+                    .copied()
+                    .unwrap_or(false)
+            };
+
+            let prep_barrier = if was_presented {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::NONE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_access_mask(
+                        vk::AccessFlags2::SHADER_WRITE
+                            | vk::AccessFlags2::SHADER_READ
+                            | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+                            | vk::AccessFlags2::TRANSFER_WRITE,
+                    )
+                    .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .image(image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+            } else {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_access_mask(vk::AccessFlags2::NONE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_access_mask(
+                        vk::AccessFlags2::SHADER_WRITE
+                            | vk::AccessFlags2::SHADER_READ
+                            | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+                            | vk::AccessFlags2::TRANSFER_WRITE,
+                    )
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .image(image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+            };
             let dep_info = vk::DependencyInfo::default()
                 .image_memory_barriers(std::slice::from_ref(&prep_barrier));
             unsafe {
@@ -663,7 +698,9 @@ pub(super) fn acquire(
                 .context("Failed to end acquire prep command buffer")?;
 
             let wait_semaphores = [image_available_semaphore];
-            let wait_stages = [vk::PipelineStageFlags::TOP_OF_PIPE];
+            // Match WSI acquire guidance: wait at COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE,
+            // so the layout transition cannot start before the presentation engine releases the image.
+            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let signal_semaphores = [image_ready_semaphore];
             let prep_submit = vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores)
@@ -1028,11 +1065,9 @@ where
     // prep submit already consumed the latter to transition the image into `GENERAL`.
     let signal_timeline_value = {
         let ld = devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let v = ld.timeline_next;
-        ld.timeline_next += 1;
-        v
+        ld.timeline_next
     };
     let timeline_sem = devices
         .get(&device_handle)
@@ -1041,10 +1076,12 @@ where
 
     let wait_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(image_ready_semaphore)
+        .value(0)
         .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let bin_signal = vk::SemaphoreSubmitInfo::default()
         .semaphore(render_finished_semaphore)
+        .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
     let timeline_signal = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
@@ -1060,14 +1097,17 @@ where
         .get(&device_handle)
         .context("Surface's device is invalid")?;
 
-    unsafe {
+    let submit_r = unsafe {
         logical_device.device.queue_submit2(
             logical_device.queue,
             std::slice::from_ref(&submit2),
             in_flight_fence,
         )
+    };
+    submit_r.context("Failed to submit command buffer")?;
+    if let Some(ld) = devices.get_mut(&device_handle) {
+        ld.timeline_next = signal_timeline_value.saturating_add(1);
     }
-    .context("Failed to submit command buffer")?;
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[current_frame];
@@ -1183,11 +1223,17 @@ pub(super) fn present(
             }
             .context("Failed to begin compute-present barrier command buffer")?;
 
+            // Match the graphics present barrier shape (color path uses COLOR_ATTACHMENT_OUTPUT
+            // → BOTTOM_OF_PIPE). Compute writes swapchain images in GENERAL; use compute/transfer
+            // stages—not ALL_COMMANDS + generic MEMORY_*—so WSI sees a well-defined handoff to
+            // PRESENT_SRC_KHR (broad barriers have provoked device loss on some Windows stacks).
             let barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                .dst_access_mask(vk::AccessFlags2::MEMORY_READ)
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+                )
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+                .dst_access_mask(vk::AccessFlags2::NONE)
                 .old_layout(vk::ImageLayout::GENERAL)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .image(image)
@@ -1227,28 +1273,10 @@ pub(super) fn present(
         let signal_timeline_value = {
             let ld = state
                 .devices
-                .get_mut(&device_handle)
+                .get(&device_handle)
                 .context("Surface's device is invalid")?;
-            let v = ld.timeline_next;
-            ld.timeline_next += 1;
-            v
+            ld.timeline_next
         };
-
-        if !deferred.is_empty() {
-            state
-                .staging_belts
-                .entry(device_handle)
-                .or_insert_with(|| {
-                    super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE)
-                })
-                .finish(signal_timeline_value);
-        }
-        if !pending_tex_upload_staging.is_empty() {
-            state.compute_texture_staging_pool.insert(
-                (device_handle, signal_timeline_value),
-                pending_tex_upload_staging,
-            );
-        }
 
         let timeline_sem = state
             .devices
@@ -1265,9 +1293,11 @@ pub(super) fn present(
 
         let wait_info = vk::SemaphoreSubmitInfo::default()
             .semaphore(image_ready_sem_present)
-            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+            .value(0)
+            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
         let bin_signal = vk::SemaphoreSubmitInfo::default()
             .semaphore(render_finished_sem_present)
+            .value(0)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
         let timeline_signal = vk::SemaphoreSubmitInfo::default()
             .semaphore(timeline_sem)
@@ -1290,7 +1320,7 @@ pub(super) fn present(
                 in_flight_fence_present,
             )
         };
-        if let Err(e) = &submit_result {
+        if let Err(e) = submit_result {
             tracing::warn!(
                 surface_handle,
                 %device_handle,
@@ -1299,8 +1329,31 @@ pub(super) fn present(
                 result = ?e,
                 "single-submit compute+present queue_submit2 failed"
             );
+            let s = state.surfaces.get_mut(&surface_handle).unwrap();
+            s.frame_sync[current_frame].deferred_compute_cbs = deferred;
+            s.frame_sync[current_frame].pending_compute_texture_staging =
+                pending_tex_upload_staging;
+            anyhow::bail!("Failed to submit compute+present: {:?}", e);
         }
-        submit_result.context("Failed to submit compute+present")?;
+
+        let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
+        ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
+
+        if !deferred.is_empty() {
+            state
+                .staging_belts
+                .entry(device_handle)
+                .or_insert_with(|| {
+                    super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE)
+                })
+                .finish(signal_timeline_value);
+        }
+        if !pending_tex_upload_staging.is_empty() {
+            state.compute_texture_staging_pool.insert(
+                (device_handle, signal_timeline_value),
+                pending_tex_upload_staging,
+            );
+        }
 
         for cb in &deferred {
             state
@@ -1337,6 +1390,8 @@ pub(super) fn present(
         .image_indices(&image_indices);
 
     let result = unsafe { swapchain_loader.queue_present(present_ld.queue, &present_info) };
+    // `queue_present` returns Ok on SUCCESS and SUBOPTIMAL_KHR; Err on real failures.
+    let mark_image_presented = result.is_ok();
     if let Err(e) = &result {
         tracing::warn!(
             surface_handle,
@@ -1350,12 +1405,20 @@ pub(super) fn present(
 
     // Clear the current image and advance frame counter
     let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
+    if mark_image_presented {
+        if let Some(flag) = surface_state
+            .swapchain_image_was_presented
+            .get_mut(image_index as usize)
+        {
+            *flag = true;
+        }
+    }
     surface_state.current_image_index = None;
     surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
     // Handle suboptimal or out of date
     match result {
-        Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
+        Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
             let timeline_value = {
                 let surface_state = state
                     .surfaces
@@ -1590,6 +1653,8 @@ pub(super) fn resize(
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         surface_state.swapchain = new_swapchain;
         surface_state.swapchain_images = swapchain_images;
+        surface_state.swapchain_image_was_presented =
+            vec![false; surface_state.swapchain_images.len()];
         surface_state.swapchain_image_views = swapchain_image_views;
         surface_state.width = extent.width;
         surface_state.height = extent.height;
