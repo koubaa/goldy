@@ -37,6 +37,7 @@
 //! }
 //! ```
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 // ---------------------------------------------------------------------------
@@ -176,6 +177,25 @@ pub fn transform_virtual_main(source: &str) -> String {
     // Reset Slang's line counter to 1 so that diagnostics for the user's code
     // are reported at the original source lines, not offset by the generated prefix.
     wrapper_block + "#line 1\n" + &modified
+}
+
+/// Slang translation-unit source after the optional virtual-main rewrite.
+///
+/// This matches the compiler gate: [`transform_virtual_main`] runs only when `source`
+/// contains `[goldy_compute]`, `[goldy_vertex]`, or `[goldy_fragment]` as substrings
+/// (the same [`str::contains`] checks previously used before calling Slang).
+///
+/// Callers that feed Slang directly (disk cache keys, `add_translation_unit_source_string`) should
+/// use this so the hashed text matches the compiled text.
+pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
+    if source.contains("[goldy_compute]")
+        || source.contains("[goldy_vertex]")
+        || source.contains("[goldy_fragment]")
+    {
+        Cow::Owned(transform_virtual_main(source))
+    } else {
+        Cow::Borrowed(source)
+    }
 }
 
 // ---------------------------------------------------------------------------

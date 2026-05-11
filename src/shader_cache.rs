@@ -57,6 +57,10 @@ fn stage_tag(s: SlangStage) -> u8 {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Stable disk-cache key for a Slang compile.
+///
+/// `source` must be the exact translation-unit text Slang compiles (after
+/// [`crate::slang::virtual_main::effective_slang_source_for_compile`] when `[goldy_*]` markers apply).
 pub(crate) fn compile_cache_key(
     source: &str,
     target: ShaderTarget,
@@ -317,8 +321,10 @@ fn flatten_map_to_disk(dest: &mut Vec<u8>, map: &HashMap<u64, Vec<u8>>) -> Resul
 mod tests {
     use super::*;
     use crate::slang::{
-        ffi::SlangStage, CompiledShader, CompiledShaderWithReflection, OwnedLayoutCheck,
-        ShaderReflection, ShaderTarget,
+        ffi::SlangStage,
+        virtual_main::{effective_slang_source_for_compile, transform_virtual_main},
+        CompiledShader, CompiledShaderWithReflection, OwnedLayoutCheck, ShaderReflection,
+        ShaderTarget,
     };
     use crate::types::OptimizationLevel;
     use tempfile::TempDir;
@@ -438,6 +444,92 @@ mod tests {
         assert_ne!(
             base_key,
             compile_cache_key(src, tgt, &eps, &defs, &layouts2, opt)
+        );
+    }
+
+    /// Disk cache keys must follow the same effective source as Slang (`compile_with_reflection`).
+    #[test]
+    fn compile_cache_key_stable_for_effective_goldy_source() {
+        let goldy_src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
+}
+"#;
+        let (tgt, eps, defs, layouts, opt) = (
+            ShaderTarget::Spirv,
+            vec![("cs_main", SlangStage::Compute)],
+            vec![("X", "1")],
+            Vec::<OwnedLayoutCheck>::new(),
+            OptimizationLevel::None,
+        );
+        let transformed = transform_virtual_main(goldy_src);
+        let k_effective = compile_cache_key(
+            effective_slang_source_for_compile(goldy_src).as_ref(),
+            tgt,
+            &eps,
+            &defs,
+            &layouts,
+            opt,
+        );
+        let k_transformed_only =
+            compile_cache_key(transformed.as_str(), tgt, &eps, &defs, &layouts, opt);
+        assert_eq!(
+            k_effective, k_transformed_only,
+            "cache key must hash post-transform source, matching transform_virtual_main output"
+        );
+    }
+
+    /// Raw `[goldy_*]` source differs from what Slang compiles; keys must not use raw alone.
+    #[test]
+    fn compile_cache_key_goldy_raw_differs_from_effective() {
+        let goldy_src = r#"[goldy_compute]
+[numthreads(8, 8, 1)]
+void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
+"#;
+        let (tgt, eps, defs, layouts, opt) = (
+            ShaderTarget::Spirv,
+            vec![("cs_main", SlangStage::Compute)],
+            vec![] as Vec<(&str, &str)>,
+            Vec::<OwnedLayoutCheck>::new(),
+            OptimizationLevel::Default,
+        );
+        assert_ne!(
+            compile_cache_key(goldy_src, tgt, &eps, &defs, &layouts, opt),
+            compile_cache_key(
+                effective_slang_source_for_compile(goldy_src).as_ref(),
+                tgt,
+                &eps,
+                &defs,
+                &layouts,
+                opt,
+            ),
+            "pre-transform and effective sources must not collide in the cache key"
+        );
+    }
+
+    #[test]
+    fn compile_cache_key_plain_source_matches_effective_helper() {
+        let src = "float4 main() : SV_Target0 { return 0; }";
+        let (tgt, eps, defs, layouts, opt) = (
+            ShaderTarget::Spirv,
+            vec![("main", SlangStage::Fragment)],
+            vec![] as Vec<(&str, &str)>,
+            Vec::<OwnedLayoutCheck>::new(),
+            OptimizationLevel::Default,
+        );
+        assert_eq!(
+            compile_cache_key(src, tgt, &eps, &defs, &layouts, opt),
+            compile_cache_key(
+                effective_slang_source_for_compile(src).as_ref(),
+                tgt,
+                &eps,
+                &defs,
+                &layouts,
+                opt,
+            )
         );
     }
 
