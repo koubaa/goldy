@@ -278,9 +278,7 @@ pub(super) fn destroy(
             }
 
             if buffer.transient_heap_suballoc {
-                device
-                    .resource_registry
-                    .unregister_buffer(buffer_handle);
+                device.resource_registry.unregister_buffer(buffer_handle);
                 unsafe {
                     device.device.destroy_buffer(buffer.buffer, None);
                 }

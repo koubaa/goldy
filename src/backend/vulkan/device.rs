@@ -438,9 +438,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Flush any pending deferred deletions
-            logical_device
-                .deletion_queue
-                .flush_all(&logical_device.device, &mut logical_device.resource_registry);
+            logical_device.deletion_queue.flush_all(
+                &logical_device.device,
+                &mut logical_device.resource_registry,
+            );
 
             if let Some(mut belt) = state.staging_belts.remove(&device_handle) {
                 belt.destroy_all(&logical_device);

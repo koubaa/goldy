@@ -360,9 +360,7 @@ pub(crate) enum PendingDeletion {
     },
     /// A buffer view whose D3D12 resource belongs to the parent; only the
     /// bindless descriptor slots need deregistration.
-    BufferView {
-        buffer_handle: BufferHandle,
-    },
+    BufferView { buffer_handle: BufferHandle },
     Texture {
         texture_handle: TextureHandle,
         resource: Direct3D12::ID3D12Resource,
@@ -387,16 +385,10 @@ impl DeletionQueue {
     }
 
     /// Drop resources whose associated fence value has been reached by the GPU.
-    pub fn process(
-        &mut self,
-        fence: &Direct3D12::ID3D12Fence,
-        registry: &mut ResourceRegistry,
-    ) {
+    pub fn process(&mut self, fence: &Direct3D12::ID3D12Fence, registry: &mut ResourceRegistry) {
         let completed = unsafe { fence.GetCompletedValue() };
-        let (to_delete, to_keep): (Vec<_>, Vec<_>) = self
-            .pending
-            .drain(..)
-            .partition(|(fv, _)| *fv <= completed);
+        let (to_delete, to_keep): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|(fv, _)| *fv <= completed);
 
         self.pending = to_keep;
 
