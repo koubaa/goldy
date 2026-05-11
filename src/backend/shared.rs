@@ -218,7 +218,6 @@ impl<K, V> DeferredQueue<K, V> {
     pub fn len(&self) -> usize {
         self.pending.len()
     }
-
 }
 
 impl<K: PartialOrd + Copy, V> DeferredQueue<K, V> {

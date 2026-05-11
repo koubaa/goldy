@@ -34,7 +34,11 @@ pub mod mock;
 pub mod metal;
 
 /// Shared primitives reused across Vulkan, DX12, and Metal backends.
-#[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"), all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos")
+))]
 pub(crate) mod shared;
 
 use crate::types::{
