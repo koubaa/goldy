@@ -656,6 +656,26 @@ impl GpuBackend for MetalBackend {
         transient::transient_heap_alignment_hints(&self.state, device)
     }
 
+    fn available_bindless_slots(
+        &self,
+        device: DeviceHandle,
+        category: crate::types::BindlessCategory,
+    ) -> u32 {
+        self.state
+            .devices
+            .get(&device)
+            .map(|ld| ld.resource_registry.available_slots(category))
+            .unwrap_or(0)
+    }
+
+    fn max_bindless_slots_per_category(
+        &self,
+        _device: DeviceHandle,
+        _category: crate::types::BindlessCategory,
+    ) -> u32 {
+        types::MAX_RESOURCES_PER_CATEGORY
+    }
+
     fn flush_deferred_deletions(&mut self, device: DeviceHandle) {
         if let Some(ld) = self.state.devices.get_mut(&device) {
             ld.process_deletion_queue_up_to_signaled();

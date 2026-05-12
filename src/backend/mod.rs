@@ -738,6 +738,32 @@ pub trait GpuBackend: Send + Sync {
     /// `reset_buffer_heaps` and *before* large allocations. No-op by default.
     fn ensure_buffer_heap_capacity(&mut self, _device: DeviceHandle, _min_capacity: u64) {}
 
+    /// Number of bindless descriptor slots still available for allocation in `category`.
+    ///
+    /// Backends report `max - live` where *live* = allocated-and-not-yet-freed
+    /// slots. Slots that are pending GPU-side reclamation (Metal's deferred
+    /// timeline release) count as live until they are actually recycled.
+    ///
+    /// Returns `u32::MAX` by default (unlimited / not tracked).
+    fn available_bindless_slots(
+        &self,
+        _device: DeviceHandle,
+        _category: crate::types::BindlessCategory,
+    ) -> u32 {
+        u32::MAX
+    }
+
+    /// Maximum number of bindless descriptor slots per category for this backend.
+    ///
+    /// Returns `u32::MAX` by default (unlimited / not tracked).
+    fn max_bindless_slots_per_category(
+        &self,
+        _device: DeviceHandle,
+        _category: crate::types::BindlessCategory,
+    ) -> u32 {
+        u32::MAX
+    }
+
     /// Process pending GPU deletions and reclaim bindless descriptor slots
     /// whose GPU timeline barrier has been signaled.
     ///

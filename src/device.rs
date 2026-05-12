@@ -437,6 +437,28 @@ impl Device {
         backend.wait_until_timeout(self.inner.handle, value, timeout_ms)
     }
 
+    /// Number of bindless descriptor slots still available for allocation in
+    /// the given `category`.
+    ///
+    /// Use this to check remaining capacity and make adaptive cleanup
+    /// decisions (e.g. calling [`flush_deferred_deletions`](Self::flush_deferred_deletions)
+    /// when slots are low) rather than relying on fixed heuristics.
+    ///
+    /// Returns `u32::MAX` on backends that don't enforce a per-category cap
+    /// (currently Vulkan and DX12, which support 16 384+ per category).
+    pub fn available_bindless_slots(&self, category: BindlessCategory) -> u32 {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.available_bindless_slots(self.inner.handle, category)
+    }
+
+    /// Maximum number of bindless descriptor slots per category for this device.
+    ///
+    /// Returns `u32::MAX` on backends that don't enforce a meaningful per-category cap.
+    pub fn max_bindless_slots_per_category(&self, category: BindlessCategory) -> u32 {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.max_bindless_slots_per_category(self.inner.handle, category)
+    }
+
     /// Reclaim bindless descriptor slots and process deferred GPU deletions
     /// whose timeline barrier has been signaled.
     ///

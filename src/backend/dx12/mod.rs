@@ -939,6 +939,26 @@ impl GpuBackend for Dx12Backend {
         transient::transient_heap_alignment_hints(&self.state, device)
     }
 
+    fn available_bindless_slots(
+        &self,
+        device_handle: DeviceHandle,
+        category: crate::types::BindlessCategory,
+    ) -> u32 {
+        self.state
+            .devices
+            .get(&device_handle)
+            .map(|ld| ld.resource_registry.available_slots(category))
+            .unwrap_or(0)
+    }
+
+    fn max_bindless_slots_per_category(
+        &self,
+        _device_handle: DeviceHandle,
+        category: crate::types::BindlessCategory,
+    ) -> u32 {
+        types::ResourceRegistry::max_slots(category)
+    }
+
     fn flush_deferred_deletions(&mut self, device_handle: DeviceHandle) {
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
             ld.deletion_queue

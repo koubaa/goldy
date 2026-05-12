@@ -155,6 +155,12 @@ impl SlotAllocator {
         self.free.push(slot);
     }
 
+    /// Number of slots currently live (allocated and not yet freed).
+    #[inline]
+    pub fn live_count(&self) -> u32 {
+        self.next - self.free.len() as u32
+    }
+
     /// Number of slots currently on the free list.
     ///
     /// Only compiled for tests and the Metal backend, which exercise slot
