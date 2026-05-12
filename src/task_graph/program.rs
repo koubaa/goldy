@@ -1,7 +1,8 @@
-//! Precompiled compute graphs with abstract buffer/texture slots ([`ComputeProgram`]).
+//! Precompiled task graphs with abstract buffer/texture/render-target slots ([`GraphProgram`]).
 //!
 //! Build a graph once using [`ProgramBuilder`] with slot placeholders, then call
-//! [`ComputeProgram::specialize`] each frame with concrete handles — wave scheduling
+//! [`GraphProgram::specialize`] (or [`GraphProgram::specialize_graph`] for mixed
+//! compute + render programs) each frame with concrete handles — wave scheduling
 //! and barrier placement are reused without re-running the analyzer.
 
 use super::analysis;
@@ -10,18 +11,20 @@ use super::ir::{
     TaskNode, Wave,
 };
 use super::ResourceId;
-use crate::backend::{BufferHandle, ComputePipelineHandle, TextureHandle};
+use crate::backend::{BufferHandle, ComputePipelineHandle, RenderTargetHandle, TextureHandle};
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
+use crate::render_target::RenderTarget;
 use crate::texture::Texture;
 use anyhow::Result;
 use std::collections::HashMap;
 
-/// Slot → concrete resource handles for [`ComputeProgram::specialize`].
+/// Slot → concrete resource handles for [`GraphProgram::specialize`].
 #[derive(Debug, Clone, Default)]
 pub struct ProgramResolution {
     pub buffers: HashMap<u32, BufferHandle>,
     pub textures: HashMap<u32, TextureHandle>,
+    pub render_targets: HashMap<u32, RenderTargetHandle>,
 }
 
 impl ProgramResolution {
@@ -39,6 +42,11 @@ impl ProgramResolution {
         self
     }
 
+    pub fn bind_render_target(&mut self, slot: u32, target: &RenderTarget) -> &mut Self {
+        self.render_targets.insert(slot, target.backend_handle());
+        self
+    }
+
     fn buffer(&self, slot: u32) -> Result<BufferHandle> {
         self.buffers
             .get(&slot)
@@ -52,9 +60,18 @@ impl ProgramResolution {
             .copied()
             .ok_or_else(|| anyhow::anyhow!("ProgramResolution: missing texture slot {}", slot))
     }
+
+    fn render_target(&self, slot: u32) -> Result<RenderTargetHandle> {
+        self.render_targets
+            .get(&slot)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!("ProgramResolution: missing render target slot {}", slot)
+            })
+    }
 }
 
-/// Builder for a [`ComputeProgram`]: static topology with slot placeholders.
+/// Builder for a [`GraphProgram`]: static topology with slot placeholders.
 pub struct ProgramBuilder {
     ir: GraphIR,
     next_slot: u32,
@@ -82,6 +99,13 @@ impl ProgramBuilder {
         s
     }
 
+    /// Allocate a render target slot id for use with [`ProgramBuilder::render_pass_step`].
+    pub fn render_target_slot(&mut self) -> u32 {
+        let s = self.next_slot;
+        self.next_slot += 1;
+        s
+    }
+
     /// Start a compute step (dispatch node).
     pub fn step<'a>(
         &'a mut self,
@@ -98,11 +122,30 @@ impl ProgramBuilder {
         }
     }
 
-    /// Analyze the graph once and produce a [`ComputeProgram`].
-    pub fn compile(self) -> Result<ComputeProgram> {
+    /// Start a render pass step targeting a render-target slot.
+    ///
+    /// The `target_slot` should be allocated via [`Self::render_target_slot`]
+    /// and resolved at specialization time via
+    /// [`ProgramResolution::bind_render_target`].
+    pub fn render_pass_step<'a>(
+        &'a mut self,
+        label: &str,
+        target_slot: u32,
+    ) -> ProgramRenderPassBuilder<'a> {
+        ProgramRenderPassBuilder {
+            builder: self,
+            label: label.to_string(),
+            target_slot,
+            bindings: Vec::new(),
+        }
+    }
+
+    /// Analyze the graph once and produce a [`GraphProgram`].
+    pub fn compile(self) -> Result<GraphProgram> {
+        let mut has_render = false;
         for n in &self.ir.nodes {
             if matches!(n.kind, NodeKind::RenderPass { .. }) {
-                anyhow::bail!("ComputeProgram does not support render_pass nodes");
+                has_render = true;
             }
             if n.bindings.iter().any(|b| {
                 matches!(
@@ -111,15 +154,16 @@ impl ProgramBuilder {
                 )
             }) {
                 anyhow::bail!(
-                    "ComputeProgram does not support transient_buffer/transient_texture resources"
+                    "GraphProgram does not support transient_buffer/transient_texture resources"
                 );
             }
         }
         let edges = analysis::build_edges(&self.ir);
         let schedule = analysis::schedule_waves(&self.ir, &edges);
-        Ok(ComputeProgram {
+        Ok(GraphProgram {
             ir: self.ir,
             schedule,
+            has_render,
         })
     }
 }
@@ -243,18 +287,119 @@ impl ProgramStepBuilder<'_> {
     }
 }
 
-/// Cached scheduling for a slot-based compute graph.
-pub struct ComputeProgram {
-    ir: GraphIR,
-    schedule: CompiledSchedule,
+/// Per-node builder for [`ProgramBuilder::render_pass_step`].
+pub struct ProgramRenderPassBuilder<'a> {
+    builder: &'a mut ProgramBuilder,
+    label: String,
+    target_slot: u32,
+    bindings: Vec<ResourceBinding>,
 }
 
-impl ComputeProgram {
+impl ProgramRenderPassBuilder<'_> {
+    pub fn bind_buffer_slot(mut self, slot: u32, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::ProgramBuffer(slot),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_texture_slot(mut self, slot: u32, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::ProgramTexture(slot),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Buffer(buf.handle),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::BufferRange {
+                parent: view.parent_handle(),
+                offset: view.offset(),
+                len: view.size(),
+            },
+            access,
+        });
+        self
+    }
+
+    pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Texture(tex.handle()),
+            access,
+        });
+        self
+    }
+
+    /// Finalize the render pass node with fixed [`RenderCommand`](crate::backend::RenderCommand)s.
+    ///
+    /// The render target will be resolved from the slot at specialization time;
+    /// the draw commands are baked into the program and reused across specializations.
+    pub fn finish(self, commands: Vec<crate::backend::RenderCommand>) {
+        // Store the target_slot in the RenderTargetHandle field as a sentinel;
+        // substitute_kind resolves it to the concrete handle at specialize time.
+        self.builder.ir.nodes.push(TaskNode {
+            label: self.label,
+            bindings: self.bindings,
+            kind: NodeKind::RenderPass {
+                target: self.target_slot as RenderTargetHandle,
+                commands,
+            },
+        });
+    }
+}
+
+/// Cached scheduling for a slot-based graph (compute and/or render pass nodes).
+///
+/// Build with [`ProgramBuilder`], compile once, then call [`specialize`](Self::specialize)
+/// each frame to resolve slot placeholders without re-running the analyzer.
+pub struct GraphProgram {
+    ir: GraphIR,
+    schedule: CompiledSchedule,
+    has_render: bool,
+}
+
+/// Deprecated: use [`GraphProgram`] instead.
+#[deprecated(since = "0.3.0", note = "use `GraphProgram` instead")]
+pub type ComputeProgram = GraphProgram;
+
+impl GraphProgram {
     /// Resolve slots and emit `GpuCommand`s without re-analyzing the graph.
+    ///
+    /// Panics if the program contains render pass nodes — use
+    /// [`specialize_graph`](Self::specialize_graph) for mixed programs.
     pub fn specialize(&self, res: &ProgramResolution) -> Result<Vec<crate::backend::GpuCommand>> {
+        assert!(
+            !self.has_render,
+            "specialize: program contains render passes; use specialize_graph"
+        );
         let ir = substitute_ir(&self.ir, res)?;
         let schedule = resolve_full_schedule(&self.schedule, res)?;
         Ok(analysis::emit_commands(&ir, &schedule))
+    }
+
+    /// Resolve slots and emit [`GraphCommand`](crate::backend::GraphCommand)s for mixed programs.
+    pub fn specialize_graph(
+        &self,
+        res: &ProgramResolution,
+    ) -> Result<Vec<crate::backend::GraphCommand>> {
+        let ir = substitute_ir(&self.ir, res)?;
+        let schedule = resolve_full_schedule(&self.schedule, res)?;
+        Ok(analysis::emit_graph_commands(&ir, &schedule))
+    }
+
+    /// Whether this program contains any render pass nodes.
+    pub fn has_render_passes(&self) -> bool {
+        self.has_render
     }
 }
 
@@ -304,6 +449,7 @@ fn substitute_rid(r: ResourceId, res: &ProgramResolution) -> Result<ResourceId> 
             offset,
             len,
         },
+        ResourceId::RenderTargetSlot(_) => r,
         o => o,
     })
 }
@@ -332,7 +478,7 @@ fn substitute_ir(ir: &GraphIR, res: &ProgramResolution) -> Result<GraphIR> {
     Ok(GraphIR { nodes })
 }
 
-fn substitute_kind(kind: &NodeKind, _res: &ProgramResolution) -> Result<NodeKind> {
+fn substitute_kind(kind: &NodeKind, res: &ProgramResolution) -> Result<NodeKind> {
     Ok(match kind {
         NodeKind::Dispatch {
             pipeline,
@@ -399,7 +545,14 @@ fn substitute_kind(kind: &NodeKind, _res: &ProgramResolution) -> Result<NodeKind
             height: *height,
             data: data.clone(),
         },
-        NodeKind::RenderPass { .. } => anyhow::bail!("RenderPass in substitute_kind"),
+        NodeKind::RenderPass { target, commands } => {
+            let slot = *target as u32;
+            let resolved_target = res.render_target(slot)?;
+            NodeKind::RenderPass {
+                target: resolved_target,
+                commands: commands.clone(),
+            }
+        }
     })
 }
 
@@ -444,6 +597,96 @@ mod tests {
             a.iter()
                 .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "expected a barrier between write and read waves"
+        );
+    }
+
+    #[test]
+    fn mixed_compute_render_graph_program() {
+        use crate::backend::{GraphCommand, RenderCommand};
+        use crate::render_target::RenderTarget;
+        use crate::types::{Color, TextureFormat};
+
+        let dev = device();
+        let shader = ShaderModule::from_slang(&dev, "void main() {}").unwrap();
+        let pipe = ComputePipeline::new(&dev, &shader).unwrap();
+
+        let mut builder = ProgramBuilder::new();
+        let buf_slot = builder.buffer_slot();
+        let rt_slot = builder.render_target_slot();
+
+        // Compute step writes to buffer.
+        builder
+            .step("compute_write", &pipe)
+            .bind_buffer_slot(buf_slot, NodeAccess::Write)
+            .bind_resources_raw(&[0])
+            .dispatch(1, 1, 1);
+
+        // Render pass reads from buffer.
+        builder
+            .render_pass_step("draw", rt_slot)
+            .bind_buffer_slot(buf_slot, NodeAccess::Read)
+            .finish(vec![RenderCommand::Clear(Color::RED)]);
+
+        let prog = builder.compile().unwrap();
+        assert!(prog.has_render_passes());
+
+        // Specialize with two different render targets.
+        let rt_a =
+            RenderTarget::new(&dev, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+        let rt_b =
+            RenderTarget::new(&dev, 16, 16, TextureFormat::Rgba8Unorm).unwrap();
+        let buf = crate::buffer::Buffer::new(&dev, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut res_a = ProgramResolution::new();
+        res_a.bind_buffer(buf_slot, &buf);
+        res_a.bind_render_target(rt_slot, &rt_a);
+
+        let mut res_b = ProgramResolution::new();
+        res_b.bind_buffer(buf_slot, &buf);
+        res_b.bind_render_target(rt_slot, &rt_b);
+
+        let cmds_a = prog.specialize_graph(&res_a).unwrap();
+        let cmds_b = prog.specialize_graph(&res_b).unwrap();
+
+        // Both should have the same structure (same number of commands).
+        assert_eq!(cmds_a.len(), cmds_b.len());
+
+        // Both should contain compute and render commands.
+        assert!(
+            cmds_a.iter().any(|c| matches!(c, GraphCommand::Compute(_))),
+            "expected Compute commands"
+        );
+        assert!(
+            cmds_a.iter().any(|c| matches!(c, GraphCommand::Render { .. })),
+            "expected Render commands"
+        );
+
+        // Should have a barrier between compute write and render read.
+        assert!(
+            cmds_a
+                .iter()
+                .any(|c| matches!(c, GraphCommand::Compute(GpuCommand::ResourceBarrier { .. }))),
+            "expected ResourceBarrier between compute and render waves"
+        );
+
+        // The two specializations should target different render targets.
+        let target_a = cmds_a
+            .iter()
+            .find_map(|c| match c {
+                GraphCommand::Render { target, .. } => Some(*target),
+                _ => None,
+            })
+            .unwrap();
+        let target_b = cmds_b
+            .iter()
+            .find_map(|c| match c {
+                GraphCommand::Render { target, .. } => Some(*target),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(
+            target_a, target_b,
+            "specializations should resolve to different render targets"
         );
     }
 }

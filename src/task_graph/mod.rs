@@ -89,7 +89,13 @@ pub mod program;
 
 pub use graph::{NodeBuilder, RenderPassBuilder, TaskGraph};
 pub use ir::NodeAccess;
-pub use program::{ComputeProgram, ProgramBuilder, ProgramResolution, ProgramStepBuilder};
+pub use program::{
+    GraphProgram, ProgramBuilder, ProgramRenderPassBuilder, ProgramResolution, ProgramStepBuilder,
+};
+
+/// Deprecated: use [`GraphProgram`] instead.
+#[deprecated(since = "0.3.0", note = "use `GraphProgram` instead")]
+pub type ComputeProgram = GraphProgram;
 
 use crate::backend::{BufferHandle, TextureHandle};
 use crate::types::TextureFormat;
@@ -150,7 +156,7 @@ pub(crate) enum ResourceId {
         len: u64,
     },
     Texture(TextureHandle),
-    /// Program slot (resolved at [`crate::task_graph::program::ComputeProgram::specialize`] time).
+    /// Program slot (resolved at [`crate::task_graph::program::GraphProgram::specialize`] time).
     ProgramBuffer(u32),
     ProgramTexture(u32),
     ProgramBufferRange {
@@ -158,6 +164,9 @@ pub(crate) enum ResourceId {
         offset: u64,
         len: u64,
     },
+    /// Render-target slot (resolved at [`crate::task_graph::program::GraphProgram::specialize_graph`] time).
+    #[allow(dead_code)]
+    RenderTargetSlot(u32),
     /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
     TransientBuffer(TransientId),
     /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
@@ -176,6 +185,7 @@ impl ResourceId {
             ResourceId::Texture(_) => None,
             ResourceId::ProgramBuffer(_) | ResourceId::ProgramBufferRange { .. } => None,
             ResourceId::ProgramTexture(_) => None,
+            ResourceId::RenderTargetSlot(_) => None,
             ResourceId::TransientBuffer(_) => None,
             ResourceId::TransientTexture(_) => None,
         }

@@ -77,6 +77,8 @@ pub struct MockBackend {
     pub samplers_created: usize,
     /// Count of compute dispatches performed
     pub compute_dispatch_count: usize,
+    /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
+    pub wait_until_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
     device_timeline_next: HashMap<DeviceHandle, u64>,
@@ -196,6 +198,7 @@ impl MockBackend {
             textures_created: 0,
             samplers_created: 0,
             compute_dispatch_count: 0,
+            wait_until_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
             device_timeline_completed: HashMap::new(),
@@ -224,6 +227,7 @@ impl MockBackend {
         self.textures_created = 0;
         self.samplers_created = 0;
         self.compute_dispatch_count = 0;
+        self.wait_until_count = 0;
         self.transient_heap_ops.clear();
         self.transient_heap_sizes.clear();
     }
@@ -922,6 +926,7 @@ impl GpuBackend for MockBackend {
         device: DeviceHandle,
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
+        self.wait_until_count += 1;
         let cur = self.gpu_progress(device);
         if value > cur {
             self.device_timeline_completed.insert(device, value);
@@ -1891,5 +1896,40 @@ mod tests {
             }
             _ => panic!("Expected BindResources command"),
         }
+    }
+
+    #[test]
+    fn submit_graph_does_not_cpu_wait() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let target = backend
+            .create_render_target(device, 8, 8, TextureFormat::Rgba8Unorm)
+            .unwrap();
+
+        let commands = vec![
+            GraphCommand::Compute(GpuCommand::SetPipeline(0)),
+            GraphCommand::Compute(GpuCommand::Dispatch {
+                workgroups_x: 1,
+                workgroups_y: 1,
+                workgroups_z: 1,
+            }),
+            GraphCommand::Render {
+                target,
+                commands: vec![RenderCommand::Clear(Color::RED)],
+            },
+            GraphCommand::Compute(GpuCommand::SetPipeline(0)),
+            GraphCommand::Compute(GpuCommand::Dispatch {
+                workgroups_x: 1,
+                workgroups_y: 1,
+                workgroups_z: 1,
+            }),
+        ];
+
+        assert_eq!(backend.wait_until_count, 0);
+        backend.submit_graph(device, &commands).unwrap();
+        assert_eq!(
+            backend.wait_until_count, 0,
+            "submit_graph should not call wait_until (no CPU waits)"
+        );
     }
 }

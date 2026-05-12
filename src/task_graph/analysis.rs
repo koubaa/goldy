@@ -101,6 +101,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
                 len: l2,
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
+        (ResourceId::RenderTargetSlot(x), ResourceId::RenderTargetSlot(y)) => x == y,
         (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         _ => false,
@@ -133,6 +134,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         Texture(u64),
         ProgramBuffer(u32),
         ProgramTexture(u32),
+        RenderTargetSlot(u32),
         TransientBuffer(u32),
         TransientTexture(u32),
     }
@@ -146,6 +148,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
                 GroupKey::ProgramBuffer(slot)
             }
             ResourceId::ProgramTexture(slot) => GroupKey::ProgramTexture(slot),
+            ResourceId::RenderTargetSlot(slot) => GroupKey::RenderTargetSlot(slot),
             ResourceId::TransientBuffer(t) => GroupKey::TransientBuffer(t.0),
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
         }
@@ -434,7 +437,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
                 || !wave.barriers_before.program_texture_slots.is_empty()
             {
                 panic!(
-                    "emit_commands: unresolved program barrier slots; use ComputeProgram::specialize"
+                    "emit_commands: unresolved program barrier slots; use GraphProgram::specialize"
                 );
             }
             commands.push(GpuCommand::ResourceBarrier {
@@ -549,7 +552,7 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                 || !wave.barriers_before.program_texture_slots.is_empty()
             {
                 panic!(
-                    "emit_graph_commands: unresolved program barrier slots; use ComputeProgram::specialize"
+                    "emit_graph_commands: unresolved program barrier slots; use GraphProgram::specialize"
                 );
             }
             commands.push(GraphCommand::Compute(GpuCommand::ResourceBarrier {

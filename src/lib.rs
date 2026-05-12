@@ -62,9 +62,13 @@ pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
 pub use task_graph::{
-    ComputeProgram, NodeAccess, NodeBuilder, ProgramBuilder, ProgramResolution, RenderPassBuilder,
+    GraphProgram, NodeAccess, NodeBuilder, ProgramBuilder, ProgramResolution, RenderPassBuilder,
     TaskGraph, TransientId, TransientTextureId,
 };
+
+/// Deprecated: use [`GraphProgram`] instead.
+#[deprecated(since = "0.3.0", note = "use `GraphProgram` instead")]
+pub type ComputeProgram = GraphProgram;
 pub use texture::Texture;
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use types::*;
