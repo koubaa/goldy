@@ -219,6 +219,7 @@ pub(super) fn place_buffer_in_transient_heap(
             device_handle: device,
             resource,
             size,
+            allocation_size: size,
             bindless_offset: Some(uav_offset),
             bindless_srv_offset: Some(srv_offset),
             is_storage: true,

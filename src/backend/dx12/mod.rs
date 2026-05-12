@@ -445,6 +445,7 @@ impl GpuBackend for Dx12Backend {
             &mut self.state,
             device_handle,
             size,
+            size,
             access,
             element_stride,
             flags,
@@ -466,6 +467,44 @@ impl GpuBackend for Dx12Backend {
 
     fn buffer_size(&self, buffer_handle: BufferHandle) -> u64 {
         buffer::size(&self.state, buffer_handle)
+    }
+
+    fn buffer_capacity(&self, buffer_handle: BufferHandle) -> u64 {
+        buffer::capacity(&self.state, buffer_handle)
+    }
+
+    fn create_buffer_with_capacity(
+        &mut self,
+        device_handle: DeviceHandle,
+        initial_size: u64,
+        capacity: u64,
+        access: crate::backend::DataAccess,
+        element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
+    ) -> Result<(BufferHandle, u64)> {
+        buffer::create_with_capacity(
+            &mut self.state,
+            device_handle,
+            initial_size,
+            capacity,
+            access,
+            element_stride,
+            flags,
+        )
+    }
+
+    fn set_buffer_logical_size(
+        &mut self,
+        device_handle: DeviceHandle,
+        buffer_handle: BufferHandle,
+        new_logical_size: u64,
+    ) -> Result<()> {
+        buffer::set_logical_size(
+            &mut self.state,
+            device_handle,
+            buffer_handle,
+            new_logical_size,
+        )
     }
 
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {

@@ -449,6 +449,63 @@ fn new_with_capacity_hint_smoke() {
     let device = make_device();
     let b = Buffer::new_with_capacity_hint(&device, 16, 4096, DataAccess::Scattered).expect("b");
     assert_eq!(b.size(), 16);
+    assert!(b.allocated_size() >= 4096, "expected oversize allocation");
+}
+
+#[test]
+fn oversize_resize_within_capacity_preserves_and_zeros_tail() {
+    let device = make_device();
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 16, 4096, DataAccess::Scattered).expect("buf");
+    let idx = buf.bindless_index().expect("bindless");
+    buf.write(0, &[0xabu8; 16]).expect("seed");
+    buf.resize_to(256).expect("grow within cap");
+    assert_eq!(buf.bindless_index(), Some(idx));
+    assert!(buf.size() >= 256);
+    let mut got = vec![0u8; 256];
+    buf.read_to_cpu(&device, &mut got).expect("read");
+    assert_eq!(&got[..16], &[0xabu8; 16]);
+    assert!(got[16..].iter().all(|&x| x == 0));
+}
+
+#[test]
+fn oversize_resize_beyond_capacity_falls_back_and_preserves() {
+    let device = make_device();
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 16, 256, DataAccess::Scattered).expect("buf");
+    buf.write(0, &[7u8; 16]).expect("w");
+    buf.resize_to(512).expect("grow past cap");
+    assert!(buf.allocated_size() >= 512);
+    let mut got = vec![0u8; 512];
+    buf.read_to_cpu(&device, &mut got).expect("r");
+    assert_eq!(&got[..16], &[7u8; 16]);
+}
+
+#[test]
+fn hint_unused_above_does_not_corrupt_prefix() {
+    let device = make_device();
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 64, 4096, DataAccess::Scattered).expect("buf");
+    buf.write(0, &[0x11u8; 64]).expect("w");
+    buf.hint_unused_above(32);
+    let mut got = vec![0u8; 32];
+    buf.read_to_cpu(&device, &mut got).expect("r");
+    assert_eq!(&got[..], &[0x11u8; 32]);
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[test]
+fn device_capabilities_metal_reports_constant_resize() {
+    use goldy::{types::BufferResizeCost, BackendType, Instance};
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::IntegratedGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::DiscreteGpu))
+        .expect("dev");
+    assert_eq!(device.backend_type(), BackendType::Metal);
+    let caps = device.capabilities();
+    assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);
+    assert!(caps.buffer_decommit_supported);
 }
 
 #[test]

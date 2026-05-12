@@ -178,6 +178,54 @@ impl GpuBackend for MetalBackend {
         buffer::size(&self.state, buffer)
     }
 
+    fn buffer_capacity(&self, buffer: BufferHandle) -> u64 {
+        buffer::buffer_capacity(&self.state, buffer)
+    }
+
+    fn create_buffer_with_capacity(
+        &mut self,
+        device: DeviceHandle,
+        initial_size: u64,
+        capacity: u64,
+        access: DataAccess,
+        element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
+    ) -> Result<(BufferHandle, u64)> {
+        buffer::create_with_capacity(
+            &mut self.state,
+            device,
+            initial_size,
+            capacity,
+            access,
+            element_stride,
+            flags,
+        )
+    }
+
+    fn set_buffer_logical_size(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_logical_size: u64,
+    ) -> Result<()> {
+        buffer::set_logical_size(&mut self.state, device, buffer, new_logical_size)
+    }
+
+    fn hint_buffer_unused_above(&mut self, buffer: BufferHandle, offset: u64) {
+        buffer::hint_unused_above(&mut self.state, buffer, offset);
+    }
+
+    fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
+        let _ = device;
+        crate::device::DeviceCapabilities {
+            has_zero_copy_storage_readback: true,
+            buffer_resize_cost: crate::types::BufferResizeCost::Constant,
+            buffer_page_size: 16 * 1024,
+            buffer_decommit_supported: true,
+            ..crate::device::DeviceCapabilities::default()
+        }
+    }
+
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32> {
         buffer::bindless_index(&self.state, buffer)
     }

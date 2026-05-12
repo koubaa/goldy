@@ -316,6 +316,7 @@ impl GpuBackend for VulkanBackend {
             &self.state.instance,
             device_handle,
             size,
+            size,
             access,
             element_stride,
             flags,
@@ -348,6 +349,50 @@ impl GpuBackend for VulkanBackend {
 
     fn buffer_size(&self, buffer_handle: BufferHandle) -> u64 {
         buffer::size(&self.state.buffers, buffer_handle)
+    }
+
+    fn buffer_capacity(&self, buffer_handle: BufferHandle) -> u64 {
+        buffer::capacity(&self.state.buffers, buffer_handle)
+    }
+
+    fn create_buffer_with_capacity(
+        &mut self,
+        device_handle: DeviceHandle,
+        initial_size: u64,
+        capacity: u64,
+        access: DataAccess,
+        element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
+    ) -> Result<(BufferHandle, u64)> {
+        let cap = capacity.max(initial_size);
+        let handle = buffer::create(
+            &mut self.state.devices,
+            &mut self.state.buffers,
+            &mut self.state.next_buffer_handle,
+            &self.state.instance,
+            device_handle,
+            initial_size,
+            cap,
+            access,
+            element_stride,
+            flags,
+        )?;
+        Ok((handle, cap))
+    }
+
+    fn set_buffer_logical_size(
+        &mut self,
+        device_handle: DeviceHandle,
+        buffer_handle: BufferHandle,
+        new_logical_size: u64,
+    ) -> Result<()> {
+        buffer::set_logical_size(
+            &mut self.state.devices,
+            &mut self.state.buffers,
+            device_handle,
+            buffer_handle,
+            new_logical_size,
+        )
     }
 
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {

@@ -441,7 +441,10 @@ pub(crate) struct LogicalDevice {
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub resource: Direct3D12::ID3D12Resource,
+    /// Logical byte size (descriptor element counts, bounds).
     pub size: u64,
+    /// Committed resource width in bytes (`>= size`).
+    pub allocation_size: u64,
     /// Primary descriptor heap offset for bindless access (UAV for storage, CBV for uniform)
     pub bindless_offset: Option<u32>,
     /// Secondary SRV descriptor offset for storage buffers (for read-only graphics access)

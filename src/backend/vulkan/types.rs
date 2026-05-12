@@ -354,7 +354,10 @@ pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
+    /// Logical byte size (descriptor range, bounds checks).
     pub size: u64,
+    /// Bytes reserved in the VkBuffer (`>= size` when oversize allocations are used).
+    pub allocation_size: u64,
     /// Index in the global bindless descriptor set (if bindless enabled)
     pub bindless_index: Option<u32>,
     /// Whether this is a storage buffer (vs uniform buffer)

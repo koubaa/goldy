@@ -81,11 +81,13 @@ pub(super) fn create(
     next_buffer_handle: &mut BufferHandle,
     instance: &ash::Instance,
     device_handle: DeviceHandle,
-    size: u64,
+    logical_size: u64,
+    allocation_size: u64,
     access: DataAccess,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
+    assert!(logical_size <= allocation_size);
     let logical_device = devices
         .get(&device_handle)
         .context("Invalid device handle")?;
@@ -100,7 +102,7 @@ pub(super) fn create(
                 | vk::BufferUsageFlags::VERTEX_BUFFER
                 | vk::BufferUsageFlags::INDEX_BUFFER;
             // Indirect dispatch reads 3× u32 (12 bytes) from a storage buffer
-            if size >= 12 {
+            if logical_size >= 12 {
                 vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
             }
             true
@@ -121,7 +123,7 @@ pub(super) fn create(
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
     let buffer_info = vk::BufferCreateInfo::default()
-        .size(size)
+        .size(allocation_size)
         .usage(vk_usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
@@ -170,7 +172,7 @@ pub(super) fn create(
         let device = devices
             .get(&device_handle)
             .context("Buffer's device is invalid for host map")?;
-        let ptr = unsafe { device.map_memory2(memory, 0, size) }
+        let ptr = unsafe { device.map_memory2(memory, 0, allocation_size) }
             .context("Failed to map CPU_READABLE buffer memory")?;
         let p = ptr as *mut u8;
         if p.is_null() {
@@ -196,7 +198,7 @@ pub(super) fn create(
             let buffer_info = vk::DescriptorBufferInfo::default()
                 .buffer(buffer)
                 .offset(0)
-                .range(size);
+                .range(logical_size.max(1));
 
             let binding = if is_storage {
                 types::bindless_bindings::STORAGE_BUFFERS
@@ -240,7 +242,8 @@ pub(super) fn create(
             device_handle,
             buffer,
             memory,
-            size,
+            size: logical_size,
+            allocation_size,
             bindless_index,
             is_storage,
             element_stride,
@@ -255,6 +258,97 @@ pub(super) fn create(
     );
 
     Ok(handle)
+}
+
+/// Byte size of the underlying VkBuffer allocation.
+pub(super) fn capacity(
+    buffers: &HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+) -> u64 {
+    buffers
+        .get(&buffer_handle)
+        .map(|b| b.allocation_size)
+        .unwrap_or(0)
+}
+
+pub(super) fn set_logical_size(
+    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    new_logical_size: u64,
+) -> Result<()> {
+    let (bindless_index, is_storage, vkbuf, old_logical) = {
+        let buf = buffers
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        if buf.is_view {
+            anyhow::bail!("cannot set logical size on buffer views");
+        }
+        if buf.transient_heap_suballoc {
+            anyhow::bail!("cannot change logical size on transient heap sub-allocations");
+        }
+        if buf.device_handle != device_handle {
+            anyhow::bail!("buffer belongs to a different device");
+        }
+        if new_logical_size > buf.allocation_size {
+            anyhow::bail!("logical size exceeds allocation");
+        }
+        if new_logical_size == 0 {
+            anyhow::bail!("buffer size must be non-zero");
+        }
+        (
+            buf.bindless_index,
+            buf.is_storage,
+            buf.buffer,
+            buf.size,
+        )
+    };
+
+    buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+
+    if old_logical == new_logical_size {
+        return Ok(());
+    }
+
+    let bindless_descriptor_set = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .bindless_descriptor_set;
+
+    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index) {
+        let buffer_info = vk::DescriptorBufferInfo::default()
+            .buffer(vkbuf)
+            .offset(0)
+            .range(new_logical_size.max(1));
+
+        let binding = if is_storage {
+            types::bindless_bindings::STORAGE_BUFFERS
+        } else {
+            types::bindless_bindings::UNIFORM_BUFFERS
+        };
+
+        let descriptor_type = if is_storage {
+            vk::DescriptorType::STORAGE_BUFFER
+        } else {
+            vk::DescriptorType::UNIFORM_BUFFER
+        };
+
+        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(binding)
+            .dst_array_element(bindless_index)
+            .descriptor_type(descriptor_type)
+            .buffer_info(std::slice::from_ref(&buffer_info));
+        unsafe {
+            logical_device
+                .device
+                .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+        }
+    }
+
+    Ok(())
 }
 
 /// Allocate VkBuffer + memory (no bindless registration). Matches [`create`] rules.
@@ -607,6 +701,7 @@ pub(super) fn resize(
         buffer: new_buffer,
         memory: new_memory,
         size: new_size,
+        allocation_size: new_size,
         bindless_index: old_state.bindless_index,
         is_storage: old_state.is_storage,
         element_stride: old_state.element_stride,
@@ -808,6 +903,7 @@ pub(super) fn create_view(
             buffer: vk_buffer,
             memory: vk::DeviceMemory::null(),
             size,
+            allocation_size: parent.allocation_size,
             bindless_index,
             is_storage,
             element_stride,

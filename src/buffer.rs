@@ -50,7 +50,10 @@ pub struct Buffer {
     device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
+    /// Logical byte size (API-facing; may be smaller than reserved GPU storage).
     size: u64,
+    /// Reserved byte size (`MTLBuffer.length` / Vulkan allocation / …); >= [`Self::size`].
+    allocated_size: u64,
     access: DataAccess,
     element_stride: Option<u32>,
     flags: BufferFlags,
@@ -75,19 +78,42 @@ impl Buffer {
         Self::new_with_stride_and_flags(device, size, access, None, BufferFlags::empty())
     }
 
-    /// Like [`Self::new`], with an optional peak-capacity hint.
-    ///
-    /// Phase 1 ignores `expected_max` and allocates exactly `initial_size`. The hint is reserved
-    /// for later phases (oversized reservations, demand paging).
+    /// Like [`Self::new`], with a peak-capacity hint for backends that support oversize virtual
+    /// reservations (e.g. Metal). `expected_max` is clamped with `initial_size`; allocation is at
+    /// least `max(initial_size, expected_max)` on supporting backends.
     pub fn new_with_capacity_hint(
         device: &Device,
         initial_size: u64,
-        _expected_max: u64,
+        expected_max: u64,
         access: DataAccess,
     ) -> Result<Self> {
-        Self::new(device, initial_size, access)
+        let capacity = expected_max.max(initial_size);
+        tracing::debug!(
+            initial_size,
+            capacity,
+            ?access,
+            "Creating buffer with capacity hint"
+        );
+        let mut backend = device.inner.backend.lock().unwrap();
+        let (handle, allocated_size) = backend.create_buffer_with_capacity(
+            device.inner.handle,
+            initial_size,
+            capacity,
+            access,
+            None,
+            BufferFlags::empty(),
+        )?;
+        Ok(Self {
+            device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
+            handle,
+            size: initial_size,
+            allocated_size,
+            access,
+            element_stride: None,
+            flags: BufferFlags::empty(),
+        })
     }
-
     pub fn new_with_stride(
         device: &Device,
         size: u64,
@@ -115,6 +141,7 @@ impl Buffer {
             backend: Arc::clone(&device.inner.backend),
             handle,
             size,
+            allocated_size: size,
             access,
             element_stride,
             flags,
@@ -165,6 +192,7 @@ impl Buffer {
             backend: Arc::clone(&device.inner.backend),
             handle,
             size: bytes.len() as u64,
+            allocated_size: bytes.len() as u64,
             access,
             element_stride: Some(element_stride),
             flags,
@@ -229,6 +257,7 @@ impl Buffer {
             backend: Arc::clone(&device.inner.backend),
             handle,
             size: data.len() as u64,
+            allocated_size: data.len() as u64,
             access,
             element_stride: Some(element_stride),
             flags,
@@ -251,11 +280,15 @@ impl Buffer {
         self.write(offset, bytemuck::cast_slice(data))
     }
 
-    /// Get the buffer size in bytes.
+    /// Logical byte size (may be less than reserved capacity; see [`Self::allocated_size`]).
     pub fn size(&self) -> u64 {
         self.size
     }
 
+    /// Reserved byte capacity (physical or virtual backing size).
+    pub fn allocated_size(&self) -> u64 {
+        self.allocated_size
+    }
     /// Get the buffer's access pattern.
     pub fn access(&self) -> DataAccess {
         self.access
@@ -271,9 +304,29 @@ impl Buffer {
         self.element_stride
     }
 
-    /// Resize buffer storage in place. `[0..min(old_size, new_size))` is preserved; any newly
-    /// exposed bytes are zero-filled. The [`BufferHandle`] and bindless indices stay stable.
     pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
+        if new_size == self.size {
+            return Ok(());
+        }
+        if new_size <= self.allocated_size {
+            let old_logical = self.size;
+            let mut backend = self.backend.lock().unwrap();
+            backend.set_buffer_logical_size(
+                self.device.inner.handle,
+                self.handle,
+                new_size,
+            )?;
+            drop(backend);
+            if new_size > old_logical {
+                self.clear(
+                    &self.device,
+                    old_logical,
+                    new_size.saturating_sub(old_logical),
+                )?;
+            }
+            self.size = new_size;
+            return Ok(());
+        }
         let mut backend = self.backend.lock().unwrap();
         backend.resize_buffer(
             self.device.inner.handle,
@@ -281,6 +334,7 @@ impl Buffer {
             new_size,
             true,
         )?;
+        self.allocated_size = backend.buffer_capacity(self.handle);
         self.size = new_size;
         Ok(())
     }
@@ -288,6 +342,19 @@ impl Buffer {
     /// Resize without preserving or initializing existing bytes (fast path for pools about to reset).
     /// New storage may contain arbitrary data; only the handle stability contract applies.
     pub fn resize_to_uninitialized(&mut self, new_size: u64) -> Result<()> {
+        if new_size == self.size {
+            return Ok(());
+        }
+        if new_size <= self.allocated_size {
+            let mut backend = self.backend.lock().unwrap();
+            backend.set_buffer_logical_size(
+                self.device.inner.handle,
+                self.handle,
+                new_size,
+            )?;
+            self.size = new_size;
+            return Ok(());
+        }
         let mut backend = self.backend.lock().unwrap();
         backend.resize_buffer(
             self.device.inner.handle,
@@ -295,14 +362,18 @@ impl Buffer {
             new_size,
             false,
         )?;
+        self.allocated_size = backend.buffer_capacity(self.handle);
         self.size = new_size;
         Ok(())
     }
 
     /// Hint that bytes at and above `offset` are not needed until written again.
     ///
-    /// Phase 1: no-op (reserved for decommit / paging).
-    pub fn hint_unused_above(&mut self, _offset: u64) {}
+    /// On Metal (shared memory), may return physical pages to the OS. Other backends may no-op.
+    pub fn hint_unused_above(&mut self, offset: u64) {
+        let mut backend = self.backend.lock().unwrap();
+        backend.hint_buffer_unused_above(self.handle, offset);
+    }
 
     /// Get the buffer's index in the global bindless descriptor set.
     ///
@@ -681,6 +752,36 @@ impl BufferPool {
         })
     }
 
+    /// Like [`Self::with_alignment`], but reserves up to `expected_max` bytes on supporting backends.
+    pub fn with_alignment_and_capacity_hint(
+        device: &Device,
+        total_size: u64,
+        expected_max: u64,
+        alignment: u64,
+    ) -> Result<Self> {
+        assert!(
+            alignment.is_power_of_two(),
+            "alignment must be a power of two"
+        );
+        tracing::debug!(
+            total_size,
+            expected_max,
+            alignment,
+            "Creating buffer pool with capacity hint"
+        );
+        let backing = Buffer::new_with_capacity_hint(
+            device,
+            total_size,
+            expected_max,
+            DataAccess::Scattered,
+        )?;
+        Ok(Self {
+            backing,
+            offset: 0,
+            alignment,
+        })
+    }
+
     /// Resize the backing buffer in place (stable handle) and reset the bump allocator.
     pub fn resize(&mut self, new_size: u64) -> Result<()> {
         self.backing.resize_to(new_size)?;
@@ -833,6 +934,11 @@ impl<const N: usize> BufferPoolRing<N> {
     }
 
     /// Like [`prepare`](Self::prepare) but with an optional upper bound for shrinking.
+    ///
+    /// When the pool is larger than `max`, it is shrunk by resizing the backing buffer.
+    /// On backends with oversize reservations (Metal), prefer
+    /// [`Self::prepare_with_capacity_hint`] and [`BufferPool::hint_unused_above`] instead of
+    /// relying on explicit shrinks.
     pub fn prepare_bounded(
         &mut self,
         device: &Device,
@@ -864,6 +970,43 @@ impl<const N: usize> BufferPoolRing<N> {
                 device.reset_buffer_heaps();
                 device.ensure_buffer_heap_capacity(size);
                 self.pools[idx] = Some(BufferPool::new(device, size)?);
+            }
+            self.clear_flags[idx] = true;
+        } else {
+            self.pools[idx]
+                .as_mut()
+                .expect("pool must exist when need_new is false")
+                .reset();
+            self.clear_flags[idx] = false;
+        }
+        Ok(())
+    }
+
+    /// Ensure the current pool slot has at least `size` bytes of logical capacity, reserving
+    /// up to `expected_max` on backends that support [`Buffer::new_with_capacity_hint`].
+    pub fn prepare_with_capacity_hint(
+        &mut self,
+        device: &Device,
+        size: u64,
+        expected_max: u64,
+    ) -> Result<()> {
+        let idx = self.idx;
+        let need_new = match &self.pools[idx] {
+            Some(pool) => pool.capacity() < size,
+            None => true,
+        };
+        if need_new {
+            if let Some(pool) = &mut self.pools[idx] {
+                pool.resize(size)?;
+            } else {
+                device.reset_buffer_heaps();
+                device.ensure_buffer_heap_capacity(expected_max.max(size));
+                self.pools[idx] = Some(BufferPool::with_alignment_and_capacity_hint(
+                    device,
+                    size,
+                    expected_max,
+                    256,
+                )?);
             }
             self.clear_flags[idx] = true;
         } else {

@@ -484,6 +484,7 @@ pub(super) fn resize(
                 device_handle,
                 resource: new_resource.clone(),
                 size: new_size,
+                allocation_size: new_size,
                 bindless_offset: None,
                 bindless_srv_offset: None,
                 is_storage: true,
@@ -560,6 +561,7 @@ pub(super) fn resize(
             device_handle,
             resource: new_resource,
             size: new_size,
+            allocation_size: new_size,
             bindless_offset: old.bindless_offset,
             bindless_srv_offset: old.bindless_srv_offset,
             is_storage: old.is_storage,
@@ -598,11 +600,13 @@ pub(super) fn resize(
 pub(super) fn create(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
-    size: u64,
+    logical_size: u64,
+    allocation_size: u64,
     access: DataAccess,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
+    debug_assert!(logical_size <= allocation_size);
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     // First pass: create the resource (immutable borrow of device)
     let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
@@ -640,7 +644,7 @@ pub(super) fn create(
         let resource_desc = D3D12_RESOURCE_DESC {
             Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
             Alignment: 0,
-            Width: size,
+            Width: allocation_size,
             Height: 1,
             DepthOrArraySize: 1,
             MipLevels: 1,
@@ -691,7 +695,7 @@ pub(super) fn create(
             let readback_desc = D3D12_RESOURCE_DESC {
                 Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
                 Alignment: 0,
-                Width: size,
+                Width: allocation_size,
                 Height: 1,
                 DepthOrArraySize: 1,
                 MipLevels: 1,
@@ -754,12 +758,12 @@ pub(super) fn create(
             // For storage buffers, create BOTH UAV (for compute write) and SRV (for graphics read)
             let stride = element_stride.unwrap_or(4);
             debug_assert!(
-                stride > 0 && (size as u32).is_multiple_of(stride),
-                "buffer size {size} not evenly divisible by element stride {stride} — \
+                stride > 0 && (logical_size as u32).is_multiple_of(stride),
+                "buffer logical size {logical_size} not evenly divisible by element stride {stride} — \
                  likely a stride mismatch (set BufferProxy::element_stride or \
                  update element_stride_for_buffer)"
             );
-            let num_elements = (size as u32) / stride;
+            let num_elements = (logical_size as u32) / stride;
 
             // Register UAV to get the next available descriptor offset
             let uav_offset = logical_device.resource_registry.register_buffer_uav(handle);
@@ -843,7 +847,13 @@ pub(super) fn create(
             let cbv_offset = logical_device.resource_registry.register_buffer_cbv(handle);
 
             // CBV size must be 256-byte aligned
-            let aligned_size = (size + 255) & !255;
+            let aligned_size = (logical_size + 255) & !255;
+
+            if aligned_size as u64 > allocation_size {
+                anyhow::bail!(
+                    "uniform buffer CBV size {aligned_size} exceeds allocation {allocation_size}"
+                );
+            }
 
             // Create CBV descriptor
             let cbv_desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
@@ -882,7 +892,8 @@ pub(super) fn create(
         BufferState {
             device_handle,
             resource,
-            size,
+            size: logical_size,
+            allocation_size,
             bindless_offset,
             bindless_srv_offset,
             is_storage,
@@ -899,6 +910,84 @@ pub(super) fn create(
     );
 
     Ok(handle)
+}
+
+pub(super) fn create_with_capacity(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    initial_size: u64,
+    capacity: u64,
+    access: DataAccess,
+    element_stride: Option<u32>,
+    flags: BufferFlags,
+) -> Result<(BufferHandle, u64)> {
+    let cap = capacity.max(initial_size);
+    let h = create(
+        state,
+        device_handle,
+        initial_size,
+        cap,
+        access,
+        element_stride,
+        flags,
+    )?;
+    Ok((h, cap))
+}
+
+pub(super) fn capacity(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
+    state
+        .buffers
+        .get(&buffer_handle)
+        .map(|b| b.allocation_size)
+        .unwrap_or(0)
+}
+
+pub(super) fn set_logical_size(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    new_logical_size: u64,
+) -> Result<()> {
+    let old = state
+        .buffers
+        .get(&buffer_handle)
+        .cloned()
+        .context("set_logical_size: invalid buffer")?;
+    if old.device_handle != device_handle {
+        anyhow::bail!("set_logical_size: buffer belongs to a different device");
+    }
+    if old.is_view {
+        anyhow::bail!("set_logical_size: cannot resize a buffer view");
+    }
+    if old.transient_placed {
+        anyhow::bail!("set_logical_size: cannot resize a transient placed buffer");
+    }
+    if new_logical_size > old.allocation_size {
+        anyhow::bail!("logical size exceeds allocation");
+    }
+    if new_logical_size == 0 {
+        anyhow::bail!("buffer size must be non-zero");
+    }
+    let stride = old.element_stride.unwrap_or(4);
+    if old.is_storage && stride > 0 && (new_logical_size as u32) % stride != 0 {
+        anyhow::bail!(
+            "set_logical_size: new size {new_logical_size} not divisible by stride {stride}"
+        );
+    }
+    if !old.is_storage {
+        let aligned = (new_logical_size + 255) & !255;
+        if aligned as u64 > old.allocation_size {
+            anyhow::bail!("CBV aligned size exceeds allocation");
+        }
+    }
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("set_logical_size: device")?;
+    rewrite_root_buffer_descriptors(logical_device, &old.resource, new_logical_size, &old)?;
+    state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+    Ok(())
 }
 
 /// Destroy a buffer, queueing both the D3D12 resources and the bindless
@@ -1087,6 +1176,7 @@ pub(super) fn create_view(
             device_handle,
             resource,
             size,
+            allocation_size: parent.allocation_size,
             bindless_offset,
             bindless_srv_offset,
             is_storage: true,

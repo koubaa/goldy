@@ -261,6 +261,7 @@ pub(super) fn place_buffer_in_transient_heap(
             buffer,
             memory: shared_mem,
             size,
+            allocation_size: size,
             bindless_index,
             is_storage: true,
             element_stride: None,

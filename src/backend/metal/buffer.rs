@@ -1,49 +1,54 @@
 //! Buffer management logic.
 
 use super::super::{BufferHandle, DeviceHandle};
-use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE};
+use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE, MAX_HEAP_SIZE};
 use crate::backend::DataAccess;
 use crate::types::BufferFlags;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
 
-/// Create a buffer with the given size and access pattern.
-pub(super) fn create(
+/// Heap allocation, or direct device buffer when larger than [`MAX_HEAP_SIZE`].
+fn allocate_mtl_storage_buffer(
+    logical_device: &mut super::types::LogicalDevice,
+    allocation_size: u64,
+    options: MTLResourceOptions,
+) -> Result<(mtl::Buffer, bool)> {
+    if allocation_size > MAX_HEAP_SIZE {
+        let buf = logical_device.device.new_buffer(allocation_size, options);
+        Ok((buf, true))
+    } else {
+        let buf = logical_device
+            .heap_allocator
+            .allocate(allocation_size, options)
+            .context("Metal buffer heap allocation failed — all heaps exhausted")?;
+        Ok((buf, false))
+    }
+}
+
+fn insert_buffer_common(
     state: &mut MetalState,
     device_handle: DeviceHandle,
-    size: u64,
+    handle: BufferHandle,
+    buffer: mtl::Buffer,
+    logical_size: u64,
+    allocation_size: u64,
+    is_device_allocated: bool,
     access: DataAccess,
     element_stride: Option<u32>,
     flags: BufferFlags,
-) -> Result<BufferHandle> {
+    parent_for_view: Option<BufferHandle>,
+    view_byte_offset: Option<u64>,
+) -> Result<()> {
+    debug_assert!(logical_size <= allocation_size);
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let is_storage = access == DataAccess::Scattered;
-    if cpu_readable && !is_storage {
-        anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
-        );
-    }
+
     let logical_device = state
         .devices
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
-
-    // Allocate buffer from heap allocator with Shared storage (CPU-accessible).
-    let options =
-        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
-
-    let buffer = logical_device
-        .heap_allocator
-        .allocate(size, options)
-        .context("Metal buffer heap allocation failed — all heaps exhausted")?;
-
-    // Register in bindless registry based on access pattern.
-    // arg_buffer_index is the LOCAL shader slot (0-63 for both Scattered and Broadcast).
-    // For encoding into the flat argument buffer, Broadcast buffers need the global index.
     let arg_buffer_index = match access {
         DataAccess::Broadcast => logical_device
             .resource_registry
@@ -57,8 +62,9 @@ pub(super) fn create(
         DataAccess::Scattered => arg_buffer_index,
     };
     tracing::debug!(
-        "Allocated buffer {} from heap at bindless index {}",
+        "Allocated buffer {} (device heap={}) at bindless index {}",
         handle,
+        is_device_allocated,
         arg_buffer_index
     );
 
@@ -89,17 +95,191 @@ pub(super) fn create(
         BufferState {
             device_handle,
             buffer,
-            size,
+            size: logical_size,
+            allocation_size,
+            is_device_allocated,
             arg_buffer_index,
             flags,
             element_stride,
-            parent_for_view: None,
+            parent_for_view,
             access,
-            view_byte_offset: None,
+            view_byte_offset,
         },
     );
 
+    Ok(())
+}
+
+/// Create a buffer with the given size and access pattern.
+pub(super) fn create(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    size: u64,
+    access: DataAccess,
+    element_stride: Option<u32>,
+    flags: BufferFlags,
+) -> Result<BufferHandle> {
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    let is_storage = access == DataAccess::Scattered;
+    if cpu_readable && !is_storage {
+        anyhow::bail!(
+            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
+        );
+    }
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+
+    let logical_device = state
+        .devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
+    let options =
+        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
+
+    let (buffer, is_device_allocated) =
+        allocate_mtl_storage_buffer(logical_device, size, options)?;
+
+    insert_buffer_common(
+        state,
+        device_handle,
+        handle,
+        buffer,
+        size,
+        size,
+        is_device_allocated,
+        access,
+        element_stride,
+        flags,
+        None,
+        None,
+    )?;
+
     Ok(handle)
+}
+
+/// Create with reserved capacity (`allocation_size >= logical_size`).
+pub(super) fn create_with_capacity(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    logical_size: u64,
+    capacity: u64,
+    access: DataAccess,
+    element_stride: Option<u32>,
+    flags: BufferFlags,
+) -> Result<(BufferHandle, u64)> {
+    let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    let is_storage = access == DataAccess::Scattered;
+    if cpu_readable && !is_storage {
+        anyhow::bail!(
+            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
+        );
+    }
+    if logical_size > capacity {
+        anyhow::bail!("logical_size {logical_size} exceeds capacity {capacity}");
+    }
+    if logical_size == 0 || capacity == 0 {
+        anyhow::bail!("buffer sizes must be non-zero");
+    }
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+
+    let logical_device = state
+        .devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
+    let options =
+        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
+
+    let (buffer, is_device_allocated) =
+        allocate_mtl_storage_buffer(logical_device, capacity, options)?;
+
+    insert_buffer_common(
+        state,
+        device_handle,
+        handle,
+        buffer,
+        logical_size,
+        capacity,
+        is_device_allocated,
+        access,
+        element_stride,
+        flags,
+        None,
+        None,
+    )?;
+
+    Ok((handle, capacity))
+}
+
+pub(super) fn buffer_capacity(state: &MetalState, buffer_handle: BufferHandle) -> u64 {
+    state
+        .buffers
+        .get(&buffer_handle)
+        .map(|b| b.allocation_size)
+        .unwrap_or(0)
+}
+
+pub(super) fn set_logical_size(
+    state: &mut MetalState,
+    _device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    new_logical_size: u64,
+) -> Result<()> {
+    let b = state
+        .buffers
+        .get_mut(&buffer_handle)
+        .context("Invalid buffer handle")?;
+    if b.parent_for_view.is_some() {
+        anyhow::bail!("cannot resize logical extent of buffer views");
+    }
+    if new_logical_size > b.allocation_size {
+        anyhow::bail!(
+            "logical size {} exceeds allocation {}",
+            new_logical_size,
+            b.allocation_size
+        );
+    }
+    if new_logical_size == 0 {
+        anyhow::bail!("buffer size must be non-zero");
+    }
+    b.size = new_logical_size;
+    Ok(())
+}
+
+/// Hint kernel reclaim for pages at/above `offset` (see [`GpuBackend::hint_buffer_unused_above`]).
+pub(super) fn hint_unused_above(state: &mut MetalState, buffer_handle: BufferHandle, offset: u64) {
+    let Some(b) = state.buffers.get(&buffer_handle) else {
+        return;
+    };
+    if b.parent_for_view.is_some() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use libc::{sysconf, _SC_PAGESIZE};
+        let ptr = b.buffer.contents() as *mut u8;
+        if ptr.is_null() {
+            return;
+        }
+        let page = unsafe { sysconf(_SC_PAGESIZE) } as u64;
+        if page == 0 {
+            return;
+        }
+        let page_off = offset.div_ceil(page).saturating_mul(page);
+        let len = b.allocation_size.saturating_sub(page_off);
+        if len == 0 {
+            return;
+        }
+        unsafe {
+            libc::madvise(
+                ptr.add(page_off as usize).cast(),
+                len as usize,
+                libc::MADV_FREE,
+            );
+        }
+    }
 }
 
 /// Create a view into a sub-region of an existing storage buffer.
@@ -160,6 +340,8 @@ pub(super) fn create_view(
             device_handle,
             buffer: parent_mtl_buffer,
             size,
+            allocation_size: parent.allocation_size,
+            is_device_allocated: parent.is_device_allocated,
             arg_buffer_index,
             flags: parent_flags,
             element_stride,
@@ -206,10 +388,8 @@ pub(super) fn resize(
 
     let options =
         MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
-    let new_buffer = logical_device
-        .heap_allocator
-        .allocate(new_size, options)
-        .context("Metal buffer heap allocation failed (resize)")?;
+    let (new_buffer, is_device_allocated) =
+        allocate_mtl_storage_buffer(logical_device, new_size, options)?;
 
     let copy_len = if preserve_contents {
         old_state.size.min(new_size)
@@ -272,6 +452,8 @@ pub(super) fn resize(
         device_handle,
         buffer: new_buffer,
         size: new_size,
+        allocation_size: new_size,
+        is_device_allocated,
         arg_buffer_index: old_state.arg_buffer_index,
         flags: old_state.flags,
         element_stride: old_state.element_stride,

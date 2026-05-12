@@ -62,7 +62,7 @@ const MIN_OVERFLOW_HEAP_SIZE: u64 = 16 * 1024 * 1024;
 /// the symptom (hours-long hangs, crash spirals logging tens of thousands
 /// of 12 GB allocation attempts) into a single clean error the caller can
 /// handle. Raise this if a legitimate workload needs it.
-const MAX_HEAP_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+pub(super) const MAX_HEAP_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 
 /// Multi-heap allocator for Metal buffer allocations.
 ///
@@ -851,7 +851,12 @@ impl ResourceRegistry {
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub buffer: MTLBuffer,
+    /// Logical byte size (API-visible).
     pub size: u64,
+    /// Backing allocation size (`MTLBuffer.length()`).
+    pub allocation_size: u64,
+    /// `true` when created via [`MTLDevice::new_buffer`] (jumbo) rather than a heap.
+    pub is_device_allocated: bool,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
     pub flags: crate::types::BufferFlags,
