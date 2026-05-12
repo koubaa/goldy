@@ -159,6 +159,7 @@ pub(super) fn create(
             root_signature,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: Vec::new(),
+            binding_element_strides: Vec::new(),
             shader_debug_name,
         },
     );

@@ -117,6 +117,7 @@ pub(super) fn create(
             owns_layout,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: Vec::new(),
+            binding_element_strides: Vec::new(),
             shader_debug_name,
         },
     );
@@ -406,6 +407,19 @@ pub(super) fn submit(
                 } => {
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
                     {
+                        if crate::slang::layout_validation_enabled()
+                            && !pipeline.binding_element_strides.is_empty()
+                        {
+                            let actual_strides: Vec<Option<u32>> = buffer_handles
+                                .iter()
+                                .map(|h| buffers.get(h).and_then(|b| b.element_stride))
+                                .collect();
+                            crate::backend::validate_binding_strides(
+                                &actual_strides,
+                                &pipeline.binding_element_strides,
+                                &pipeline.shader_debug_name,
+                            )?;
+                        }
                         let mut layout = PushLayout::default();
                         shared::fill_bindless(
                             &mut layout,

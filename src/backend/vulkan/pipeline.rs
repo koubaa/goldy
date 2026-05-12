@@ -164,6 +164,7 @@ pub(super) fn create(
             owns_layout,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: Vec::new(),
+            binding_element_strides: Vec::new(),
             shader_debug_name,
         },
     );
@@ -368,6 +369,7 @@ pub(super) fn create_with_depth(
             owns_layout,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: Vec::new(),
+            binding_element_strides: Vec::new(),
             shader_debug_name,
         },
     );

@@ -886,6 +886,9 @@ pub(crate) struct PipelineState {
     pub primitive_type: MTLPrimitiveType,
     /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per push-constant slot expected element stride (bytes) from reflection.
+    #[allow(dead_code)]
+    pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }
@@ -898,6 +901,9 @@ pub(crate) struct ComputePipelineState {
     pub workgroup_size: [u32; 3],
     /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per push-constant slot expected element stride (bytes) from reflection.
+    #[allow(dead_code)]
+    pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
 }

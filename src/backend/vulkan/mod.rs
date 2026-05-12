@@ -850,12 +850,17 @@ impl GpuBackend for VulkanBackend {
         let cs_module =
             self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
-        let cats = self
+        let (cats, strides) = self
             .state
             .shaders
             .get(&compute_shader)
             .and_then(|s| s.reflection.as_ref())
-            .map(|r| r.push_constant_categories.clone())
+            .map(|r| {
+                (
+                    r.push_constant_categories.clone(),
+                    r.binding_element_strides.clone(),
+                )
+            })
             .unwrap_or_default();
 
         let shader_debug_name = format!("compute_shader#{compute_shader}");
@@ -871,6 +876,7 @@ impl GpuBackend for VulkanBackend {
 
         if let Some(ps) = self.state.compute_pipelines.get_mut(&handle) {
             ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
         }
         Ok(handle)
     }

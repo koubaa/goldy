@@ -75,6 +75,7 @@ pub(super) fn create(
             pipeline,
             workgroup_size,
             push_constant_categories: Vec::new(),
+            binding_element_strides: Vec::new(),
             shader_debug_name: String::new(),
         },
     );

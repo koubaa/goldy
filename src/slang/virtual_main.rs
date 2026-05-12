@@ -44,6 +44,106 @@ use std::ops::Range;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Extract the inner element type name for each bindless slot from the
+/// `[goldy_*]` entry points in `source`.
+///
+/// For `Scattered<T>` / `BufRO<T>` → `Some("T")`, for `ByteAddress` →
+/// `None`, for broadcasts → `Some(struct_name)`, for textures/samplers/SVs
+/// → `None`.  Fragment entries take precedence, matching [`extract_push_constant_categories`].
+pub fn extract_binding_element_type_names(source: &str) -> Vec<Option<String>> {
+    let entries = find_all_entries(source);
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    fn type_name_for_param(param: &Param) -> Option<String> {
+        match &param.kind {
+            ParamKind::Resource => {
+                let ty = param.ty.trim();
+                fn inner(ty: &str, prefix: &str) -> Option<String> {
+                    if ty.starts_with(prefix) && ty.ends_with('>') {
+                        Some(ty[prefix.len()..ty.len() - 1].to_string())
+                    } else {
+                        None
+                    }
+                }
+                inner(ty, "Scattered<")
+                    .or_else(|| inner(ty, "BufRO<"))
+                    .or_else(|| inner(ty, "Interpolated<"))
+                    .or_else(|| inner(ty, "DirectSpatial<"))
+            }
+            ParamKind::Broadcast => Some(param.ty.clone()),
+            _ => None,
+        }
+    }
+
+    fn extract_from_params(params: &[ParamItem]) -> Vec<Option<String>> {
+        let mut names: Vec<Option<String>> = Vec::new();
+        for item in params {
+            match item {
+                ParamItem::Single(p) => {
+                    if matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast) {
+                        names.push(type_name_for_param(p));
+                    }
+                }
+                ParamItem::Conditional {
+                    then_params,
+                    else_params,
+                    ..
+                } => {
+                    let then_count = then_params
+                        .iter()
+                        .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                        .count();
+                    let else_count = else_params
+                        .iter()
+                        .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                        .count();
+                    let max_slots = then_count.max(else_count);
+                    for i in 0..max_slots {
+                        let then_name = then_params
+                            .iter()
+                            .filter(|p| {
+                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
+                            })
+                            .nth(i)
+                            .and_then(type_name_for_param);
+                        let else_name = else_params
+                            .iter()
+                            .filter(|p| {
+                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
+                            })
+                            .nth(i)
+                            .and_then(type_name_for_param);
+                        if then_name == else_name {
+                            names.push(then_name);
+                        } else {
+                            names.push(None);
+                        }
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    let mut fragment_names: Option<Vec<Option<String>>> = None;
+    let mut fallback_names: Option<Vec<Option<String>>> = None;
+
+    for entry in &entries {
+        let names = extract_from_params(&entry.params);
+        if !names.is_empty() {
+            if entry.stage == Stage::Fragment {
+                fragment_names = Some(names);
+            } else if fallback_names.is_none() || entry.stage == Stage::Compute {
+                fallback_names = Some(names);
+            }
+        }
+    }
+
+    fragment_names.or(fallback_names).unwrap_or_default()
+}
+
 /// Extract per-bindless-slot [`BindlessCategory`](crate::types::BindlessCategory) expectations from the
 /// `[goldy_*]` entry points in `source`.
 ///
@@ -2061,5 +2161,58 @@ void cs_main(uniform uint _bw0) {}
 "#;
         let cats = extract_push_constant_categories(source);
         assert!(cats.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_binding_element_type_names tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn binding_type_names_compute_basic() {
+        let source = r#"
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
+    data[id.x] = cfg.base;
+}
+"#;
+        let names = extract_binding_element_type_names(source);
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], Some("TimeUniforms".into()));
+        assert_eq!(names[1], Some("uint".into()));
+    }
+
+    #[test]
+    fn binding_type_names_all_resource_types() {
+        let source = r#"
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(
+    Scattered<float4> buf,
+    BufRO<uint> ro,
+    Interpolated<float4> tex,
+    DirectSpatial<float4> img,
+    Filter sampler,
+    ThreadId id
+) {}
+"#;
+        let names = extract_binding_element_type_names(source);
+        assert_eq!(names.len(), 5);
+        assert_eq!(names[0], Some("float4".into()));
+        assert_eq!(names[1], Some("uint".into()));
+        assert_eq!(names[2], Some("float4".into()));
+        assert_eq!(names[3], Some("float4".into()));
+        assert_eq!(names[4], None); // Filter has no inner type
+    }
+
+    #[test]
+    fn binding_type_names_empty_for_non_goldy() {
+        let source = r#"
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uniform uint _bw0) {}
+"#;
+        let names = extract_binding_element_type_names(source);
+        assert!(names.is_empty());
     }
 }
