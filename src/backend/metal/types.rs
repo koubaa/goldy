@@ -491,8 +491,8 @@ impl LogicalDevice {
     /// [`ResourceRegistry::drain_pending_slots_up_to`]) whose GPU timeline
     /// barrier has been signaled. Both advance together so slots are recycled
     /// as soon as the GPU catches up, without requiring a full blocking
-    /// `wait_all_in_flight`. This is what prevents the 64-slot `pending_free`
-    /// list from filling up in long-running or multi-window scenarios.
+    /// `wait_all_in_flight`. This is what prevents the `pending_free` list
+    /// from filling up in long-running or multi-window scenarios.
     pub(crate) fn process_deletion_queue_up_to_signaled(&mut self) {
         let signaled = self.timeline_event.as_ref().signaled_value();
         self.deletion_queue.process_up_to(signaled);
@@ -500,22 +500,31 @@ impl LogicalDevice {
     }
 }
 
-/// Maximum resources per access pattern category (must match GOLDY_MAX_RESOURCES in shaders)
-pub const MAX_RESOURCES_PER_CATEGORY: u32 = 64;
+/// Maximum resources per access pattern category (must match GOLDY_MAX_RESOURCES in shaders).
+///
+/// Raised from 64 to 4096 in issue #125. The previous 64-slot limit only
+/// supported ~2 frames in flight with typical per-frame buffer counts; 4096
+/// comfortably handles hundreds of in-flight frames. The argument buffer
+/// cost is 5 × 4096 × 8 B ≈ 160 KB — negligible vs Metal Tier 2's 500K
+/// limit. Vulkan and DX12 already use 16 384.
+pub const MAX_RESOURCES_PER_CATEGORY: u32 = 4096;
 
 use super::super::shared::SlotAllocator;
 
 /// Registry for tracking bindless resource indices
 ///
-/// The layout matches GoldyBindlessResources in bindless_resources.slang:
-/// - storageBuffers[64] at indices 0-63   (Scattered access)
-/// - uniformBuffers[64] at indices 64-127 (Broadcast access)
-/// - textures[64] at indices 128-191      (Interpolated / Texture2D)
-/// - storageImages[64] at indices 192-255 (Direct / RWTexture2D)
-/// - samplers[64] at indices 256-319      (Filter config)
+/// The layout matches GoldyBindlessResources in bindless_resources.slang.
+/// Each category occupies [`MAX_RESOURCES_PER_CATEGORY`] slots:
+/// - storageBuffers at indices `0..N`   (Scattered access)
+/// - uniformBuffers at indices `N..2N`  (Broadcast access)
+/// - textures at indices `2N..3N`       (Interpolated / Texture2D)
+/// - storageImages at indices `3N..4N`  (Direct / RWTexture2D)
+/// - samplers at indices `4N..5N`       (Filter config)
+///
+/// where `N = MAX_RESOURCES_PER_CATEGORY`.
 ///
 /// Each category uses a [`SlotAllocator`] that recycles freed LOCAL indices
-/// (0-63) before minting new ones. The global argument-buffer encoding offset
+/// before minting new ones. The global argument-buffer encoding offset
 /// is computed by adding the category's base (`*_global_index` helpers).
 /// Metal's two-phase recycle (slots parked in `pending_free_*_slots` until the
 /// GPU timeline advances past the barrier) is layered on top: pending slots are
@@ -565,7 +574,7 @@ impl ResourceRegistry {
         Self::default()
     }
 
-    /// Register a storage buffer (Scattered access) - LOCAL indices 0-63.
+    /// Register a storage buffer (Scattered access) - LOCAL indices 0..MAX_RESOURCES_PER_CATEGORY.
     ///
     /// Reuses a freed slot if available (see `unregister_buffer`). Without
     /// this reuse, long-running apps that churn transient buffers every frame
@@ -610,7 +619,7 @@ impl ResourceRegistry {
         local_index
     }
 
-    /// Register a uniform buffer (Broadcast access) — returns the LOCAL index (0-63).
+    /// Register a uniform buffer (Broadcast access) — returns a LOCAL index.
     /// The global argument-buffer encoding offset is `uniform_global_index(local)`.
     ///
     /// Reuses a freed slot if available (see `unregister_buffer`).
@@ -639,7 +648,7 @@ impl ResourceRegistry {
         local_index + MAX_RESOURCES_PER_CATEGORY
     }
 
-    /// Register a sampled texture (Interpolated / Texture2D) — returns the LOCAL index (0-63).
+    /// Register a sampled texture (Interpolated / Texture2D) — returns a LOCAL index.
     /// Use `texture_global_index()` to get the argument buffer encoding offset.
     ///
     /// Reuses a freed slot if available (see `release_texture_slot`).
@@ -668,7 +677,7 @@ impl ResourceRegistry {
         local_index + 2 * MAX_RESOURCES_PER_CATEGORY
     }
 
-    /// Register a storage image (Direct / RWTexture2D) — returns the LOCAL index (0-63).
+    /// Register a storage image (Direct / RWTexture2D) — returns a LOCAL index.
     /// Use `storage_image_global_index()` to get the argument buffer encoding offset.
     ///
     /// Reuses a freed slot if available (see `release_storage_image_slot`).
@@ -711,7 +720,7 @@ impl ResourceRegistry {
         local_index + 3 * MAX_RESOURCES_PER_CATEGORY
     }
 
-    /// Register a sampler — returns the LOCAL index (0-63) for resource slots.
+    /// Register a sampler — returns a LOCAL index for resource slots.
     /// Use `sampler_global_index()` to get the argument buffer encoding offset.
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
         let local_index = self.sampler.alloc();
@@ -727,8 +736,8 @@ impl ResourceRegistry {
 
     /// Remove a buffer handle from the registry and return its LOCAL slot
     /// to the appropriate free list so subsequent `register_*_buffer` calls
-    /// reuse it. Without this, per-frame buffer churn exhausts the 64-slot
-    /// argument-buffer window in ~9 seconds and the shader starts reading
+    /// reuse it. Without this, per-frame buffer churn exhausts the
+    /// argument-buffer window and the shader starts reading
     /// into corrupt / out-of-range descriptors.
     ///
     /// Pass `Some(barrier)` when any GPU command buffer that may still reference
@@ -798,6 +807,22 @@ impl ResourceRegistry {
     /// `drain_pending_slots_up_to(signaled)` instead.
     pub fn drain_pending_slots(&mut self) {
         self.drain_pending_slots_up_to(TimelineValue::MAX);
+    }
+
+    /// Number of available (allocatable) slots in the given category.
+    ///
+    /// Includes both recycled free-list entries and not-yet-minted slots up to
+    /// [`MAX_RESOURCES_PER_CATEGORY`]. Pending-free slots (awaiting GPU timeline)
+    /// are counted as occupied.
+    pub fn available_slots(&self, category: crate::types::BindlessCategory) -> u32 {
+        let allocator = match category {
+            crate::types::BindlessCategory::Scattered => &self.storage_buffer,
+            crate::types::BindlessCategory::Broadcast => &self.uniform_buffer,
+            crate::types::BindlessCategory::Texture => &self.texture,
+            crate::types::BindlessCategory::StorageImage => &self.storage_image,
+            crate::types::BindlessCategory::Sampler => &self.sampler,
+        };
+        MAX_RESOURCES_PER_CATEGORY.saturating_sub(allocator.live_count())
     }
 
     /// Number of buffer slots currently waiting for GPU idle before reuse.
@@ -898,7 +923,7 @@ pub(crate) struct TextureState {
     pub height: u32,
     pub format: TextureFormat,
     pub texture: MTLTexture,
-    /// LOCAL index (0..MAX_RESOURCES_PER_CATEGORY) in the texture category this
+    /// LOCAL index in the texture category this
     /// texture was registered in (`storageImages[]` when `is_storage_image`,
     /// otherwise `textures[]`).
     pub arg_buffer_index: u32,

@@ -158,6 +158,28 @@ impl ResourceRegistry {
             self.sampler.free(offset);
         }
     }
+
+    /// Number of available (allocatable) slots in the given category.
+    ///
+    /// DX12 uses a unified CBV/SRV/UAV heap for all non-sampler categories,
+    /// so Scattered/Broadcast/Texture/StorageImage all report against the
+    /// same pool. Sampler has its own heap.
+    pub fn available_slots(&self, category: crate::types::BindlessCategory) -> u32 {
+        match category {
+            crate::types::BindlessCategory::Sampler => {
+                MAX_BINDLESS_SAMPLERS.saturating_sub(self.sampler.live_count())
+            }
+            _ => MAX_BINDLESS_CBV_SRV_UAV.saturating_sub(self.cbv_srv_uav.live_count()),
+        }
+    }
+
+    /// Maximum slots for the given category.
+    pub fn max_slots(category: crate::types::BindlessCategory) -> u32 {
+        match category {
+            crate::types::BindlessCategory::Sampler => MAX_BINDLESS_SAMPLERS,
+            _ => MAX_BINDLESS_CBV_SRV_UAV,
+        }
+    }
 }
 
 #[cfg(test)]

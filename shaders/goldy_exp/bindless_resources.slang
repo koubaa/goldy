@@ -15,8 +15,8 @@
 
 implementing goldy_exp;
 
-// Maximum resources per access pattern category
-static const uint GOLDY_MAX_RESOURCES = 64;
+// Maximum resources per access pattern category (must match MAX_RESOURCES_PER_CATEGORY in metal/types.rs)
+static const uint GOLDY_MAX_RESOURCES = 4096;
 #if defined(__METAL__)
 
 // ParameterBlock with device pointers.

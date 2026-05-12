@@ -149,6 +149,18 @@ impl ResourceRegistry {
             self.sampler.free(index);
         }
     }
+
+    /// Number of available (allocatable) slots in the given category.
+    pub fn available_slots(&self, category: crate::types::BindlessCategory) -> u32 {
+        let allocator = match category {
+            crate::types::BindlessCategory::Scattered => &self.storage_buffer,
+            crate::types::BindlessCategory::Broadcast => &self.uniform_buffer,
+            crate::types::BindlessCategory::Texture => &self.sampled_texture,
+            crate::types::BindlessCategory::StorageImage => &self.storage_image,
+            crate::types::BindlessCategory::Sampler => &self.sampler,
+        };
+        MAX_BINDLESS_RESOURCES.saturating_sub(allocator.live_count())
+    }
 }
 
 #[cfg(test)]
