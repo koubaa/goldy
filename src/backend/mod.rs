@@ -595,11 +595,11 @@ pub trait GpuBackend: Send + Sync {
 
     /// Submit an analyzed task graph with optional offscreen [`GraphCommand::Render`] segments.
     ///
-    /// Compute batches run through [`submit_standalone`](Self::submit_standalone); each
-    /// [`GraphCommand::Render`] runs via [`render_to_target`](Self::render_to_target) after
-    /// waiting on the preceding compute timeline value so GPU ordering is preserved.
-    ///
-    /// The default implementation is correct for all three backends and should not be overridden.
+    /// The default implementation is correct but suboptimal: it calls
+    /// [`wait_until`](Self::wait_until) (CPU stall) between each compute batch and render
+    /// pass to ensure GPU ordering. Backends should override this to record all commands
+    /// into a single command buffer/list with GPU-side barriers, eliminating CPU waits.
+    /// Metal, Vulkan, and DX12 all provide such overrides.
     fn submit_graph(
         &mut self,
         device: DeviceHandle,

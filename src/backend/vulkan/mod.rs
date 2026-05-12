@@ -955,6 +955,14 @@ impl GpuBackend for VulkanBackend {
         compute::submit(&mut self.state, device_handle, commands, None)
     }
 
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit_graph(&mut self.state, device, commands)
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .state

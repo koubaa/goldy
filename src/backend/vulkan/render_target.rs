@@ -384,12 +384,19 @@ pub(super) fn destroy(
 
 /// Render commands to a render target.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_to<F>(
+/// Record an offscreen render pass into an existing command buffer without submitting.
+///
+/// Records layout transitions (UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL),
+/// dynamic rendering, draw commands, and the post-render barrier
+/// (COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL) into `cmd`.
+/// Does NOT begin/end the command buffer and does NOT submit.
+pub(super) fn record_render_pass_to_buffer<F>(
     devices: &HashMap<DeviceHandle, LogicalDevice>,
-    render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
+    render_targets: &HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
     commands: &[RenderCommand],
+    cmd: vk::CommandBuffer,
     record_commands_fn: F,
 ) -> Result<()>
 where
@@ -412,7 +419,6 @@ where
         anyhow::bail!("Render target belongs to a different device");
     }
 
-    let cmd = render_target.command_buffer;
     let width = render_target.width;
     let height = render_target.height;
     let image = render_target.image;
@@ -420,7 +426,6 @@ where
     let depth_view = render_target.depth_view;
     let depth_format = render_target.depth_format;
 
-    // Find the first Clear command to use as the initial clear color
     let clear_color = commands
         .iter()
         .find_map(|c| match c {
@@ -429,7 +434,6 @@ where
         })
         .unwrap_or(Color::BLACK);
 
-    // Find the first ClearDepth command
     let clear_depth = commands
         .iter()
         .find_map(|c| match c {
@@ -437,13 +441,6 @@ where
             _ => None,
         })
         .unwrap_or(1.0);
-
-    // Begin command buffer
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-    unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
-        .context("Failed to begin command buffer")?;
 
     // Transition image to color attachment
     let color_barrier = vk::ImageMemoryBarrier2::default()
@@ -462,10 +459,8 @@ where
             layer_count: 1,
         });
 
-    // Prepare image barriers - color always, depth if present
     let mut barriers = vec![color_barrier];
 
-    // Add depth barrier if depth buffer exists
     if let (Some(depth_img), Some(df)) = (render_target.depth_image, depth_format) {
         let depth_barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
@@ -492,7 +487,6 @@ where
     }
 
     let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
     // Begin dynamic rendering
@@ -507,7 +501,6 @@ where
             },
         });
 
-    // Create depth attachment if present
     let depth_attachment = depth_view.map(|dv| {
         vk::RenderingAttachmentInfo::default()
             .image_view(dv)
@@ -530,7 +523,6 @@ where
         .layer_count(1)
         .color_attachments(std::slice::from_ref(&color_attachment));
 
-    // Add depth attachment if present
     if let Some(ref depth_att) = depth_attachment {
         rendering_info = rendering_info.depth_attachment(depth_att);
     }
@@ -541,12 +533,11 @@ where
             .cmd_begin_rendering(cmd, &rendering_info)
     };
 
-    // Negative viewport height flips Y to match DX12 (core since Vulkan 1.1)
     let viewport = vk::Viewport {
         x: 0.0,
-        y: height as f32, // Start from bottom
+        y: height as f32,
         width: width as f32,
-        height: -(height as f32), // Negative height flips Y
+        height: -(height as f32),
         min_depth: 0.0,
         max_depth: 1.0,
     };
@@ -566,13 +557,9 @@ where
             .cmd_set_scissor(cmd, 0, std::slice::from_ref(&scissor))
     };
 
-    // Track current pipeline for bind group binding
     let mut current_pipeline: Option<PipelineHandle> = None;
-
-    // Execute render commands using provided callback
     record_commands_fn(cmd, commands, logical_device, &mut current_pipeline)?;
 
-    // End dynamic rendering
     unsafe { logical_device.device.cmd_end_rendering(cmd) };
 
     // Transition image to transfer src (ready for potential readback)
@@ -594,16 +581,59 @@ where
 
     let dep_info =
         vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
-    // End command buffer
+    Ok(())
+}
+
+pub(super) fn render_to<F>(
+    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
+    device_handle: DeviceHandle,
+    target: RenderTargetHandle,
+    commands: &[RenderCommand],
+    record_commands_fn: F,
+) -> Result<()>
+where
+    F: FnOnce(
+        vk::CommandBuffer,
+        &[RenderCommand],
+        &LogicalDevice,
+        &mut Option<PipelineHandle>,
+    ) -> Result<()>,
+{
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
+    let cmd = render_targets
+        .get(&target)
+        .context("Invalid render target handle")?
+        .command_buffer;
+
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
+        .context("Failed to begin command buffer")?;
+
+    record_render_pass_to_buffer(
+        devices,
+        render_targets,
+        device_handle,
+        target,
+        commands,
+        cmd,
+        record_commands_fn,
+    )?;
+
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+
     unsafe { logical_device.device.end_command_buffer(cmd) }
         .context("Failed to end command buffer")?;
 
-    // Submit
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
-
     unsafe {
         logical_device.device.queue_submit(
             logical_device.queue,
@@ -613,11 +643,9 @@ where
     }
     .context("Failed to submit command buffer")?;
 
-    // Wait for completion
     unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }
         .context("Failed to wait for queue")?;
 
-    // Mark as rendered
     if let Some(rt) = render_targets.get_mut(&target) {
         rt.has_rendered = true;
     }
