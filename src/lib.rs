@@ -46,9 +46,6 @@ pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transf
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use timeline::TimelineValue;
 
-/// Deprecated: use [`TaskGraph`] instead.
-#[deprecated(since = "0.2.0", note = "use `TaskGraph` instead")]
-pub type ComputeGraph = TaskGraph;
 pub use backend::GraphCommand;
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
@@ -66,9 +63,6 @@ pub use task_graph::{
     TaskGraph, TransientId, TransientTextureId,
 };
 
-/// Deprecated: use [`GraphProgram`] instead.
-#[deprecated(since = "0.3.0", note = "use `GraphProgram` instead")]
-pub type ComputeProgram = GraphProgram;
 pub use texture::Texture;
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use types::*;

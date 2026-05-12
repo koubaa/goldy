@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
-    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    Buffer, Color, CommandEncoder, ComputePipeline, DataAccess, DeviceType, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, TaskGraph,
     VertexBufferLayout,
 };
 use std::sync::Arc;
@@ -220,16 +220,17 @@ impl RenderState {
         self.params_buffer.write_data(0, &[params])?;
 
         // Run compute pass to update particles
-        let mut compute_encoder = ComputeEncoder::new();
-        {
-            let mut pass = compute_encoder.begin_compute_pass();
-            pass.set_pipeline(&self.compute_pipeline);
-            // Pass buffer indices via push constants
-            pass.bind_resources(&[&self.particle_buffer, &self.params_buffer]);
-            let workgroups = NUM_PARTICLES.div_ceil(64);
-            pass.dispatch(workgroups, 1, 1);
-        }
-        compute_encoder.dispatch(&self.device)?;
+        let mut graph = TaskGraph::new();
+        graph
+            .node("update_particles", &self.compute_pipeline)
+            .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
+            .bind_buffer(&self.params_buffer, NodeAccess::Read)
+            .bind_resources_raw(&[
+                self.particle_buffer.bindless_index().unwrap(),
+                self.params_buffer.bindless_index().unwrap(),
+            ])
+            .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
+        graph.dispatch(&self.device)?;
 
         // Render particles
         let frame = self.surface.begin()?;

@@ -9,9 +9,9 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferPool, BufferView, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceType,
-    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
-    VertexBufferLayout,
+    BufferPool, BufferView, Color, CommandEncoder, ComputePipeline, DeviceType, Instance,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -217,36 +217,24 @@ impl RenderState {
         if should_update {
             self.last_update = now;
 
-            // Run compute pass with ping-pong buffers
-            let mut compute_encoder = ComputeEncoder::new();
-            {
-                let mut pass = compute_encoder.begin_compute_pass();
-                pass.set_pipeline(&self.compute_pipeline);
-
-                // Pass buffer indices via push constants.
-                // Order matters: [current_state, next_state] matching shader slots.
-                let (read_handle, write_handle) = if self.use_buffer_a {
-                    // A -> B: read from A, write to B
-                    (
-                        self.view_a.bindless_handle().unwrap(),
-                        self.view_b.bindless_handle().unwrap(),
-                    )
-                } else {
-                    // B -> A: read from B, write to A
-                    (
-                        self.view_b.bindless_handle().unwrap(),
-                        self.view_a.bindless_handle().unwrap(),
-                    )
-                };
-                pass.bind_resources_typed(&[read_handle, write_handle]);
-
-                // Dispatch workgroups (8x8 threads per group)
-                let workgroups_x = GRID_WIDTH.div_ceil(8);
-                let workgroups_y = GRID_HEIGHT.div_ceil(8);
-                pass.dispatch(workgroups_x, workgroups_y, 1);
-            }
-
-            compute_encoder.dispatch(&self.device)?;
+            // Run compute pass with ping-pong buffers.
+            // Order matters: [current_state, next_state] matching shader slots.
+            let (read_view, write_view) = if self.use_buffer_a {
+                (&self.view_a, &self.view_b) // A -> B
+            } else {
+                (&self.view_b, &self.view_a) // B -> A
+            };
+            let mut graph = TaskGraph::new();
+            graph
+                .node("game_of_life", &self.compute_pipeline)
+                .bind_buffer_view(read_view, NodeAccess::Read)
+                .bind_buffer_view(write_view, NodeAccess::Write)
+                .bind_resources_raw(&[
+                    read_view.bindless_handle().unwrap().index(),
+                    write_view.bindless_handle().unwrap().index(),
+                ])
+                .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
+            graph.dispatch(&self.device)?;
 
             // Toggle buffer for next frame
             self.use_buffer_a = !self.use_buffer_a;

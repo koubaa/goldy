@@ -62,12 +62,9 @@ impl ProgramResolution {
     }
 
     fn render_target(&self, slot: u32) -> Result<RenderTargetHandle> {
-        self.render_targets
-            .get(&slot)
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!("ProgramResolution: missing render target slot {}", slot)
-            })
+        self.render_targets.get(&slot).copied().ok_or_else(|| {
+            anyhow::anyhow!("ProgramResolution: missing render target slot {}", slot)
+        })
     }
 }
 
@@ -368,10 +365,6 @@ pub struct GraphProgram {
     has_render: bool,
 }
 
-/// Deprecated: use [`GraphProgram`] instead.
-#[deprecated(since = "0.3.0", note = "use `GraphProgram` instead")]
-pub type ComputeProgram = GraphProgram;
-
 impl GraphProgram {
     /// Resolve slots and emit `GpuCommand`s without re-analyzing the graph.
     ///
@@ -631,10 +624,8 @@ mod tests {
         assert!(prog.has_render_passes());
 
         // Specialize with two different render targets.
-        let rt_a =
-            RenderTarget::new(&dev, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
-        let rt_b =
-            RenderTarget::new(&dev, 16, 16, TextureFormat::Rgba8Unorm).unwrap();
+        let rt_a = RenderTarget::new(&dev, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+        let rt_b = RenderTarget::new(&dev, 16, 16, TextureFormat::Rgba8Unorm).unwrap();
         let buf = crate::buffer::Buffer::new(&dev, 256, crate::DataAccess::Scattered).unwrap();
 
         let mut res_a = ProgramResolution::new();
@@ -657,7 +648,9 @@ mod tests {
             "expected Compute commands"
         );
         assert!(
-            cmds_a.iter().any(|c| matches!(c, GraphCommand::Render { .. })),
+            cmds_a
+                .iter()
+                .any(|c| matches!(c, GraphCommand::Render { .. })),
             "expected Render commands"
         );
 

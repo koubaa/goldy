@@ -93,10 +93,6 @@ pub use program::{
     GraphProgram, ProgramBuilder, ProgramRenderPassBuilder, ProgramResolution, ProgramStepBuilder,
 };
 
-/// Deprecated: use [`GraphProgram`] instead.
-#[deprecated(since = "0.3.0", note = "use `GraphProgram` instead")]
-pub type ComputeProgram = GraphProgram;
-
 use crate::backend::{BufferHandle, TextureHandle};
 use crate::types::TextureFormat;
 
