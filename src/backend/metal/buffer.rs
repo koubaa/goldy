@@ -14,7 +14,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     size: u64,
     access: DataAccess,
-    _element_stride: Option<u32>,
+    element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
@@ -92,6 +92,7 @@ pub(super) fn create(
             size,
             arg_buffer_index,
             flags,
+            element_stride,
         },
     );
 
@@ -107,7 +108,7 @@ pub(super) fn create_view(
     parent_handle: BufferHandle,
     offset: u64,
     size: u64,
-    _element_stride: Option<u32>,
+    element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
     let parent = state
         .buffers
@@ -158,6 +159,7 @@ pub(super) fn create_view(
             size,
             arg_buffer_index,
             flags: parent_flags,
+            element_stride,
         },
     );
 

@@ -173,6 +173,7 @@ pub(super) fn place_buffer_in_transient_heap(
             size,
             arg_buffer_index,
             flags: crate::types::BufferFlags::empty(),
+            element_stride: None,
         },
     );
     Ok(handle)

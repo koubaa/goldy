@@ -151,6 +151,18 @@ pub(super) fn create(
     let handle = state.next_compute_pipeline_handle;
     state.next_compute_pipeline_handle += 1;
 
+    let (cats, strides) = state
+        .shaders
+        .get(&compute_shader)
+        .and_then(|s| s.reflection.as_ref())
+        .map(|r| {
+            (
+                r.push_constant_categories.clone(),
+                r.binding_element_strides.clone(),
+            )
+        })
+        .unwrap_or_default();
+
     state.compute_pipelines.insert(
         handle,
         ComputePipelineState {
@@ -158,8 +170,8 @@ pub(super) fn create(
             pipeline_state,
             root_signature,
             parameter_block_layouts: Vec::new(),
-            push_constant_categories: Vec::new(),
-            binding_element_strides: Vec::new(),
+            push_constant_categories: cats,
+            binding_element_strides: strides,
             shader_debug_name,
         },
     );
@@ -334,6 +346,23 @@ pub(super) fn submit(
                 }
             }
             GpuCommand::BindResources { buffers } => {
+                if crate::slang::layout_validation_enabled() {
+                    if let Some(pipeline) =
+                        current_compute_pipeline.and_then(|h| state.compute_pipelines.get(&h))
+                    {
+                        if !pipeline.binding_element_strides.is_empty() {
+                            let actual: Vec<Option<u32>> = buffers
+                                .iter()
+                                .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
+                                .collect();
+                            crate::backend::validate_binding_strides(
+                                &actual,
+                                &pipeline.binding_element_strides,
+                                &pipeline.shader_debug_name,
+                            )?;
+                        }
+                    }
+                }
                 let mut layout = types::PushLayout::default();
                 shared::fill_bindless(
                     &mut layout,

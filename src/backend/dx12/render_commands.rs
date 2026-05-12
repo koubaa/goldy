@@ -71,6 +71,23 @@ pub(super) fn record(
                 }
             }
             RenderCommand::BindResources { buffers } => {
+                if crate::slang::layout_validation_enabled() {
+                    if let Some(pipeline) =
+                        current_pipeline_handle.and_then(|h| state.pipelines.get(&h))
+                    {
+                        if !pipeline.binding_element_strides.is_empty() {
+                            let actual: Vec<Option<u32>> = buffers
+                                .iter()
+                                .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
+                                .collect();
+                            crate::backend::validate_binding_strides(
+                                &actual,
+                                &pipeline.binding_element_strides,
+                                &pipeline.shader_debug_name,
+                            )?;
+                        }
+                    }
+                }
                 let mut layout = types::PushLayout::default();
                 shared::fill_bindless(
                     &mut layout,
