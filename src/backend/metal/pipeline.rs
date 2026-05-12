@@ -1,32 +1,27 @@
 //! Graphics pipeline management logic.
 
-use super::super::{DeviceHandle, PipelineHandle, ShaderHandle};
+use super::super::shared::GraphicsPipelineCreateDesc;
+use super::super::PipelineHandle;
 use super::types::{MetalState, PipelineState};
 use super::utils::{
     compare_to_mtl, depth_format_to_mtl, format_to_mtl, topology_to_mtl, vertex_format_to_mtl,
 };
 use crate::slang::SlangStage;
-use crate::types::PrimitiveTopology;
-use crate::types::{DepthStencilState, TextureFormat, VertexBufferLayout};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 
 /// Create a graphics pipeline (with optional depth stencil).
-///
-/// The argument count mirrors the Vulkan and DX12 backends for cross-backend navigability.
-/// If this function is ever refactored to a `PipelineDesc` struct, update all three backends
-/// simultaneously to keep the API surface consistent.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn create_with_depth(
     state: &mut MetalState,
-    device_handle: DeviceHandle,
-    vertex_shader: ShaderHandle,
-    fragment_shader: ShaderHandle,
-    vertex_layout: &VertexBufferLayout,
-    topology: PrimitiveTopology,
-    target_format: TextureFormat,
-    depth_stencil: Option<&DepthStencilState>,
+    desc: &GraphicsPipelineCreateDesc<'_>,
 ) -> Result<PipelineHandle> {
+    let device_handle = desc.device_handle;
+    let vertex_shader = desc.vertex_shader;
+    let fragment_shader = desc.fragment_shader;
+    let vertex_layout = desc.raster.vertex_layout;
+    let topology = desc.raster.topology;
+    let target_format = desc.raster.target_format;
+    let depth_stencil = desc.raster.depth_stencil;
     super::shader::ensure_stage_compiled(
         &state.slang_compiler,
         &state.devices,

@@ -436,12 +436,14 @@ impl GpuBackend for VulkanBackend {
             &self.state.devices,
             &mut self.state.shaders,
             &mut self.state.next_shader_handle,
-            device_handle,
-            slang_source,
-            search_paths,
-            defines,
-            optimization_level,
-            layout_checks,
+            crate::backend::shared::ShaderDesc::new(
+                device_handle,
+                slang_source,
+                search_paths,
+                defines,
+                optimization_level,
+            )
+            .with_layout_checks(layout_checks),
         )
     }
 
@@ -468,18 +470,18 @@ impl GpuBackend for VulkanBackend {
             render_push_constant_categories(&self.state.shaders, vertex_shader, fragment_shader);
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        let handle = pipeline::create(
-            &self.state.devices,
-            &mut self.state.pipelines,
-            &mut self.state.next_pipeline_handle,
+        let raster =
+            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
+        let handle = pipeline::create(pipeline::VulkanGraphicsPipelineCreateBundle {
+            devices: &self.state.devices,
+            pipelines: &mut self.state.pipelines,
+            next_pipeline_handle: &mut self.state.next_pipeline_handle,
             device_handle,
             vs_module,
             fs_module,
-            vertex_layout,
-            topology,
-            target_format,
+            raster: &raster,
             shader_debug_name,
-        )?;
+        })?;
 
         if let Some(ps) = self.state.pipelines.get_mut(&handle) {
             ps.push_constant_categories = cats;
@@ -685,19 +687,19 @@ impl GpuBackend for VulkanBackend {
         let cats =
             render_push_constant_categories(&self.state.shaders, vertex_shader, fragment_shader);
 
-        let handle = pipeline::create_with_depth(
-            &self.state.devices,
-            &mut self.state.pipelines,
-            &mut self.state.next_pipeline_handle,
+        let raster =
+            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
+                .with_depth_stencil(depth_stencil);
+        let handle = pipeline::create_with_depth(pipeline::VulkanGraphicsPipelineCreateBundle {
+            devices: &self.state.devices,
+            pipelines: &mut self.state.pipelines,
+            next_pipeline_handle: &mut self.state.next_pipeline_handle,
             device_handle,
             vs_module,
             fs_module,
-            vertex_layout,
-            topology,
-            target_format,
-            depth_stencil,
+            raster: &raster,
             shader_debug_name,
-        )?;
+        })?;
 
         if let Some(ps) = self.state.pipelines.get_mut(&handle) {
             ps.push_constant_categories = cats;

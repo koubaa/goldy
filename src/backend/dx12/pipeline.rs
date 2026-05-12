@@ -1,21 +1,21 @@
 //! Pipeline creation and management.
 
 use super::types::PipelineState;
-use super::{pso_cache, shader, utils, DeviceHandle, Dx12State, PipelineHandle, ShaderHandle};
-use crate::types::{DepthStencilState, PrimitiveTopology, TextureFormat, VertexBufferLayout};
+use super::{pso_cache, shader, utils, DeviceHandle, Dx12State, PipelineHandle};
 use anyhow::{Context, Result};
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub(super) fn create(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    vertex_shader: ShaderHandle,
-    fragment_shader: ShaderHandle,
-    vertex_layout: &VertexBufferLayout,
-    topology: PrimitiveTopology,
-    target_format: TextureFormat,
+    desc: &crate::backend::shared::GraphicsPipelineCreateDesc<'_>,
 ) -> Result<PipelineHandle> {
+    let device_handle = desc.device_handle;
+    let vertex_shader = desc.vertex_shader;
+    let fragment_shader = desc.fragment_shader;
+    let vertex_layout = desc.raster.vertex_layout;
+    let topology = desc.raster.topology;
+    let target_format = desc.raster.target_format;
     // Compile shaders on-demand
     let vs_bytecode =
         shader::ensure_stage_compiled(state, vertex_shader, crate::slang::SlangStage::Vertex)?;
@@ -226,17 +226,18 @@ pub(super) fn create(
 }
 
 /// Create a graphics pipeline with depth testing.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub(super) fn create_with_depth(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    vertex_shader: ShaderHandle,
-    fragment_shader: ShaderHandle,
-    vertex_layout: &VertexBufferLayout,
-    topology: PrimitiveTopology,
-    target_format: TextureFormat,
-    depth_stencil: Option<&DepthStencilState>,
+    desc: &crate::backend::shared::GraphicsPipelineCreateDesc<'_>,
 ) -> Result<PipelineHandle> {
+    let device_handle = desc.device_handle;
+    let vertex_shader = desc.vertex_shader;
+    let fragment_shader = desc.fragment_shader;
+    let vertex_layout = desc.raster.vertex_layout;
+    let topology = desc.raster.topology;
+    let target_format = desc.raster.target_format;
+    let depth_stencil = desc.raster.depth_stencil;
     let vs_bytecode =
         shader::ensure_stage_compiled(state, vertex_shader, crate::slang::SlangStage::Vertex)?;
     let fs_bytecode =
