@@ -1,7 +1,7 @@
 //! Shader management logic.
 
 use super::types::{Dx12State, ShaderState};
-use super::{DeviceHandle, ShaderHandle};
+use super::ShaderHandle;
 use anyhow::{Context, Result};
 
 pub(super) fn create_with_checks(

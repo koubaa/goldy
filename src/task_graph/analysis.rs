@@ -83,24 +83,6 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceId::Texture(x), ResourceId::Texture(y)) => x == y,
-        (ResourceId::ProgramBuffer(x), ResourceId::ProgramBuffer(y)) => x == y,
-        (ResourceId::ProgramTexture(x), ResourceId::ProgramTexture(y)) => x == y,
-        (ResourceId::ProgramBuffer(h), ResourceId::ProgramBufferRange { slot: parent, .. })
-        | (ResourceId::ProgramBufferRange { slot: parent, .. }, ResourceId::ProgramBuffer(h)) => {
-            h == parent
-        }
-        (
-            ResourceId::ProgramBufferRange {
-                slot: p1,
-                offset: o1,
-                len: l1,
-            },
-            ResourceId::ProgramBufferRange {
-                slot: p2,
-                offset: o2,
-                len: l2,
-            },
-        ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         _ => false,
@@ -131,8 +113,6 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     enum GroupKey {
         Buffer(u64),
         Texture(u64),
-        ProgramBuffer(u32),
-        ProgramTexture(u32),
         TransientBuffer(u32),
         TransientTexture(u32),
     }
@@ -142,10 +122,6 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::Buffer(h) => GroupKey::Buffer(h),
             ResourceId::BufferRange { parent, .. } => GroupKey::Buffer(parent),
             ResourceId::Texture(h) => GroupKey::Texture(h),
-            ResourceId::ProgramBuffer(slot) | ResourceId::ProgramBufferRange { slot, .. } => {
-                GroupKey::ProgramBuffer(slot)
-            }
-            ResourceId::ProgramTexture(slot) => GroupKey::ProgramTexture(slot),
             ResourceId::TransientBuffer(t) => GroupKey::TransientBuffer(t.0),
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
         }
@@ -367,8 +343,6 @@ fn compute_barriers(
     let wave_set: HashSet<usize> = wave_nodes.iter().copied().collect();
     let mut barrier_buffers: HashSet<BufferHandle> = HashSet::new();
     let mut barrier_textures: HashSet<TextureHandle> = HashSet::new();
-    let mut barrier_prog_buf: HashSet<u32> = HashSet::new();
-    let mut barrier_prog_tex: HashSet<u32> = HashSet::new();
 
     // Any edge crossing into this wave means the conflicting resource needs a barrier.
     for &(from, to) in edges {
@@ -384,10 +358,6 @@ fn compute_barriers(
                             None => {
                                 if let ResourceId::Texture(h) = bi.resource {
                                     barrier_textures.insert(h);
-                                } else if let Some(s) = bi.resource.program_buffer_slot() {
-                                    barrier_prog_buf.insert(s);
-                                } else if let Some(s) = bi.resource.program_texture_slot() {
-                                    barrier_prog_tex.insert(s);
                                 }
                             }
                         }
@@ -399,19 +369,10 @@ fn compute_barriers(
 
     let mut buffers: Vec<_> = barrier_buffers.into_iter().collect();
     let mut textures: Vec<_> = barrier_textures.into_iter().collect();
-    let mut program_buffer_slots: Vec<_> = barrier_prog_buf.into_iter().collect();
-    let mut program_texture_slots: Vec<_> = barrier_prog_tex.into_iter().collect();
     buffers.sort();
     textures.sort();
-    program_buffer_slots.sort();
-    program_texture_slots.sort();
 
-    BarrierSet {
-        buffers,
-        textures,
-        program_buffer_slots,
-        program_texture_slots,
-    }
+    BarrierSet { buffers, textures }
 }
 
 /// Emit a flat `Vec<GpuCommand>` from a graph IR and its compiled schedule.
@@ -430,13 +391,6 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
 
     for wave in &schedule.waves {
         if !wave.barriers_before.is_empty() {
-            if !wave.barriers_before.program_buffer_slots.is_empty()
-                || !wave.barriers_before.program_texture_slots.is_empty()
-            {
-                panic!(
-                    "emit_commands: unresolved program barrier slots; use ComputeProgram::specialize"
-                );
-            }
             commands.push(GpuCommand::ResourceBarrier {
                 buffers: wave.barriers_before.buffers.clone(),
                 textures: wave.barriers_before.textures.clone(),
@@ -545,13 +499,6 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
 
     for wave in &schedule.waves {
         if !wave.barriers_before.is_empty() {
-            if !wave.barriers_before.program_buffer_slots.is_empty()
-                || !wave.barriers_before.program_texture_slots.is_empty()
-            {
-                panic!(
-                    "emit_graph_commands: unresolved program barrier slots; use ComputeProgram::specialize"
-                );
-            }
             commands.push(GraphCommand::Compute(GpuCommand::ResourceBarrier {
                 buffers: wave.barriers_before.buffers.clone(),
                 textures: wave.barriers_before.textures.clone(),

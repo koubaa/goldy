@@ -113,7 +113,7 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 /// can detect cross-encoder dependencies (e.g. compute→blit→compute). Without
 /// this, Metal may overlap encoders that share buffers accessed via argument
 /// buffers, since the indirect access is opaque to automatic hazard tracking.
-fn begin_compute_encoder<'a>(
+pub(super) fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
     state: &MetalState,
     logical_device: &super::types::LogicalDevice,
@@ -156,9 +156,9 @@ fn begin_compute_encoder<'a>(
 /// Guard that ensures Metal command encoders are ended on all exit paths
 /// (including early `?` returns). Metal asserts at dealloc time if an encoder
 /// was never ended, so this prevents crashes on error paths.
-struct EncoderGuard<'a> {
-    compute: Option<&'a mtl::ComputeCommandEncoderRef>,
-    blit: Option<&'a mtl::BlitCommandEncoderRef>,
+pub(super) struct EncoderGuard<'a> {
+    pub(super) compute: Option<&'a mtl::ComputeCommandEncoderRef>,
+    pub(super) blit: Option<&'a mtl::BlitCommandEncoderRef>,
 }
 
 impl Drop for EncoderGuard<'_> {
@@ -181,7 +181,7 @@ impl Drop for EncoderGuard<'_> {
 /// encoder is ended before the new one begins. Metal guarantees sequential
 /// execution of encoders within a command buffer, so this preserves the
 /// caller's intended ordering (e.g. dispatch → clear → dispatch).
-fn record_commands_to_buffer(
+pub(super) fn record_commands_to_buffer(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     logical_device: &super::types::LogicalDevice,
@@ -644,10 +644,228 @@ pub(super) fn submit(
     Ok(signal_value)
 }
 
+/// Submit a mixed compute + render graph in a single command buffer.
+///
+/// Unlike the default `submit_graph` which does CPU waits between compute
+/// batches and render passes, this records everything into one `MTLCommandBuffer`
+/// by switching between compute, blit, and render encoders. Metal guarantees
+/// sequential execution of encoders within a command buffer, so GPU ordering
+/// is preserved without any CPU-side synchronization.
+pub(super) fn submit_graph(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    commands: &[super::super::GraphCommand],
+) -> Result<TimelineValue> {
+    use super::super::GraphCommand;
+
+    if state.device_lost.load(Ordering::Relaxed) {
+        anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
+    }
+
+    let owned_command_buffer = {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        ld.command_queue.new_command_buffer().to_owned()
+    };
+    let command_buffer_ref = owned_command_buffer.as_ref();
+
+    // Walk GraphCommands, collecting contiguous compute batches and recording
+    // render passes inline. Encoder transitions within a single command buffer
+    // provide implicit full pipeline barriers on Metal.
+    {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let mut compute_batch: Vec<GpuCommand> = Vec::new();
+
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => {
+                    compute_batch.push(c.clone());
+                }
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
+                    // Flush any pending compute work first.
+                    if !compute_batch.is_empty() {
+                        record_commands_to_buffer(
+                            state,
+                            command_buffer_ref,
+                            ld,
+                            device_handle,
+                            &compute_batch,
+                        )?;
+                        compute_batch.clear();
+                    }
+
+                    // Record the render pass into the same command buffer.
+                    record_render_pass_to_buffer(
+                        state,
+                        command_buffer_ref,
+                        ld,
+                        device_handle,
+                        *target,
+                        render_cmds,
+                    )?;
+                }
+            }
+        }
+
+        // Flush trailing compute work.
+        if !compute_batch.is_empty() {
+            record_commands_to_buffer(
+                state,
+                command_buffer_ref,
+                ld,
+                device_handle,
+                &compute_batch,
+            )?;
+        }
+    }
+
+    // Signal timeline and commit — same pattern as `submit`.
+    let signal_value = {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let v = ld.timeline_next;
+        ld.timeline_next += 1;
+        ld.timeline_scheduled_max = ld.timeline_scheduled_max.max(v);
+        v
+    };
+
+    let waiter = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .timeline_waiter
+        .clone();
+
+    let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
+        let status = cb.status();
+        if status != MTLCommandBufferStatus::Completed {
+            let description = read_command_buffer_error_description(cb);
+            tracing::error!(
+                "GPU command buffer (graph, timeline={}) finished with status={:?}: {}",
+                signal_value,
+                status,
+                description
+            );
+        }
+        waiter.signal(signal_value);
+    })
+    .copy();
+    command_buffer_ref.add_completed_handler(&handler);
+
+    let ld = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+    command_buffer_ref.encode_signal_event(ld.timeline_event.as_ref(), signal_value);
+
+    command_buffer_ref.commit();
+
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.process_deletion_queue_up_to_signaled();
+    }
+
+    // Mark render targets as rendered.
+    for cmd in commands {
+        if let GraphCommand::Render { target, .. } = cmd {
+            if let Some(rt) = state.render_targets.get_mut(target) {
+                rt.has_rendered = true;
+            }
+        }
+    }
+
+    Ok(signal_value)
+}
+
+/// Record an offscreen render pass into an existing command buffer (no commit/wait).
+fn record_render_pass_to_buffer(
+    state: &MetalState,
+    command_buffer: &mtl::CommandBufferRef,
+    logical_device: &super::types::LogicalDevice,
+    device_handle: DeviceHandle,
+    target: super::super::RenderTargetHandle,
+    commands: &[super::super::RenderCommand],
+) -> Result<()> {
+    let render_target = state
+        .render_targets
+        .get(&target)
+        .context("Invalid render target")?;
+
+    let mut clear_color = None;
+    let mut clear_depth = None;
+    for cmd in commands {
+        match cmd {
+            super::super::RenderCommand::Clear(color) => clear_color = Some(*color),
+            super::super::RenderCommand::ClearDepth(depth) => clear_depth = Some(*depth),
+            _ => {}
+        }
+    }
+
+    let render_pass = super::render_commands::create_render_pass(
+        &render_target.texture,
+        render_target.depth_texture.as_deref(),
+        clear_color,
+        clear_depth,
+    );
+
+    let encoder = command_buffer.new_render_command_encoder(render_pass);
+
+    let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
+    logical_device
+        .heap_allocator
+        .use_heaps_for_render(encoder, render_stages);
+    logical_device
+        .texture_heap
+        .use_heaps_for_render(encoder, render_stages);
+    super::transient::use_transient_heaps_for_render(logical_device, encoder, render_stages);
+    for buf_state in state.buffers.values() {
+        if buf_state.device_handle == device_handle {
+            encoder.use_resource_at(
+                &buf_state.buffer,
+                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
+                render_stages,
+            );
+        }
+    }
+
+    encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
+    encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
+
+    encoder.set_viewport(mtl::MTLViewport {
+        originX: 0.0,
+        originY: 0.0,
+        width: render_target.width as f64,
+        height: render_target.height as f64,
+        znear: 0.0,
+        zfar: 1.0,
+    });
+    encoder.set_scissor_rect(mtl::MTLScissorRect {
+        x: 0,
+        y: 0,
+        width: render_target.width as u64,
+        height: render_target.height as u64,
+    });
+
+    super::render_commands::record(encoder, commands, &state.pipelines, &state.buffers)?;
+
+    encoder.end_encoding();
+    Ok(())
+}
+
 /// Extract `localizedDescription` from an `MTLCommandBuffer`'s `error` property.
 /// Returns `"<none>"` when the buffer has no attached error, or a best-effort
 /// diagnostic string when it does.
-fn read_command_buffer_error_description(buf: &mtl::CommandBufferRef) -> String {
+pub(super) fn read_command_buffer_error_description(buf: &mtl::CommandBufferRef) -> String {
     use objc::runtime::Object;
     unsafe {
         let err: *mut Object = msg_send![buf, error];

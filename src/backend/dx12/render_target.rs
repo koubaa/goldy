@@ -228,23 +228,23 @@ pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
     }
 }
 
-/// Render commands to a render target.
+/// Record an offscreen render pass into an existing command list without closing/executing.
+///
+/// Records COMMON -> RENDER_TARGET barriers, clear, viewport/scissor, descriptor heap
+/// binding, draw commands, and RENDER_TARGET -> COPY_SOURCE barrier into `cmd_list`.
+/// Does NOT close/execute/signal.
 #[allow(clippy::too_many_lines)]
-pub(super) fn render(
-    state: &mut Dx12State,
+pub(super) fn record_render_pass_to_list(
+    state: &Dx12State,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
     commands: &[RenderCommand],
+    cmd_list: &ID3D12GraphicsCommandList7,
 ) -> Result<()> {
-    // Get device first
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
-
-    // Reset command allocator and command list
-    unsafe { logical_device.command_allocator.Reset() }
-        .context("Failed to reset command allocator")?;
 
     let render_target = state
         .render_targets
@@ -255,22 +255,16 @@ pub(super) fn render(
         anyhow::bail!("Render target belongs to a different device");
     }
 
-    let cmd = &render_target.command_list;
-    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd_list) };
     let width = render_target.width;
     let height = render_target.height;
 
-    unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }
-        .context("Failed to reset command list")?;
-
-    // Get RTV handle
     let rtv_handle = unsafe {
         let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
         handle.ptr += (render_target.rtv_offset * logical_device.rtv_descriptor_size) as usize;
         handle
     };
 
-    // Find clear color and depth
     let clear_color = commands
         .iter()
         .find_map(|c| match c {
@@ -287,7 +281,6 @@ pub(super) fn render(
         .unwrap_or(1.0);
 
     // COMMON -> render target layout for color + optional depth.
-    // SYNC_NONE + NO_ACCESS: no preceding work on these resources in this command list.
     let color_tex = barriers::texture_barrier_full(
         &render_target.texture,
         D3D12_BARRIER_SYNC_NONE,
@@ -310,10 +303,9 @@ pub(super) fn render(
         ));
     }
     unsafe {
-        barriers::barrier_textures(cmd, &initial_tex_barriers);
+        barriers::barrier_textures(cmd_list, &initial_tex_barriers);
     }
 
-    // Clear color and set render target (with optional depth/stencil)
     unsafe {
         cmd_gfx.ClearRenderTargetView(
             rtv_handle,
@@ -338,7 +330,6 @@ pub(super) fn render(
         }
     }
 
-    // Set viewport and scissor
     let viewport = D3D12_VIEWPORT {
         TopLeftX: 0.0,
         TopLeftY: 0.0,
@@ -358,12 +349,6 @@ pub(super) fn render(
         cmd_gfx.RSSetScissorRects(&[scissor]);
     }
 
-    // Bind descriptor heaps for bindless rendering
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
-
     unsafe {
         cmd_gfx.SetDescriptorHeaps(&[
             Some(logical_device.cbv_srv_uav_heap.clone()),
@@ -371,8 +356,7 @@ pub(super) fn render(
         ]);
     }
 
-    // Execute render commands
-    render_commands::record(cmd, commands, device_handle, state)?;
+    render_commands::record(cmd_list, commands, device_handle, state)?;
 
     // RENDER_TARGET -> COPY_SOURCE for potential readback
     let to_copy = barriers::texture_barrier_full(
@@ -384,10 +368,51 @@ pub(super) fn render(
         D3D12_BARRIER_LAYOUT_RENDER_TARGET,
         D3D12_BARRIER_LAYOUT_COPY_SOURCE,
     );
-    unsafe { barriers::barrier_textures(cmd, &[to_copy]) };
+    unsafe { barriers::barrier_textures(cmd_list, &[to_copy]) };
 
-    // Close and execute
+    Ok(())
+}
+
+/// Render commands to a render target.
+#[allow(clippy::too_many_lines)]
+pub(super) fn render(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    target: RenderTargetHandle,
+    commands: &[RenderCommand],
+) -> Result<()> {
+    let logical_device = state
+        .devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
+
+    unsafe { logical_device.command_allocator.Reset() }
+        .context("Failed to reset command allocator")?;
+
+    let render_target = state
+        .render_targets
+        .get(&target)
+        .context("Invalid render target handle")?;
+
+    if render_target.device_handle != device_handle {
+        anyhow::bail!("Render target belongs to a different device");
+    }
+
+    let cmd = &render_target.command_list;
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
+
+    unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }
+        .context("Failed to reset command list")?;
+
+    record_render_pass_to_list(state, device_handle, target, commands, cmd)?;
+
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     unsafe {
@@ -396,7 +421,6 @@ pub(super) fn render(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    // Wait for completion
     let fence_value = logical_device.fence_value;
     unsafe {
         logical_device
@@ -406,12 +430,10 @@ pub(super) fn render(
     .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
-    // Increment fence value for next operation
     if let Some(dev) = state.devices.get_mut(&device_handle) {
         dev.fence_value += 1;
     }
 
-    // Mark as rendered
     if let Some(rt) = state.render_targets.get_mut(&target) {
         rt.has_rendered = true;
     }

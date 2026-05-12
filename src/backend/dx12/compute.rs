@@ -6,8 +6,8 @@ use super::pso_cache;
 use super::shader;
 use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
-use super::{ComputePipelineHandle, DeviceHandle, ShaderHandle};
-use crate::backend::GpuCommand;
+use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
+use crate::backend::{GpuCommand, GraphCommand};
 use crate::timeline::TimelineValue;
 use anyhow::{Context, Result};
 use windows::core::Interface;
@@ -786,6 +786,611 @@ pub(super) fn submit(
         belt_slices.len(),
         "WriteBuffer storage count mismatch vs belt prepass"
     );
+
+    Ok(fence_value)
+}
+
+/// Submit mixed compute + render graph commands in a single command list.
+///
+/// Eliminates CPU waits between compute and render segments by recording
+/// everything into one `ID3D12GraphicsCommandList7` and performing a single
+/// `ExecuteCommandLists` + `Signal(fence)` at the end.
+#[allow(clippy::too_many_lines)]
+pub(super) fn submit_graph(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    commands: &[GraphCommand],
+) -> Result<TimelineValue> {
+    // --- Allocator + fence value reservation (same as `submit`) ---
+    let (allocator, fence_value, slot_idx) = {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+
+        let fence = &logical_device.fence;
+        let completed = unsafe { fence.GetCompletedValue() };
+        let pool = &mut logical_device.compute_allocator_pool;
+        let slot_idx = pool.iter().position(|s| completed >= s.fence_value);
+        let (allocator, slot_idx) = if let Some(idx) = slot_idx {
+            let slot = &mut pool[idx];
+            unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
+            (slot.allocator.clone(), idx)
+        } else {
+            let new_allocator: ID3D12CommandAllocator = unsafe {
+                logical_device
+                    .device
+                    .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+            }
+            .context("Failed to create command allocator")?;
+            pool.push(ComputeAllocatorSlot {
+                allocator: new_allocator.clone(),
+                fence_value: 0,
+            });
+            unsafe { new_allocator.Reset() }.context("Failed to reset new command allocator")?;
+            (new_allocator, pool.len() - 1)
+        };
+        let token = logical_device.fence_value;
+        logical_device.fence_value += 1;
+        (allocator, token, slot_idx)
+    };
+
+    // --- Staging belt reclaim ---
+    let fence_clone = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .fence
+        .clone();
+    state
+        .staging_belts
+        .entry(device_handle)
+        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+        .reclaim(&fence_clone)?;
+
+    // --- Pre-pass: stage WriteBuffer data for compute segments ---
+    let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
+    let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
+
+    for graph_cmd in commands {
+        if let GraphCommand::Compute(gpu_cmd) = graph_cmd {
+            match gpu_cmd {
+                GpuCommand::WriteBuffer {
+                    buffer: buf_handle,
+                    data,
+                    ..
+                } => {
+                    let buf = state
+                        .buffers
+                        .get(buf_handle)
+                        .context("WriteBuffer pre-pass: invalid handle")?;
+                    if buf.is_storage {
+                        let buf_dev = buf.device_handle;
+                        let ld = state
+                            .devices
+                            .get(&buf_dev)
+                            .context("WriteBuffer pre-pass: device missing")?;
+                        let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
+                            staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
+                        });
+                        let (res, off) = belt_entry.write(ld, data)?;
+                        belt_slices.push((res, off));
+                    }
+                }
+                GpuCommand::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
+                    staged_texture_uploads.push(super::texture::stage_texture_upload_full(
+                        state, *texture, data, *width, *height,
+                    )?);
+                }
+                GpuCommand::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
+                    staged_texture_uploads.push(super::texture::stage_texture_upload_region(
+                        state, *texture, *x, *y, *width, *height, data,
+                    )?);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // --- Create command list ---
+    let command_list: ID3D12GraphicsCommandList = {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        unsafe {
+            logical_device.device.CreateCommandList(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                &allocator,
+                None,
+            )
+        }
+        .context("Failed to create command list")?
+    };
+    let command_list7: ID3D12GraphicsCommandList7 = command_list
+        .cast()
+        .context("ID3D12GraphicsCommandList7 required")?;
+
+    {
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        unsafe {
+            command_list.SetDescriptorHeaps(&[
+                Some(logical_device.cbv_srv_uav_heap.clone()),
+                Some(logical_device.sampler_heap.clone()),
+            ]);
+        }
+    }
+
+    // --- Walk GraphCommands ---
+    let mut belt_idx = 0usize;
+    let mut texture_upload_idx = 0usize;
+    let mut current_compute_pipeline: Option<super::ComputePipelineHandle> = None;
+    let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
+
+    for graph_cmd in commands {
+        match graph_cmd {
+            GraphCommand::Compute(gpu_cmd) => match gpu_cmd {
+                GpuCommand::SetPipeline(handle) => {
+                    current_compute_pipeline = Some(*handle);
+                    if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
+                        unsafe {
+                            command_list.SetComputeRootSignature(&pipeline_state.root_signature);
+                            command_list.SetPipelineState(&pipeline_state.pipeline_state);
+                        }
+                    }
+                }
+                GpuCommand::BindResources { buffers } => {
+                    let mut layout = types::PushLayout::default();
+                    shared::fill_bindless(
+                        &mut layout,
+                        buffers.iter().map(|h| {
+                            state
+                                .buffers
+                                .get(h)
+                                .and_then(|b| b.bindless_offset)
+                                .unwrap_or(0)
+                        }),
+                    );
+                    unsafe {
+                        command_list.SetComputeRoot32BitConstants(
+                            0,
+                            (types::TOTAL_PUSH_BYTES / 4) as u32,
+                            &layout as *const _ as *const std::ffi::c_void,
+                            0,
+                        );
+                    }
+                }
+                GpuCommand::BindResourcesRaw {
+                    indices: raw_indices,
+                    user: raw_user,
+                } => {
+                    let mut layout = types::PushLayout::default();
+                    shared::fill_raw(&mut layout, raw_indices, raw_user);
+                    unsafe {
+                        command_list.SetComputeRoot32BitConstants(
+                            0,
+                            (types::TOTAL_PUSH_BYTES / 4) as u32,
+                            &layout as *const _ as *const std::ffi::c_void,
+                            0,
+                        );
+                    }
+                }
+                GpuCommand::BindResourcesTyped {
+                    handles: typed_handles,
+                } => {
+                    if let Some(pipeline) =
+                        current_compute_pipeline.and_then(|h| state.compute_pipelines.get(&h))
+                    {
+                        crate::backend::validate_typed_push_constants(
+                            typed_handles,
+                            &pipeline.push_constant_categories,
+                            &pipeline.shader_debug_name,
+                        )?;
+                    }
+                    let mut layout = types::PushLayout::default();
+                    shared::fill_typed(&mut layout, typed_handles.iter().copied());
+                    unsafe {
+                        command_list.SetComputeRoot32BitConstants(
+                            0,
+                            (types::TOTAL_PUSH_BYTES / 4) as u32,
+                            &layout as *const _ as *const std::ffi::c_void,
+                            0,
+                        );
+                    }
+                }
+                GpuCommand::Dispatch {
+                    workgroups_x,
+                    workgroups_y,
+                    workgroups_z,
+                } => unsafe {
+                    command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
+                },
+                GpuCommand::DispatchIndirect { buffer, offset } => {
+                    let logical_device = state
+                        .devices
+                        .get(&device_handle)
+                        .context("DispatchIndirect: invalid device")?;
+                    let buf_state = state
+                        .buffers
+                        .get(buffer)
+                        .context("DispatchIndirect: invalid buffer handle")?;
+                    let signature = logical_device
+                        .compute_dispatch_indirect_signature
+                        .as_ref()
+                        .context("DispatchIndirect: compute indirect signature not available")?;
+
+                    let mut to_indirect = [barriers::buffer_barrier_full(
+                        &buf_state.resource,
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                    )];
+                    unsafe { barriers::barrier_buffers(&command_list7, &to_indirect) };
+                    unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
+
+                    unsafe {
+                        command_list.ExecuteIndirect(
+                            signature,
+                            1,
+                            &buf_state.resource,
+                            *offset,
+                            None,
+                            0,
+                        );
+                    }
+
+                    let mut to_uav = [barriers::buffer_barrier_full(
+                        &buf_state.resource,
+                        D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    )];
+                    unsafe { barriers::barrier_buffers(&command_list7, &to_uav) };
+                    unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
+                }
+                GpuCommand::Barrier => {
+                    let g = D3D12_GLOBAL_BARRIER {
+                        SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        AccessAfter: D3D12_BARRIER_ACCESS(
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                        ),
+                    };
+                    unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                }
+                GpuCommand::ResourceBarrier {
+                    buffers: buf_handles,
+                    textures: tex_handles,
+                } => {
+                    let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
+                        .iter()
+                        .filter_map(|h| state.buffers.get(h))
+                        .map(|bs| {
+                            barriers::buffer_barrier_full(
+                                &bs.resource,
+                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                D3D12_BARRIER_ACCESS(
+                                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                        | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                                ),
+                            )
+                        })
+                        .collect();
+                    unsafe { barriers::barrier_buffers(&command_list7, &buf_barriers) };
+                    unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
+
+                    let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_handles
+                        .iter()
+                        .filter_map(|h| state.textures.get(h))
+                        .map(|ts| {
+                            let (access, layout) = if ts.last_layout
+                                == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+                                || ts.last_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+                            {
+                                (
+                                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                                )
+                            } else {
+                                (
+                                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                                )
+                            };
+                            barriers::texture_barrier_full(
+                                &ts.resource,
+                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                access,
+                                access,
+                                layout,
+                                layout,
+                            )
+                        })
+                        .collect();
+                    unsafe { barriers::barrier_textures(&command_list7, &tex_barriers) };
+                    unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
+                }
+                GpuCommand::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    let buf_state = state
+                        .buffers
+                        .get(buffer)
+                        .context("ClearBuffer: invalid buffer handle")?;
+                    let clear_size = if *size == 0 {
+                        buf_state.size.saturating_sub(*offset)
+                    } else {
+                        *size
+                    };
+                    if clear_size > 0 {
+                        if buf_state.is_storage {
+                            let logical_device = state
+                                .devices
+                                .get(&device_handle)
+                                .context("ClearBuffer: invalid device")?;
+                            super::buffer::uav_clear(
+                                logical_device,
+                                buf_state,
+                                &command_list,
+                                *offset,
+                                clear_size,
+                            )?;
+                        } else {
+                            let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                            let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                            unsafe { buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+                                .context("ClearBuffer: failed to map buffer")?;
+                            unsafe {
+                                std::ptr::write_bytes(
+                                    (mapped as *mut u8).add(*offset as usize),
+                                    0,
+                                    clear_size as usize,
+                                );
+                            }
+                            let written = D3D12_RANGE {
+                                Begin: *offset as usize,
+                                End: (*offset + clear_size) as usize,
+                            };
+                            unsafe { buf_state.resource.Unmap(0, Some(&written)) };
+                        }
+                    }
+                }
+                GpuCommand::WriteBuffer {
+                    buffer: buf_handle,
+                    offset,
+                    data,
+                } => {
+                    let buf_state = state
+                        .buffers
+                        .get(buf_handle)
+                        .context("WriteBuffer: invalid buffer handle")?;
+                    if !buf_state.is_storage {
+                        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                        unsafe { buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+                            .context("WriteBuffer: map failed")?;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr(),
+                                (mapped as *mut u8).add(*offset as usize),
+                                data.len(),
+                            );
+                        }
+                        let written_range = D3D12_RANGE {
+                            Begin: *offset as usize,
+                            End: (*offset as usize) + data.len(),
+                        };
+                        unsafe { buf_state.resource.Unmap(0, Some(&written_range)) };
+                    } else {
+                        let belt_entry = belt_slices
+                            .get(belt_idx)
+                            .context("WriteBuffer: belt slice missing (internal)")?;
+                        belt_idx += 1;
+                        let upload_src = belt_entry.0.clone();
+                        let upload_off = belt_entry.1;
+                        let buf_state = state.buffers.get(buf_handle).unwrap();
+
+                        let mut b_to_copy = [barriers::buffer_barrier_full(
+                            &buf_state.resource,
+                            D3D12_BARRIER_SYNC_ALL,
+                            D3D12_BARRIER_SYNC_COPY,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            D3D12_BARRIER_ACCESS_COPY_DEST,
+                        )];
+                        let mut b_to_uav = [barriers::buffer_barrier_full(
+                            &buf_state.resource,
+                            D3D12_BARRIER_SYNC_COPY,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_ACCESS_COPY_DEST,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        )];
+                        unsafe {
+                            barriers::barrier_buffers(&command_list7, &b_to_copy);
+                            barriers::drop_buffer_barriers(&mut b_to_copy);
+                            command_list.CopyBufferRegion(
+                                &buf_state.resource,
+                                *offset,
+                                &upload_src,
+                                upload_off,
+                                data.len() as u64,
+                            );
+                            barriers::barrier_buffers(&command_list7, &b_to_uav);
+                            barriers::drop_buffer_barriers(&mut b_to_uav);
+                        }
+                    }
+                }
+                GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                    let upload = staged_texture_uploads
+                        .get(texture_upload_idx)
+                        .context("WriteTexture: staged upload missing (internal)")?;
+                    texture_upload_idx += 1;
+                    super::texture::record_staged_texture_upload(
+                        &command_list,
+                        &command_list7,
+                        state,
+                        upload,
+                    )?;
+                }
+            },
+            GraphCommand::Render {
+                target,
+                commands: render_cmds,
+            } => {
+                // Flush compute/copy writes before the render pass
+                let compute_to_render = D3D12_GLOBAL_BARRIER {
+                    SyncBefore: D3D12_BARRIER_SYNC(
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,
+                    ),
+                    SyncAfter: D3D12_BARRIER_SYNC(
+                        D3D12_BARRIER_SYNC_RENDER_TARGET.0
+                            | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0
+                            | D3D12_BARRIER_SYNC_VERTEX_SHADING.0
+                            | D3D12_BARRIER_SYNC_PIXEL_SHADING.0,
+                    ),
+                    AccessBefore: D3D12_BARRIER_ACCESS(
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0,
+                    ),
+                    AccessAfter: D3D12_BARRIER_ACCESS(
+                        D3D12_BARRIER_ACCESS_RENDER_TARGET.0
+                            | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE.0
+                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                    ),
+                };
+                unsafe { barriers::barrier_globals(&command_list7, &[compute_to_render]) };
+
+                super::render_target::record_render_pass_to_list(
+                    state,
+                    device_handle,
+                    *target,
+                    render_cmds,
+                    &command_list7,
+                )?;
+
+                rendered_targets.push(*target);
+
+                // Make render writes visible to subsequent compute
+                let render_to_compute = D3D12_GLOBAL_BARRIER {
+                    SyncBefore: D3D12_BARRIER_SYNC(
+                        D3D12_BARRIER_SYNC_RENDER_TARGET.0 | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0,
+                    ),
+                    SyncAfter: D3D12_BARRIER_SYNC(
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,
+                    ),
+                    AccessBefore: D3D12_BARRIER_ACCESS(
+                        D3D12_BARRIER_ACCESS_RENDER_TARGET.0
+                            | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE.0,
+                    ),
+                    AccessAfter: D3D12_BARRIER_ACCESS(
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                            | D3D12_BARRIER_ACCESS_COPY_SOURCE.0
+                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                    ),
+                };
+                unsafe { barriers::barrier_globals(&command_list7, &[render_to_compute]) };
+            }
+        }
+    }
+
+    // --- Tail barrier ---
+    let tail = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC(
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,
+        ),
+        SyncAfter: D3D12_BARRIER_SYNC_ALL,
+        AccessBefore: D3D12_BARRIER_ACCESS(
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0,
+        ),
+        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+    };
+    unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
+
+    // --- Close + execute + signal ---
+    if let Err(e) = unsafe { command_list.Close() } {
+        let diag = state
+            .devices
+            .get(&device_handle)
+            .and_then(|dev| drain_info_queue(&dev.device))
+            .unwrap_or_else(|| {
+                "  (no debug-layer messages; enable GOLDY_DX12_DEBUG=1)\n".to_string()
+            });
+        return Err(anyhow::anyhow!(
+            "Failed to close command list: {e}\nDebug layer messages:\n{diag}"
+        ));
+    }
+
+    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
+
+    let logical_device = state.devices.get(&device_handle).unwrap();
+    unsafe {
+        logical_device
+            .command_queue
+            .ExecuteCommandLists(&[Some(cmd_list)]);
+    }
+
+    unsafe {
+        logical_device
+            .command_queue
+            .Signal(&logical_device.fence, fence_value)
+    }
+    .context("Failed to signal fence")?;
+
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
+            slot.fence_value = fence_value;
+        }
+        dev.deletion_queue
+            .process(&dev.fence, &mut dev.resource_registry);
+    }
+
+    state
+        .staging_belts
+        .entry(device_handle)
+        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+        .finish(fence_value);
+
+    if !staged_texture_uploads.is_empty() {
+        let resources = staged_texture_uploads
+            .into_iter()
+            .map(|u| u.staging_resource)
+            .collect::<Vec<_>>();
+        state
+            .staging_belts
+            .entry(device_handle)
+            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+            .defer_standalone_resources(fence_value, resources);
+    }
+
+    // Mark rendered targets
+    for t in rendered_targets {
+        if let Some(rt) = state.render_targets.get_mut(&t) {
+            rt.has_rendered = true;
+        }
+    }
 
     Ok(fence_value)
 }

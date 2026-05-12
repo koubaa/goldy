@@ -730,6 +730,14 @@ impl GpuBackend for Dx12Backend {
         compute::submit(&mut self.state, device_handle, commands)
     }
 
+    fn submit_graph(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit_graph(&mut self.state, device, commands)
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         surface::record_gpu_work(&mut self.state, frame.surface, commands)
     }

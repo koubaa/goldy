@@ -1,7 +1,7 @@
 //! Pipeline creation and management.
 
 use super::types::PipelineState;
-use super::{pso_cache, shader, utils, DeviceHandle, Dx12State, PipelineHandle};
+use super::{pso_cache, shader, utils, Dx12State, PipelineHandle};
 use anyhow::{Context, Result};
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
