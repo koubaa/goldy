@@ -4,7 +4,7 @@ use super::super::shared;
 use super::staging;
 use super::types::{ComputePipelineState, LogicalDevice, PushLayout};
 use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, SurfaceHandle};
-use crate::backend::{GraphCommand, GpuCommand};
+use crate::backend::{GpuCommand, GraphCommand};
 use crate::timeline::TimelineValue;
 use anyhow::{Context, Result};
 use ash::vk;
@@ -847,19 +847,17 @@ pub(super) fn submit_graph(
                     width,
                     height,
                 } => {
-                    texture_upload_scratch.push(
-                        super::texture::allocate_compute_texture_staging(
-                            &state.instance,
-                            &state.devices,
-                            &state.textures,
-                            *texture,
-                            data,
-                            0,
-                            0,
-                            *width,
-                            *height,
-                        )?,
-                    );
+                    texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                        &state.instance,
+                        &state.devices,
+                        &state.textures,
+                        *texture,
+                        data,
+                        0,
+                        0,
+                        *width,
+                        *height,
+                    )?);
                 }
                 GpuCommand::WriteTextureRegion {
                     texture,
@@ -869,19 +867,17 @@ pub(super) fn submit_graph(
                     height,
                     data,
                 } => {
-                    texture_upload_scratch.push(
-                        super::texture::allocate_compute_texture_staging(
-                            &state.instance,
-                            &state.devices,
-                            &state.textures,
-                            *texture,
-                            data,
-                            *x,
-                            *y,
-                            *width,
-                            *height,
-                        )?,
-                    );
+                    texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                        &state.instance,
+                        &state.devices,
+                        &state.textures,
+                        *texture,
+                        data,
+                        *x,
+                        *y,
+                        *width,
+                        *height,
+                    )?);
                 }
                 _ => {}
             }
@@ -1115,8 +1111,7 @@ pub(super) fn submit_graph(
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                                 .dst_access_mask(
-                                    vk::AccessFlags2::SHADER_READ
-                                        | vk::AccessFlags2::SHADER_WRITE,
+                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
                                 );
                             let dep_info = vk::DependencyInfo::default()
                                 .memory_barriers(std::slice::from_ref(&mem_barrier));
@@ -1154,8 +1149,7 @@ pub(super) fn submit_graph(
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                                 .dst_access_mask(
-                                    vk::AccessFlags2::SHADER_READ
-                                        | vk::AccessFlags2::SHADER_WRITE,
+                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
                                 );
                             let dep_info = vk::DependencyInfo::default()
                                 .memory_barriers(std::slice::from_ref(&mem_barrier));

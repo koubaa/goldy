@@ -7,7 +7,7 @@ use super::shader;
 use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
 use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
-use crate::backend::{GraphCommand, GpuCommand};
+use crate::backend::{GpuCommand, GraphCommand};
 use crate::timeline::TimelineValue;
 use anyhow::{Context, Result};
 use windows::core::Interface;
@@ -840,10 +840,9 @@ pub(super) fn submit_graph(
                             .devices
                             .get(&buf_dev)
                             .context("WriteBuffer pre-pass: device missing")?;
-                        let belt_entry =
-                            state.staging_belts.entry(buf_dev).or_insert_with(|| {
-                                staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                            });
+                        let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
+                            staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
+                        });
                         let (res, off) = belt_entry.write(ld, data)?;
                         belt_slices.push((res, off));
                     }
@@ -921,8 +920,7 @@ pub(super) fn submit_graph(
                     current_compute_pipeline = Some(*handle);
                     if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
                         unsafe {
-                            command_list
-                                .SetComputeRootSignature(&pipeline_state.root_signature);
+                            command_list.SetComputeRootSignature(&pipeline_state.root_signature);
                             command_list.SetPipelineState(&pipeline_state.pipeline_state);
                         }
                     }
@@ -1005,9 +1003,7 @@ pub(super) fn submit_graph(
                     let signature = logical_device
                         .compute_dispatch_indirect_signature
                         .as_ref()
-                        .context(
-                            "DispatchIndirect: compute indirect signature not available",
-                        )?;
+                        .context("DispatchIndirect: compute indirect signature not available")?;
 
                     let mut to_indirect = [barriers::buffer_barrier_full(
                         &buf_state.resource,
@@ -1137,10 +1133,8 @@ pub(super) fn submit_graph(
                         } else {
                             let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
                             let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-                            unsafe {
-                                buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped))
-                            }
-                            .context("ClearBuffer: failed to map buffer")?;
+                            unsafe { buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+                                .context("ClearBuffer: failed to map buffer")?;
                             unsafe {
                                 std::ptr::write_bytes(
                                     (mapped as *mut u8).add(*offset as usize),
@@ -1168,10 +1162,8 @@ pub(super) fn submit_graph(
                     if !buf_state.is_storage {
                         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
                         let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-                        unsafe {
-                            buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped))
-                        }
-                        .context("WriteBuffer: map failed")?;
+                        unsafe { buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+                            .context("WriteBuffer: map failed")?;
                         unsafe {
                             std::ptr::copy_nonoverlapping(
                                 data.as_ptr(),
@@ -1251,8 +1243,7 @@ pub(super) fn submit_graph(
                             | D3D12_BARRIER_SYNC_PIXEL_SHADING.0,
                     ),
                     AccessBefore: D3D12_BARRIER_ACCESS(
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                            | D3D12_BARRIER_ACCESS_COPY_DEST.0,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0,
                     ),
                     AccessAfter: D3D12_BARRIER_ACCESS(
                         D3D12_BARRIER_ACCESS_RENDER_TARGET.0
@@ -1275,8 +1266,7 @@ pub(super) fn submit_graph(
                 // Make render writes visible to subsequent compute
                 let render_to_compute = D3D12_GLOBAL_BARRIER {
                     SyncBefore: D3D12_BARRIER_SYNC(
-                        D3D12_BARRIER_SYNC_RENDER_TARGET.0
-                            | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0,
+                        D3D12_BARRIER_SYNC_RENDER_TARGET.0 | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0,
                     ),
                     SyncAfter: D3D12_BARRIER_SYNC(
                         D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,
