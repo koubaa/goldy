@@ -126,17 +126,11 @@ pub struct GraphIR {
 pub struct BarrierSet {
     pub buffers: Vec<BufferHandle>,
     pub textures: Vec<TextureHandle>,
-    /// Program buffer slots (see [`super::ResourceId::ProgramBuffer`]) pending resolution.
-    pub program_buffer_slots: Vec<u32>,
-    pub program_texture_slots: Vec<u32>,
 }
 
 impl BarrierSet {
     pub fn is_empty(&self) -> bool {
-        self.buffers.is_empty()
-            && self.textures.is_empty()
-            && self.program_buffer_slots.is_empty()
-            && self.program_texture_slots.is_empty()
+        self.buffers.is_empty() && self.textures.is_empty()
     }
 }
 

@@ -85,13 +85,9 @@
 pub(crate) mod analysis;
 mod graph;
 mod ir;
-pub mod program;
 
 pub use graph::{NodeBuilder, RenderPassBuilder, TaskGraph};
 pub use ir::NodeAccess;
-pub use program::{
-    GraphProgram, ProgramBuilder, ProgramRenderPassBuilder, ProgramResolution, ProgramStepBuilder,
-};
 
 use crate::backend::{BufferHandle, TextureHandle};
 use crate::types::TextureFormat;
@@ -152,17 +148,6 @@ pub(crate) enum ResourceId {
         len: u64,
     },
     Texture(TextureHandle),
-    /// Program slot (resolved at [`crate::task_graph::program::GraphProgram::specialize`] time).
-    ProgramBuffer(u32),
-    ProgramTexture(u32),
-    ProgramBufferRange {
-        slot: u32,
-        offset: u64,
-        len: u64,
-    },
-    /// Render-target slot (resolved at [`crate::task_graph::program::GraphProgram::specialize_graph`] time).
-    #[allow(dead_code)]
-    RenderTargetSlot(u32),
     /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
     TransientBuffer(TransientId),
     /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
@@ -179,26 +164,8 @@ impl ResourceId {
             ResourceId::Buffer(h) => Some(h),
             ResourceId::BufferRange { parent, .. } => Some(parent),
             ResourceId::Texture(_) => None,
-            ResourceId::ProgramBuffer(_) | ResourceId::ProgramBufferRange { .. } => None,
-            ResourceId::ProgramTexture(_) => None,
-            ResourceId::RenderTargetSlot(_) => None,
             ResourceId::TransientBuffer(_) => None,
             ResourceId::TransientTexture(_) => None,
-        }
-    }
-
-    pub(crate) fn program_buffer_slot(self) -> Option<u32> {
-        match self {
-            ResourceId::ProgramBuffer(s) => Some(s),
-            ResourceId::ProgramBufferRange { slot, .. } => Some(slot),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn program_texture_slot(self) -> Option<u32> {
-        match self {
-            ResourceId::ProgramTexture(s) => Some(s),
-            _ => None,
         }
     }
 }
