@@ -494,6 +494,8 @@ pub(crate) struct PipelineState {
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per push-constant slot expected element stride (bytes) from reflection.
+    pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }
@@ -508,6 +510,8 @@ pub(crate) struct ComputePipelineState {
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per push-constant slot expected element stride (bytes) from reflection.
+    pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
 }

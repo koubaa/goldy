@@ -497,11 +497,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
+      # Match other Windows jobs: cache cargo before setup-python so actions/cache sees the Rust-only env.
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -514,6 +510,11 @@ jobs:
           key: ${{ runner.os }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-python-
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
 
       - name: Install maturin
         run: pip install maturin numpy

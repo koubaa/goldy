@@ -120,6 +120,53 @@ pub(crate) fn validate_typed_push_constants(
     }
 }
 
+/// Validate that each bound buffer's `element_stride` matches the shader's
+/// reflected expectation for that push-constant slot.
+///
+/// `buffer_strides[i]` is the actual `element_stride` of the buffer bound to
+/// slot `i`.  `expected[i]` is the stride the shader expects (from Slang
+/// reflection).  `None` on either side means "unknown / not applicable" and
+/// is silently skipped.
+///
+/// Only runs when layout validation is enabled; designed for the bind hot
+/// path — allocates only on the error path.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_binding_strides(
+    buffer_strides: &[Option<u32>],
+    expected: &[Option<u32>],
+    shader_name: &str,
+) -> Result<()> {
+    let mut mismatches: Vec<String> = Vec::new();
+    for (slot, actual) in buffer_strides.iter().enumerate() {
+        let Some(exp) = expected.get(slot).copied().flatten() else {
+            continue;
+        };
+        let Some(act) = actual else {
+            continue;
+        };
+        if *act != exp {
+            mismatches.push(format!(
+                "slot {slot}: shader expects element stride {exp} but buffer has {act}"
+            ));
+        }
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "buffer element-stride mismatch in shader `{shader_name}`:\n  {}\n\
+             Hint: ensure the buffer's element_stride (set at creation) matches \
+             the size of the shader's StructuredBuffer<T> element type.",
+            mismatches.join("\n  ")
+        );
+    }
+}
+
 // Re-export raw_window_handle for Surface API users
 pub use raw_window_handle;
 
@@ -981,6 +1028,61 @@ mod push_constant_validation_tests {
             Some(BindlessCategory::Broadcast),
         ];
         let err = validate_typed_push_constants(&handles, &expectations, "sh")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slot 0"), "should report slot 0: {err}");
+        assert!(err.contains("slot 1"), "should report slot 1: {err}");
+    }
+}
+
+#[cfg(test)]
+mod binding_stride_validation_tests {
+    use super::validate_binding_strides;
+
+    #[test]
+    fn matching_strides_pass() {
+        let actual = vec![Some(4), Some(16)];
+        let expected = vec![Some(4), Some(16)];
+        validate_binding_strides(&actual, &expected, "test").unwrap();
+    }
+
+    #[test]
+    fn none_expected_skipped() {
+        let actual = vec![Some(4), Some(8)];
+        let expected: Vec<Option<u32>> = vec![None, None];
+        validate_binding_strides(&actual, &expected, "test").unwrap();
+    }
+
+    #[test]
+    fn none_actual_skipped() {
+        let actual: Vec<Option<u32>> = vec![None, None];
+        let expected = vec![Some(4), Some(16)];
+        validate_binding_strides(&actual, &expected, "test").unwrap();
+    }
+
+    #[test]
+    fn empty_expected_passes() {
+        let actual = vec![Some(4), Some(8)];
+        validate_binding_strides(&actual, &[], "test").unwrap();
+    }
+
+    #[test]
+    fn stride_mismatch_detected() {
+        let actual = vec![Some(4)];
+        let expected = vec![Some(16)];
+        let err = validate_binding_strides(&actual, &expected, "my_shader")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slot 0"), "should name slot: {err}");
+        assert!(err.contains("16"), "should mention expected stride: {err}");
+        assert!(err.contains("4"), "should mention actual stride: {err}");
+    }
+
+    #[test]
+    fn multiple_stride_mismatches_reported() {
+        let actual = vec![Some(4), Some(8)];
+        let expected = vec![Some(16), Some(32)];
+        let err = validate_binding_strides(&actual, &expected, "cs")
             .unwrap_err()
             .to_string();
         assert!(err.contains("slot 0"), "should report slot 0: {err}");

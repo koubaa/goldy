@@ -124,6 +124,26 @@ pub(super) fn create_with_depth(
     let handle = state.next_pipeline_handle;
     state.next_pipeline_handle += 1;
 
+    let (cats, strides) = state
+        .shaders
+        .get(&fragment_shader)
+        .and_then(|s| s.reflection.as_ref())
+        .or_else(|| {
+            state
+                .shaders
+                .get(&vertex_shader)
+                .and_then(|s| s.reflection.as_ref())
+        })
+        .map(|r| {
+            (
+                r.push_constant_categories.clone(),
+                r.binding_element_strides.clone(),
+            )
+        })
+        .unwrap_or_default();
+
+    let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
+
     state.pipelines.insert(
         handle,
         PipelineState {
@@ -131,8 +151,9 @@ pub(super) fn create_with_depth(
             pipeline,
             depth_stencil: depth_stencil_state,
             primitive_type: topology_to_mtl(topology),
-            push_constant_categories: Vec::new(),
-            shader_debug_name: String::new(),
+            push_constant_categories: cats,
+            binding_element_strides: strides,
+            shader_debug_name,
         },
     );
 

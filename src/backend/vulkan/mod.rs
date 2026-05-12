@@ -36,25 +36,30 @@ use std::ffi::{c_char, CStr};
 
 /// Extract push-constant slot categories for a render pipeline from shader
 /// reflection. Fragment shader data takes precedence; vertex is a fallback.
-fn render_push_constant_categories(
+fn render_reflection_data(
     shaders: &HashMap<ShaderHandle, ShaderState>,
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
-) -> Vec<Option<crate::types::BindlessCategory>> {
-    let fs_cats = shaders
+) -> (
+    Vec<Option<crate::types::BindlessCategory>>,
+    Vec<Option<u32>>,
+) {
+    let preferred = shaders
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .map(|r| &r.push_constant_categories);
-    if let Some(cats) = fs_cats {
-        if !cats.is_empty() {
-            return cats.clone();
-        }
+        .filter(|r| !r.push_constant_categories.is_empty())
+        .or_else(|| {
+            shaders
+                .get(&vertex_shader)
+                .and_then(|s| s.reflection.as_ref())
+        });
+    match preferred {
+        Some(r) => (
+            r.push_constant_categories.clone(),
+            r.binding_element_strides.clone(),
+        ),
+        None => (Vec::new(), Vec::new()),
     }
-    shaders
-        .get(&vertex_shader)
-        .and_then(|s| s.reflection.as_ref())
-        .map(|r| r.push_constant_categories.clone())
-        .unwrap_or_default()
 }
 
 /// Khronos instance validation when GPU API validation is requested (`GOLDY_VALIDATION=1`,
@@ -466,8 +471,8 @@ impl GpuBackend for VulkanBackend {
         let fs_module =
             self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let cats =
-            render_push_constant_categories(&self.state.shaders, vertex_shader, fragment_shader);
+        let (cats, strides) =
+            render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
         let raster =
@@ -485,6 +490,7 @@ impl GpuBackend for VulkanBackend {
 
         if let Some(ps) = self.state.pipelines.get_mut(&handle) {
             ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
         }
         Ok(handle)
     }
@@ -684,8 +690,8 @@ impl GpuBackend for VulkanBackend {
 
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        let cats =
-            render_push_constant_categories(&self.state.shaders, vertex_shader, fragment_shader);
+        let (cats, strides) =
+            render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
 
         let raster =
             crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
@@ -703,6 +709,7 @@ impl GpuBackend for VulkanBackend {
 
         if let Some(ps) = self.state.pipelines.get_mut(&handle) {
             ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
         }
         Ok(handle)
     }
@@ -852,12 +859,17 @@ impl GpuBackend for VulkanBackend {
         let cs_module =
             self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
-        let cats = self
+        let (cats, strides) = self
             .state
             .shaders
             .get(&compute_shader)
             .and_then(|s| s.reflection.as_ref())
-            .map(|r| r.push_constant_categories.clone())
+            .map(|r| {
+                (
+                    r.push_constant_categories.clone(),
+                    r.binding_element_strides.clone(),
+                )
+            })
             .unwrap_or_default();
 
         let shader_debug_name = format!("compute_shader#{compute_shader}");
@@ -873,6 +885,7 @@ impl GpuBackend for VulkanBackend {
 
         if let Some(ps) = self.state.compute_pipelines.get_mut(&handle) {
             ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
         }
         Ok(handle)
     }

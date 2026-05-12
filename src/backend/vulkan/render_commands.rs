@@ -73,6 +73,19 @@ pub(super) fn record(
                 buffers: buf_handles,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
+                    if crate::slang::layout_validation_enabled()
+                        && !pipeline.binding_element_strides.is_empty()
+                    {
+                        let actual: Vec<Option<u32>> = buf_handles
+                            .iter()
+                            .map(|h| buffers.get(h).and_then(|b| b.element_stride))
+                            .collect();
+                        crate::backend::validate_binding_strides(
+                            &actual,
+                            &pipeline.binding_element_strides,
+                            &pipeline.shader_debug_name,
+                        )?;
+                    }
                     let mut layout = PushLayout::default();
                     shared::fill_bindless(
                         &mut layout,

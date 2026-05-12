@@ -168,6 +168,9 @@ pub(super) fn ensure_stage_compiled(
         if existing.push_constant_categories.is_empty() {
             existing.push_constant_categories = new_reflection.push_constant_categories;
         }
+        if existing.binding_element_strides.is_empty() {
+            existing.binding_element_strides = new_reflection.binding_element_strides;
+        }
     } else {
         shader.reflection = Some(new_reflection);
     }

@@ -856,7 +856,26 @@ impl GpuBackend for Dx12Backend {
         device_handle: DeviceHandle,
         compute_shader: ShaderHandle,
     ) -> Result<ComputePipelineHandle> {
-        compute::create(&mut self.state, device_handle, compute_shader)
+        let handle = compute::create(&mut self.state, device_handle, compute_shader)?;
+
+        let (cats, strides) = self
+            .state
+            .shaders
+            .get(&compute_shader)
+            .and_then(|s| s.reflection.as_ref())
+            .map(|r| {
+                (
+                    r.push_constant_categories.clone(),
+                    r.binding_element_strides.clone(),
+                )
+            })
+            .unwrap_or_default();
+
+        if let Some(ps) = self.state.compute_pipelines.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
+        }
+        Ok(handle)
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {

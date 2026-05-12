@@ -96,6 +96,13 @@ pub struct ShaderReflection {
     /// Used by backend validation when `BindResourcesTyped` is used to catch category
     /// mismatches against the shader's reflected expectations.
     pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    /// Per push-constant slot, the expected element stride (bytes) of the bound
+    /// buffer. Populated from `[goldy_*]` source analysis + Slang reflection at
+    /// compile time.  At dispatch time, backends compare each bound buffer's
+    /// `element_stride` against this value when layout validation is enabled
+    /// (`GOLDY_VALIDATE_LAYOUTS`, `GOLDY_VALIDATION=layout`).
+    #[serde(default)]
+    pub binding_element_strides: Vec<Option<u32>>,
 }
 
 /// Byte layout of a Slang `struct` under uniform / constant-buffer rules (`SlangLayoutRules::Default`).
@@ -310,6 +317,26 @@ impl CompiledShader {
         } else {
             None
         }
+    }
+}
+
+/// Return the byte stride of a Slang built-in scalar/vector/matrix type, or
+/// `None` for user-defined structs that require Slang reflection.
+pub fn builtin_type_stride(name: &str) -> Option<u32> {
+    match name {
+        "uint" | "int" | "float" | "bool" | "dword" => Some(4),
+        "half" | "float16_t" => Some(2),
+        "double" | "uint64_t" | "int64_t" => Some(8),
+        "uint2" | "int2" | "float2" => Some(8),
+        "half2" => Some(4),
+        "uint3" | "int3" | "float3" => Some(12),
+        "half3" => Some(6),
+        "uint4" | "int4" | "float4" => Some(16),
+        "half4" => Some(8),
+        "float2x2" => Some(16),
+        "float3x3" => Some(36),
+        "float4x4" => Some(64),
+        _ => None,
     }
 }
 
@@ -647,6 +674,8 @@ impl SlangCompiler {
             }
         }
 
+        let binding_type_names = super::virtual_main::extract_binding_element_type_names(source);
+
         let out = self.with_compiled_request(
             effective.as_ref(),
             target,
@@ -668,11 +697,22 @@ impl SlangCompiler {
                 let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
                 unsafe { blob_release(blob) };
 
-                let reflection = slf.extract_reflection(request)?;
+                let mut reflection = slf.extract_reflection(request)?;
 
                 if !layout_checks.is_empty() {
                     slf.validate_owned_layout_checks(request, layout_checks)?;
                 }
+
+                let strides: Vec<Option<u32>> = binding_type_names
+                    .iter()
+                    .map(|opt_name| {
+                        opt_name.as_deref().and_then(|name| {
+                            builtin_type_stride(name)
+                                .or_else(|| slf.reflect_type_size_from_request(request, name))
+                        })
+                    })
+                    .collect();
+                reflection.binding_element_strides = strides;
 
                 Ok(CompiledShaderWithReflection {
                     shader: CompiledShader { data, target },
@@ -761,6 +801,43 @@ impl SlangCompiler {
         }
 
         self.extract_struct_layout_uniform(layout_ptr, type_name)
+    }
+
+    /// Query the byte size of a named type from a live compile request.
+    ///
+    /// Uses the `Uniform` parameter category (std140-style), which matches
+    /// std430 for most scalar/vector/simple-struct types.  Returns `None`
+    /// when the type is not found in the compiled program.
+    fn reflect_type_size_from_request(
+        &self,
+        request: *mut SlangCompileRequest,
+        type_name: &str,
+    ) -> Option<u32> {
+        let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
+        if reflection_ptr.is_null() {
+            return None;
+        }
+        let name_cstr = CString::new(type_name).ok()?;
+        let ty = unsafe {
+            (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr())
+        };
+        if ty.is_null() {
+            return None;
+        }
+        let layout_ptr = unsafe {
+            (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default)
+        };
+        if layout_ptr.is_null() {
+            return None;
+        }
+        let cat = SlangParameterCategory::Uniform as i32;
+        let size =
+            unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, cat) } as u32;
+        if size > 0 {
+            Some(size)
+        } else {
+            None
+        }
     }
 
     fn extract_struct_layout_uniform(
@@ -911,6 +988,7 @@ impl SlangCompiler {
         Ok(ShaderReflection {
             parameter_blocks,
             push_constant_categories: Vec::new(),
+            binding_element_strides: Vec::new(),
         })
     }
 
@@ -1159,6 +1237,39 @@ impl SlangCompiler {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod builtin_stride_tests {
+    use super::builtin_type_stride;
+
+    #[test]
+    fn scalar_types() {
+        assert_eq!(builtin_type_stride("uint"), Some(4));
+        assert_eq!(builtin_type_stride("int"), Some(4));
+        assert_eq!(builtin_type_stride("float"), Some(4));
+        assert_eq!(builtin_type_stride("half"), Some(2));
+        assert_eq!(builtin_type_stride("double"), Some(8));
+    }
+
+    #[test]
+    fn vector_types() {
+        assert_eq!(builtin_type_stride("float2"), Some(8));
+        assert_eq!(builtin_type_stride("float3"), Some(12));
+        assert_eq!(builtin_type_stride("float4"), Some(16));
+        assert_eq!(builtin_type_stride("uint4"), Some(16));
+    }
+
+    #[test]
+    fn matrix_types() {
+        assert_eq!(builtin_type_stride("float4x4"), Some(64));
+    }
+
+    #[test]
+    fn user_struct_returns_none() {
+        assert_eq!(builtin_type_stride("MyStruct"), None);
+        assert_eq!(builtin_type_stride("Particle"), None);
     }
 }
 
@@ -1512,6 +1623,58 @@ mod struct_layout_validate_tests {
         assert!(
             err.contains("`y`"),
             "error should name the offending field: {err}"
+        );
+    }
+
+    /// Integration test: compiles a `[goldy_compute]` shader that uses
+    /// `Scattered<uint>` and a broadcast struct, then verifies that the
+    /// reflected `binding_element_strides` contain the expected values.
+    #[test]
+    fn stride_extraction_end_to_end() {
+        use super::{ShaderTarget, SlangCompiler, SlangStage};
+        use crate::types::OptimizationLevel;
+
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable; skipping");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("shaders").to_string_lossy().into_owned();
+
+        let source = r#"
+            import goldy_exp;
+
+            struct Params { float x; float y; };
+
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(Params cfg, Scattered<uint> data, ThreadId id) {
+                data[id.x] = uint(cfg.x);
+            }
+        "#;
+
+        let result = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[("__SPIRV__", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("compilation failed");
+
+        let strides = &result.reflection.binding_element_strides;
+        assert_eq!(strides.len(), 2, "expected 2 binding slots: {strides:?}");
+
+        assert_eq!(
+            strides[0],
+            Some(16),
+            "Params {{float x; float y}} under uniform (std140) rules = 16: {strides:?}"
+        );
+        assert_eq!(
+            strides[1],
+            Some(4),
+            "Scattered<uint> element stride should be 4: {strides:?}"
         );
     }
 }
