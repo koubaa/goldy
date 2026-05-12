@@ -2042,3 +2042,209 @@ fn ring_two_frame_cycle_resets_bump() {
         );
     }
 }
+
+// ============================================================================
+// Element-stride validation integration tests
+//
+// These exercise the full GPU path: compile a [goldy_compute] shader, create
+// a pipeline, create a buffer with a deliberately wrong element_stride, bind
+// it, and verify that stride validation fires (or that matching strides pass).
+// ============================================================================
+
+/// Helper: create a device for stride-validation tests.
+fn make_device_for_stride_tests() -> goldy::Device {
+    let instance = Instance::new().expect("instance");
+    instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .expect("device")
+}
+
+/// Shader that reads from a `Scattered<uint>` buffer (element stride 4).
+const STRIDE_UINT_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] + 1;
+}
+"#;
+
+/// A shader that uses a user-defined struct as a broadcast uniform and a
+/// `Scattered<float4>` buffer (element stride 16).
+const STRIDE_STRUCT_SHADER: &str = r#"
+import goldy_exp;
+
+struct MyParams { float x; float y; };
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(MyParams cfg, Scattered<float4> data, ThreadId id) {
+    data[id.x] = float4(cfg.x, cfg.y, 0, 0);
+}
+"#;
+
+/// Matching strides: buffer with stride 4 dispatched to a shader
+/// expecting `Scattered<uint>` (stride 4). Must pass validation and execute
+/// correctly.
+#[test]
+fn stride_validation_matching_uint_passes() {
+    std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+
+    let device = make_device_for_stride_tests();
+    let shader =
+        ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let initial: Vec<u32> = (0..64).collect();
+    let buffer =
+        Buffer::with_data(&device, &initial, DataAccess::Scattered).expect("create buffer");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buffer]);
+        pass.dispatch(1, 1, 1);
+    }
+    let result = encoder.dispatch(&device);
+
+    std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+    result.expect("dispatch with matching stride must succeed");
+}
+
+/// Mismatched stride: buffer created with stride 16 bound to a shader
+/// expecting `Scattered<uint>` (stride 4). Must produce a stride-mismatch
+/// error when layout validation is enabled.
+#[test]
+fn stride_validation_mismatched_uint_vs_stride16_fails() {
+    std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+
+    let device = make_device_for_stride_tests();
+    let shader =
+        ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let data = vec![0u8; 64 * 16];
+    let buffer = Buffer::with_bytes_stride(&device, &data, DataAccess::Scattered, 16)
+        .expect("create buffer with stride 16");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buffer]);
+        pass.dispatch(1, 1, 1);
+    }
+    let result = encoder.dispatch(&device);
+
+    std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+    let err = result.expect_err("dispatch with wrong stride must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("stride"), "error must mention 'stride': {msg}");
+    assert!(
+        msg.contains("slot 0"),
+        "error must identify the offending slot: {msg}"
+    );
+}
+
+/// When layout validation is disabled, the same mismatch must NOT produce an
+/// error (validation is opt-in for performance).
+#[test]
+fn stride_validation_disabled_allows_mismatch() {
+    std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+    std::env::remove_var("GOLDY_VALIDATION");
+
+    let device = make_device_for_stride_tests();
+    let shader =
+        ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let data = vec![0u8; 64 * 16];
+    let buffer = Buffer::with_bytes_stride(&device, &data, DataAccess::Scattered, 16)
+        .expect("create buffer with stride 16");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buffer]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder
+        .dispatch(&device)
+        .expect("dispatch must succeed when validation is off");
+}
+
+/// Multi-binding mismatch: shader expects broadcast struct (reflected stride)
+/// + `Scattered<float4>` (stride 16). Bind the broadcast slot correctly but
+/// give the second slot a buffer with stride 4. Only slot 1 should be
+/// reported.
+#[test]
+fn stride_validation_multi_binding_detects_second_slot_mismatch() {
+    std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+
+    let device = make_device_for_stride_tests();
+    let shader =
+        ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let params_data = vec![0u8; 16];
+    let params = Buffer::with_bytes_stride(&device, &params_data, DataAccess::Broadcast, 16)
+        .expect("create broadcast buffer with stride 16");
+
+    let wrong_data = vec![0u8; 64 * 4];
+    let data_buf = Buffer::with_bytes_stride(&device, &wrong_data, DataAccess::Scattered, 4)
+        .expect("create data buf with stride 4");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&params, &data_buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    let result = encoder.dispatch(&device);
+
+    std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+    let err = result.expect_err("dispatch with wrong stride on slot 1 must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("slot 1"),
+        "error must identify slot 1 (data buffer): {msg}"
+    );
+    assert!(msg.contains("stride"), "error must mention 'stride': {msg}");
+}
+
+/// Matching strides with two bindings: broadcast + `Scattered<float4>` both
+/// have correct strides. Must pass validation and execute correctly.
+#[test]
+fn stride_validation_multi_binding_all_correct_passes() {
+    std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+
+    let device = make_device_for_stride_tests();
+    let shader =
+        ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let params_data = vec![0u8; 16];
+    let params = Buffer::with_bytes_stride(&device, &params_data, DataAccess::Broadcast, 16)
+        .expect("create broadcast buffer with stride 16");
+
+    let data = vec![0u8; 64 * 16];
+    let data_buf = Buffer::with_bytes_stride(&device, &data, DataAccess::Scattered, 16)
+        .expect("create data buf with stride 16");
+
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&params, &data_buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    let result = encoder.dispatch(&device);
+
+    std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+    result.expect("dispatch with all-correct strides must succeed");
+}
