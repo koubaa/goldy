@@ -2051,6 +2051,10 @@ fn ring_two_frame_cycle_resets_bump() {
 // it, and verify that stride validation fires (or that matching strides pass).
 // ============================================================================
 
+/// Env-var guard: these tests mutate `GOLDY_VALIDATE_LAYOUTS` which is
+/// process-global, so they must not run concurrently.
+static STRIDE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Helper: create a device for stride-validation tests.
 fn make_device_for_stride_tests() -> goldy::Device {
     let instance = Instance::new().expect("instance");
@@ -2073,15 +2077,17 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
 /// A shader that uses a user-defined struct as a broadcast uniform and a
 /// `Scattered<float4>` buffer (element stride 16).
+/// The struct uses four floats (16 bytes) so its reflected size is identical
+/// under both HLSL packing (DX12) and std140 rules (SPIR-V/Vulkan).
 const STRIDE_STRUCT_SHADER: &str = r#"
 import goldy_exp;
 
-struct MyParams { float x; float y; };
+struct MyParams { float x; float y; float z; float w; };
 
 [goldy_compute]
 [numthreads(64, 1, 1)]
 void cs_main(MyParams cfg, Scattered<float4> data, ThreadId id) {
-    data[id.x] = float4(cfg.x, cfg.y, 0, 0);
+    data[id.x] = float4(cfg.x, cfg.y, cfg.z, cfg.w);
 }
 "#;
 
@@ -2090,6 +2096,7 @@ void cs_main(MyParams cfg, Scattered<float4> data, ThreadId id) {
 /// correctly.
 #[test]
 fn stride_validation_matching_uint_passes() {
+    let _lock = STRIDE_ENV_LOCK.lock().unwrap();
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
@@ -2119,6 +2126,7 @@ fn stride_validation_matching_uint_passes() {
 /// error when layout validation is enabled.
 #[test]
 fn stride_validation_mismatched_uint_vs_stride16_fails() {
+    let _lock = STRIDE_ENV_LOCK.lock().unwrap();
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
@@ -2153,6 +2161,7 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
 /// error (validation is opt-in for performance).
 #[test]
 fn stride_validation_disabled_allows_mismatch() {
+    let _lock = STRIDE_ENV_LOCK.lock().unwrap();
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     std::env::remove_var("GOLDY_VALIDATION");
 
@@ -2183,6 +2192,7 @@ fn stride_validation_disabled_allows_mismatch() {
 /// reported.
 #[test]
 fn stride_validation_multi_binding_detects_second_slot_mismatch() {
+    let _lock = STRIDE_ENV_LOCK.lock().unwrap();
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
@@ -2221,6 +2231,7 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
 /// have correct strides. Must pass validation and execute correctly.
 #[test]
 fn stride_validation_multi_binding_all_correct_passes() {
+    let _lock = STRIDE_ENV_LOCK.lock().unwrap();
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
