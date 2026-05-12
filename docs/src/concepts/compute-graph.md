@@ -1,14 +1,14 @@
 # Compute Graph
 
-The compute graph API pairs Goldy's bindless resource model with explicit dependency declarations, enabling optimal barrier insertion and dispatch parallelism across all backends. It is opt-in alongside the existing [`ComputeEncoder`](./commands.md) / [`ComputePass`](./compute.md) API.
+The **task graph** API ([`TaskGraph`](../reference/api.md)) pairs Goldy's bindless resource model with explicit dependency declarations, enabling optimal barrier insertion and dispatch parallelism across all backends. It is opt-in alongside the existing [`ComputeEncoder`](./commands.md) / [`ComputePass`](./compute.md) API.
 
-## Why a compute graph?
+## Why a task graph?
 
 Goldy's bindless model (heap-backed argument buffers, resource-slot indices) gives shaders flexible, low-overhead access to resources. But it makes the GPU's automatic dependency tracking blind — Metal cannot see through argument buffer indirection to know which resources a dispatch reads or writes.
 
 Without the graph, each dispatch must be submitted as a separate command buffer to guarantee correct ordering. This forces total serialization with per-command-buffer overhead — worse than wgpu, which batches everything into one encoder with bind-group-based implicit hazard tracking.
 
-The compute graph tells Goldy exactly what each dispatch reads and writes. Goldy then:
+The task graph tells Goldy exactly what each dispatch reads and writes. Goldy then:
 
 1. Builds a dependency DAG from declared resource access patterns.
 2. Groups independent dispatches into **waves** that execute concurrently.
@@ -19,7 +19,7 @@ This is strictly more powerful than implicit bind-group tracking because the cal
 
 ## NodeAccess: logical vs physical access
 
-Goldy already categorizes resources by physical access pattern (`DataAccess::Scattered` for read/write storage, `Broadcast` for read-only uniform). But within a compute graph, a `Scattered` buffer might be read-only in one dispatch and read-write in another.
+Goldy already categorizes resources by physical access pattern (`DataAccess::Scattered` for read/write storage, `Broadcast` for read-only uniform). But within a task graph, a `Scattered` buffer might be read-only in one dispatch and read-write in another.
 
 `NodeAccess` captures the **per-node logical access**, orthogonal to the buffer's physical type:
 
@@ -33,14 +33,14 @@ pub enum NodeAccess {
 
 Multiple `Read` nodes on the same resource run concurrently — single-writer/multiple-reader (SWMR) parallelism.
 
-## Tier 1: ComputeGraph — dynamic, interpreted
+## TaskGraph — build, submit, repeat
 
-Build a DAG of dispatch nodes each frame. At submit time, Goldy analyzes dependencies, inserts barriers, and executes.
+Build a DAG of nodes (compute dispatches, clears, uploads, offscreen render passes as needed). Each call to [`TaskGraph::submit`](../reference/api.md) analyzes the current IR, schedules waves, emits barriers, and submits to the GPU.
 
 ```rust
-use goldy::{ComputeGraph, NodeAccess};
+use goldy::{NodeAccess, TaskGraph};
 
-let mut graph = ComputeGraph::new();
+let mut graph = TaskGraph::new();
 
 graph.node("pathtag_reduce", &pipeline_a)
     .bind_buffer(&scene_buf, NodeAccess::Read)
@@ -60,69 +60,27 @@ graph.node("bbox_clear", &pipeline_c)
     .bind_resources_raw(&[bbox_idx])
     .dispatch(16, 1, 1);
 
-graph.dispatch(&device)?;
-```
-
-**When to use:** dynamic workloads, prototyping, small graphs, cases where topology changes per frame.
-
-## Tier 2: ComputeProgram — compiled, specializable
-
-Separate graph topology (static) from bindings and dimensions (dynamic). Compile once, specialize cheaply per frame. The wave grouping and barrier placement are cached at compile time.
-
-```rust
-use goldy::{ComputeProgram, NodeAccess};
-
-// === Build phase (once, at init) ===
-
-let mut builder = ComputeProgram::builder();
-
-let scene     = builder.buffer_slot("scene");
-let tagmonoid = builder.buffer_slot("tagmonoid");
-let reduced   = builder.buffer_slot("reduced");
-let wg_reduce = builder.dim_slot("wg_reduce");
-
-builder.step("pathtag_reduce", &pipeline_a)
-    .bind_buffer(scene, NodeAccess::Read)
-    .bind_buffer(tagmonoid, NodeAccess::ReadWrite)
-    .dispatch_slot(wg_reduce);
-
-builder.step("pathtag_scan", &pipeline_b)
-    .bind_buffer(tagmonoid, NodeAccess::Read)
-    .bind_buffer(reduced, NodeAccess::ReadWrite)
-    .dispatch(32, 1, 1);          // fixed dimensions are fine too
-
-let program = builder.compile()?;
-
-// === Execute phase (each frame) ===
-
-let mut exec = program.specialize();
-exec.bind_buffer(scene, &scene_buf);
-exec.bind_buffer(tagmonoid, &tagmonoid_buf);
-exec.bind_buffer(reduced, &reduced_buf);
-exec.set_dim(wg_reduce, (64, 1, 1));
-
-let tv = exec.submit(&device)?;
+let tv = graph.submit(&device)?;
 device.wait_until(tv)?;
 ```
 
-**When to use:** fixed-topology pipelines where the sequence of shaders doesn't change frame to frame — only buffer sizes and dispatch dimensions do.
+For a **blocking** submit that waits for the GPU before returning, use [`Device::dispatch`](../../src/device.rs) instead of `submit` + `wait_until`.
 
-## How the tiers relate
+**When to use:** dynamic workloads, changing topology or bindings each frame, multi-dispatch pipelines with real data dependencies. Analysis cost for typical graphs (tens of nodes) is small relative to GPU work.
+
+## Submission path
 
 ```text
-ComputeGraph::submit()               → [build graph] → [analyze] → [emit barriers] → [execute]
-                                             ↑ every frame
-
-ComputeProgram::compile()            → [build graph] → [analyze] → [cache barrier template]
-ComputeProgram::specialize().submit() → [bind slots] → [replay cached template]
-                                             ↑ every frame (cheap)
+TaskGraph::submit() → [resolve transients if any] → [build_edges] → [schedule_waves]
+                    → [emit barriers + commands] → [backend submit]
+                              ↑ each submit (IR is rebuilt every frame)
 ```
 
-Tier 1 is conceptually "build a program, compile, specialize, and submit in one call." The graph IR is shared. Tier 2 caches the compiled form.
+There is no separate “compile once / specialize” graph type: the same IR path runs on every submission. If profiling ever shows scheduling as hot, a reasonable extension is to **cache the compiled schedule inside `TaskGraph`** when a topology fingerprint matches the previous frame — without duplicating the public builder API.
 
 ## Backend details
 
-The graph emits `ComputeCommand::ResourceBarrier` with per-resource granularity:
+The graph emits `GpuCommand::ResourceBarrier` with per-resource granularity:
 
 | Backend | Behavior |
 |---------|----------|
@@ -134,7 +92,7 @@ On Metal — the primary beneficiary — the graph enables single-encoder submis
 
 ## Comparison with ComputeEncoder
 
-| | `ComputeEncoder` | `ComputeGraph` / `ComputeProgram` |
+| | `ComputeEncoder` | `TaskGraph` |
 |---|---|---|
 | Dependency tracking | Manual (caller inserts barriers) | Automatic (from declared `NodeAccess`) |
 | Barrier granularity | Global (`Barrier`) | Per-resource (`ResourceBarrier`) |
@@ -142,4 +100,4 @@ On Metal — the primary beneficiary — the graph enables single-encoder submis
 | API complexity | Low — flat command list | Medium — declare access per node |
 | Best for | One-off dispatches, simple workloads | Multi-dispatch pipelines with data dependencies |
 
-The existing `ComputeEncoder` / `ComputePass` API is unchanged. The graph API is purely additive.
+The existing `ComputeEncoder` / `ComputePass` API is unchanged. The task graph API is purely additive.

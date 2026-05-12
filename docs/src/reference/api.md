@@ -601,7 +601,9 @@ pub use texture::*;
 pub use sampler::*;
 pub use compute::*;
 pub use timeline::TimelineValue;
-pub use task_graph::{NodeAccess, NodeBuilder, TaskGraph};
+pub use task_graph::{
+    NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId,
+};
 pub use common_types::*;
 ```
 
