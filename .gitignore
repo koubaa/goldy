@@ -2,6 +2,9 @@
 /target/
 Cargo.lock
 
+# Local Cargo home (e.g. CI/agents when global registry is not writable)
+.cargo-cache/
+
 # Output files from examples (but not test reference screenshots)
 *.png
 !tests/screenshots/*.png
