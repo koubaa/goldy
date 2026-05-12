@@ -5,27 +5,36 @@ use super::utils::{
     compare_to_vk, depth_format_to_vk, format_to_vk, topology_to_vk, vertex_format_to_vk,
 };
 use super::{DeviceHandle, PipelineHandle};
-use crate::types::{
-    CompareFunction, DepthStencilState, PrimitiveTopology, TextureFormat, VertexBufferLayout,
-};
+use crate::types::CompareFunction;
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 
+/// Shader modules plus raster state for Vulkan graphics pipeline creation.
+pub(super) struct VulkanGraphicsPipelineCreateBundle<'a> {
+    pub devices: &'a HashMap<DeviceHandle, types::LogicalDevice>,
+    pub pipelines: &'a mut HashMap<PipelineHandle, PipelineState>,
+    pub next_pipeline_handle: &'a mut PipelineHandle,
+    pub device_handle: DeviceHandle,
+    pub vs_module: vk::ShaderModule,
+    pub fs_module: vk::ShaderModule,
+    pub raster: &'a crate::backend::shared::PipelineDesc<'a>,
+    pub shader_debug_name: String,
+}
+
 /// Create a graphics pipeline without depth testing.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn create(
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
-    pipelines: &mut HashMap<PipelineHandle, PipelineState>,
-    next_pipeline_handle: &mut PipelineHandle,
-    device_handle: DeviceHandle,
-    vs_module: vk::ShaderModule,
-    fs_module: vk::ShaderModule,
-    vertex_layout: &VertexBufferLayout,
-    topology: PrimitiveTopology,
-    target_format: TextureFormat,
-    shader_debug_name: String,
-) -> Result<PipelineHandle> {
+pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<PipelineHandle> {
+    let VulkanGraphicsPipelineCreateBundle {
+        devices,
+        pipelines,
+        next_pipeline_handle,
+        device_handle,
+        vs_module,
+        fs_module,
+        raster: raster_desc,
+        shader_debug_name,
+    } = bundle;
+
     let logical_device = devices
         .get(&device_handle)
         .context("Invalid device handle")?;
@@ -45,16 +54,17 @@ pub(super) fn create(
 
     // Vertex input — only declare binding 0 when there are actual attributes
     let binding_descs: Vec<vk::VertexInputBindingDescription> =
-        if vertex_layout.attributes.is_empty() {
+        if raster_desc.vertex_layout.attributes.is_empty() {
             Vec::new()
         } else {
             vec![vk::VertexInputBindingDescription::default()
                 .binding(0)
-                .stride(vertex_layout.stride)
+                .stride(raster_desc.vertex_layout.stride)
                 .input_rate(vk::VertexInputRate::VERTEX)]
         };
 
-    let attribute_descs: Vec<_> = vertex_layout
+    let attribute_descs: Vec<_> = raster_desc
+        .vertex_layout
         .attributes
         .iter()
         .map(|attr| {
@@ -72,7 +82,7 @@ pub(super) fn create(
 
     // Input assembly
     let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(topology_to_vk(topology))
+        .topology(topology_to_vk(raster_desc.topology))
         .primitive_restart_enable(false);
 
     // Viewport/scissor (dynamic)
@@ -116,7 +126,7 @@ pub(super) fn create(
     let owns_layout = false;
 
     // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)
-    let color_format = format_to_vk(target_format);
+    let color_format = format_to_vk(raster_desc.target_format);
     let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
         .color_attachment_formats(std::slice::from_ref(&color_format));
 
@@ -173,20 +183,20 @@ pub(super) fn create(
 }
 
 /// Create a graphics pipeline with depth testing support.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn create_with_depth(
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
-    pipelines: &mut HashMap<PipelineHandle, PipelineState>,
-    next_pipeline_handle: &mut PipelineHandle,
-    device_handle: DeviceHandle,
-    vs_module: vk::ShaderModule,
-    fs_module: vk::ShaderModule,
-    vertex_layout: &VertexBufferLayout,
-    topology: PrimitiveTopology,
-    target_format: TextureFormat,
-    depth_stencil: Option<&DepthStencilState>,
-    shader_debug_name: String,
+    bundle: VulkanGraphicsPipelineCreateBundle<'_>,
 ) -> Result<PipelineHandle> {
+    let VulkanGraphicsPipelineCreateBundle {
+        devices,
+        pipelines,
+        next_pipeline_handle,
+        device_handle,
+        vs_module,
+        fs_module,
+        raster: raster_desc,
+        shader_debug_name,
+    } = bundle;
+
     let logical_device = devices
         .get(&device_handle)
         .context("Invalid device handle")?;
@@ -206,16 +216,17 @@ pub(super) fn create_with_depth(
 
     // Vertex input — only declare binding 0 when there are actual attributes
     let binding_descs: Vec<vk::VertexInputBindingDescription> =
-        if vertex_layout.attributes.is_empty() {
+        if raster_desc.vertex_layout.attributes.is_empty() {
             Vec::new()
         } else {
             vec![vk::VertexInputBindingDescription::default()
                 .binding(0)
-                .stride(vertex_layout.stride)
+                .stride(raster_desc.vertex_layout.stride)
                 .input_rate(vk::VertexInputRate::VERTEX)]
         };
 
-    let attribute_descs: Vec<_> = vertex_layout
+    let attribute_descs: Vec<_> = raster_desc
+        .vertex_layout
         .attributes
         .iter()
         .map(|attr| {
@@ -233,7 +244,7 @@ pub(super) fn create_with_depth(
 
     // Input assembly
     let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(topology_to_vk(topology))
+        .topology(topology_to_vk(raster_desc.topology))
         .primitive_restart_enable(false);
 
     // Viewport/scissor (dynamic)
@@ -257,7 +268,7 @@ pub(super) fn create_with_depth(
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
     // Depth stencil state
-    let depth_stencil_state = if let Some(ds) = depth_stencil {
+    let depth_stencil_state = if let Some(ds) = raster_desc.depth_stencil {
         vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(
                 ds.depth_write_enabled || ds.depth_compare != CompareFunction::Always,
@@ -314,8 +325,9 @@ pub(super) fn create_with_depth(
     let owns_layout = true;
 
     // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)
-    let color_format = format_to_vk(target_format);
-    let depth_format_vk = depth_stencil
+    let color_format = format_to_vk(raster_desc.target_format);
+    let depth_format_vk = raster_desc
+        .depth_stencil
         .map(|ds| depth_format_to_vk(ds.format))
         .unwrap_or(vk::Format::UNDEFINED);
 

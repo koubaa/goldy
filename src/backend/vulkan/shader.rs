@@ -7,22 +7,14 @@ use ash::vk;
 use std::collections::HashMap;
 
 /// Create a shader from Slang source code.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
     next_shader_handle: &mut ShaderHandle,
-    device_handle: DeviceHandle,
-    slang_source: &str,
-    search_paths: &[&str],
-    defines: &[(&str, &str)],
-    optimization_level: crate::types::OptimizationLevel,
-    layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    desc: crate::backend::shared::ShaderDesc<'_>,
 ) -> Result<ShaderHandle> {
     // Just validate the device exists - actual compilation happens at pipeline creation
-    let _ = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let _ = devices.get(&desc.device).context("Invalid device handle")?;
 
     let handle = *next_shader_handle;
     *next_shader_handle += 1;
@@ -30,19 +22,20 @@ pub(super) fn create(
     shaders.insert(
         handle,
         ShaderState {
-            device_handle,
-            slang_source: slang_source.to_string(),
-            search_paths: search_paths.iter().map(|s| s.to_string()).collect(),
-            defines: defines
+            device_handle: desc.device,
+            slang_source: desc.slang_source.to_string(),
+            search_paths: desc.search_paths.iter().map(|s| s.to_string()).collect(),
+            defines: desc
+                .defines
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            optimization_level,
+            optimization_level: desc.optimization_level,
             vertex_module: None,
             fragment_module: None,
             compute_module: None,
             reflection: None,
-            layout_checks,
+            layout_checks: desc.layout_checks,
         },
     );
 
@@ -74,7 +67,6 @@ pub(super) fn destroy(
 }
 
 /// Compile a shader for a specific stage on demand.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn ensure_stage_compiled(
     slang_compiler: &crate::slang::SlangCompiler,
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,

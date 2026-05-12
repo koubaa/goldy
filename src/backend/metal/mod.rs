@@ -247,12 +247,14 @@ impl GpuBackend for MetalBackend {
             &self.state.devices,
             &mut self.state.shaders,
             &mut self.state.next_shader_handle,
-            device,
-            slang_source,
-            search_paths,
-            defines,
-            optimization_level,
-            layout_checks,
+            crate::backend::shared::ShaderDesc::new(
+                device,
+                slang_source,
+                search_paths,
+                defines,
+                optimization_level,
+            )
+            .with_layout_checks(layout_checks),
         )
     }
 
@@ -269,16 +271,15 @@ impl GpuBackend for MetalBackend {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
-        pipeline::create_with_depth(
-            &mut self.state,
-            device,
+        let raster =
+            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
+        let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
+            device_handle: device,
             vertex_shader,
             fragment_shader,
-            vertex_layout,
-            topology,
-            target_format,
-            None,
-        )
+            raster: &raster,
+        };
+        pipeline::create_with_depth(&mut self.state, &desc)
     }
 
     fn create_pipeline_with_depth(
@@ -291,16 +292,16 @@ impl GpuBackend for MetalBackend {
         target_format: TextureFormat,
         depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        pipeline::create_with_depth(
-            &mut self.state,
-            device,
+        let raster =
+            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
+                .with_depth_stencil(depth_stencil);
+        let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
+            device_handle: device,
             vertex_shader,
             fragment_shader,
-            vertex_layout,
-            topology,
-            target_format,
-            depth_stencil,
-        )
+            raster: &raster,
+        };
+        pipeline::create_with_depth(&mut self.state, &desc)
     }
 
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {

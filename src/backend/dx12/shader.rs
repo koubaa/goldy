@@ -6,23 +6,19 @@ use anyhow::{Context, Result};
 
 pub(super) fn create_with_checks(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    slang_source: &str,
-    search_paths: &[&str],
-    defines: &[(&str, &str)],
-    optimization_level: crate::types::OptimizationLevel,
-    layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    desc: crate::backend::shared::ShaderDesc<'_>,
 ) -> Result<ShaderHandle> {
     let _ = state
         .devices
-        .get(&device_handle)
+        .get(&desc.device)
         .context("Invalid device handle")?;
 
     let handle = state.next_shader_handle;
     state.next_shader_handle += 1;
 
-    let stored_paths: Vec<String> = search_paths.iter().map(|s| s.to_string()).collect();
-    let stored_defines: Vec<(String, String)> = defines
+    let stored_paths: Vec<String> = desc.search_paths.iter().map(|s| s.to_string()).collect();
+    let stored_defines: Vec<(String, String)> = desc
+        .defines
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
@@ -30,16 +26,16 @@ pub(super) fn create_with_checks(
     state.shaders.insert(
         handle,
         ShaderState {
-            device_handle,
-            slang_source: slang_source.to_string(),
+            device_handle: desc.device,
+            slang_source: desc.slang_source.to_string(),
             search_paths: stored_paths,
             defines: stored_defines,
-            optimization_level,
+            optimization_level: desc.optimization_level,
             vertex_bytecode: None,
             fragment_bytecode: None,
             compute_bytecode: None,
             reflection: None,
-            layout_checks,
+            layout_checks: desc.layout_checks,
         },
     );
 

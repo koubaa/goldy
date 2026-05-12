@@ -5,7 +5,18 @@
 //! re-export them locally without leaking internal details to crate consumers.
 //!
 
+use crate::slang::OwnedLayoutCheck;
+use crate::types::{
+    DepthStencilState, OptimizationLevel, PrimitiveTopology, TextureFormat, VertexBufferLayout,
+};
 use anyhow::Result;
+
+use super::DeviceHandle;
+#[cfg(any(
+    all(feature = "metal", target_os = "macos"),
+    all(feature = "dx12", target_os = "windows"),
+))]
+use super::ShaderHandle;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Push-constant layout
@@ -428,4 +439,102 @@ pub fn resolve_clear_size(buffer_size: u64, offset: u64, size: u64) -> u64 {
     } else {
         size
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Shader / pipeline creation descriptors (shared across backends)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Deferred shader creation parameters shared by every GPU backend.
+#[derive(Debug)]
+pub struct ShaderDesc<'a> {
+    pub device: DeviceHandle,
+    pub slang_source: &'a str,
+    pub search_paths: &'a [&'a str],
+    pub defines: &'a [(&'a str, &'a str)],
+    pub optimization_level: OptimizationLevel,
+    pub layout_checks: Vec<OwnedLayoutCheck>,
+}
+
+impl<'a> ShaderDesc<'a> {
+    #[inline]
+    pub fn new(
+        device: DeviceHandle,
+        slang_source: &'a str,
+        search_paths: &'a [&'a str],
+        defines: &'a [(&'a str, &'a str)],
+        optimization_level: OptimizationLevel,
+    ) -> Self {
+        Self {
+            device,
+            slang_source,
+            search_paths,
+            defines,
+            optimization_level,
+            layout_checks: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn with_layout_checks(mut self, layout_checks: Vec<OwnedLayoutCheck>) -> Self {
+        self.layout_checks = layout_checks;
+        self
+    }
+}
+
+/// Slang compile inputs for a single shader stage (Metal path; same field set as other backends).
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[derive(Debug, Clone, Copy)]
+pub struct ShaderStageCompileDesc<'a> {
+    pub slang_source: &'a str,
+    pub search_paths: &'a [&'a str],
+    pub entry_point: &'a str,
+    pub stage: crate::slang::SlangStage,
+    pub extra_defines: &'a [(&'a str, &'a str)],
+    pub layout_checks: &'a [OwnedLayoutCheck],
+    pub optimization_level: OptimizationLevel,
+}
+
+/// Rasterization state for a graphics pipeline, shared across Vulkan, DX12, and Metal.
+#[derive(Debug, Clone, Copy)]
+pub struct PipelineDesc<'a> {
+    pub vertex_layout: &'a VertexBufferLayout,
+    pub topology: PrimitiveTopology,
+    pub target_format: TextureFormat,
+    pub depth_stencil: Option<&'a DepthStencilState>,
+}
+
+impl<'a> PipelineDesc<'a> {
+    #[inline]
+    pub fn new(
+        vertex_layout: &'a VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+    ) -> Self {
+        Self {
+            vertex_layout,
+            topology,
+            target_format,
+            depth_stencil: None,
+        }
+    }
+
+    #[inline]
+    pub fn with_depth_stencil(mut self, depth_stencil: Option<&'a DepthStencilState>) -> Self {
+        self.depth_stencil = depth_stencil;
+        self
+    }
+}
+
+/// Full graphics pipeline creation inputs for backends that resolve shaders by handle.
+#[cfg(any(
+    all(feature = "metal", target_os = "macos"),
+    all(feature = "dx12", target_os = "windows"),
+))]
+#[derive(Debug, Clone, Copy)]
+pub struct GraphicsPipelineCreateDesc<'a> {
+    pub device_handle: DeviceHandle,
+    pub vertex_shader: ShaderHandle,
+    pub fragment_shader: ShaderHandle,
+    pub raster: &'a PipelineDesc<'a>,
 }

@@ -1,8 +1,9 @@
 //! Shader compilation and management logic.
 
+use super::super::shared::{ShaderDesc, ShaderStageCompileDesc};
 use super::super::{DeviceHandle, ShaderHandle};
 use super::types::ShaderState;
-use crate::slang::{OwnedLayoutCheck, ShaderTarget, SlangCompiler, SlangStage};
+use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{Device as MTLDevice, Library};
@@ -78,42 +79,28 @@ pub(super) fn patch_vertex_msl_entry_point_params(msl: &str) -> String {
 }
 
 /// Compile a shader stage to MSL and create a Metal library.
-///
-/// The argument count reflects the Slang compile API surface: each parameter
-/// maps to a distinct compile-time concept (source, search paths, entry point,
-/// stage, defines, layout checks, optimization). Grouping them into a struct
-/// would require the same change in the Vulkan and DX12 backends.
-#[allow(clippy::too_many_arguments)]
 fn compile_stage_with_reflection(
     slang_compiler: &SlangCompiler,
     device: &MTLDevice,
-    slang_source: &str,
-    search_paths: &[String],
-    entry_point: &str,
-    stage: SlangStage,
-    extra_defines: &[(&str, &str)],
-    layout_checks: &[OwnedLayoutCheck],
-    optimization_level: crate::types::OptimizationLevel,
+    desc: &ShaderStageCompileDesc<'_>,
 ) -> Result<(Library, Option<crate::slang::ShaderReflection>)> {
-    let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
-
     let compile_outcome = slang_compiler.compile_bindless_with_reflection_and_defines(
-        slang_source,
+        desc.slang_source,
         ShaderTarget::Metal,
-        &[(entry_point, stage)],
-        &search_path_refs,
-        extra_defines,
-        layout_checks,
-        optimization_level,
+        &[(desc.entry_point, desc.stage)],
+        desc.search_paths,
+        desc.extra_defines,
+        desc.layout_checks,
+        desc.optimization_level,
     );
 
     let result = compile_outcome
-        .with_context(|| format!("Failed to compile {} shader stage", entry_point))?;
+        .with_context(|| format!("Failed to compile {} shader stage", desc.entry_point))?;
 
     if !result.reflection.parameter_blocks.is_empty() {
         tracing::debug!(
             "Shader {} has {} ParameterBlock(s):",
-            entry_point,
+            desc.entry_point,
             result.reflection.parameter_blocks.len()
         );
         for pb in &result.reflection.parameter_blocks {
@@ -144,12 +131,12 @@ fn compile_stage_with_reflection(
         .to_string();
 
     // Apply vertex-shader patch for missing EntryPointParams [[buffer(1)]] binding.
-    let msl_source = if stage == SlangStage::Vertex {
+    let msl_source = if desc.stage == SlangStage::Vertex {
         let patched = patch_vertex_msl_entry_point_params(&raw_msl);
         if patched != raw_msl {
             tracing::debug!(
                 "Applied vertex EntryPointParams [[buffer(1)]] patch for {}",
-                entry_point
+                desc.entry_point
             );
         }
         patched
@@ -159,7 +146,7 @@ fn compile_stage_with_reflection(
 
     tracing::debug!(
         "Compiled MSL {} shader ({} bytes)",
-        entry_point,
+        desc.entry_point,
         msl_source.len()
     );
 
@@ -170,7 +157,7 @@ fn compile_stage_with_reflection(
         let idx = DUMP_IDX.fetch_add(1, Ordering::Relaxed);
         let dir = std::path::Path::new(&dump_dir);
         let _ = std::fs::create_dir_all(dir);
-        let filename = format!("{:03}_{}.metal", idx, entry_point);
+        let filename = format!("{:03}_{}.metal", idx, desc.entry_point);
         if let Ok(mut f) = std::fs::File::create(dir.join(&filename)) {
             let _ = f.write_all(msl_source.as_bytes());
             tracing::info!("Dumped MSL to {}/{}", dump_dir, filename);
@@ -180,7 +167,11 @@ fn compile_stage_with_reflection(
     let library = device
         .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
         .map_err(|e| {
-            anyhow::anyhow!("Failed to create Metal library for {}: {}", entry_point, e)
+            anyhow::anyhow!(
+                "Failed to create Metal library for {}: {}",
+                desc.entry_point,
+                e
+            )
         })?;
 
     Ok((library, Some(result.reflection)))
@@ -238,17 +229,18 @@ pub(super) fn ensure_stage_compiled(
         .get(&device_handle)
         .context("Shader's device no longer valid")?;
 
-    let (library, reflection) = compile_stage_with_reflection(
-        slang_compiler,
-        &logical_device.device,
-        &slang_source,
-        &search_paths,
+    let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
+    let compile_desc = ShaderStageCompileDesc {
+        slang_source: &slang_source,
+        search_paths: &search_path_refs,
         entry_point,
         stage,
-        &extra_defines,
-        &layout_checks_snapshot,
+        extra_defines: &extra_defines,
+        layout_checks: &layout_checks_snapshot,
         optimization_level,
-    )?;
+    };
+    let (library, reflection) =
+        compile_stage_with_reflection(slang_compiler, &logical_device.device, &compile_desc)?;
 
     let shader = shaders
         .get_mut(&shader_handle)
@@ -280,21 +272,13 @@ pub(super) fn ensure_stage_compiled(
 }
 
 /// Create a shader handle (compilation deferred to pipeline creation).
-#[allow(clippy::too_many_arguments)] // Backend entry point; parameters map 1:1 to GpuBackend::create_shader.
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, super::types::LogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
     next_shader_handle: &mut ShaderHandle,
-    device_handle: DeviceHandle,
-    slang_source: &str,
-    search_paths: &[&str],
-    defines: &[(&str, &str)],
-    optimization_level: crate::types::OptimizationLevel,
-    layout_checks: Vec<OwnedLayoutCheck>,
+    desc: ShaderDesc<'_>,
 ) -> Result<ShaderHandle> {
-    devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    devices.get(&desc.device).context("Invalid device handle")?;
 
     let handle = *next_shader_handle;
     *next_shader_handle += 1;
@@ -302,19 +286,20 @@ pub(super) fn create(
     shaders.insert(
         handle,
         ShaderState {
-            device_handle,
-            slang_source: slang_source.to_string(),
-            search_paths: search_paths.iter().map(|s| s.to_string()).collect(),
-            defines: defines
+            device_handle: desc.device,
+            slang_source: desc.slang_source.to_string(),
+            search_paths: desc.search_paths.iter().map(|s| s.to_string()).collect(),
+            defines: desc
+                .defines
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            optimization_level,
+            optimization_level: desc.optimization_level,
             vertex_library: None,
             fragment_library: None,
             compute_library: None,
             reflection: None,
-            layout_checks,
+            layout_checks: desc.layout_checks,
         },
     );
 
