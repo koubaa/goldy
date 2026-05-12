@@ -11,20 +11,23 @@ A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets 
 ## Quick Example
 
 ```rust
-use goldy::{Instance, DeviceType, Buffer, DataAccess, Color, CommandEncoder, FrameOutput, TextureFormat};
+use goldy::{
+    Color, CommandEncoder, DeviceType, Instance, RenderTarget, TextureFormat,
+};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
     let device = instance.create_device(DeviceType::DiscreteGpu)?;
-    
-    let frame = FrameOutput::new(&device, 800, 600, TextureFormat::Rgba8Unorm);
+
+    let target = RenderTarget::new(&device, 800, 600, TextureFormat::Rgba8Unorm)?;
     let mut encoder = CommandEncoder::new();
     {
         let mut pass = encoder.begin_render_pass();
         pass.clear(Color::CORNFLOWER_BLUE);
     }
-    
-    let pixels = frame.render(encoder)?;
+
+    target.render(encoder)?;
+    let _pixels = target.read_to_cpu()?;
     Ok(())
 }
 ```
@@ -36,9 +39,7 @@ fn main() -> anyhow::Result<()> {
 | **Rust-native** | Idiomatic Rust API, not a wrapper around C |
 | **Modern-only** | Vulkan 1.4+, DX12, Metal Tier 2 |
 | **Slang shaders** | Single shader language for all backends |
-| **Legacy-free** | No OpenGL, no Vulkan <1.4, no OpenCL |
 | **Unified** | Graphics and compute in one API |
-| **Fast-moving** | Not a standard—can iterate quickly |
 
 ## Installation
 
@@ -136,7 +137,7 @@ cargo test
 Goldy is dual-licensed:
 
 - **Open source** — [GNU Lesser General Public License v2.1 or later](LICENSE) (LGPL-2.1-or-later). You may use, modify, and distribute Goldy as a dynamically linked library in any project, including proprietary software, under the terms of the LGPL.
-- **Commercial** — A commercial license is available for use cases where LGPL terms are not suitable (static linking, proprietary modifications, embedded distribution without LGPL obligations, etc.). Contact [koubaa@github](mailto:11414628+koubaa@users.noreply.github.com) for terms.
+- **Commercial** — A commercial license is available for use cases where LGPL terms are not suitable (static linking, proprietary modifications, embedded distribution without LGPL obligations, etc.). Contact [koubaa at github](permanent email TBD) for terms.
 
 ## Author
 
