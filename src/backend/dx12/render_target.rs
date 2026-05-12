@@ -90,8 +90,11 @@ pub(super) fn create_with_depth(
     let texture = texture.context("CreateCommittedResource returned null")?;
 
     // Create RTV
-    let rtv_offset = state.next_rtv_offset;
-    state.next_rtv_offset += 1;
+    let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
+        let off = state.next_rtv_offset;
+        state.next_rtv_offset += 1;
+        off
+    });
 
     let rtv_handle = unsafe {
         let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
@@ -146,8 +149,11 @@ pub(super) fn create_with_depth(
         .context("Failed to create depth buffer")?;
         let depth_tex = depth_tex.context("CreateCommittedResource returned null for depth")?;
 
-        let dsv_off = state.next_dsv_offset;
-        state.next_dsv_offset += 1;
+        let dsv_off = state.free_dsv_offsets.pop().unwrap_or_else(|| {
+            let off = state.next_dsv_offset;
+            state.next_dsv_offset += 1;
+            off
+        });
 
         let dsv_handle = unsafe {
             let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
@@ -214,7 +220,12 @@ pub(super) fn create_with_depth(
 
 /// Destroy a render target.
 pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
-    state.render_targets.remove(&target);
+    if let Some(rt) = state.render_targets.remove(&target) {
+        state.free_rtv_offsets.push(rt.rtv_offset);
+        if let Some(dsv_off) = rt.dsv_offset {
+            state.free_dsv_offsets.push(dsv_off);
+        }
+    }
 }
 
 /// Render commands to a render target.

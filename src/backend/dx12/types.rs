@@ -651,10 +651,14 @@ pub(super) struct Dx12State {
     pub next_texture_handle: TextureHandle,
     pub samplers: HashMap<SamplerHandle, SamplerState>,
     pub next_sampler_handle: SamplerHandle,
-    /// Next RTV descriptor offset
+    /// Next RTV descriptor offset (high-water mark; prefer free_rtv_offsets first)
     pub next_rtv_offset: u32,
-    /// Next DSV descriptor offset
+    /// Recycled RTV descriptor slots available for reuse
+    pub free_rtv_offsets: Vec<u32>,
+    /// Next DSV descriptor offset (high-water mark; prefer free_dsv_offsets first)
     pub next_dsv_offset: u32,
+    /// Recycled DSV descriptor slots available for reuse
+    pub free_dsv_offsets: Vec<u32>,
     /// Per-backend Slang compiler instance
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-device upload belts for `GpuCommand::WriteBuffer`.
