@@ -360,6 +360,104 @@ fn vk_api_validation_two_device_teardown() {
     drop(i2);
 }
 
+// ─── Buffer resize (Phase 1: stable handles, realloc-copy fallback) ───────────
+
+#[test]
+fn resize_preserves_contents() {
+    let device = make_device();
+    let mut buf =
+        Buffer::with_data(&device, &[1u32, 2, 3, 4], DataAccess::Scattered).expect("buf");
+    buf.resize_to(32).expect("resize");
+    let mut out = vec![0u8; 32];
+    buf.read_to_cpu(&device, &mut out).expect("read");
+    let words: &[u32] = bytemuck::cast_slice(&out);
+    assert_eq!(&words[..4], &[1u32, 2, 3, 4]);
+    for w in &words[4..8] {
+        assert_eq!(*w, 0, "new region should be zero");
+    }
+}
+
+#[test]
+fn resize_preserves_bindless_index() {
+    let device = make_device();
+    let mut buf = Buffer::new(&device, 16, DataAccess::Scattered).expect("buf");
+    let idx = buf.bindless_index().expect("bindless");
+    buf.resize_to(256).expect("resize");
+    assert_eq!(buf.bindless_index(), Some(idx));
+}
+
+#[test]
+fn resize_down_truncates() {
+    let device = make_device();
+    let mut buf =
+        Buffer::with_data(&device, &[10u32, 20, 30, 40], DataAccess::Scattered).expect("buf");
+    buf.resize_to(8).expect("resize down");
+    let mut out = vec![0u8; 8];
+    buf.read_to_cpu(&device, &mut out).expect("read");
+    let words: &[u32] = bytemuck::cast_slice(&out);
+    assert_eq!(words, &[10u32, 20]);
+}
+
+#[test]
+fn resize_uninitialized_skips_copy() {
+    let device = make_device();
+    let mut buf =
+        Buffer::with_data(&device, &[0xABCD_BEEFu32], DataAccess::Scattered).expect("buf");
+    buf.resize_to_uninitialized(8).expect("resize uni");
+    let mut out = vec![0u8; 8];
+    buf.read_to_cpu(&device, &mut out).expect("read");
+}
+
+#[test]
+fn buffer_pool_resize() {
+    let device = make_device();
+    let mut pool = BufferPool::new(&device, 1024).expect("pool");
+    let v1 = pool.alloc::<u32>(4).expect("v1");
+    let v2 = pool.alloc::<u32>(4).expect("v2");
+    let i1 = v1.bindless_index().unwrap();
+    let i2 = v2.bindless_index().unwrap();
+    pool.resize(2048).expect("resize pool");
+    let _v3 = pool.alloc::<u32>(8).expect("v3");
+    assert_eq!(v1.bindless_index(), Some(i1));
+    assert_eq!(v2.bindless_index(), Some(i2));
+}
+
+#[test]
+fn buffer_pool_ring_resize_stable_handle() {
+    let device = make_device();
+    let mut ring: BufferPoolRing<2> = BufferPoolRing::new();
+    ring.advance();
+    let mut stable: Option<u32> = None;
+    for size in [64u64, 128, 256] {
+        ring.prepare(&device, size).expect("prepare");
+        let idx = ring
+            .current()
+            .expect("pool")
+            .backing_buffer()
+            .bindless_index()
+            .expect("bindless");
+        assert!(
+            stable.map_or(true, |p| p == idx),
+            "bindless index changed across resize"
+        );
+        stable = Some(idx);
+    }
+}
+
+#[test]
+fn new_with_capacity_hint_smoke() {
+    let device = make_device();
+    let b = Buffer::new_with_capacity_hint(&device, 16, 4096, DataAccess::Scattered).expect("b");
+    assert_eq!(b.size(), 16);
+}
+
+#[test]
+fn hint_unused_above_smoke() {
+    let device = make_device();
+    let mut buf = Buffer::new(&device, 64, DataAccess::Scattered).expect("buf");
+    buf.hint_unused_above(32);
+}
+
 // ─── Buffer read_to_cpu / clear tests ────────────────────────────────────────
 
 /// Write data via a compute shader then read it back, verifying correctness

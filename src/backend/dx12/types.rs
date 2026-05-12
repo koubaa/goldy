@@ -324,6 +324,12 @@ pub(crate) enum PendingDeletion {
         upload_buffer: Option<Direct3D12::ID3D12Resource>,
         coherent_readback: Option<Direct3D12::ID3D12Resource>,
     },
+    /// Old GPU allocations after an in-place buffer resize; logical handle and heap slots stay live.
+    ReplacedBufferGpu {
+        resource: Direct3D12::ID3D12Resource,
+        upload_buffer: Option<Direct3D12::ID3D12Resource>,
+        coherent_readback: Option<Direct3D12::ID3D12Resource>,
+    },
     /// A buffer view whose D3D12 resource belongs to the parent; only the
     /// bindless descriptor slots need deregistration.
     BufferView { buffer_handle: BufferHandle },
@@ -374,6 +380,7 @@ impl DeletionQueue {
             | PendingDeletion::BufferView { buffer_handle } => {
                 registry.unregister_buffer(*buffer_handle);
             }
+            PendingDeletion::ReplacedBufferGpu { .. } => {}
             PendingDeletion::Texture { texture_handle, .. } => {
                 registry.unregister_texture(*texture_handle);
             }
@@ -429,6 +436,7 @@ pub(crate) struct LogicalDevice {
 }
 
 /// GPU buffer state.
+#[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
@@ -456,6 +464,10 @@ pub(crate) struct BufferState {
     pub flags: crate::types::BufferFlags,
     /// Created with [`crate::backend::GpuBackend::place_buffer_in_transient_heap`] (placed resource).
     pub transient_placed: bool,
+    /// Parent buffer handle when [`Self::is_view`]; [`None`] for root buffers.
+    pub parent_for_view: Option<BufferHandle>,
+    /// Byte offset into the parent for views; [`None`] for root buffers.
+    pub view_byte_offset: Option<u64>,
 }
 
 /// Shader module state with cached compiled bytecode.

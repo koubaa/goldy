@@ -377,6 +377,24 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
+    fn resize_buffer(
+        &mut self,
+        device_handle: DeviceHandle,
+        buffer_handle: BufferHandle,
+        new_size: u64,
+        preserve_contents: bool,
+    ) -> Result<()> {
+        buffer::resize(
+            &self.state.instance,
+            &mut self.state.devices,
+            &mut self.state.buffers,
+            device_handle,
+            buffer_handle,
+            new_size,
+            preserve_contents,
+        )
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device_handle: DeviceHandle,

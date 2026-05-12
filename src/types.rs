@@ -153,6 +153,21 @@ pub enum DataAccess {
     Broadcast,
 }
 
+/// How costly [`crate::Buffer::resize_to`] is on this device.
+///
+/// Phase 1 uses [`Self::Copy`] on all backends. Later phases may report
+/// [`Self::Constant`] (oversized + demand paging) or [`Self::PageBind`] (sparse).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BufferResizeCost {
+    /// Handle is stable; growth within reserved capacity is metadata-only.
+    Constant,
+    /// Physical pages bound/unbound (Vulkan sparse, DX12 tiled).
+    PageBind,
+    /// Reallocation plus GPU copy of existing contents.
+    #[default]
+    Copy,
+}
+
 /// Category of a bindless descriptor slot.
 ///
 /// Goldy's bindless argument buffers / descriptor heaps are organized into

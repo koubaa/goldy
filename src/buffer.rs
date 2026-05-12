@@ -47,11 +47,12 @@ impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T;
 
 /// A GPU buffer.
 pub struct Buffer {
-    _device: Device,
+    device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
     size: u64,
     access: DataAccess,
+    element_stride: Option<u32>,
     flags: BufferFlags,
 }
 
@@ -72,6 +73,19 @@ impl Buffer {
     ///   Hardware optimizes for wave-wide broadcast (ConstantBuffer).
     pub fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self> {
         Self::new_with_stride_and_flags(device, size, access, None, BufferFlags::empty())
+    }
+
+    /// Like [`Self::new`], with an optional peak-capacity hint.
+    ///
+    /// Phase 1 ignores `expected_max` and allocates exactly `initial_size`. The hint is reserved
+    /// for later phases (oversized reservations, demand paging).
+    pub fn new_with_capacity_hint(
+        device: &Device,
+        initial_size: u64,
+        _expected_max: u64,
+        access: DataAccess,
+    ) -> Result<Self> {
+        Self::new(device, initial_size, access)
     }
 
     pub fn new_with_stride(
@@ -97,11 +111,12 @@ impl Buffer {
             backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
 
         Ok(Self {
-            _device: device.clone(),
+            device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
             size,
             access,
+            element_stride,
             flags,
         })
     }
@@ -146,11 +161,12 @@ impl Buffer {
         drop(backend);
 
         let buffer = Self {
-            _device: device.clone(),
+            device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
             size: bytes.len() as u64,
             access,
+            element_stride: Some(element_stride),
             flags,
         };
         buffer.write(0, bytes)?;
@@ -209,11 +225,12 @@ impl Buffer {
         drop(backend);
 
         let buffer = Self {
-            _device: device.clone(),
+            device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
             size: data.len() as u64,
             access,
+            element_stride: Some(element_stride),
             flags,
         };
         buffer.write(0, data)?;
@@ -248,6 +265,44 @@ impl Buffer {
     pub fn flags(&self) -> BufferFlags {
         self.flags
     }
+
+    /// Element stride passed at creation (for structured-buffer descriptors), if any.
+    pub fn element_stride(&self) -> Option<u32> {
+        self.element_stride
+    }
+
+    /// Resize buffer storage in place. `[0..min(old_size, new_size))` is preserved; any newly
+    /// exposed bytes are zero-filled. The [`BufferHandle`] and bindless indices stay stable.
+    pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
+        let mut backend = self.backend.lock().unwrap();
+        backend.resize_buffer(
+            self.device.inner.handle,
+            self.handle,
+            new_size,
+            true,
+        )?;
+        self.size = new_size;
+        Ok(())
+    }
+
+    /// Resize without preserving or initializing existing bytes (fast path for pools about to reset).
+    /// New storage may contain arbitrary data; only the handle stability contract applies.
+    pub fn resize_to_uninitialized(&mut self, new_size: u64) -> Result<()> {
+        let mut backend = self.backend.lock().unwrap();
+        backend.resize_buffer(
+            self.device.inner.handle,
+            self.handle,
+            new_size,
+            false,
+        )?;
+        self.size = new_size;
+        Ok(())
+    }
+
+    /// Hint that bytes at and above `offset` are not needed until written again.
+    ///
+    /// Phase 1: no-op (reserved for decommit / paging).
+    pub fn hint_unused_above(&mut self, _offset: u64) {}
 
     /// Get the buffer's index in the global bindless descriptor set.
     ///
@@ -331,7 +386,7 @@ impl Buffer {
         let mut backend = self.backend.lock().unwrap();
         let handle = backend.create_buffer_view(self.handle, offset, size, element_stride)?;
         Ok(BufferView {
-            _device: self._device.clone(),
+            _device: self.device.clone(),
             backend: Arc::clone(&self.backend),
             handle,
             parent_handle: self.handle,
@@ -626,6 +681,13 @@ impl BufferPool {
         })
     }
 
+    /// Resize the backing buffer in place (stable handle) and reset the bump allocator.
+    pub fn resize(&mut self, new_size: u64) -> Result<()> {
+        self.backing.resize_to(new_size)?;
+        self.offset = 0;
+        Ok(())
+    }
+
     /// Allocate a typed region from the pool.
     ///
     /// Returns a `BufferView` spanning `count` elements of type `T`, with the offset
@@ -705,6 +767,11 @@ impl BufferPool {
     pub fn backing_buffer(&self) -> &Buffer {
         &self.backing
     }
+
+    /// Forward [`Buffer::hint_unused_above`] on the backing allocation.
+    pub fn hint_unused_above(&mut self, offset: u64) {
+        self.backing.hint_unused_above(offset);
+    }
 }
 
 /// A fixed-size ring of [`BufferPool`]s for double- (or N-) buffered rendering.
@@ -780,12 +847,24 @@ impl<const N: usize> BufferPoolRing<N> {
             }
             None => (true, false),
         };
-        if too_small || too_large {
-            self.pools[idx] = None;
-            device.reset_buffer_heaps();
-            device.ensure_buffer_heap_capacity(size);
-            let pool = BufferPool::new(device, size)?;
-            self.pools[idx] = Some(pool);
+        if too_small {
+            if let Some(pool) = &mut self.pools[idx] {
+                pool.resize(size)?;
+            } else {
+                device.reset_buffer_heaps();
+                device.ensure_buffer_heap_capacity(size);
+                self.pools[idx] = Some(BufferPool::new(device, size)?);
+            }
+            self.clear_flags[idx] = true;
+        } else if too_large {
+            if let Some(pool) = &mut self.pools[idx] {
+                pool.resize(size)?;
+                pool.hint_unused_above(size);
+            } else {
+                device.reset_buffer_heaps();
+                device.ensure_buffer_heap_capacity(size);
+                self.pools[idx] = Some(BufferPool::new(device, size)?);
+            }
             self.clear_flags[idx] = true;
         } else {
             self.pools[idx]

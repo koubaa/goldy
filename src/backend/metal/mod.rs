@@ -197,6 +197,16 @@ impl GpuBackend for MetalBackend {
         buffer::create_view(&mut self.state, parent, offset, size, element_stride)
     }
 
+    fn resize_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_size: u64,
+        preserve_contents: bool,
+    ) -> Result<()> {
+        buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device: DeviceHandle,

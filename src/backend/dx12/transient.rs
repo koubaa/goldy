@@ -229,6 +229,8 @@ pub(super) fn place_buffer_in_transient_heap(
             coherent_readback_mapped: None,
             flags: crate::types::BufferFlags::empty(),
             transient_placed: true,
+            parent_for_view: None,
+            view_byte_offset: None,
         },
     );
     Ok(handle)

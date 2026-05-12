@@ -381,6 +381,30 @@ impl GpuBackend for MockBackend {
         Ok(handle)
     }
 
+    fn resize_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_size: u64,
+        preserve_contents: bool,
+    ) -> Result<()> {
+        let buf = self
+            .buffers
+            .get_mut(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if buf.device_handle != device {
+            anyhow::bail!("Buffer belongs to a different device");
+        }
+        let new_len = new_size as usize;
+        if preserve_contents {
+            buf.data.resize(new_len, 0);
+        } else {
+            buf.data = vec![0u8; new_len];
+        }
+        buf.size = new_size;
+        Ok(())
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         _device: DeviceHandle,

@@ -214,6 +214,15 @@ pub struct DeviceCapabilities {
     /// `true` on Vulkan (`HOST_VISIBLE` storage) and Metal (Shared storage). `false` on Direct3D 12
     /// (requires GPU copy to a READBACK heap).
     pub has_zero_copy_storage_readback: bool,
+
+    /// How [`crate::Buffer::resize_to`] is implemented on this device.
+    pub buffer_resize_cost: BufferResizeCost,
+
+    /// Sparse / tile page size when applicable; informational for aligning resize hints.
+    pub buffer_page_size: u64,
+
+    /// Whether [`crate::Buffer::hint_unused_above`] can return physical memory to the system.
+    pub buffer_decommit_supported: bool,
 }
 
 impl Default for DeviceCapabilities {
@@ -234,6 +243,9 @@ impl Default for DeviceCapabilities {
                 TextureFormat::Rgba32Float,
             ],
             has_zero_copy_storage_readback: true,
+            buffer_resize_cost: BufferResizeCost::Copy,
+            buffer_page_size: 64 * 1024,
+            buffer_decommit_supported: false,
         }
     }
 }

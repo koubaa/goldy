@@ -270,6 +270,7 @@ pub(super) fn place_buffer_in_transient_heap(
             host_mapped: None,
             flags: crate::types::BufferFlags::empty(),
             transient_heap_suballoc: true,
+            view_byte_offset: None,
         },
     );
     Ok(handle)

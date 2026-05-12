@@ -441,6 +441,15 @@ pub trait GpuBackend: Send + Sync {
         element_stride: Option<u32>,
     ) -> Result<BufferHandle>;
 
+    /// Resize buffer storage in place. Logical handle and bindless offsets stay stable.
+    fn resize_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_size: u64,
+        preserve_contents: bool,
+    ) -> Result<()>;
+
     // Shader management
     fn create_shader_with_paths(
         &mut self,

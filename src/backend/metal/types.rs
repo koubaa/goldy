@@ -847,6 +847,7 @@ impl ResourceRegistry {
 }
 
 /// GPU buffer state.
+#[derive(Clone)]
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub buffer: MTLBuffer,
@@ -856,6 +857,12 @@ pub(crate) struct BufferState {
     pub flags: crate::types::BufferFlags,
     /// Structured-buffer element stride from buffer creation (for stride validation).
     pub element_stride: Option<u32>,
+    /// For buffer views: parent [`BufferHandle`]. `None` for root buffers.
+    pub parent_for_view: Option<BufferHandle>,
+    /// Access pattern at creation (for argument-buffer re-encoding on resize).
+    pub access: DataAccess,
+    /// Byte offset into parent for views; [`None`] for root buffers.
+    pub view_byte_offset: Option<u64>,
 }
 
 /// Shader module state with cached compiled stages.

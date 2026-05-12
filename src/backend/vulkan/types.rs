@@ -349,6 +349,7 @@ impl LogicalDevice {
 }
 
 /// GPU buffer state.
+#[derive(Clone)]
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub buffer: vk::Buffer,
@@ -377,6 +378,8 @@ pub(crate) struct BufferState {
     pub flags: crate::types::BufferFlags,
     /// Sub-allocated from [`crate::backend::GpuBackend::create_transient_heap`]; `memory` is shared.
     pub transient_heap_suballoc: bool,
+    /// Byte offset in parent for buffer views; [`None`] for root buffers.
+    pub view_byte_offset: Option<u64>,
 }
 
 /// Shader module state with cached compiled stages.
@@ -593,6 +596,14 @@ pub(crate) enum PendingDeletion {
     BufferView {
         buffer_handle: BufferHandle,
     },
+    /// Previous Vk allocation after [`super::buffer::resize`]; the logical
+    /// [`BufferHandle`] stays registered — destroy GPU objects only.
+    ReplacedBufferGpu {
+        buffer: vk::Buffer,
+        memory: vk::DeviceMemory,
+        staging_buffer: Option<vk::Buffer>,
+        staging_memory: Option<vk::DeviceMemory>,
+    },
     Texture {
         texture_handle: TextureHandle,
         image: vk::Image,
@@ -669,6 +680,21 @@ impl DeletionQueue {
                 }
                 PendingDeletion::BufferView { buffer_handle } => {
                     registry.unregister_buffer(buffer_handle);
+                }
+                PendingDeletion::ReplacedBufferGpu {
+                    buffer,
+                    memory,
+                    staging_buffer,
+                    staging_memory,
+                } => {
+                    device.destroy_buffer(buffer, None);
+                    device.free_memory(memory, None);
+                    if let Some(buf) = staging_buffer {
+                        device.destroy_buffer(buf, None);
+                    }
+                    if let Some(mem) = staging_memory {
+                        device.free_memory(mem, None);
+                    }
                 }
                 PendingDeletion::Texture {
                     texture_handle,
