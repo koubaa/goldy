@@ -124,8 +124,11 @@ pub(super) fn create(
         let buffer: ID3D12Resource =
             unsafe { swapchain.GetBuffer(i as u32) }.context("Failed to get swapchain buffer")?;
 
-        let rtv_offset = state.next_rtv_offset;
-        state.next_rtv_offset += 1;
+        let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
+            let off = state.next_rtv_offset;
+            state.next_rtv_offset += 1;
+            off
+        });
 
         let rtv_handle = unsafe {
             let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
@@ -306,6 +309,12 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
     if let Some(surface_state) = state.surfaces.remove(&surface_handle) {
         if let Some(logical_device) = state.devices.get(&surface_state.device_handle) {
             let _ = wait_for_gpu(logical_device);
+        }
+        for offset in surface_state.rtv_offsets {
+            state.free_rtv_offsets.push(offset);
+        }
+        if let Some(dsv_off) = surface_state.dsv_offset {
+            state.free_dsv_offsets.push(dsv_off);
         }
         if let Some(SendSyncHandle(waitable)) = surface_state.frame_latency_waitable {
             unsafe { CloseHandle(waitable) }.ok();
@@ -883,13 +892,19 @@ pub(super) fn resize(
         texture::destroy(state, h);
     }
 
-    // Release old render targets, depth buffer, and resize swapchain
+    // Release old render targets, depth buffer, and resize swapchain.
+    // Return the old descriptor slots to the free lists before clearing them so
+    // they can be reused immediately for the new render targets below.
     let depth_format = {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+        for old_offset in surface.rtv_offsets.drain(..) {
+            state.free_rtv_offsets.push(old_offset);
+        }
+        if let Some(old_dsv) = surface.dsv_offset.take() {
+            state.free_dsv_offsets.push(old_dsv);
+        }
         surface.render_targets.clear();
-        surface.rtv_offsets.clear();
         surface.depth_texture = None;
-        surface.dsv_offset = None;
         let df = surface.depth_format;
 
         let resize_flags = {
@@ -935,8 +950,11 @@ pub(super) fn resize(
         let buffer: ID3D12Resource = unsafe { surface.swapchain.GetBuffer(i as u32) }
             .context("Failed to get swapchain buffer")?;
 
-        let rtv_offset = state.next_rtv_offset;
-        state.next_rtv_offset += 1;
+        let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
+            let off = state.next_rtv_offset;
+            state.next_rtv_offset += 1;
+            off
+        });
 
         let rtv_handle = unsafe {
             let mut handle = rtv_heap.GetCPUDescriptorHandleForHeapStart();
@@ -1010,8 +1028,11 @@ pub(super) fn resize(
         .context("Failed to create surface depth buffer on resize")?;
         let depth_tex = depth_tex.context("CreateCommittedResource returned null for depth")?;
 
-        let dsv_off = state.next_dsv_offset;
-        state.next_dsv_offset += 1;
+        let dsv_off = state.free_dsv_offsets.pop().unwrap_or_else(|| {
+            let off = state.next_dsv_offset;
+            state.next_dsv_offset += 1;
+            off
+        });
 
         let dsv_handle = unsafe {
             let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
