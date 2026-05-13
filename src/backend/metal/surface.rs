@@ -87,6 +87,22 @@ pub(super) fn create(
         // Don't set framebufferOnly so the texture can be used with compute
         let () = msg_send![layer, setFramebufferOnly: NO];
 
+        // Pin triple-buffered pool size to match `MAX_FRAMES_IN_FLIGHT`.
+        //
+        // Per Apple, `maximumDrawableCount` must be `2` or `3`; the documented
+        // default on current platforms is already `3`.  We set it explicitly so
+        // the layer semantics stay aligned with our bindless slot rotation even
+        // if OS defaults drift, and so the requirement is visible in code review.
+        let () = msg_send![layer, setMaximumDrawableCount: MAX_FRAMES_IN_FLIGHT as u64];
+
+        let enforced: usize = msg_send![layer, maximumDrawableCount];
+        tracing::debug!(
+            enforced,
+            requested = MAX_FRAMES_IN_FLIGHT,
+            "CAMetalLayer maximumDrawableCount (read-back after set)"
+        );
+        debug_assert_eq!(enforced, MAX_FRAMES_IN_FLIGHT);
+
         let () = msg_send![ns_view, setWantsLayer: YES];
         let () = msg_send![ns_view, setLayer: layer];
 
@@ -156,7 +172,11 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
         Some(s) => {
             let handles: [Option<TextureHandle>; MAX_FRAMES_IN_FLIGHT] =
                 s.drawable_texture_cache.map(|entry| entry.map(|(_, h)| h));
-            (Some(s.device_handle), Some(s.bindless_storage_slots), handles)
+            (
+                Some(s.device_handle),
+                Some(s.bindless_storage_slots),
+                handles,
+            )
         }
         None => (None, None, [None; MAX_FRAMES_IN_FLIGHT]),
     };
@@ -245,11 +265,8 @@ pub(super) fn acquire(
     };
 
     // Store the drawable pointer (needed for present).
-    state
-        .surfaces
-        .get_mut(&surface)
-        .unwrap()
-        .current_drawable = Some(drawable as *mut std::ffi::c_void);
+    state.surfaces.get_mut(&surface).unwrap().current_drawable =
+        Some(drawable as *mut std::ffi::c_void);
 
     // --- Drawable texture cache ---
     //
@@ -260,9 +277,7 @@ pub(super) fn acquire(
     let tex_handle = match cached {
         Some((cached_ptr, cached_handle)) if cached_ptr == texture_key => {
             // Fast path: same texture as last time — reuse the registration.
-            tracing::trace!(
-                "acquire: drawable texture cache hit for frame slot {current_frame}"
-            );
+            tracing::trace!("acquire: drawable texture cache hit for frame slot {current_frame}");
             cached_handle
         }
         Some((_, stale_handle)) => {
@@ -271,8 +286,7 @@ pub(super) fn acquire(
                 "acquire: drawable texture changed for slot {current_frame}, re-registering"
             );
             unregister_surface_texture(state, stale_handle);
-            let texture: &mtl::TextureRef =
-                unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+            let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
             let h = register_surface_texture(
                 state,
                 device_handle,
@@ -291,8 +305,7 @@ pub(super) fn acquire(
         }
         None => {
             // Cold path: first time seeing this frame slot — register once.
-            let texture: &mtl::TextureRef =
-                unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+            let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
             let h = register_surface_texture(
                 state,
                 device_handle,
@@ -408,7 +421,8 @@ pub(super) fn render(
             .get(&device_handle)
             .context("Device no longer valid")?;
         let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
-        ld.heap_allocator.use_heaps_for_render(encoder, render_stages);
+        ld.heap_allocator
+            .use_heaps_for_render(encoder, render_stages);
         ld.texture_heap.use_heaps_for_render(encoder, render_stages);
         super::transient::use_transient_heaps_for_render(ld, encoder, render_stages);
         for buf_state in state.buffers.values() {
