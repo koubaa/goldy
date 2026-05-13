@@ -208,6 +208,7 @@ pub(crate) fn map_tile_run(
     let range_flag = D3D12_TILE_RANGE_FLAG_NONE;
     let heap_range_start = u32::try_from(heap_start_offset / u64::from(BUFFER_TILE_BYTES))
         .map_err(|_| anyhow::anyhow!("heap tile index"))?;
+
     unsafe {
         queue.UpdateTileMappings(
             resource,
@@ -249,6 +250,7 @@ pub(crate) fn unmap_tile_run(
         Depth: 0,
     };
     let range_flag = D3D12_TILE_RANGE_FLAG_NULL;
+
     unsafe {
         queue.UpdateTileMappings(
             resource,

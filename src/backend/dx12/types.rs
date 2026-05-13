@@ -462,6 +462,13 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
                     &tiles,
                 );
             }
+            // Flush the queue so the unmap is processed before releasing the resource.
+            // Without this, the driver can crash (device removal) on Release.
+            let fv = ld.fence_value;
+            ld.fence_value += 1;
+            if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
+                let _ = super::utils::wait_for_fence(&ld.fence, fv);
+            }
             drop(resource);
             drop(upload_buffer);
             drop(coherent_readback);
@@ -490,6 +497,13 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
                 &resource,
                 &tiles,
             );
+            // Flush the queue so the unmap is processed before releasing the resource.
+            // Without this, the driver can crash (device removal) on Release.
+            let fv = ld.fence_value;
+            ld.fence_value += 1;
+            if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
+                let _ = super::utils::wait_for_fence(&ld.fence, fv);
+            }
             drop(resource);
             drop(upload_buffer);
             drop(coherent_readback);

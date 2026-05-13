@@ -997,6 +997,7 @@ pub(super) fn create_reserved_with_capacity(
             mappings.push((i as u32, heap.clone(), off));
             slots[i] = Some((heap, off));
         }
+
         tiles::map_tiles_batched(&queue, &resource, &mappings)?;
         (resource, slots)
     };
