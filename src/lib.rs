@@ -40,7 +40,7 @@ pub mod timeline;
 
 // Re-export main types
 pub use buffer::{
-    Buffer, BufferPool, BufferPoolRing, BufferSource, BufferView, StructuredBufferElement,
+    Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement,
 };
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
