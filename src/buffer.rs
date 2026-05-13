@@ -57,6 +57,10 @@ pub struct Buffer {
     access: DataAccess,
     element_stride: Option<u32>,
     flags: BufferFlags,
+    /// Peak `allocated_size` ever observed on this buffer (telemetry; for profiling/tuning hints).
+    peak_committed_bytes: u64,
+    /// Number of completed [`Self::resize_to`] / [`Self::resize_to_uninitialized`] calls.
+    resize_count: u32,
 }
 
 impl Buffer {
@@ -112,6 +116,8 @@ impl Buffer {
             access,
             element_stride: None,
             flags: BufferFlags::empty(),
+            peak_committed_bytes: allocated_size,
+            resize_count: 0,
         })
     }
     pub fn new_with_stride(
@@ -145,6 +151,8 @@ impl Buffer {
             access,
             element_stride,
             flags,
+            peak_committed_bytes: size,
+            resize_count: 0,
         })
     }
 
@@ -196,6 +204,8 @@ impl Buffer {
             access,
             element_stride: Some(element_stride),
             flags,
+            peak_committed_bytes: bytes.len() as u64,
+            resize_count: 0,
         };
         buffer.write(0, bytes)?;
         Ok(buffer)
@@ -261,6 +271,8 @@ impl Buffer {
             access,
             element_stride: Some(element_stride),
             flags,
+            peak_committed_bytes: data.len() as u64,
+            resize_count: 0,
         };
         buffer.write(0, data)?;
         Ok(buffer)
@@ -304,10 +316,31 @@ impl Buffer {
         self.element_stride
     }
 
+    /// Peak physically-committed bytes ever observed on this buffer.
+    ///
+    /// Equals [`Self::allocated_size`] at creation and grows monotonically each time a
+    /// [`Self::resize_to`] / [`Self::resize_to_uninitialized`] call causes the backend to
+    /// expand the physical backing. Useful for profiling capacity hints and detecting
+    /// over-allocation.
+    pub fn peak_committed_bytes(&self) -> u64 {
+        self.peak_committed_bytes
+    }
+
+    /// Number of completed resize operations ([`Self::resize_to`] / [`Self::resize_to_uninitialized`]).
+    ///
+    /// Incremented once per call that changes the logical size. No-op calls (same size as
+    /// current) are not counted.
+    pub fn resize_count(&self) -> u32 {
+        self.resize_count
+    }
+
+    /// Resize the buffer in place, preserving contents in `[0..min(old, new))` and zero-initialising
+    /// any newly exposed bytes. The [`Self::bindless_handle`] and [`Self::handle`] are stable.
     pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
         if new_size == self.size {
             return Ok(());
         }
+        self.resize_count = self.resize_count.saturating_add(1);
         if new_size <= self.allocated_size {
             let old_logical = self.size;
             let mut backend = self.backend.lock().unwrap();
@@ -335,6 +368,7 @@ impl Buffer {
             true,
         )?;
         self.allocated_size = backend.buffer_capacity(self.handle);
+        self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
         self.size = new_size;
         Ok(())
     }
@@ -345,6 +379,7 @@ impl Buffer {
         if new_size == self.size {
             return Ok(());
         }
+        self.resize_count = self.resize_count.saturating_add(1);
         if new_size <= self.allocated_size {
             let mut backend = self.backend.lock().unwrap();
             backend.set_buffer_logical_size(
@@ -363,6 +398,7 @@ impl Buffer {
             false,
         )?;
         self.allocated_size = backend.buffer_capacity(self.handle);
+        self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
         self.size = new_size;
         Ok(())
     }
