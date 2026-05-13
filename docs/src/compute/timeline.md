@@ -1,0 +1,136 @@
+# Device Timeline
+
+Goldy tracks GPU completion with a monotonic **timeline counter** — a `u64` value (`TimelineValue`) that increments with each submission. This replaces fence-per-submission models with a single, always-increasing counter on the device.
+
+## TimelineValue
+
+Every non-blocking submission returns a `TimelineValue`:
+
+```rust
+let tv: TimelineValue = graph.submit(&device)?;
+```
+
+This value represents a point on the device's timeline. When the GPU finishes executing that submission, the timeline advances past `tv`.
+
+Both `TaskGraph::submit` and `ComputeEncoder::submit` return timeline values. Surface presentation via `Frame::present` also returns one.
+
+## Querying GPU progress
+
+`device.gpu_progress()` returns the latest completed timeline value without blocking:
+
+```rust
+let current = device.gpu_progress();
+if current >= tv {
+    // submission has finished — safe to read back results
+}
+```
+
+This is a lightweight query (single atomic read on most backends) suitable for polling in a loop or checking once per frame.
+
+## Waiting for completion
+
+`device.wait_until(value)` blocks the current thread until the GPU timeline reaches at least `value`:
+
+```rust
+let tv = graph.submit(&device)?;
+
+// CPU work while GPU executes...
+prepare_next_frame();
+
+// Block until this specific submission completes
+device.wait_until(tv)?;
+```
+
+For bounded waits, use `wait_until_timeout`:
+
+```rust
+let completed = device.wait_until_timeout(tv, 1000)?; // 1 second timeout
+if !completed {
+    // GPU hasn't finished yet — handle timeout
+}
+```
+
+## Blocking dispatch
+
+For simple cases where you don't need CPU/GPU overlap, `dispatch` combines submit + wait:
+
+```rust
+graph.dispatch(&device)?; // submits and blocks until complete
+```
+
+This is equivalent to:
+
+```rust
+let tv = graph.submit(&device)?;
+device.wait_until(tv)?;
+```
+
+## How this differs from fence-based synchronization
+
+Traditional GPU APIs use one fence object per submission. You create a fence, attach it to a submit call, then query or wait on that specific fence. Managing multiple in-flight submissions means tracking multiple fence objects.
+
+Goldy's timeline is a single monotonic counter shared across all submissions on a device:
+
+| | Fence-based | Timeline-based |
+|---|---|---|
+| Tracking | One fence per submission | One counter for the device |
+| Query | Poll each fence individually | `gpu_progress() >= value` |
+| Wait | Wait on a specific fence | `wait_until(value)` |
+| Ordering | Fences are independent | Values are monotonically ordered |
+| Multi-frame | Track N fence objects | Compare N `u64` values |
+
+Because timeline values are ordered, you can reason about completion transitively: if `gpu_progress() >= tv_b` and `tv_b > tv_a`, then `tv_a` has also completed.
+
+## Practical use cases
+
+### CPU readback after compute
+
+```rust
+let tv = graph.submit(&device)?;
+device.wait_until(tv)?;
+
+let result: Vec<f32> = buffer.read_data(0)?;
+```
+
+### Multi-frame pipelining
+
+Overlap CPU frame N+1 preparation with GPU frame N execution:
+
+```rust
+let mut pending: Option<TimelineValue> = None;
+
+loop {
+    // Wait for the previous frame to finish before reusing its resources
+    if let Some(tv) = pending {
+        device.wait_until(tv)?;
+    }
+
+    // Prepare frame N+1 on the CPU
+    update_uniforms(&uniform_buffer)?;
+
+    // Submit frame N+1 — GPU starts working, CPU continues
+    let tv = graph.submit(&device)?;
+    pending = Some(tv);
+
+    // CPU work for the next iteration...
+}
+```
+
+### Polling without blocking
+
+Check completion in a non-blocking render loop:
+
+```rust
+let tv = graph.submit(&device)?;
+
+loop {
+    if device.gpu_progress() >= tv {
+        break; // done
+    }
+    // do other work, yield, etc.
+}
+```
+
+### Resource lifetime
+
+Dropping a `Buffer` or `Texture` may be deferred internally: the GPU memory stays alive until all submissions that reference it have completed. Submit (or present a frame) before dropping resources that must outlive those commands.

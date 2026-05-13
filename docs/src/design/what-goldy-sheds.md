@@ -1,113 +1,69 @@
 # What Goldy Sheds
 
-Because Goldy targets **modern hardware only**, it can drop significant complexity that other libraries must maintain.
+Goldy's bindless model and modern-hardware baseline make several traditional GPU programming concepts unnecessary. These aren't missing features — they're intentional design choices that keep the API small and the programming model coherent.
 
-## From Vulkan Legacy
+## No Descriptor Set Management
 
-| Dropped | Replacement | Why |
-|---------|-------------|-----|
-| Render pass objects | Dynamic rendering (1.4+) | Modern GPUs don't need ahead-of-time render pass specification |
-| Descriptor set layouts | Bindless descriptors (1.2+) | Index into descriptor heaps directly |
-| Image layout transitions | Unified layouts (extension) | Hardware handles hazards automatically |
-| Pipeline layouts as objects | Implicit from shader reflection | Redundant with shader metadata |
-| VkBuffer + VkDeviceMemory split | Unified allocation | Modern allocators handle this |
-| Separate transfer queues | Simplified queue model | Async compute is the common case |
+Traditional APIs require you to declare descriptor set layouts, allocate descriptor pools, write descriptor sets, and bind them before each draw or dispatch. A typical Vulkan pipeline touches three to four descriptor set objects before anything reaches the GPU.
 
-## From OpenGL Heritage
+Goldy replaces all of this with a flat bindless heap. Resources get a slot index when created, and shaders access them by that index. There are no layouts, no pools, no binding calls.
 
-| Dropped | Notes |
-|---------|-------|
-| Fixed-function pipeline | Shaders only - no legacy transform/lighting |
-| Immediate mode | Command buffers only |
-| Binding points (GL_TEXTURE0, etc.) | Bindless access by index |
-| Client-side vertex arrays | GPU buffers only |
-| glGet* state queries | Explicit state tracking |
-| Per-shader uniforms | Shared uniform model |
-
-## From OpenCL Complexity
-
-| Dropped | Notes |
-|---------|-------|
-| Separate compute API | Unified with graphics pipeline |
-| Platform enumeration | Simplified device model |
-| NDRange complexity | Simple dispatch(x, y, z) |
-| Kernel argument binding | Bindless buffers |
-
-## What This Enables
-
-By dropping legacy support, Goldy can assume:
-
-### 1. Coherent Caches
-No complex flush/invalidate patterns. Modern GPUs have coherent L2 caches that handle synchronization automatically.
-
-### 2. Bindless Everything
-Descriptors live in GPU memory. Shaders access resources by index:
-
-```rust
-// Goldy - resources are bindless
-let buffer = device.create_buffer(&desc)?;
-// Access in shader by index, no explicit binding
-```
-
-### 3. Unified Queues
-Graphics and compute on the same queue. No complex multi-queue synchronization for common cases.
-
-### 4. 64-bit Pointers
-Buffer device address in shaders. Pointers just work:
-
-```wgsl
-// In shader - direct memory access
-let data = buffer_ptr[index];
-```
-
-### 5. Collapsed Pipeline Permutations
-The industry's PSO explosion comes from the *product* of many baked-in dimensions: render pass × descriptor layout × pipeline layout × viewport state × blend mode × .... Goldy collapses most of these:
-
-- **Dynamic rendering** eliminates render pass compatibility as a pipeline dimension.
-- **One global bindless layout** eliminates descriptor set layout and pipeline layout permutations.
-- **Dynamic state** (viewport, scissor) removes those from the baked PSO.
-
-What remains — shader × vertex format × target format × depth config — is a small, manageable space. Goldy addresses PSO churn by having fewer pipelines, not by building infrastructure to manage many variants.
-
-## The Simplicity Dividend
-
-A typical Vulkan "hello triangle" requires:
-- Instance creation with extensions
-- Physical device selection
-- Logical device and queue creation
-- Swapchain setup
-- Render pass creation
-- Framebuffer creation
-- Pipeline layout
-- Graphics pipeline with all state
-- Command pool and buffers
-- Synchronization primitives
-- Drawing loop with acquire/present
-
-Goldy's equivalent:
-
-```rust
-let instance = Instance::new()?;
-let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
-let shader = ShaderModule::from_slang(&device, SHADER)?;
-let pipeline = RenderPipeline::new(&device, &shader, &shader, &desc)?;
-
-// Create surface for zero-copy window presentation
-let surface = Surface::new(&device, &window)?;
-
-// Render loop
-let frame = surface.acquire()?;
-let mut encoder = CommandEncoder::new();
-{
-    let mut pass = encoder.begin_render_pass();
-    pass.set_pipeline(&pipeline);
-    pass.set_vertex_buffer(0, &vertices);
-    pass.draw(0..3, 0..1);
+```hlsl
+// Shader receives resources by index — no descriptor sets
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<Particle> particles, ThreadId id) {
+    particles[id.x].position += particles[id.x].velocity;
 }
-frame.render(encoder)?;
-surface.present(frame)?;
 ```
 
-That's it. No render passes, no framebuffers, no command pools, no explicit synchronization. Goldy handles the complexity internally using modern GPU features.
+This also eliminates **pipeline layouts as objects**. In Vulkan, each unique combination of descriptor set layouts produces a pipeline layout, which is baked into the pipeline at creation time. Goldy's single global bindless layout means one pipeline layout for all pipelines.
 
+## No Manual Barrier Insertion
 
+In Vulkan and DX12, you manually insert memory barriers and image layout transitions to tell the GPU when a resource changes from "written by compute" to "read by fragment" (or any other transition). Missing a barrier is a silent correctness bug; inserting too many is a performance bug.
+
+Goldy's task graph handles this automatically. You declare what each task reads and writes; Goldy derives the minimal set of barriers and transitions. This is both safer and typically more efficient than hand-placed barriers, because the task graph has a global view of the frame.
+
+## No Shader Permutation Systems
+
+Traditional engines maintain thousands of shader variants — combinations of feature flags, render pass compatibility, descriptor set layout versions, and pipeline state. Some ship dedicated cloud infrastructure just to compile and cache them all.
+
+Goldy collapses most of the dimensions that drive permutation counts:
+
+| Traditional dimension | Goldy equivalent |
+|-----------------------|------------------|
+| Render pass compatibility | Dynamic rendering — no render pass objects |
+| Descriptor set layout | One global bindless layout |
+| Pipeline layout | Implicit from the global layout |
+| Viewport/scissor state | Dynamic state, not baked into PSO |
+
+What remains — shader source × vertex format × target format × depth config — is a small, manageable space. Goldy addresses pipeline variety by having fewer pipelines, not by building infrastructure to manage many variants.
+
+## Minimal Pipeline State Management
+
+A Vulkan `VkGraphicsPipelineCreateInfo` touches blend state, depth/stencil state, rasterizer state, multisample state, input assembly, viewport/scissor, dynamic state flags, render pass, subpass, pipeline layout, and shader stages. Many of these are baked in at pipeline creation time, producing the combinatorial explosion that drives PSO caches.
+
+Goldy uses dynamic rendering and dynamic state to move viewport, scissor, and render target configuration out of the pipeline object. The remaining pipeline state is intentionally minimal:
+
+```rust
+let pipeline = RenderPipeline::new(&device, &shader, &shader, &desc)?;
+```
+
+Blend mode, depth testing, and vertex format are still part of the pipeline — they represent genuine hardware configuration. But the many compatibility dimensions that traditional APIs bake in are gone.
+
+## No Separate Compute API
+
+OpenCL introduced compute to GPUs as an entirely separate API with its own device model, memory model, and dispatch semantics. Even "unified" APIs like Vulkan treat compute as a second-class citizen — compute pipelines and graphics pipelines share almost no code paths.
+
+In Goldy, compute is a first-class citizen on the same footing as graphics. Compute shaders use the same bindless resource model, the same buffer types, and the same task graph. A compute dispatch that writes to a buffer and a draw call that reads from it are just nodes in the same graph.
+
+```rust
+// Compute updates particles, render draws them — same resources, same graph
+graph.add_compute("update", &compute_shader, &[&particle_buf], [workgroups, 1, 1]);
+graph.add_render("draw", &render_pipeline, &[&particle_buf], &surface);
+```
+
+## The Design Principle
+
+Each of these omissions follows the same logic: if modern hardware doesn't need a concept for correctness or performance, Goldy doesn't expose it. The result is an API where the concepts that remain — buffers, textures, shaders, pipelines, task graph — each carry their weight.
