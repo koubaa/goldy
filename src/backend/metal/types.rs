@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
-    ArgumentEncoder, Buffer as MTLBuffer, CommandQueue,
+    ArgumentEncoder, Buffer as MTLBuffer, CommandBuffer as MTLCommandBuffer, CommandQueue,
     ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState,
     Device as MTLDevice, Heap, Library, MTLPrimitiveType, MTLResourceOptions, RenderPipelineState,
     SamplerState, SharedEvent, Texture as MTLTexture,
@@ -856,6 +856,9 @@ pub(crate) struct BufferState {
     pub flags: crate::types::BufferFlags,
     /// Structured-buffer element stride from buffer creation (for stride validation).
     pub element_stride: Option<u32>,
+    /// Timeline value of the most recent GPU submission that references this buffer.
+    /// A CPU write is safe to skip the staging blit when `signaled_value() >= last_gpu_use`.
+    pub last_gpu_use: TimelineValue,
 }
 
 /// Shader module state with cached compiled stages.
@@ -984,6 +987,22 @@ pub(crate) struct SurfaceState {
     pub present_mode: crate::types::PresentMode,
     /// Frame-scoped GPU commands ([`crate::backend::GpuBackend::record_gpu_work`]).
     pub frame_pending_gpu_commands: Vec<crate::backend::GpuCommand>,
+    /// Render command buffer encoded this frame but not yet committed.
+    /// `present()` appends `present_drawable` + timeline signal and commits it,
+    /// merging render and present into a single command buffer submission.
+    pub pending_render_cb: Option<MTLCommandBuffer>,
+    /// Per-frame cached drawable texture registrations.
+    ///
+    /// CAMetalLayer recycles the same `MAX_FRAMES_IN_FLIGHT` `MTLTexture` objects
+    /// every time a drawable comes back around to the same frame slot.  After the
+    /// warm-up (first `MAX_FRAMES_IN_FLIGHT` frames) `acquire()` can skip the
+    /// ObjC retain, argument-buffer re-encoding, and `HashMap` insert/remove on
+    /// every frame where the texture pointer hasn't changed.
+    ///
+    /// Each entry is `(texture_ptr_as_usize, TextureHandle)`.  The handle stays
+    /// live in `MetalState::textures` for the lifetime of the surface and is only
+    /// released in `destroy()`.
+    pub drawable_texture_cache: [Option<(usize, TextureHandle)>; MAX_FRAMES_IN_FLIGHT],
 }
 
 // SAFETY: `SurfaceState` contains raw pointers to a `CALayer` and `CAMetalDrawable`.

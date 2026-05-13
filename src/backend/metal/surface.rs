@@ -138,6 +138,8 @@ pub(super) fn create(
             bindless_storage_slots,
             present_mode: PresentMode::Auto,
             frame_pending_gpu_commands: Vec::new(),
+            pending_render_cb: None,
+            drawable_texture_cache: [None; MAX_FRAMES_IN_FLIGHT],
         },
     );
     tracing::info!(
@@ -150,15 +152,18 @@ pub(super) fn create(
 
 /// Destroy a surface.
 pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
-    let (device_handle, slots) = match state.surfaces.get(&surface) {
-        Some(s) => (Some(s.device_handle), Some(s.bindless_storage_slots)),
-        None => (None, None),
+    let (device_handle, slots, cached_handles) = match state.surfaces.get(&surface) {
+        Some(s) => {
+            let handles: [Option<TextureHandle>; MAX_FRAMES_IN_FLIGHT] =
+                s.drawable_texture_cache.map(|entry| entry.map(|(_, h)| h));
+            (Some(s.device_handle), Some(s.bindless_storage_slots), handles)
+        }
+        None => (None, None, [None; MAX_FRAMES_IN_FLIGHT]),
     };
 
-    if let Some(surface_state) = state.surfaces.get(&surface) {
-        if let Some(tex_handle) = surface_state.current_texture_handle {
-            unregister_surface_texture(state, tex_handle);
-        }
+    // Release all drawable texture cache entries (kept alive across frames).
+    for handle in cached_handles.into_iter().flatten() {
+        unregister_surface_texture(state, handle);
     }
 
     // Release all persistent bindless storage-image slots back to the device
@@ -188,28 +193,31 @@ pub(super) fn acquire(
     state: &mut MetalState,
     surface: SurfaceHandle,
 ) -> Result<SwapchainImageHandle> {
-    // Clean up any previously acquired drawable that wasn't presented
-    if let Some(surface_state) = state.surfaces.get(&surface) {
-        if let Some(tex_handle) = surface_state.current_texture_handle {
-            tracing::warn!("Previous drawable was not presented; cleaning up");
-            unregister_surface_texture(state, tex_handle);
+    // Texture handles are cached for the surface's lifetime; a dropped frame
+    // doesn't need to unregister anything — just warn.
+    if let Some(ss) = state.surfaces.get(&surface) {
+        if ss.current_texture_handle.is_some() {
+            tracing::warn!("Previous drawable was not presented; frame dropped");
         }
     }
 
-    let surface_state = state
-        .surfaces
-        .get_mut(&surface)
-        .context("Invalid surface handle")?;
+    // --- Collect everything from surface state so we can drop the borrow. ---
+    let (layer, device_handle, format) = {
+        let ss = state
+            .surfaces
+            .get_mut(&surface)
+            .context("Invalid surface handle")?;
+        let layer = ss.layer as id;
 
-    let layer = surface_state.layer as id;
+        let size: CGSize = unsafe { msg_send![layer, drawableSize] };
+        ss.width = size.width as u32;
+        ss.height = size.height as u32;
+        ss.current_frame = (ss.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
-    let size: CGSize = unsafe { msg_send![layer, drawableSize] };
-    surface_state.width = size.width as u32;
-    surface_state.height = size.height as u32;
+        (layer, ss.device_handle, ss.format)
+    };
 
-    surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-
-    // Get the next drawable from the layer
+    // --- nextDrawable (the blocking call) happens here, outside the borrow. ---
     let drawable: id = unsafe { msg_send![layer, nextDrawable] };
     if drawable == nil {
         anyhow::bail!("Failed to get next drawable from CAMetalLayer");
@@ -217,28 +225,91 @@ pub(super) fn acquire(
     unsafe {
         let () = msg_send![drawable, retain];
     }
-    surface_state.current_drawable = Some(drawable as *mut std::ffi::c_void);
 
-    // Get the drawable's texture and register it for bindless access
     let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
-    let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+    let texture_key = texture_ptr as usize;
 
-    let device_handle = surface_state.device_handle;
-    let width = surface_state.width;
-    let height = surface_state.height;
-    let format = surface_state.format;
-    // Use the frame-indexed slot to avoid overwriting a slot the GPU is still reading.
-    let bindless_slot = surface_state.bindless_storage_slots[surface_state.current_frame];
+    // Re-borrow to read width/height (updated above) and the cache entry.
+    let (width, height, current_frame, bindless_slot, cached) = {
+        let ss = state
+            .surfaces
+            .get(&surface)
+            .expect("surface still valid after nextDrawable");
+        (
+            ss.width,
+            ss.height,
+            ss.current_frame,
+            ss.bindless_storage_slots[ss.current_frame],
+            ss.drawable_texture_cache[ss.current_frame],
+        )
+    };
 
-    let tex_handle = register_surface_texture(
-        state,
-        device_handle,
-        texture,
-        width,
-        height,
-        format,
-        bindless_slot,
-    )?;
+    // Store the drawable pointer (needed for present).
+    state
+        .surfaces
+        .get_mut(&surface)
+        .unwrap()
+        .current_drawable = Some(drawable as *mut std::ffi::c_void);
+
+    // --- Drawable texture cache ---
+    //
+    // CAMetalLayer rotates the same MTLTexture objects through the drawable
+    // pool.  Once a frame slot has been seen, the texture pointer never
+    // changes, so we can skip the ObjC retain, argument-buffer encoding, and
+    // HashMap insert on every subsequent frame for that slot.
+    let tex_handle = match cached {
+        Some((cached_ptr, cached_handle)) if cached_ptr == texture_key => {
+            // Fast path: same texture as last time — reuse the registration.
+            tracing::trace!(
+                "acquire: drawable texture cache hit for frame slot {current_frame}"
+            );
+            cached_handle
+        }
+        Some((_, stale_handle)) => {
+            // Texture pointer changed (shouldn't happen in practice, but handle it).
+            tracing::debug!(
+                "acquire: drawable texture changed for slot {current_frame}, re-registering"
+            );
+            unregister_surface_texture(state, stale_handle);
+            let texture: &mtl::TextureRef =
+                unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+            let h = register_surface_texture(
+                state,
+                device_handle,
+                texture,
+                width,
+                height,
+                format,
+                bindless_slot,
+            )?;
+            state
+                .surfaces
+                .get_mut(&surface)
+                .unwrap()
+                .drawable_texture_cache[current_frame] = Some((texture_key, h));
+            h
+        }
+        None => {
+            // Cold path: first time seeing this frame slot — register once.
+            let texture: &mtl::TextureRef =
+                unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+            let h = register_surface_texture(
+                state,
+                device_handle,
+                texture,
+                width,
+                height,
+                format,
+                bindless_slot,
+            )?;
+            state
+                .surfaces
+                .get_mut(&surface)
+                .unwrap()
+                .drawable_texture_cache[current_frame] = Some((texture_key, h));
+            h
+        }
+    };
 
     let surface_state = state
         .surfaces
@@ -250,7 +321,7 @@ pub(super) fn acquire(
         ld.process_deletion_queue_up_to_signaled();
     }
 
-    Ok(surface_state.current_frame as u64)
+    Ok(current_frame as u64)
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -262,27 +333,34 @@ pub(super) fn frame_texture(state: &MetalState, surface: SurfaceHandle) -> Optio
 }
 
 /// Render commands to the swapchain using the already-acquired drawable.
+///
+/// The command buffer is **not committed here** — it is stored in
+/// `SurfaceState::pending_render_cb` and committed inside `present()` after
+/// appending `present_drawable` and the timeline signal. This merges render
+/// and present into a single command buffer, halving per-frame CB submissions.
 pub(super) fn render(
     state: &mut MetalState,
     surface: SurfaceHandle,
     _image: SwapchainImageHandle,
     commands: &[RenderCommand],
 ) -> Result<()> {
-    let surface_state = state
-        .surfaces
-        .get(&surface)
-        .context("Invalid surface handle")?;
+    // --- Extract everything we need from surface/device state first so
+    //     we can release the immutable borrows before the mutable store. ---
+    let (drawable_ptr, device_handle, surface_width, surface_height) = {
+        let ss = state
+            .surfaces
+            .get(&surface)
+            .context("Invalid surface handle")?;
+        (
+            ss.current_drawable
+                .context("No drawable acquired — call surface_acquire first")?,
+            ss.device_handle,
+            ss.width,
+            ss.height,
+        )
+    };
 
-    let drawable_ptr = surface_state
-        .current_drawable
-        .context("No drawable acquired — call surface_acquire first")?;
     let drawable = drawable_ptr as id;
-
-    let logical_device = state
-        .devices
-        .get(&surface_state.device_handle)
-        .context("Device no longer valid")?;
-
     let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
@@ -295,92 +373,116 @@ pub(super) fn render(
             _ => {}
         }
     }
-    let render_pass = create_render_pass(
-        texture,
-        surface_state.depth_texture.as_deref(),
-        clear_color,
-        clear_depth,
-    );
 
-    let command_buffer = logical_device.command_queue.new_command_buffer();
-    let encoder = command_buffer.new_render_command_encoder(render_pass);
+    // Build render pass descriptor (borrows depth_texture transiently).
+    let render_pass = {
+        let ss = state
+            .surfaces
+            .get(&surface)
+            .context("Invalid surface handle")?;
+        create_render_pass(
+            texture,
+            ss.depth_texture.as_deref(),
+            clear_color,
+            clear_depth,
+        )
+    };
 
-    let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
-    logical_device
-        .heap_allocator
-        .use_heaps_for_render(encoder, render_stages);
-    logical_device
-        .texture_heap
-        .use_heaps_for_render(encoder, render_stages);
-    super::transient::use_transient_heaps_for_render(logical_device, encoder, render_stages);
-    for buf_state in state.buffers.values() {
-        if buf_state.device_handle == surface_state.device_handle {
-            encoder.use_resource_at(
-                &buf_state.buffer,
-                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
-                render_stages,
-            );
+    // Create an owned command buffer so we can store it without keeping a
+    // borrow on `logical_device` alive past the encoding phase.
+    let owned_cb = {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Device no longer valid")?;
+        ld.command_queue.new_command_buffer().to_owned()
+    };
+
+    let cb = owned_cb.as_ref();
+    let encoder = cb.new_render_command_encoder(render_pass);
+
+    // Declare heap/resource residency and bind the global argument buffer.
+    {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Device no longer valid")?;
+        let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
+        ld.heap_allocator.use_heaps_for_render(encoder, render_stages);
+        ld.texture_heap.use_heaps_for_render(encoder, render_stages);
+        super::transient::use_transient_heaps_for_render(ld, encoder, render_stages);
+        for buf_state in state.buffers.values() {
+            if buf_state.device_handle == device_handle {
+                encoder.use_resource_at(
+                    &buf_state.buffer,
+                    mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
+                    render_stages,
+                );
+            }
         }
+        encoder.set_vertex_buffer(0, Some(&ld.argument_buffer), 0);
+        encoder.set_fragment_buffer(0, Some(&ld.argument_buffer), 0);
     }
-
-    encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
-    encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
     tracing::trace!("Bound global argument buffer at slot 0");
 
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
         originY: 0.0,
-        width: surface_state.width as f64,
-        height: surface_state.height as f64,
+        width: surface_width as f64,
+        height: surface_height as f64,
         znear: 0.0,
         zfar: 1.0,
     });
     encoder.set_scissor_rect(mtl::MTLScissorRect {
         x: 0,
         y: 0,
-        width: surface_state.width as u64,
-        height: surface_state.height as u64,
+        width: surface_width as u64,
+        height: surface_height as u64,
     });
 
     record(encoder, commands, &state.pipelines, &state.buffers)?;
-
     encoder.end_encoding();
-    command_buffer.commit();
+
+    // Store the uncommitted CB — present() will append present_drawable,
+    // signal the timeline, and commit it.
+    state
+        .surfaces
+        .get_mut(&surface)
+        .expect("surface must exist after render encoding")
+        .pending_render_cb = Some(owned_cb);
 
     Ok(())
 }
 
-/// Present the acquired drawable and unregister its temporary texture.
+/// Present the acquired drawable.
 ///
-/// This is the sole place where `presentDrawable:` is called. A lightweight
-/// command buffer is created to schedule the presentation. If `render()` was
-/// called first, Metal's serial queue ordering guarantees the render commands
-/// complete before the present is scheduled by the GPU.
+/// Takes `pending_render_cb` stored by `render()` (or allocates a new empty
+/// CB if `render()` was skipped), appends `present_drawable` and the timeline
+/// signal, and commits — exactly **one** command buffer per frame.
 pub(super) fn present(
     state: &mut MetalState,
     surface: SurfaceHandle,
     _image: SwapchainImageHandle,
 ) -> Result<crate::timeline::TimelineValue> {
-    let surface_state = state
-        .surfaces
-        .get(&surface)
-        .context("Invalid surface handle")?;
-
-    let device_handle = surface_state.device_handle;
-
-    let drawable_ptr = match surface_state.current_drawable {
-        Some(d) => d,
-        None => {
-            let ld = state
-                .devices
-                .get_mut(&device_handle)
-                .context("Device no longer valid")?;
-            ld.process_deletion_queue_up_to_signaled();
-            return Ok(ld.timeline_event.as_ref().signaled_value());
-        }
+    // Extract what we need before taking the mutable borrow.
+    let (device_handle, drawable_ptr) = {
+        let ss = state
+            .surfaces
+            .get(&surface)
+            .context("Invalid surface handle")?;
+        (ss.device_handle, ss.current_drawable)
     };
-    let tex_handle = surface_state.current_texture_handle;
 
+    let Some(drawable_ptr) = drawable_ptr else {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Device no longer valid")?;
+        ld.process_deletion_queue_up_to_signaled();
+        return Ok(ld.timeline_event.as_ref().signaled_value());
+    };
+
+    // Assign the next timeline value.
     let signal_value = {
         let ld = state
             .devices
@@ -392,43 +494,59 @@ pub(super) fn present(
         v
     };
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Device no longer valid")?;
+    // Take the pending render CB (encoded but not committed) or allocate a
+    // fresh one if render() was not called this frame.
+    let owned_cb = state
+        .surfaces
+        .get_mut(&surface)
+        .expect("surface must exist at present time")
+        .pending_render_cb
+        .take()
+        .map(Ok)
+        .unwrap_or_else(|| {
+            state
+                .devices
+                .get(&device_handle)
+                .context("Device no longer valid")
+                .map(|ld| ld.command_queue.new_command_buffer().to_owned())
+        })?;
 
-    let command_buffer = logical_device.command_queue.new_command_buffer();
-    command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
+    let cb = owned_cb.as_ref();
 
-    let waiter = logical_device.timeline_waiter.clone();
-    let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
-        waiter.signal(signal_value);
-    })
-    .copy();
-    command_buffer.add_completed_handler(&handler);
-
+    // Append present + timeline signal to the same CB as the render pass.
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
-    command_buffer.present_drawable(drawable_ref);
-    command_buffer.commit();
+    cb.present_drawable(drawable_ref);
 
-    // Release the retained drawable
+    {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Device no longer valid")?;
+        cb.encode_signal_event(ld.timeline_event.as_ref(), signal_value);
+        let waiter = ld.timeline_waiter.clone();
+        let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+            waiter.signal(signal_value);
+        })
+        .copy();
+        cb.add_completed_handler(&handler);
+    }
+
+    cb.commit();
+
+    // Release the retained drawable.
     unsafe {
         let (): () = msg_send![drawable, release];
     }
 
-    // Unregister the temporary surface texture
-    if let Some(th) = tex_handle {
-        unregister_surface_texture(state, th);
-    }
-
-    // Clear the drawable state
-    let surface_state = state
+    // Texture handle is now owned by the cache — do not unregister here.
+    // Just clear the per-frame "in use" marker.
+    let ss = state
         .surfaces
         .get_mut(&surface)
         .expect("surface must be registered before presenting a frame");
-    surface_state.current_drawable = None;
-    surface_state.current_texture_handle = None;
+    ss.current_drawable = None;
+    ss.current_texture_handle = None;
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.process_deletion_queue_up_to_signaled();

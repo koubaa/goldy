@@ -12,9 +12,10 @@
 use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
-    DeviceType, Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    DeviceType, Instance, PresentMode, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    SurfaceConfig, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+use std::collections::VecDeque;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -86,36 +87,53 @@ fn quad_verts(
 // App state
 // ============================================================================
 
+const FPS_WINDOW: usize = 100;
+
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     surface: Option<Surface>,
     window: Option<Arc<Window>>,
+    warm_vb: Option<Buffer>,
+    cool_vb: Option<Buffer>,
     frame_count: u64,
     start_time: std::time::Instant,
+    last_title_update: std::time::Instant,
+    frame_times: VecDeque<std::time::Instant>,
 }
 
 impl App {
     fn new() -> anyhow::Result<Self> {
         let instance = Instance::new()?;
+        let now = std::time::Instant::now();
         Ok(Self {
             instance,
             device: None,
             pipeline: None,
             surface: None,
             window: None,
+            warm_vb: None,
+            cool_vb: None,
             frame_count: 0,
-            start_time: std::time::Instant::now(),
+            start_time: now,
+            last_title_update: now,
+            frame_times: VecDeque::with_capacity(FPS_WINDOW + 1),
         })
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
 
-        // Surface with a depth buffer for 3D depth testing
-        let surface =
-            Surface::new_with_depth(&device, window.as_ref(), Some(DepthFormat::Depth32Float))?;
+        // Immediate present mode: no vsync cap, max throughput for benchmarking.
+        let surface = Surface::new_with_config(
+            &device,
+            window.as_ref(),
+            SurfaceConfig {
+                present_mode: PresentMode::Immediate,
+                depth_format: Some(DepthFormat::Depth32Float),
+            },
+        )?;
 
         let shader =
             ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
@@ -136,6 +154,13 @@ impl App {
             },
         )?;
 
+        // Pre-allocate vertex buffers once; updated each frame via write_data.
+        let vb_size = std::mem::size_of::<[DepthVertex; 6]>() as u64;
+        let warm_vb = Buffer::new(&device, vb_size, DataAccess::Scattered)?;
+        let cool_vb = Buffer::new(&device, vb_size, DataAccess::Scattered)?;
+
+        self.warm_vb = Some(warm_vb);
+        self.cool_vb = Some(cool_vb);
         self.device = Some(device);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
@@ -149,15 +174,16 @@ impl App {
             return Ok(());
         }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let warm_vb = self.warm_vb.as_ref().unwrap();
+        let cool_vb = self.cool_vb.as_ref().unwrap();
 
-        // Two independent sine-wave oscillations chosen so they cross ~twice per
-        // second at 60 fps.  Both stay in (0.1, 0.9) so neither is ever clipped.
-        let t = self.frame_count as f32 * 0.04;
-        let warm_z = t.sin() * 0.4 + 0.5; // ~1 Hz
-        let cool_z = (t * 1.3 + 1.0).sin() * 0.4 + 0.5; // ~1.3 Hz
+        // Time-based animation: frame-rate independent oscillation.
+        // The factor 2.4 (= 0.04 * 60) preserves the original visual rhythm.
+        let t = self.start_time.elapsed().as_secs_f32() * 2.4;
+        let warm_z = t.sin() * 0.4 + 0.5; // ~0.38 Hz
+        let cool_z = (t * 1.3 + 1.0).sin() * 0.4 + 0.5; // ~0.5 Hz
 
         // Both quads are FULLSCREEN.  Draw order is always: warm first, cool second.
         // Without depth testing cool would always overwrite warm.
@@ -165,21 +191,42 @@ impl App {
         let warm_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, warm_z, 0.95, 0.35, 0.1);
         let cool_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, cool_z, 0.1, 0.6, 0.95);
 
-        let warm_vb = Buffer::with_data(device, &warm_verts, DataAccess::Scattered)?;
-        let cool_vb = Buffer::with_data(device, &cool_verts, DataAccess::Scattered)?;
+        // Overwrite pre-allocated buffers in place — no alloc, no bindless churn.
+        warm_vb.write_data(0, &warm_verts)?;
+        cool_vb.write_data(0, &cool_verts)?;
 
-        // Update window title with live depth values so it is easy to reason
-        // about what is happening.
-        let winner = if warm_z < cool_z {
-            "WARM wins"
-        } else {
-            "COOL wins"
-        };
-        if let Some(window) = &self.window {
-            window.set_title(&format!(
-                "Depth Quads  |  warm z={:.3}  cool z={:.3}  →  {}",
-                warm_z, cool_z, winner
-            ));
+        // Record this frame's timestamp; keep only the last FPS_WINDOW+1 entries.
+        let now = std::time::Instant::now();
+        self.frame_times.push_back(now);
+        if self.frame_times.len() > FPS_WINDOW + 1 {
+            self.frame_times.pop_front();
+        }
+
+        // Throttle title update to once per second to avoid AppKit layout spam.
+        if now.duration_since(self.last_title_update).as_secs_f32() >= 1.0 {
+            let fps = if self.frame_times.len() >= 2 {
+                let span = self
+                    .frame_times
+                    .back()
+                    .unwrap()
+                    .duration_since(*self.frame_times.front().unwrap())
+                    .as_secs_f64();
+                (self.frame_times.len() - 1) as f64 / span
+            } else {
+                0.0
+            };
+            let winner = if warm_z < cool_z {
+                "WARM wins"
+            } else {
+                "COOL wins"
+            };
+            if let Some(window) = &self.window {
+                window.set_title(&format!(
+                    "Depth Quads  |  warm z={:.3}  cool z={:.3}  →  {}  |  {:.0} FPS",
+                    warm_z, cool_z, winner, fps
+                ));
+            }
+            self.last_title_update = now;
         }
 
         let frame = surface.begin()?;
@@ -191,10 +238,10 @@ impl App {
             pass.clear_depth(1.0);
             pass.set_pipeline(pipeline);
 
-            pass.set_vertex_buffer(0, &warm_vb);
+            pass.set_vertex_buffer(0, warm_vb);
             pass.draw(0..6, 0..1);
 
-            pass.set_vertex_buffer(0, &cool_vb);
+            pass.set_vertex_buffer(0, cool_vb);
             pass.draw(0..6, 0..1);
         }
 
@@ -219,13 +266,19 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         let elapsed = self.start_time.elapsed().as_secs_f64();
-        let fps = if elapsed > 0.0 {
-            self.frame_count as f64 / elapsed
+        let rolling_fps = if self.frame_times.len() >= 2 {
+            let span = self
+                .frame_times
+                .back()
+                .unwrap()
+                .duration_since(*self.frame_times.front().unwrap())
+                .as_secs_f64();
+            (self.frame_times.len() - 1) as f64 / span
         } else {
             0.0
         };
         println!(
-            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s rolling_fps={rolling_fps:.1}",
             self.frame_count
         );
     }

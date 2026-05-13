@@ -637,6 +637,13 @@ pub(super) fn submit(
 
     command_buffer_ref.commit();
 
+    // Stamp all buffers on this device so `buffer::write` knows they may be in flight.
+    for buf_state in state.buffers.values_mut() {
+        if buf_state.device_handle == device_handle {
+            buf_state.last_gpu_use = signal_value;
+        }
+    }
+
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.process_deletion_queue_up_to_signaled();
     }
@@ -770,6 +777,13 @@ pub(super) fn submit_graph(
     command_buffer_ref.encode_signal_event(ld.timeline_event.as_ref(), signal_value);
 
     command_buffer_ref.commit();
+
+    // Stamp all buffers on this device so `buffer::write` knows they may be in flight.
+    for buf_state in state.buffers.values_mut() {
+        if buf_state.device_handle == device_handle {
+            buf_state.last_gpu_use = signal_value;
+        }
+    }
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.process_deletion_queue_up_to_signaled();

@@ -174,6 +174,7 @@ pub(super) fn place_buffer_in_transient_heap(
             arg_buffer_index,
             flags: crate::types::BufferFlags::empty(),
             element_stride: None,
+            last_gpu_use: 0,
         },
     );
     Ok(handle)
