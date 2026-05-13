@@ -12,6 +12,18 @@ use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
 use super::types::LogicalDevice;
 
+/// Minimum committed width for a uniform (upload) buffer so a CBV can be created.
+///
+/// [`D3D12_CONSTANT_BUFFER_VIEW_DESC::SizeInBytes`] must be a multiple of 256
+/// ([`D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT`]). We align the logical
+/// constant data size to that; the resource must be at least that wide.
+#[inline]
+fn uniform_buffer_allocation_width(logical_size: u64, requested_width: u64) -> u64 {
+    debug_assert!(logical_size <= requested_width);
+    let cbv_range = (logical_size + 255) & !255;
+    requested_width.max(cbv_range)
+}
+
 /// Allocates main buffer resource and optional CPU_READABLE readback pairing (same as [`create`]).
 fn alloc_committed_buffer_pair(
     logical_device: &LogicalDevice,
@@ -390,8 +402,18 @@ pub(super) fn resize(
         }
     }
 
-    let (new_resource, new_readback, new_readback_mapped) =
-        alloc_committed_buffer_pair(logical_device_ro, new_size, old.is_storage, cpu_readable)?;
+    let new_alloc_width = if old.is_storage {
+        new_size
+    } else {
+        uniform_buffer_allocation_width(new_size, new_size)
+    };
+
+    let (new_resource, new_readback, new_readback_mapped) = alloc_committed_buffer_pair(
+        logical_device_ro,
+        new_alloc_width,
+        old.is_storage,
+        cpu_readable,
+    )?;
 
     let old_resource = old.resource.clone();
     let copy_len = if preserve_contents {
@@ -560,7 +582,7 @@ pub(super) fn resize(
             device_handle,
             resource: new_resource,
             size: new_size,
-            allocation_size: new_size,
+            allocation_size: new_alloc_width,
             bindless_offset: old.bindless_offset,
             bindless_srv_offset: old.bindless_srv_offset,
             is_storage: old.is_storage,
@@ -621,6 +643,11 @@ pub(super) fn create(
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
     debug_assert!(logical_size <= allocation_size);
+    let allocation_size = if access == DataAccess::Broadcast {
+        uniform_buffer_allocation_width(logical_size, allocation_size)
+    } else {
+        allocation_size
+    };
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     // First pass: create the resource (immutable borrow of device)
     let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
@@ -1123,7 +1150,7 @@ pub(super) fn create_with_capacity(
         element_stride,
         flags,
     )?;
-    Ok((h, cap))
+    Ok((h, capacity(state, h)))
 }
 
 pub(super) fn capacity(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
