@@ -1,6 +1,7 @@
 //! Buffer management logic.
 
 use super::barriers;
+use super::tiles;
 use super::types::{BufferState, Dx12State};
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::DataAccess;
@@ -359,6 +360,11 @@ pub(super) fn resize(
     if new_size == old.size {
         return Ok(());
     }
+    if old.is_reserved && new_size <= old.allocation_size {
+        anyhow::bail!(
+            "reserved buffer: growth within virtual capacity must use set_buffer_logical_size, not resize_buffer"
+        );
+    }
 
     let cpu_readable = old.flags.contains(BufferFlags::CPU_READABLE);
     if cpu_readable && !old.is_storage {
@@ -497,6 +503,9 @@ pub(super) fn resize(
                 transient_placed: false,
                 parent_for_view: None,
                 view_byte_offset: None,
+                is_reserved: false,
+                tile_byte_size: 0,
+                reserved_tiles: Vec::new(),
             };
             uav_clear(device, &tmp_state, &cmd, old.size, tail_len)?;
         }
@@ -574,6 +583,9 @@ pub(super) fn resize(
             transient_placed: false,
             parent_for_view: None,
             view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
         },
     );
 
@@ -583,14 +595,26 @@ pub(super) fn resize(
         .devices
         .get_mut(&device_handle)
         .context("resize_buffer: queue deletion")?;
-    dev_mut.deletion_queue.queue(
-        deletion_fence_marker,
-        super::types::PendingDeletion::ReplacedBufferGpu {
-            resource: old_resource,
-            upload_buffer: old.upload_buffer,
-            coherent_readback: old.coherent_readback,
-        },
-    );
+    if old.is_reserved {
+        dev_mut.deletion_queue.queue(
+            deletion_fence_marker,
+            super::types::PendingDeletion::ReplacedReservedBufferGpu {
+                resource: old_resource,
+                tiles: old.reserved_tiles,
+                upload_buffer: old.upload_buffer,
+                coherent_readback: old.coherent_readback,
+            },
+        );
+    } else {
+        dev_mut.deletion_queue.queue(
+            deletion_fence_marker,
+            super::types::PendingDeletion::ReplacedBufferGpu {
+                resource: old_resource,
+                upload_buffer: old.upload_buffer,
+                coherent_readback: old.coherent_readback,
+            },
+        );
+    }
 
     Ok(())
 }
@@ -906,6 +930,160 @@ pub(super) fn create(
             transient_placed: false,
             parent_for_view: None,
             view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
+        },
+    );
+
+    Ok(handle)
+}
+
+pub(super) fn create_reserved_with_capacity(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    logical_size: u64,
+    capacity: u64,
+    element_stride: Option<u32>,
+    flags: BufferFlags,
+) -> Result<BufferHandle> {
+    let allocation_size = tiles::align_reserved_cap(capacity.max(logical_size));
+    let num_tiles = tiles::num_tiles_for_bytes(allocation_size) as usize;
+    let initial_tiles = tiles::tiles_needed_for_logical_size(logical_size) as usize;
+
+    let resource_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: allocation_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+    };
+
+    let (resource, reserved_tiles) = {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let pool = ld
+            .tile_heap_pool
+            .as_mut()
+            .context("internal: tile heap pool missing")?;
+        let queue = ld.command_queue.clone();
+
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe {
+            ld.device.CreateReservedResource(
+                &resource_desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                None,
+                &mut resource,
+            )
+        }
+        .context("CreateReservedResource")?;
+        let resource = resource.context("CreateReservedResource returned null")?;
+
+        let mut slots: Vec<Option<(ID3D12Heap, u64)>> = vec![None; num_tiles];
+        for i in 0..initial_tiles {
+            let (heap, off) = pool.alloc_tile(&ld.device)?;
+            tiles::map_tile_run(&queue, &resource, i as u32, 1, &heap, off)?;
+            slots[i] = Some((heap.clone(), off));
+        }
+        (resource, slots)
+    };
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+
+    let stride = element_stride.unwrap_or(4);
+    debug_assert!(
+        stride > 0 && (logical_size as u32).is_multiple_of(stride),
+        "buffer logical size {logical_size} not evenly divisible by element stride {stride}"
+    );
+    let num_elements = (logical_size as u32) / stride;
+
+    let (bindless_offset, bindless_srv_offset) = {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let uav_offset = ld.resource_registry.register_buffer_uav(handle);
+        let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_UAV {
+                    FirstElement: 0,
+                    NumElements: num_elements,
+                    StructureByteStride: stride,
+                    CounterOffsetInBytes: 0,
+                    Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+                },
+            },
+        };
+        let uav_cpu_handle = unsafe {
+            let mut cpu_handle = ld.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+            cpu_handle.ptr += (uav_offset * ld.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
+        };
+        unsafe {
+            ld.device.CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
+        }
+
+        let srv_offset = ld.resource_registry.register_buffer_srv(handle);
+        let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 0,
+                    NumElements: num_elements,
+                    StructureByteStride: stride,
+                    Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                },
+            },
+        };
+        let srv_cpu_handle = unsafe {
+            let mut cpu_handle = ld.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+            cpu_handle.ptr += (srv_offset * ld.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
+        };
+        unsafe {
+            ld.device.CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
+        }
+        (Some(uav_offset), Some(srv_offset))
+    };
+
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            resource,
+            size: logical_size,
+            allocation_size,
+            bindless_offset,
+            bindless_srv_offset,
+            is_storage: true,
+            upload_buffer: None,
+            element_stride,
+            is_view: false,
+            coherent_readback: None,
+            coherent_readback_mapped: None,
+            flags,
+            transient_placed: false,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: true,
+            tile_byte_size: tiles::BUFFER_TILE_BYTES,
+            reserved_tiles,
         },
     );
 
@@ -916,12 +1094,24 @@ pub(super) fn create_with_capacity(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     initial_size: u64,
-    capacity: u64,
+    requested_capacity: u64,
     access: DataAccess,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<(BufferHandle, u64)> {
-    let cap = capacity.max(initial_size);
+    let cap = requested_capacity.max(initial_size);
+    let use_reserved = state.devices.get(&device_handle).is_some_and(|d| {
+        d.supports_reserved_buffers
+            && d.tile_heap_pool.is_some()
+            && cap > initial_size
+            && access == DataAccess::Scattered
+            && !flags.contains(BufferFlags::CPU_READABLE)
+    });
+    if use_reserved {
+        let h =
+            create_reserved_with_capacity(state, device_handle, initial_size, cap, element_stride, flags)?;
+        return Ok((h, capacity(state, h)));
+    }
     let h = create(
         state,
         device_handle,
@@ -981,6 +1171,49 @@ pub(super) fn set_logical_size(
         }
     }
 
+    if old.is_reserved {
+        let old_pages = tiles::tiles_needed_for_logical_size(old.size);
+        let new_pages = tiles::tiles_needed_for_logical_size(new_logical_size);
+        {
+            let ld = state
+                .devices
+                .get_mut(&device_handle)
+                .context("set_logical_size: device")?;
+            let pool = ld
+                .tile_heap_pool
+                .as_mut()
+                .context("set_logical_size: tile heap pool")?;
+            let queue = ld.command_queue.clone();
+            let buf = state
+                .buffers
+                .get_mut(&buffer_handle)
+                .expect("set_logical_size: buffer");
+            if new_pages > old_pages {
+                for i in old_pages..new_pages {
+                    let (heap, off) = pool.alloc_tile(&ld.device)?;
+                    tiles::map_tile_run(&queue, &buf.resource, i, 1, &heap, off)?;
+                    buf.reserved_tiles[i as usize] = Some((heap.clone(), off));
+                }
+            } else if new_pages < old_pages {
+                for i in new_pages..old_pages {
+                    if let Some((heap, off)) = buf.reserved_tiles.get_mut(i as usize).and_then(|s| s.take())
+                    {
+                        tiles::unmap_tile_run(&queue, &buf.resource, i, 1)?;
+                        pool.free_tile(&heap, off);
+                    }
+                }
+            }
+        }
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("set_logical_size: device")?;
+        let buf = state.buffers.get(&buffer_handle).unwrap();
+        rewrite_root_buffer_descriptors(logical_device, &buf.resource, new_logical_size, buf)?;
+        state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+        return Ok(());
+    }
+
     let logical_device = state
         .devices
         .get(&device_handle)
@@ -1023,8 +1256,51 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
                     resource: buffer.resource,
                     upload_buffer: buffer.upload_buffer,
                     coherent_readback: buffer.coherent_readback,
+                    reserved_tiles: if buffer.is_reserved {
+                        Some(buffer.reserved_tiles)
+                    } else {
+                        None
+                    },
                 },
             );
+        }
+    }
+}
+
+/// Hint unused reserved tiles at/above `offset` (bytes).
+pub(super) fn hint_unused_above(state: &mut Dx12State, buffer_handle: BufferHandle, offset: u64) {
+    let (device_handle, first_tile) = {
+        let Some(buf) = state.buffers.get(&buffer_handle) else {
+            return;
+        };
+        if !buf.is_reserved {
+            return;
+        }
+        let tile = u64::from(buf.tile_byte_size);
+        if tile == 0 {
+            return;
+        }
+        let ft = ((offset.saturating_add(tile.saturating_sub(1))) / tile) as usize;
+        if ft >= buf.reserved_tiles.len() {
+            return;
+        }
+        (buf.device_handle, ft)
+    };
+    let (devices, buffers) = (&mut state.devices, &mut state.buffers);
+    let Some(ld) = devices.get_mut(&device_handle) else {
+        return;
+    };
+    let Some(pool) = ld.tile_heap_pool.as_mut() else {
+        return;
+    };
+    let queue = &ld.command_queue;
+    let Some(buf_mut) = buffers.get_mut(&buffer_handle) else {
+        return;
+    };
+    for i in first_tile..buf_mut.reserved_tiles.len() {
+        if let Some((heap, off)) = buf_mut.reserved_tiles[i].take() {
+            let _ = tiles::unmap_tile_run(queue, &buf_mut.resource, i as u32, 1);
+            pool.free_tile(&heap, off);
         }
     }
 }
@@ -1189,6 +1465,9 @@ pub(super) fn create_view(
             transient_placed: false,
             parent_for_view: Some(parent_handle),
             view_byte_offset: Some(offset),
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
         },
     );
 

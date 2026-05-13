@@ -508,6 +508,67 @@ fn device_capabilities_metal_reports_constant_resize() {
     assert!(caps.buffer_decommit_supported);
 }
 
+#[cfg(feature = "vulkan")]
+#[test]
+fn device_capabilities_vulkan_reports_pagebind_when_sparse() {
+    use goldy::{types::BufferResizeCost, BackendType, Instance};
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
+        .expect("dev");
+    assert_eq!(device.backend_type(), BackendType::Vulkan);
+    let caps = device.capabilities();
+    if caps.buffer_resize_cost == BufferResizeCost::PageBind {
+        assert_eq!(caps.buffer_page_size, 64 * 1024);
+        assert!(caps.buffer_decommit_supported);
+    }
+}
+
+#[cfg(feature = "dx12")]
+#[test]
+fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
+    use goldy::{types::BufferResizeCost, BackendType, Instance};
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
+        .expect("dev");
+    assert_eq!(device.backend_type(), BackendType::Dx12);
+    let caps = device.capabilities();
+    if caps.buffer_resize_cost == BufferResizeCost::PageBind {
+        assert_eq!(caps.buffer_page_size, 64 * 1024);
+        assert!(caps.buffer_decommit_supported);
+    }
+}
+
+#[cfg(any(feature = "vulkan", feature = "dx12"))]
+#[test]
+fn sparse_backend_oversize_resize_and_hint_within_capacity() {
+    use goldy::{types::BufferResizeCost, Instance};
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
+        .expect("dev");
+    if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
+        return;
+    }
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 64, 4096, DataAccess::Scattered).expect("buf");
+    buf.write(0, &[0x11u8; 64]).expect("w");
+    buf.resize_to(256).expect("grow within cap");
+    let mut got = vec![0u8; 256];
+    buf.read_to_cpu(&device, &mut got).expect("r");
+    assert_eq!(&got[..64], &[0x11u8; 64]);
+    assert!(got[64..].iter().all(|&x| x == 0));
+
+    buf.hint_unused_above(32);
+    let mut prefix = vec![0u8; 32];
+    buf.read_to_cpu(&device, &mut prefix).expect("r2");
+    assert_eq!(&prefix[..], &[0x11u8; 32]);
+}
+
 #[test]
 fn hint_unused_above_smoke() {
     let device = make_device();

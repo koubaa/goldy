@@ -272,6 +272,9 @@ pub(super) fn place_buffer_in_transient_heap(
             flags: crate::types::BufferFlags::empty(),
             transient_heap_suballoc: true,
             view_byte_offset: None,
+            is_sparse: false,
+            sparse_block_size: 0,
+            sparse_pages: Vec::new(),
         },
     );
     Ok(handle)

@@ -323,10 +323,19 @@ pub(crate) enum PendingDeletion {
         resource: Direct3D12::ID3D12Resource,
         upload_buffer: Option<Direct3D12::ID3D12Resource>,
         coherent_readback: Option<Direct3D12::ID3D12Resource>,
+        /// Reserved-buffer tile map when [`super::buffer::BufferState::is_reserved`].
+        reserved_tiles: Option<Vec<Option<(Direct3D12::ID3D12Heap, u64)>>>,
     },
     /// Old GPU allocations after an in-place buffer resize; logical handle and heap slots stay live.
     ReplacedBufferGpu {
         resource: Direct3D12::ID3D12Resource,
+        upload_buffer: Option<Direct3D12::ID3D12Resource>,
+        coherent_readback: Option<Direct3D12::ID3D12Resource>,
+    },
+    /// Previous reserved buffer after migration to committed storage — unmap tiles then drop.
+    ReplacedReservedBufferGpu {
+        resource: Direct3D12::ID3D12Resource,
+        tiles: Vec<Option<(Direct3D12::ID3D12Heap, u64)>>,
         upload_buffer: Option<Direct3D12::ID3D12Resource>,
         coherent_readback: Option<Direct3D12::ID3D12Resource>,
     },
@@ -355,36 +364,16 @@ impl DeletionQueue {
         self.inner.push(fence_value, resource);
     }
 
-    /// Drop resources whose associated fence value has been reached by the GPU.
-    pub fn process(&mut self, fence: &Direct3D12::ID3D12Fence, registry: &mut ResourceRegistry) {
-        let completed = unsafe { fence.GetCompletedValue() };
-        for resource in self.inner.drain_up_to(completed) {
-            Self::unregister(registry, &resource);
-        }
+    pub(crate) fn drain_up_to_completed(&mut self, completed: u64) -> Vec<PendingDeletion> {
+        self.inner.drain_up_to(completed)
+    }
+
+    pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
+        self.inner.flush_all().collect()
     }
 
     pub(crate) fn pending_len(&self) -> usize {
         self.inner.len()
-    }
-
-    /// Flush all pending deletions unconditionally (device teardown).
-    pub fn flush_all(&mut self, registry: &mut ResourceRegistry) {
-        for resource in self.inner.flush_all() {
-            Self::unregister(registry, &resource);
-        }
-    }
-
-    fn unregister(registry: &mut ResourceRegistry, resource: &PendingDeletion) {
-        match resource {
-            PendingDeletion::Buffer { buffer_handle, .. }
-            | PendingDeletion::BufferView { buffer_handle } => {
-                registry.unregister_buffer(*buffer_handle);
-            }
-            PendingDeletion::ReplacedBufferGpu { .. } => {}
-            PendingDeletion::Texture { texture_handle, .. } => {
-                registry.unregister_texture(*texture_handle);
-            }
-        }
     }
 }
 
@@ -408,6 +397,9 @@ pub(crate) struct LogicalDevice {
     pub fence_value: u64,
 
     // Bindless infrastructure
+    /// `true` when adapter reports tiled resources tier >= 1 (buffer reserved resources).
+    pub supports_reserved_buffers: bool,
+    pub tile_heap_pool: Option<super::tiles::TileHeapPool>,
     /// Shared root signature for all bindless pipelines (graphics and compute)
     pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
     /// Command signature for indirect compute dispatch (ExecuteIndirect)
@@ -433,6 +425,83 @@ pub(crate) struct LogicalDevice {
     pub compute_pso_blobs: HashMap<u64, Vec<u8>>,
     /// `true` if either blob map changed since loading from [`super::pso_cache`] disk file.
     pub pso_disk_cache_dirty: bool,
+}
+
+impl LogicalDevice {
+    pub(crate) fn process_deletion_queue(&mut self) {
+        let completed = unsafe { self.fence.GetCompletedValue() };
+        let batch = self.deletion_queue.drain_up_to_completed(completed);
+        for resource in batch {
+            destroy_pending_deletion(self, resource);
+        }
+    }
+
+    pub(crate) fn flush_deletion_queue(&mut self) {
+        let batch = self.deletion_queue.drain_everything();
+        for resource in batch {
+            destroy_pending_deletion(self, resource);
+        }
+    }
+}
+
+pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: PendingDeletion) {
+    match resource {
+        PendingDeletion::Buffer {
+            buffer_handle,
+            resource,
+            upload_buffer,
+            coherent_readback,
+            reserved_tiles,
+        } => {
+            ld.resource_registry.unregister_buffer(buffer_handle);
+            if let Some(tiles) = reserved_tiles {
+                super::tiles::teardown_reserved_mappings(
+                    &ld.command_queue,
+                    &mut ld.tile_heap_pool,
+                    &resource,
+                    &tiles,
+                );
+            }
+            drop(resource);
+            drop(upload_buffer);
+            drop(coherent_readback);
+        }
+        PendingDeletion::BufferView { buffer_handle } => {
+            ld.resource_registry.unregister_buffer(buffer_handle);
+        }
+        PendingDeletion::ReplacedBufferGpu {
+            resource,
+            upload_buffer,
+            coherent_readback,
+        } => {
+            drop(resource);
+            drop(upload_buffer);
+            drop(coherent_readback);
+        }
+        PendingDeletion::ReplacedReservedBufferGpu {
+            resource,
+            tiles,
+            upload_buffer,
+            coherent_readback,
+        } => {
+            super::tiles::teardown_reserved_mappings(
+                &ld.command_queue,
+                &mut ld.tile_heap_pool,
+                &resource,
+                &tiles,
+            );
+            drop(resource);
+            drop(upload_buffer);
+            drop(coherent_readback);
+        }
+        PendingDeletion::Texture {
+            texture_handle,
+            resource,
+        } => {
+            ld.resource_registry.unregister_texture(texture_handle);
+            drop(resource);
+        }
+    }
 }
 
 /// GPU buffer state.
@@ -471,6 +540,10 @@ pub(crate) struct BufferState {
     pub parent_for_view: Option<BufferHandle>,
     /// Byte offset into the parent for views; [`None`] for root buffers.
     pub view_byte_offset: Option<u64>,
+    /// Built with [`ID3D12Device::CreateReservedResource`] + tile mappings.
+    pub is_reserved: bool,
+    pub tile_byte_size: u32,
+    pub reserved_tiles: Vec<Option<(Direct3D12::ID3D12Heap, u64)>>,
 }
 
 /// Shader module state with cached compiled bytecode.

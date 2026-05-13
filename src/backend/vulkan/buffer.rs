@@ -1,5 +1,6 @@
 //! Buffer management logic.
 
+use super::sparse;
 use super::types::{self, BufferState};
 use super::utils::find_memory_type;
 use super::{BufferHandle, DeviceHandle};
@@ -254,10 +255,211 @@ pub(super) fn create(
             flags,
             transient_heap_suballoc: false,
             view_byte_offset: None,
+            is_sparse: false,
+            sparse_block_size: 0,
+            sparse_pages: Vec::new(),
         },
     );
 
     Ok(handle)
+}
+
+fn align_sparse_capacity(cap: u64, block: u64) -> u64 {
+    if block == 0 {
+        cap
+    } else {
+        ((cap + block - 1) / block) * block
+    }
+}
+
+/// Sparse **device-local** storage buffer: virtual size `capacity`, initially backed pages for `logical_size`.
+pub(super) fn create_sparse_with_capacity(
+    _instance: &ash::Instance,
+    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
+    next_buffer_handle: &mut BufferHandle,
+    device_handle: DeviceHandle,
+    logical_size: u64,
+    capacity: u64,
+    element_stride: Option<u32>,
+    flags: BufferFlags,
+) -> Result<BufferHandle> {
+    let ld = devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
+    let pool = ld
+        .sparse_page_pool
+        .as_mut()
+        .context("internal: sparse page pool missing")?;
+    let block = ld.sparse_buffer_block_size;
+    anyhow::ensure!(block > 0, "sparse block size not initialized");
+
+    let cap = capacity.max(logical_size);
+    let allocation_size = align_sparse_capacity(cap, block);
+    let num_pages = sparse::num_sparse_pages(allocation_size, block) as usize;
+    anyhow::ensure!(num_pages > 0, "sparse buffer capacity too small");
+
+    let mut vk_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+    vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER
+        | vk::BufferUsageFlags::VERTEX_BUFFER
+        | vk::BufferUsageFlags::INDEX_BUFFER;
+    if logical_size >= 12 {
+        vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
+    }
+
+    let buffer_info = vk::BufferCreateInfo::default()
+        .size(allocation_size)
+        .usage(vk_usage)
+        .flags(
+            vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY,
+        )
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }
+        .context("Failed to create sparse buffer")?;
+
+    let initial_pages = sparse::pages_needed_for_bytes(logical_size, block) as usize;
+    let mut sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>> = vec![None; num_pages];
+    let mut binds: Vec<vk::SparseMemoryBind> = Vec::with_capacity(initial_pages);
+
+    let bind_queue = ld.sparse_binding_queue;
+    let dev = &ld.device;
+
+    for i in 0..initial_pages {
+        let (mem, mem_off) = pool.alloc_page(dev)?;
+        let resource_offset = (i as u64).saturating_mul(block);
+        sparse_pages[i] = Some((mem, mem_off));
+        binds.push(
+            vk::SparseMemoryBind::default()
+                .resource_offset(resource_offset)
+                .size(block)
+                .memory(mem)
+                .memory_offset(mem_off)
+                .flags(vk::SparseMemoryBindFlags::empty()),
+        );
+    }
+
+    sparse::queue_bind_sparse_sync(dev, bind_queue, buffer, &binds)?;
+
+    let bindless_descriptor_set = ld.bindless_descriptor_set;
+    let handle = *next_buffer_handle;
+    *next_buffer_handle += 1;
+
+    let bindless_index = {
+        let index = ld.resource_registry.register_buffer(handle, true);
+        if let Some(descriptor_set) = bindless_descriptor_set {
+            let buffer_info = vk::DescriptorBufferInfo::default()
+                .buffer(buffer)
+                .offset(0)
+                .range(logical_size.max(1));
+
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(types::bindless_bindings::STORAGE_BUFFERS)
+                .dst_array_element(index)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(std::slice::from_ref(&buffer_info));
+            unsafe {
+                ld.device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
+            }
+        }
+        Some(index)
+    };
+
+    buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            buffer,
+            memory: vk::DeviceMemory::null(),
+            size: logical_size,
+            allocation_size,
+            bindless_index,
+            is_storage: true,
+            element_stride,
+            staging_buffer: None,
+            staging_memory: None,
+            is_view: false,
+            host_mapped: None,
+            flags,
+            transient_heap_suballoc: false,
+            view_byte_offset: None,
+            is_sparse: true,
+            sparse_block_size: block,
+            sparse_pages,
+        },
+    );
+
+    Ok(handle)
+}
+
+/// Hint unused sparse pages at and above `offset` (bytes).
+pub(super) fn hint_unused_above(
+    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    offset: u64,
+) {
+    let Some(buf) = buffers.get(&buffer_handle) else {
+        return;
+    };
+    if !buf.is_sparse {
+        return;
+    }
+    let block = buf.sparse_block_size;
+    if block == 0 {
+        return;
+    }
+    let device_handle = buf.device_handle;
+    let vkbuf = buf.buffer;
+    let alloc = buf.allocation_size;
+    let first_page = ((offset.saturating_add(block.saturating_sub(1))) / block) as usize;
+    let total_pages = sparse::num_sparse_pages(alloc, block) as usize;
+    if first_page >= total_pages {
+        return;
+    }
+
+    {
+        let Some(ld) = devices.get_mut(&device_handle) else {
+            return;
+        };
+        let Some(pool) = ld.sparse_page_pool.as_mut() else {
+            return;
+        };
+        let bind_queue = ld.sparse_binding_queue;
+        let dev: &ash::Device = &ld.device;
+        let sparse_pages = &mut buffers
+            .get_mut(&buffer_handle)
+            .expect("buffer missing")
+            .sparse_pages;
+
+        let mut binds = Vec::new();
+        let mut to_free: Vec<(vk::DeviceMemory, vk::DeviceSize)> = Vec::new();
+        for i in first_page..total_pages {
+            if let Some((mem, mem_off)) = sparse_pages.get_mut(i).and_then(|s| s.take()) {
+                let resource_offset = (i as u64).saturating_mul(block);
+                binds.push(
+                    vk::SparseMemoryBind::default()
+                        .resource_offset(resource_offset)
+                        .size(block)
+                        .memory(vk::DeviceMemory::null())
+                        .memory_offset(0)
+                        .flags(vk::SparseMemoryBindFlags::empty()),
+                );
+                to_free.push((mem, mem_off));
+            }
+        }
+        if binds.is_empty() {
+            return;
+        }
+        if let Err(e) = sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds) {
+            tracing::warn!(?e, "hint_unused_above sparse unbind failed");
+            return;
+        }
+        for (mem, off) in to_free {
+            pool.free_page(mem, off);
+        }
+    }
 }
 
 /// Byte size of the underlying VkBuffer allocation.
@@ -278,6 +480,20 @@ pub(super) fn set_logical_size(
     buffer_handle: BufferHandle,
     new_logical_size: u64,
 ) -> Result<()> {
+    let is_sparse = buffers
+        .get(&buffer_handle)
+        .map(|b| b.is_sparse)
+        .unwrap_or(false);
+    if is_sparse {
+        return set_logical_size_sparse(
+            devices,
+            buffers,
+            device_handle,
+            buffer_handle,
+            new_logical_size,
+        );
+    }
+
     let (bindless_index, is_storage, vkbuf, old_logical) = {
         let buf = buffers
             .get(&buffer_handle)
@@ -310,6 +526,151 @@ pub(super) fn set_logical_size(
     if old_logical == new_logical_size {
         return Ok(());
     }
+
+    let bindless_descriptor_set = devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .bindless_descriptor_set;
+
+    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index) {
+        let buffer_info = vk::DescriptorBufferInfo::default()
+            .buffer(vkbuf)
+            .offset(0)
+            .range(new_logical_size.max(1));
+
+        let binding = if is_storage {
+            types::bindless_bindings::STORAGE_BUFFERS
+        } else {
+            types::bindless_bindings::UNIFORM_BUFFERS
+        };
+
+        let descriptor_type = if is_storage {
+            vk::DescriptorType::STORAGE_BUFFER
+        } else {
+            vk::DescriptorType::UNIFORM_BUFFER
+        };
+
+        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(binding)
+            .dst_array_element(bindless_index)
+            .descriptor_type(descriptor_type)
+            .buffer_info(std::slice::from_ref(&buffer_info));
+        unsafe {
+            logical_device
+                .device
+                .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+        }
+    }
+
+    Ok(())
+}
+
+fn set_logical_size_sparse(
+    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    new_logical_size: u64,
+) -> Result<()> {
+    let (bindless_index, is_storage, vkbuf, old_logical, block) = {
+        let buf = buffers
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        if buf.is_view {
+            anyhow::bail!("cannot set logical size on buffer views");
+        }
+        if buf.transient_heap_suballoc {
+            anyhow::bail!("cannot change logical size on transient heap sub-allocations");
+        }
+        if buf.device_handle != device_handle {
+            anyhow::bail!("buffer belongs to a different device");
+        }
+        if new_logical_size > buf.allocation_size {
+            anyhow::bail!("logical size exceeds allocation");
+        }
+        if new_logical_size == 0 {
+            anyhow::bail!("buffer size must be non-zero");
+        }
+        (
+            buf.bindless_index,
+            buf.is_storage,
+            buf.buffer,
+            buf.size,
+            buf.sparse_block_size,
+        )
+    };
+
+    if old_logical == new_logical_size {
+        return Ok(());
+    }
+
+    let old_pages = sparse::pages_needed_for_bytes(old_logical, block) as usize;
+    let new_pages = sparse::pages_needed_for_bytes(new_logical_size, block) as usize;
+
+    {
+        let ld = devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let pool = ld
+            .sparse_page_pool
+            .as_mut()
+            .context("internal: sparse pool missing")?;
+        let bind_queue = ld.sparse_binding_queue;
+        let dev: &ash::Device = &ld.device;
+
+        let sparse_pages = &mut buffers
+        .get_mut(&buffer_handle)
+        .context("buffer disappeared")?
+        .sparse_pages;
+
+        if new_pages > old_pages {
+            let mut binds = Vec::with_capacity(new_pages - old_pages);
+            for i in old_pages..new_pages {
+                let (mem, mem_off) = pool.alloc_page(dev)?;
+                let resource_offset = (i as u64).saturating_mul(block);
+                if i >= sparse_pages.len() {
+                    anyhow::bail!("internal: sparse page index out of range");
+                }
+                sparse_pages[i] = Some((mem, mem_off));
+                binds.push(
+                    vk::SparseMemoryBind::default()
+                        .resource_offset(resource_offset)
+                        .size(block)
+                        .memory(mem)
+                        .memory_offset(mem_off)
+                        .flags(vk::SparseMemoryBindFlags::empty()),
+                );
+            }
+            sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds)?;
+        } else if new_pages < old_pages {
+            let mut binds = Vec::new();
+            let mut to_free: Vec<(vk::DeviceMemory, vk::DeviceSize)> = Vec::new();
+            for i in new_pages..old_pages {
+                if let Some((mem, mem_off)) = sparse_pages.get_mut(i).and_then(|s| s.take()) {
+                    let resource_offset = (i as u64).saturating_mul(block);
+                    binds.push(
+                        vk::SparseMemoryBind::default()
+                            .resource_offset(resource_offset)
+                            .size(block)
+                            .memory(vk::DeviceMemory::null())
+                            .memory_offset(0)
+                            .flags(vk::SparseMemoryBindFlags::empty()),
+                    );
+                    to_free.push((mem, mem_off));
+                }
+            }
+            if !binds.is_empty() {
+                sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds)?;
+            }
+            for (mem, off) in to_free {
+                pool.free_page(mem, off);
+            }
+        }
+    }
+
+    buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
 
     let bindless_descriptor_set = devices
         .get(&device_handle)
@@ -605,6 +966,12 @@ pub(super) fn resize(
         .bindless_index
         .context("buffer resize requires bindless descriptor support")?;
 
+    if old_state.is_sparse && new_size <= old_state.allocation_size {
+        anyhow::bail!(
+            "sparse buffer: growth within virtual capacity must use set_buffer_logical_size, not resize_buffer"
+        );
+    }
+
     let is_storage = old_state.is_storage;
 
     let (new_buffer, new_memory, new_host_mapped) = allocate_vk_buffer_memory(
@@ -668,7 +1035,7 @@ pub(super) fn resize(
         }
     }
 
-    if old_state.host_mapped.is_some() {
+    if old_state.host_mapped.is_some() && !old_state.is_sparse {
         let dev = devices.get_mut(&device_handle).unwrap();
         if let Err(e) = unsafe { dev.unmap_memory2(old_state.memory) } {
             tracing::warn!(?e, "unmap_memory2 failed for old buffer during resize");
@@ -680,19 +1047,32 @@ pub(super) fn resize(
         .unwrap()
         .timeline_next
         .saturating_sub(1);
+    let pending = if old_state.is_sparse {
+        let binds = sparse::collect_sparse_binds_for_teardown(
+            old_state.sparse_block_size,
+            &old_state.sparse_pages,
+        );
+        types::PendingDeletion::ReplacedSparseBufferGpu {
+            buffer: old_state.buffer,
+            allocation_size: old_state.allocation_size,
+            block_size: old_state.sparse_block_size,
+            binds,
+            staging_buffer: old_state.staging_buffer,
+            staging_memory: old_state.staging_memory,
+        }
+    } else {
+        types::PendingDeletion::ReplacedBufferGpu {
+            buffer: old_state.buffer,
+            memory: old_state.memory,
+            staging_buffer: old_state.staging_buffer,
+            staging_memory: old_state.staging_memory,
+        }
+    };
     devices
         .get_mut(&device_handle)
         .unwrap()
         .deletion_queue
-        .queue(
-            barrier,
-            types::PendingDeletion::ReplacedBufferGpu {
-                buffer: old_state.buffer,
-                memory: old_state.memory,
-                staging_buffer: old_state.staging_buffer,
-                staging_memory: old_state.staging_memory,
-            },
-        );
+        .queue(barrier, pending);
 
     let old_parent_vk = old_state.buffer;
 
@@ -712,6 +1092,9 @@ pub(super) fn resize(
         flags: old_state.flags,
         transient_heap_suballoc: false,
         view_byte_offset: None,
+        is_sparse: false,
+        sparse_block_size: 0,
+        sparse_pages: Vec::new(),
     };
 
     let view_handles: Vec<BufferHandle> = buffers
@@ -786,7 +1169,7 @@ pub(super) fn destroy(
                 }
                 return;
             }
-            if buffer.host_mapped.is_some() {
+            if buffer.host_mapped.is_some() && !buffer.is_sparse {
                 if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
                     tracing::warn!(
                         ?e,
@@ -794,14 +1177,31 @@ pub(super) fn destroy(
                     );
                 }
             }
+            let sparse_teardown = if buffer.is_sparse {
+                Some(types::SparseBufferTeardown {
+                    allocation_size: buffer.allocation_size,
+                    block_size: buffer.sparse_block_size,
+                    binds: sparse::collect_sparse_binds_for_teardown(
+                        buffer.sparse_block_size,
+                        &buffer.sparse_pages,
+                    ),
+                })
+            } else {
+                None
+            };
             device.deletion_queue.queue(
                 barrier,
                 types::PendingDeletion::Buffer {
                     buffer_handle,
                     buffer: buffer.buffer,
-                    memory: buffer.memory,
+                    memory: if buffer.is_sparse {
+                        vk::DeviceMemory::null()
+                    } else {
+                        buffer.memory
+                    },
                     staging_buffer: buffer.staging_buffer,
                     staging_memory: buffer.staging_memory,
+                    sparse_teardown,
                 },
             );
         }
@@ -914,6 +1314,9 @@ pub(super) fn create_view(
             flags: parent_flags,
             transient_heap_suballoc: false,
             view_byte_offset: Some(offset),
+            is_sparse: false,
+            sparse_block_size: 0,
+            sparse_pages: Vec::new(),
         },
     );
 

@@ -71,6 +71,18 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let device = device.context("D3D12CreateDevice returned null")?;
     let device = device_with_enhanced_barriers(device)?;
 
+    let mut d3d12_options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+    unsafe {
+        device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS,
+                &mut d3d12_options as *mut _ as *mut _,
+                std::mem::size_of_val(&d3d12_options) as u32,
+            )
+            .context("CheckFeatureSupport(D3D12_OPTIONS)")?;
+    }
+    let supports_reserved_buffers = d3d12_options.TiledResourcesTier.0 >= 1;
+
     // Create command queue
     let queue_desc = D3D12_COMMAND_QUEUE_DESC {
         Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -292,6 +304,12 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             sampler_descriptor_size,
             fence,
             fence_value: 1,
+            supports_reserved_buffers,
+            tile_heap_pool: if supports_reserved_buffers {
+                Some(super::tiles::TileHeapPool::new())
+            } else {
+                None
+            },
             bindless_root_signature,
             compute_dispatch_indirect_signature,
             resource_registry,

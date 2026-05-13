@@ -232,6 +232,9 @@ pub(super) fn place_buffer_in_transient_heap(
             transient_placed: true,
             parent_for_view: None,
             view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
         },
     );
     Ok(handle)

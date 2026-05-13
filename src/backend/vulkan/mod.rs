@@ -14,6 +14,7 @@
 mod buffer;
 mod compute;
 mod device;
+mod sparse;
 mod pipeline;
 mod render_commands;
 mod render_target;
@@ -365,6 +366,27 @@ impl GpuBackend for VulkanBackend {
         flags: crate::types::BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
         let cap = capacity.max(initial_size);
+        let use_sparse = self.state.devices.get(&device_handle).is_some_and(|d| {
+            d.supports_sparse_buffer
+                && cap > initial_size
+                && access == DataAccess::Scattered
+                && !flags.contains(crate::types::BufferFlags::CPU_READABLE)
+        });
+        if use_sparse {
+            let handle = buffer::create_sparse_with_capacity(
+                &self.state.instance,
+                &mut self.state.devices,
+                &mut self.state.buffers,
+                &mut self.state.next_buffer_handle,
+                device_handle,
+                initial_size,
+                cap,
+                element_stride,
+                flags,
+            )?;
+            let cap_out = buffer::capacity(&self.state.buffers, handle);
+            return Ok((handle, cap_out));
+        }
         let handle = buffer::create(
             &mut self.state.devices,
             &mut self.state.buffers,
@@ -393,6 +415,30 @@ impl GpuBackend for VulkanBackend {
             buffer_handle,
             new_logical_size,
         )
+    }
+
+    fn hint_buffer_unused_above(&mut self, buffer_handle: BufferHandle, offset: u64) {
+        buffer::hint_unused_above(
+            &mut self.state.devices,
+            &mut self.state.buffers,
+            buffer_handle,
+            offset,
+        );
+    }
+
+    fn device_capabilities(&self, device_handle: DeviceHandle) -> crate::device::DeviceCapabilities {
+        let mut caps = crate::device::DeviceCapabilities::default();
+        if self
+            .state
+            .devices
+            .get(&device_handle)
+            .is_some_and(|d| d.supports_sparse_buffer)
+        {
+            caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
+            caps.buffer_page_size = 64 * 1024;
+            caps.buffer_decommit_supported = true;
+        }
+        caps
     }
 
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
@@ -986,8 +1032,10 @@ impl GpuBackend for VulkanBackend {
         unsafe { dev.wait_semaphores(&wait, u64::MAX) }.context("wait_semaphores failed")?;
         compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            ld.deletion_queue
-                .process_up_to(&ld.device, &mut ld.resource_registry, value);
+            let drained = ld.deletion_queue.drain_up_to(value);
+            for r in drained {
+                types::destroy_pending_deletion(ld, r);
+            }
         }
         Ok(())
     }
@@ -1013,8 +1061,10 @@ impl GpuBackend for VulkanBackend {
             Ok(()) => {
                 compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
                 if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-                    ld.deletion_queue
-                        .process_up_to(&ld.device, &mut ld.resource_registry, value);
+                    let drained = ld.deletion_queue.drain_up_to(value);
+                    for r in drained {
+                        types::destroy_pending_deletion(ld, r);
+                    }
                 }
                 Ok(true)
             }
