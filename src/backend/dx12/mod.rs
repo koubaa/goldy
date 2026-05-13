@@ -30,9 +30,9 @@
 
 mod barriers;
 mod buffer;
-mod tiles;
 mod compute;
 mod diagnostic;
+mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod pipeline;
@@ -80,9 +80,8 @@ fn env_allow_warp() -> bool {
 /// tile heaps + [`UpdateTileMappings`]. In that mode, [`Dx12Backend::device_capabilities`] reports
 /// `buffer_resize_cost` as [`crate::types::BufferResizeCost::Copy`] (not `PageBind`).
 pub(crate) fn env_disable_reserved_buffers() -> bool {
-    std::env::var("GOLDY_DX12_DISABLE_RESERVED_BUFFERS").is_ok_and(|v| {
-        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-    })
+    std::env::var("GOLDY_DX12_DISABLE_RESERVED_BUFFERS")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
 }
 
 static DEBUG_LAYER_INIT: Once = Once::new();
@@ -553,13 +552,7 @@ impl GpuBackend for Dx12Backend {
         new_size: u64,
         preserve_contents: bool,
     ) -> Result<()> {
-        buffer::resize(
-            &mut self.state,
-            device,
-            buffer,
-            new_size,
-            preserve_contents,
-        )
+        buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
     }
 
     fn read_buffer_to_cpu(
@@ -572,8 +565,10 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
-        let mut caps = crate::device::DeviceCapabilities::default();
-        caps.has_zero_copy_storage_readback = false;
+        let mut caps = crate::device::DeviceCapabilities {
+            has_zero_copy_storage_readback: false,
+            ..Default::default()
+        };
         if self
             .state
             .devices

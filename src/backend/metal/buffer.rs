@@ -1,7 +1,9 @@
 //! Buffer management logic.
 
 use super::super::{BufferHandle, DeviceHandle};
-use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE, MAX_HEAP_SIZE};
+use super::types::{
+    BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE, MAX_HEAP_SIZE,
+};
 use crate::backend::DataAccess;
 use crate::types::BufferFlags;
 use ::metal as mtl;
@@ -137,8 +139,7 @@ pub(super) fn create(
     let options =
         MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
 
-    let (buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(logical_device, size, options)?;
+    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(logical_device, size, options)?;
 
     insert_buffer_common(
         state,
@@ -417,9 +418,7 @@ pub(super) fn resize(
 
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let encoding_index = match old_state.access {
-        DataAccess::Broadcast => {
-            ResourceRegistry::uniform_global_index(old_state.arg_buffer_index)
-        }
+        DataAccess::Broadcast => ResourceRegistry::uniform_global_index(old_state.arg_buffer_index),
         DataAccess::Scattered => old_state.arg_buffer_index,
     };
     let off = (encoding_index as u64) * encoded_length;
@@ -432,7 +431,8 @@ pub(super) fn resize(
             .set_buffer(0, &new_buffer, 0);
     }
 
-    if old_state.flags.contains(BufferFlags::CPU_READABLE) && old_state.access == DataAccess::Scattered
+    if old_state.flags.contains(BufferFlags::CPU_READABLE)
+        && old_state.access == DataAccess::Scattered
     {
         let ptr = new_buffer.contents() as *mut u8;
         if ptr.is_null() {
@@ -467,9 +467,7 @@ pub(super) fn resize(
     let view_handles: Vec<BufferHandle> = state
         .buffers
         .iter()
-        .filter(|(h, st)| {
-            **h != buffer_handle && st.parent_for_view == Some(buffer_handle)
-        })
+        .filter(|(h, st)| **h != buffer_handle && st.parent_for_view == Some(buffer_handle))
         .map(|(h, _)| *h)
         .collect();
 

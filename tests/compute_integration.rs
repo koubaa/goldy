@@ -8,8 +8,8 @@ mod common;
 
 use goldy::{
     types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
-    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
-    Instance, ShaderModule, Texture,
+    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
+    ShaderModule, Texture,
 };
 
 /// Simple compute shader that doubles each value in a buffer.
@@ -365,8 +365,7 @@ fn vk_api_validation_two_device_teardown() {
 #[test]
 fn resize_preserves_contents() {
     let device = make_device();
-    let mut buf =
-        Buffer::with_data(&device, &[1u32, 2, 3, 4], DataAccess::Scattered).expect("buf");
+    let mut buf = Buffer::with_data(&device, &[1u32, 2, 3, 4], DataAccess::Scattered).expect("buf");
     buf.resize_to(32).expect("resize");
     let mut out = vec![0u8; 32];
     buf.read_to_cpu(&device, &mut out).expect("read");
@@ -578,13 +577,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         return;
     }
 
-    let mut buf = Buffer::new_with_capacity_hint(
-        &device,
-        256,
-        4 * 64 * 1024,
-        DataAccess::Scattered,
-    )
-    .expect("buf");
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 256, 4 * 64 * 1024, DataAccess::Scattered)
+            .expect("buf");
     let bindless = buf.bindless_index().expect("bindless");
 
     let initial: Vec<u32> = (1..=16).collect();
@@ -2303,10 +2298,9 @@ fn stride_validation_disabled_allows_mismatch() {
         .expect("dispatch must succeed when validation is off");
 }
 
-/// Multi-binding mismatch: shader expects broadcast struct (reflected stride)
-/// + `Scattered<float4>` (stride 16). Bind the broadcast slot correctly but
-/// give the second slot a buffer with stride 4. Only slot 1 should be
-/// reported.
+/// Multi-binding mismatch: the shader expects a broadcast struct (reflected stride) plus
+/// `Scattered<float4>` (stride 16). Bind the broadcast slot correctly but give the second slot
+/// a buffer with stride 4; only slot 1 should be reported.
 #[test]
 fn stride_validation_multi_binding_detects_second_slot_mismatch() {
     let _lock = STRIDE_ENV_LOCK.lock().unwrap();

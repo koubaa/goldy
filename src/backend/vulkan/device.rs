@@ -72,8 +72,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             .instance
             .get_physical_device_features(physical_device_handle)
     };
-    let supports_sparse = pdev_features.sparse_binding != 0
-        && pdev_features.sparse_residency_buffer != 0;
+    let supports_sparse =
+        pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0;
 
     let sparse_queue_family_index = if supports_sparse {
         queue_families
@@ -194,7 +194,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         vk::Queue::default()
     };
 
-    let (sparse_buffer_block_size, sparse_memory_type_index, sparse_page_pool) = if supports_sparse {
+    let (sparse_buffer_block_size, sparse_memory_type_index, sparse_page_pool) = if supports_sparse
+    {
         let bs = super::sparse::query_sparse_buffer_block_size(&device)
             .context("query_sparse_buffer_block_size")?;
         let (mt_idx, _) = super::sparse::sparse_storage_memory_type(
@@ -204,7 +205,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         )
         .context("sparse_storage_memory_type")?;
         (
-            u64::from(bs),
+            bs,
             mt_idx,
             Some(super::sparse::SparsePagePool::new(bs, mt_idx)),
         )

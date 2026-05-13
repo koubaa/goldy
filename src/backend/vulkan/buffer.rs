@@ -9,6 +9,7 @@ use crate::types::BufferFlags;
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(
@@ -265,14 +266,17 @@ pub(super) fn create(
 }
 
 fn align_sparse_capacity(cap: u64, block: u64) -> u64 {
-    if block == 0 {
-        cap
-    } else {
-        ((cap + block - 1) / block) * block
+    match NonZeroU64::new(block) {
+        None => cap,
+        Some(block) => {
+            let block = block.get();
+            cap.div_ceil(block).saturating_mul(block)
+        }
     }
 }
 
 /// Sparse **device-local** storage buffer: virtual size `capacity`, initially backed pages for `logical_size`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_sparse_with_capacity(
     _instance: &ash::Instance,
     devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
@@ -310,9 +314,7 @@ pub(super) fn create_sparse_with_capacity(
     let buffer_info = vk::BufferCreateInfo::default()
         .size(allocation_size)
         .usage(vk_usage)
-        .flags(
-            vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY,
-        )
+        .flags(vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
     let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }
@@ -325,10 +327,10 @@ pub(super) fn create_sparse_with_capacity(
     let bind_queue = ld.sparse_binding_queue;
     let dev = &ld.device;
 
-    for i in 0..initial_pages {
+    for (i, sparse_page) in sparse_pages.iter_mut().enumerate().take(initial_pages) {
         let (mem, mem_off) = pool.alloc_page(dev)?;
         let resource_offset = (i as u64).saturating_mul(block);
-        sparse_pages[i] = Some((mem, mem_off));
+        *sparse_page = Some((mem, mem_off));
         binds.push(
             vk::SparseMemoryBind::default()
                 .resource_offset(resource_offset)
@@ -360,7 +362,8 @@ pub(super) fn create_sparse_with_capacity(
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&buffer_info));
             unsafe {
-                ld.device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                ld.device
+                    .update_descriptor_sets(std::slice::from_ref(&write), &[]);
             }
         }
         Some(index)
@@ -513,12 +516,7 @@ pub(super) fn set_logical_size(
         if new_logical_size == 0 {
             anyhow::bail!("buffer size must be non-zero");
         }
-        (
-            buf.bindless_index,
-            buf.is_storage,
-            buf.buffer,
-            buf.size,
-        )
+        (buf.bindless_index, buf.is_storage, buf.buffer, buf.size)
     };
 
     buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
@@ -532,7 +530,8 @@ pub(super) fn set_logical_size(
         .context("Invalid device handle")?
         .bindless_descriptor_set;
 
-    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index) {
+    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index)
+    {
         let buffer_info = vk::DescriptorBufferInfo::default()
             .buffer(vkbuf)
             .offset(0)
@@ -621,9 +620,9 @@ fn set_logical_size_sparse(
         let dev: &ash::Device = &ld.device;
 
         let sparse_pages = &mut buffers
-        .get_mut(&buffer_handle)
-        .context("buffer disappeared")?
-        .sparse_pages;
+            .get_mut(&buffer_handle)
+            .context("buffer disappeared")?
+            .sparse_pages;
 
         if new_pages > old_pages {
             let mut binds = Vec::with_capacity(new_pages - old_pages);
@@ -677,7 +676,8 @@ fn set_logical_size_sparse(
         .context("Invalid device handle")?
         .bindless_descriptor_set;
 
-    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index) {
+    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index)
+    {
         let buffer_info = vk::DescriptorBufferInfo::default()
             .buffer(vkbuf)
             .offset(0)
@@ -988,7 +988,11 @@ pub(super) fn resize(
     } else {
         0
     };
-    let zero_from = if preserve_contents { copy_len } else { new_size };
+    let zero_from = if preserve_contents {
+        copy_len
+    } else {
+        new_size
+    };
 
     let logical_ref = devices
         .get(&device_handle)

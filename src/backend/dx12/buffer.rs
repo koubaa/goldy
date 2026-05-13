@@ -116,8 +116,7 @@ fn alloc_committed_buffer_pair(
         let rb = rb.context("resize: readback null")?;
         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
         let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { rb.Map(0, Some(&no_read), Some(&mut mapped)) }
-            .context("resize: map readback")?;
+        unsafe { rb.Map(0, Some(&no_read), Some(&mut mapped)) }.context("resize: map readback")?;
         let p = mapped as *mut u8;
         if p.is_null() {
             anyhow::bail!("resize: Map readback returned null");
@@ -244,7 +243,8 @@ fn patch_buffer_views_after_parent_resize(
             (
                 v.device_handle,
                 v.element_stride.unwrap_or(4),
-                v.view_byte_offset.context("patch_buffer_views: view offset")?,
+                v.view_byte_offset
+                    .context("patch_buffer_views: view offset")?,
                 v.size,
                 v.bindless_offset,
                 v.bindless_srv_offset,
@@ -372,10 +372,8 @@ pub(super) fn resize(
     }
 
     let stride = old.element_stride.unwrap_or(4);
-    if old.is_storage && stride > 0 && new_size > 0 && (new_size as u32) % stride != 0 {
-        anyhow::bail!(
-            "resize_buffer: new size {new_size} not divisible by stride {stride}"
-        );
+    if old.is_storage && stride > 0 && new_size > 0 && !(new_size as u32).is_multiple_of(stride) {
+        anyhow::bail!("resize_buffer: new size {new_size} not divisible by stride {stride}");
     }
 
     let logical_device_ro = state
@@ -392,12 +390,8 @@ pub(super) fn resize(
         }
     }
 
-    let (new_resource, new_readback, new_readback_mapped) = alloc_committed_buffer_pair(
-        logical_device_ro,
-        new_size,
-        old.is_storage,
-        cpu_readable,
-    )?;
+    let (new_resource, new_readback, new_readback_mapped) =
+        alloc_committed_buffer_pair(logical_device_ro, new_size, old.is_storage, cpu_readable)?;
 
     let old_resource = old.resource.clone();
     let copy_len = if preserve_contents {
@@ -536,11 +530,7 @@ pub(super) fn resize(
         unsafe { new_resource.Map(0, Some(&dst_range), Some(&mut dst)) }
             .context("resize_buffer: map new uniform")?;
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                src as *const u8,
-                dst as *mut u8,
-                copy_len as usize,
-            );
+            std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, copy_len as usize);
             if new_size > old.size {
                 std::ptr::write_bytes(
                     (dst as *mut u8).add(old.size as usize),
@@ -873,7 +863,7 @@ pub(super) fn create(
             // CBV size must be 256-byte aligned
             let aligned_size = (logical_size + 255) & !255;
 
-            if aligned_size as u64 > allocation_size {
+            if aligned_size > allocation_size {
                 anyhow::bail!(
                     "uniform buffer CBV size {aligned_size} exceeds allocation {allocation_size}"
                 );
@@ -992,10 +982,10 @@ pub(super) fn create_reserved_with_capacity(
 
         let mut slots: Vec<Option<(ID3D12Heap, u64)>> = vec![None; num_tiles];
         let mut mappings = Vec::with_capacity(initial_tiles);
-        for i in 0..initial_tiles {
+        for (i, slot) in slots.iter_mut().enumerate().take(initial_tiles) {
             let (heap, off) = pool.alloc_tile(&ld.device)?;
             mappings.push((i as u32, heap.clone(), off));
-            slots[i] = Some((heap, off));
+            *slot = Some((heap, off));
         }
 
         tiles::map_tiles_batched(&queue, &resource, &mappings)?;
@@ -1037,7 +1027,8 @@ pub(super) fn create_reserved_with_capacity(
             cpu_handle
         };
         unsafe {
-            ld.device.CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
+            ld.device
+                .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
         }
 
         let srv_offset = ld.resource_registry.register_buffer_srv(handle);
@@ -1060,7 +1051,8 @@ pub(super) fn create_reserved_with_capacity(
             cpu_handle
         };
         unsafe {
-            ld.device.CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
+            ld.device
+                .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
         }
         (Some(uav_offset), Some(srv_offset))
     };
@@ -1112,8 +1104,14 @@ pub(super) fn create_with_capacity(
                 && !flags.contains(BufferFlags::CPU_READABLE)
         });
     if use_reserved {
-        let h =
-            create_reserved_with_capacity(state, device_handle, initial_size, cap, element_stride, flags)?;
+        let h = create_reserved_with_capacity(
+            state,
+            device_handle,
+            initial_size,
+            cap,
+            element_stride,
+            flags,
+        )?;
         return Ok((h, capacity(state, h)));
     }
     let h = create(
@@ -1163,14 +1161,14 @@ pub(super) fn set_logical_size(
         anyhow::bail!("buffer size must be non-zero");
     }
     let stride = old.element_stride.unwrap_or(4);
-    if old.is_storage && stride > 0 && (new_logical_size as u32) % stride != 0 {
+    if old.is_storage && stride > 0 && !(new_logical_size as u32).is_multiple_of(stride) {
         anyhow::bail!(
             "set_logical_size: new size {new_logical_size} not divisible by stride {stride}"
         );
     }
     if !old.is_storage {
         let aligned = (new_logical_size + 255) & !255;
-        if aligned as u64 > old.allocation_size {
+        if aligned > old.allocation_size {
             anyhow::bail!("CBV aligned size exceeds allocation");
         }
     }
@@ -1204,7 +1202,10 @@ pub(super) fn set_logical_size(
                 let n = old_pages - new_pages;
                 tiles::unmap_tile_run(&queue, &buf.resource, new_pages, n)?;
                 for i in new_pages..old_pages {
-                    if let Some((heap, off)) = buf.reserved_tiles.get_mut(i as usize).and_then(|s| s.take())
+                    if let Some((heap, off)) = buf
+                        .reserved_tiles
+                        .get_mut(i as usize)
+                        .and_then(|s| s.take())
                     {
                         pool.free_tile(&heap, off);
                     }

@@ -66,7 +66,10 @@ impl SparsePagePool {
         Ok((memory, 0))
     }
 
-    pub fn alloc_page(&mut self, device: &ash::Device) -> Result<(vk::DeviceMemory, vk::DeviceSize)> {
+    pub fn alloc_page(
+        &mut self,
+        device: &ash::Device,
+    ) -> Result<(vk::DeviceMemory, vk::DeviceSize)> {
         for ch in &mut self.chunks {
             if let Some(idx) = ch.free_indices.pop() {
                 let offset = vk::DeviceSize::from(idx) * ch.page_size;
@@ -79,7 +82,7 @@ impl SparsePagePool {
     pub fn free_page(&mut self, memory: vk::DeviceMemory, offset: vk::DeviceSize) {
         for ch in &mut self.chunks {
             if ch.memory == memory {
-                debug_assert!(ch.page_size > 0 && offset % ch.page_size == 0);
+                debug_assert!(ch.page_size > 0 && offset.is_multiple_of(ch.page_size));
                 let idx = u32::try_from(offset / ch.page_size).unwrap_or(0);
                 debug_assert!(idx < ch.num_pages);
                 ch.free_indices.push(idx);
@@ -145,14 +148,14 @@ pub(crate) fn num_sparse_pages(allocation_size: u64, block_size: u64) -> u32 {
     if allocation_size == 0 || block_size == 0 {
         return 0;
     }
-    u32::try_from((allocation_size + block_size - 1) / block_size).unwrap_or(u32::MAX)
+    u32::try_from(allocation_size.div_ceil(block_size)).unwrap_or(u32::MAX)
 }
 
 pub(crate) fn pages_needed_for_bytes(size: u64, block_size: u64) -> u32 {
     if size == 0 {
         return 0;
     }
-    u32::try_from((size + block_size - 1) / block_size).unwrap_or(u32::MAX)
+    u32::try_from(size.div_ceil(block_size)).unwrap_or(u32::MAX)
 }
 
 /// Blocking sparse bind (correctness-first).
@@ -172,7 +175,11 @@ pub(crate) fn queue_bind_sparse_sync(
     let bind_info = vk::BindSparseInfo::default().buffer_binds(std::slice::from_ref(&buffer_bind));
 
     let fence_info = vk::FenceCreateInfo::default();
-    let fence = unsafe { device.create_fence(&fence_info, None).context("sparse fence")? };
+    let fence = unsafe {
+        device
+            .create_fence(&fence_info, None)
+            .context("sparse fence")?
+    };
 
     unsafe {
         device

@@ -783,9 +783,12 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
                                 .flags(vk::SparseMemoryBindFlags::empty()),
                         );
                     }
-                    if let Err(e) =
-                        super::sparse::queue_bind_sparse_sync(device, bind_queue, buffer, &sparse_binds)
-                    {
+                    if let Err(e) = super::sparse::queue_bind_sparse_sync(
+                        device,
+                        bind_queue,
+                        buffer,
+                        &sparse_binds,
+                    ) {
                         tracing::warn!(?e, "sparse unbind on replaced buffer failed");
                     }
                     for (_res_off, mem, mem_off) in &binds {

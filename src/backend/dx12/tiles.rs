@@ -92,7 +92,7 @@ impl TileHeapPool {
         let hp = heap_ptr(heap);
         for ch in &mut self.chunks {
             if heap_ptr(&ch.heap) == hp {
-                debug_assert!(offset % ch.tile_stride == 0);
+                debug_assert!(offset.is_multiple_of(ch.tile_stride));
                 let idx = u32::try_from(offset / ch.tile_stride).unwrap_or(0);
                 debug_assert!(idx < ch.num_tiles);
                 ch.free.push(idx);
@@ -136,10 +136,7 @@ pub(crate) fn map_tiles_batched(
     let mut groups: Vec<(ID3D12Heap, Vec<(u32, u64)>)> = Vec::new();
     for (tile, heap, off) in mappings {
         let p = heap_ptr(heap);
-        if let Some((_, vec)) = groups
-            .iter_mut()
-            .find(|(gheap, _)| heap_ptr(gheap) == p)
-        {
+        if let Some((_, vec)) = groups.iter_mut().find(|(gheap, _)| heap_ptr(gheap) == p) {
             vec.push((*tile, *off));
         } else {
             groups.push((heap.clone(), vec![(*tile, *off)]));
@@ -292,10 +289,8 @@ pub(crate) fn teardown_reserved_mappings(
         let num_tiles = (i - run_start) as u32;
         let _ = unmap_tile_run(queue, resource, run_start as u32, num_tiles);
         if let Some(p) = pool.as_mut() {
-            for j in run_start..i {
-                if let Some((heap, off)) = &tiles[j] {
-                    p.free_tile(heap, *off);
-                }
+            for (heap, off) in tiles[run_start..i].iter().flatten() {
+                p.free_tile(heap, *off);
             }
         }
     }

@@ -14,12 +14,12 @@
 mod buffer;
 mod compute;
 mod device;
-mod sparse;
 mod pipeline;
 mod render_commands;
 mod render_target;
 mod sampler;
 mod shader;
+mod sparse;
 mod staging;
 mod surface;
 mod texture;
@@ -426,7 +426,10 @@ impl GpuBackend for VulkanBackend {
         );
     }
 
-    fn device_capabilities(&self, device_handle: DeviceHandle) -> crate::device::DeviceCapabilities {
+    fn device_capabilities(
+        &self,
+        device_handle: DeviceHandle,
+    ) -> crate::device::DeviceCapabilities {
         let mut caps = crate::device::DeviceCapabilities::default();
         if self
             .state

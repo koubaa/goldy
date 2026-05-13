@@ -335,7 +335,7 @@ impl Buffer {
     }
 
     /// Resize the buffer in place, preserving contents in `[0..min(old, new))` and zero-initialising
-    /// any newly exposed bytes. The [`Self::bindless_handle`] and [`Self::handle`] are stable.
+    /// any newly exposed bytes. The [`Self::bindless_handle`] and internal resource handle stay stable.
     pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
         if new_size == self.size {
             return Ok(());
@@ -344,11 +344,7 @@ impl Buffer {
         if new_size <= self.allocated_size {
             let old_logical = self.size;
             let mut backend = self.backend.lock().unwrap();
-            backend.set_buffer_logical_size(
-                self.device.inner.handle,
-                self.handle,
-                new_size,
-            )?;
+            backend.set_buffer_logical_size(self.device.inner.handle, self.handle, new_size)?;
             drop(backend);
             if new_size > old_logical {
                 self.clear(
@@ -361,12 +357,7 @@ impl Buffer {
             return Ok(());
         }
         let mut backend = self.backend.lock().unwrap();
-        backend.resize_buffer(
-            self.device.inner.handle,
-            self.handle,
-            new_size,
-            true,
-        )?;
+        backend.resize_buffer(self.device.inner.handle, self.handle, new_size, true)?;
         self.allocated_size = backend.buffer_capacity(self.handle);
         self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
         self.size = new_size;
@@ -382,21 +373,12 @@ impl Buffer {
         self.resize_count = self.resize_count.saturating_add(1);
         if new_size <= self.allocated_size {
             let mut backend = self.backend.lock().unwrap();
-            backend.set_buffer_logical_size(
-                self.device.inner.handle,
-                self.handle,
-                new_size,
-            )?;
+            backend.set_buffer_logical_size(self.device.inner.handle, self.handle, new_size)?;
             self.size = new_size;
             return Ok(());
         }
         let mut backend = self.backend.lock().unwrap();
-        backend.resize_buffer(
-            self.device.inner.handle,
-            self.handle,
-            new_size,
-            false,
-        )?;
+        backend.resize_buffer(self.device.inner.handle, self.handle, new_size, false)?;
         self.allocated_size = backend.buffer_capacity(self.handle);
         self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
         self.size = new_size;
@@ -946,5 +928,4 @@ mod tests {
             "padded_size should be tighter than naive + magic constant"
         );
     }
-
 }
