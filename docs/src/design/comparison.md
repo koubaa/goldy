@@ -1,151 +1,109 @@
 # Goldy vs wgpu
 
-Both Goldy and wgpu are Rust GPU libraries, but they serve different purposes and make different tradeoffs.
+Both Goldy and [wgpu](https://wgpu.rs/) are Rust GPU libraries with multi-backend support. They make different tradeoffs that suit different use cases.
 
-## Quick Comparison
+## At a Glance
 
-| Aspect | wgpu | Goldy |
-|--------|------|-----|
-| **Primary Goal** | WebGPU implementation | Modern GPU simplicity |
-| **Governance** | W3C WebGPU spec | Independent |
-| **Browser Support** | Yes (via WebGPU) | No |
-| **Minimum Hardware** | Wide compatibility | Modern only (2018+) |
-| **API Complexity** | Medium | Low |
-| **Iteration Speed** | Spec-bound | Fast |
+| | wgpu | Goldy |
+|---|------|-------|
+| **Identity** | WebGPU implementation for Rust | Modern Rust GPU library |
+| **Spec governance** | W3C WebGPU specification | Independent, opinionated |
+| **Browser support** | Yes (WebGPU) | No |
+| **Minimum hardware** | Wide compatibility (Vulkan 1.0+) | Modern only (Vulkan 1.4+, DX12, Metal 2+) |
+| **Shader language** | WGSL (primary), SPIR-V, GLSL, naga | Slang (compiles to SPIR-V, DXIL, MSL) |
+| **Resource model** | Descriptor-based (bind groups) | Typed bindless |
+| **Synchronization** | Manual pass ordering | Task graph |
+| **Metal support** | Via MoltenVK or wgpu-hal | Native Metal backend |
+| **Compute model** | Supported but secondary | First-class (compute-to-surface) |
 
-## When to Use wgpu
+## Resource Binding: Descriptors vs Bindless
 
-Choose wgpu when you need:
+wgpu uses **bind groups** — the WebGPU equivalent of Vulkan descriptor sets. You declare a bind group layout, create bind groups that match it, and bind them before each draw or dispatch:
 
-- **Web deployment** - wgpu compiles to WebGPU for browsers
-- **Maximum compatibility** - Supports older GPUs and drivers
-- **Ecosystem** - Large community, many examples, good tooling
-- **Stability** - Spec-driven API won't change unexpectedly
-- **Production-ready** - Battle-tested in real applications
-
-## When to Use Goldy
-
-Choose Goldy when you need:
-
-- **Simplicity** - Minimal API surface, fewer concepts
-- **Modern features** - Assume bindless, dynamic rendering, etc.
-- **Fast iteration** - API can evolve without committee approval
-- **Native performance** - No abstraction layers for translation
-
-## Architecture Differences
-
-### wgpu
-
-```
-Application
-    │
-    ▼
-┌─────────────────┐
-│     wgpu        │  ◄── WebGPU API
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌───────┐ ┌───────┐
-│wgpu-  │ │wgpu-  │
-│hal    │ │core   │
-└───┬───┘ └───────┘
-    │
-    ▼
-Vulkan/Metal/DX12/WebGPU
-```
-
-wgpu implements the WebGPU specification, which is designed as a lowest-common-denominator across all platforms including the web.
-
-### Goldy
-
-```
-Application
-    │
-    ▼
-┌─────────────────┐
-│     Goldy       │  ◄── Native Rust API
-└────────┬────────┘
-         │
-    ┌────┼────┐
-    ▼    ▼    ▼
-  Vk  Metal  DX12
- 1.4+   2+
-```
-
-Goldy talks directly to modern backend APIs without a translation layer. Each backend uses native idioms.
-
-## Code Comparison
-
-### Creating a Buffer
-
-**wgpu:**
 ```rust
-let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-    label: Some("Vertex Buffer"),
-    size: data.len() as u64,
-    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,  // wgpu uses bitflags
-    mapped_at_creation: false,
+// wgpu: declare layout, create group, bind before draw
+let layout = device.create_bind_group_layout(&desc);
+let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    layout: &layout,
+    entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+    ..
 });
-queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&data));
+pass.set_bind_group(0, &group, &[]);
 ```
 
-**Goldy:**
+Goldy uses **bindless access**. Resources get a slot index at creation time, and shaders access them directly by index. There are no layouts, groups, or binding calls:
+
 ```rust
+// Goldy: buffer already has a bindless slot, shader reads it by index
 let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered)?;
+pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
 ```
 
-### Render Pass
+The bindless approach eliminates an entire layer of API surface and the pipeline layout permutations that come with it.
+
+## Synchronization: Manual vs Task Graph
+
+wgpu provides implicit synchronization within a render/compute pass but requires you to order passes correctly. Resource transitions between passes are handled by wgpu internally, following WebGPU's implicit rules.
+
+Goldy uses an explicit **task graph**. You declare tasks and their resource dependencies; Goldy derives barriers, layout transitions, and execution order. This gives the runtime a global view of the frame for optimal scheduling and makes synchronization bugs structurally impossible.
+
+## Shader Language: WGSL vs Slang
+
+wgpu's primary shader language is **WGSL**, the WebGPU Shading Language. WGSL is designed for safety and portability across web and native targets, but it lacks features like modules, generics, and automatic differentiation.
+
+Goldy uses **Slang** exclusively. Slang compiles a single source file to SPIR-V (Vulkan), DXIL (DX12), and MSL (Metal). It provides modules with true separate compilation, generics, and HLSL-familiar syntax. The `goldy_exp` shader library builds on Slang's module system to provide shared types and utilities:
+
+```hlsl
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<Particle> particles, ThreadId id) {
+    particles[id.x].position += particles[id.x].velocity;
+}
+```
+
+## Compute as First-Class Citizen
+
+wgpu supports compute shaders, but the API is oriented around render passes. Compute-to-render workflows require manual buffer management and pass ordering.
+
+Goldy treats compute and graphics as peers. Compute-to-surface is a built-in pattern: a compute dispatch writes to a buffer or texture, and a subsequent render pass reads from it, with the task graph handling the dependency automatically.
+
+## Metal: Native vs MoltenVK
+
+wgpu supports Metal through its `wgpu-hal` Metal backend or via MoltenVK (Vulkan-on-Metal translation). MoltenVK adds a translation layer that can introduce overhead and compatibility limitations.
+
+Goldy has a **native Metal backend** that uses Metal APIs directly — Argument Buffers Tier 2 for bindless, MSL compiled from Slang, and native Metal types throughout. No translation layer sits between Goldy and the Metal driver.
+
+## Architecture
 
 **wgpu:**
-```rust
-let mut encoder = device.create_command_encoder(&Default::default());
-{
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Render Pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &view,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        ..Default::default()
-    });
-    pass.set_pipeline(&pipeline);
-    pass.set_vertex_buffer(0, buffer.slice(..));
-    pass.draw(0..3, 0..1);
-}
-queue.submit(std::iter::once(encoder.finish()));
+```
+Application → wgpu (WebGPU API) → wgpu-hal → Vulkan / Metal / DX12 / WebGPU
 ```
 
 **Goldy:**
-```rust
-let mut encoder = CommandEncoder::new();
-{
-    let mut pass = encoder.begin_render_pass();
-    pass.clear(Color::BLACK);
-    pass.set_pipeline(&pipeline);
-    pass.set_vertex_buffer(0, &buffer);
-    pass.draw(0..3, 0..1);
-}
-let output = frame.render(encoder)?;
+```
+Application → Goldy (native API) → Vulkan 1.4+ / Metal 2+ / DX12
 ```
 
-## Summary
+wgpu implements the WebGPU specification faithfully, then maps it onto each backend through an internal HAL. Goldy talks to each backend directly using native idioms.
 
-```
-                    Legacy Support    Speed    Simplicity
-                    ──────────────    ─────    ──────────
-wgpu                ████████          ██████   ██████
-Goldy               ██                ████████ ████████
-```
+## When to Choose Which
 
-**Use wgpu** for production applications that need wide compatibility.
+**Choose wgpu when:**
 
-**Use Goldy** for new projects targeting modern hardware where simplicity matters.
+- You need browser deployment via WebGPU
+- You need to support older GPUs or wide device compatibility
+- You want the stability of a specification-driven API
+- You need the wgpu ecosystem (examples, community, tooling)
 
-Both are valid choices—pick the one that fits your constraints.
+**Choose Goldy when:**
 
+- You target only modern desktop/mobile hardware (2018+)
+- You want a minimal API surface with bindless as the default
+- You want native Metal without a translation layer
+- You want Slang's module system and shader language features
+- Compute workloads are central to your application
+
+Both libraries are valid choices — the right one depends on your hardware requirements, deployment targets, and whether you value broad compatibility or API simplicity.

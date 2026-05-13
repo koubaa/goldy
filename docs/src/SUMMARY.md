@@ -2,35 +2,58 @@
 
 [Introduction](./introduction.md)
 
-# Getting Started
+# Tutorial
 
-- [Installation](./getting-started/installation.md)
-- [Your First Triangle](./getting-started/first-triangle.md)
-- [Understanding the API](./getting-started/understanding-api.md)
+- [Installation](./tutorial/installation.md)
+- [Your First Triangle](./tutorial/first-triangle.md)
+- [Your First Compute Shader](./tutorial/first-compute.md)
 
-# Core Concepts
+# Programming Model
 
-- [Devices and Instances](./concepts/devices.md)
-- [Buffers](./concepts/buffers.md)
-- [Textures and Samplers](./concepts/textures.md)
-- [Shaders](./concepts/shaders.md)
-- [Shader Libraries](./concepts/shader-libraries.md)
-- [Pipelines](./concepts/pipelines.md)
-- [Command Encoding](./concepts/commands.md)
-- [Compute](./concepts/compute.md)
-- [Compute Graph](./concepts/compute-graph.md)
-- [Frame Output](./concepts/frames.md)
-- [Device timeline](./concepts/gpu-future.md)
+- [Bindless by Default](./programming-model/bindless.md)
+- [Virtual Entry Points](./programming-model/virtual-entry-points.md)
+- [Slang in One Source](./programming-model/slang.md)
+
+# Compute Workflows
+
+- [ComputeEncoder](./compute/encoder.md)
+- [Task Graph](./compute/task-graph.md)
+- [Device Timeline](./compute/timeline.md)
+- [Compute to Surface](./compute/compute-to-surface.md)
+
+# Graphics Workflows
+
+- [Pipelines](./graphics/pipelines.md)
+- [Command Encoding](./graphics/commands.md)
+- [Vertex Types and Layouts](./graphics/vertices.md)
+
+# Surfaces and Render Targets
+
+- [Rendering Outputs](./surfaces/overview.md)
+
+# Resources at Scale
+
+- [Buffers](./resources/buffers.md)
+- [Textures and Samplers](./resources/textures.md)
+- [Pooling and Sub-Allocation](./resources/pooling.md)
+
+# Backends
+
+- [Backend Architecture](./backends/overview.md)
+- [Conditional Compilation](./backends/conditional-compilation.md)
+
+# Debugging and Observability
+
+- [Debugging and Observability](./debugging/overview.md)
+
+# Bindings
+
+- [Python](./bindings/python.md)
+- [.NET](./bindings/dotnet.md)
 
 # Examples
 
-- [Overview](./examples/overview.md)
-- [Triangle](./examples/triangle.md)
-- [Digital Clock](./examples/digital-clock.md)
-- [Plasma Effect](./examples/plasma.md)
-- [Mandelbrot Explorer](./examples/mandelbrot.md)
-- [Particle Systems](./examples/particles.md)
-- [3D Graphics](./examples/3d-graphics.md)
+- [Examples Gallery](./examples/gallery.md)
 
 # Design & Philosophy
 
@@ -39,32 +62,11 @@
 - [Goldy vs wgpu](./design/comparison.md)
 - [Target Hardware](./design/hardware.md)
 
-# Architecture
+# Appendix
 
-- [Backend Independence](./architecture/backends.md)
-- [Conditional Compilation](./architecture/conditional-compilation.md)
-
-# Python Bindings
-
-- [Installation](./python/installation.md)
-- [Quick Start](./python/quickstart.md)
-- [NumPy Integration](./python/numpy.md)
-- [Compute Shaders](./python/compute.md)
-- [API Reference](./python/api.md)
-
-# .NET Bindings
-
-- [Installation](./dotnet/installation.md)
-- [Quick Start](./dotnet/quickstart.md)
-- [Compute Shaders](./dotnet/compute.md)
-- [API Reference](./dotnet/api.md)
-
-# Reference
-
-- [API Reference](./reference/api.md)
-- [Shader Language (Slang)](./reference/shaders.md)
+- [Slang Quick Reference](./appendix/slang-reference.md)
+- [Environment Variables](./appendix/environment-variables.md)
 
 ---
 
 [License](./license.md)
-
