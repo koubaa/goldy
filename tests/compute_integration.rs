@@ -531,6 +531,7 @@ fn device_capabilities_vulkan_reports_pagebind_when_sparse() {
 #[test]
 fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
     use goldy::{types::BufferResizeCost, BackendType, Instance};
+    // With multiple backends enabled, `GOLDY_BACKEND` may select a non-DX12 API; skip in that case.
     let inst = Instance::new().expect("i");
     let device = inst
         .create_device(goldy::DeviceType::DiscreteGpu)
@@ -571,6 +572,94 @@ fn sparse_backend_oversize_resize_and_hint_within_capacity() {
     let mut prefix = vec![0u8; 32];
     buf.read_to_cpu(&device, &mut prefix).expect("r2");
     assert_eq!(&prefix[..], &[0x11u8; 32]);
+}
+
+/// DX12 reserved-buffer path: cross tile boundaries, `hint_unused_above`, regrowth, stable bindless, compute.
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+#[test]
+fn dx12_reserved_buffer_resize_compute_smoke() {
+    use goldy::types::BufferResizeCost;
+    const SMOKY_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(16, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
+}
+"#;
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(DeviceType::IntegratedGpu))
+        .expect("dev");
+    if device.backend_type() != BackendType::Dx12 {
+        return;
+    }
+    if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
+        return;
+    }
+
+    let mut buf = Buffer::new_with_capacity_hint(
+        &device,
+        256,
+        4 * 64 * 1024,
+        DataAccess::Scattered,
+    )
+    .expect("buf");
+    let bindless = buf.bindless_index().expect("bindless");
+
+    let initial: Vec<u32> = (1..=16).collect();
+    buf.write(0, bytemuck::cast_slice(&initial)).expect("w");
+
+    buf.resize_to(200 * 1024).expect("grow across tiles");
+    assert_eq!(buf.bindless_index(), Some(bindless));
+
+    let mut read = vec![0u32; 16];
+    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
+        .expect("read");
+    assert_eq!(read, initial);
+
+    let shader = ShaderModule::from_slang(&device, SMOKY_SHADER).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
+        .expect("read2");
+    for (i, &v) in read.iter().enumerate() {
+        assert_eq!(v, (i as u32 + 1) * 2, "after first dispatch[{i}]");
+    }
+
+    // Shrink to one tile, decommit reserved tail with `hint_unused_above`, then grow again.
+    buf.resize_to(64 * 1024).expect("shrink to one tile");
+    assert_eq!(buf.bindless_index(), Some(bindless));
+    buf.hint_unused_above(64 * 1024);
+    buf.resize_to(200 * 1024).expect("grow after decommit hint");
+    assert_eq!(buf.bindless_index(), Some(bindless));
+
+    let initial2: Vec<u32> = (0..16).collect();
+    buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch2");
+
+    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
+        .expect("read3");
+    for (i, &v) in read.iter().enumerate() {
+        assert_eq!(v, (i as u32) * 2, "after second dispatch[{i}]");
+    }
 }
 
 #[test]

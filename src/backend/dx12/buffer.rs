@@ -991,11 +991,13 @@ pub(super) fn create_reserved_with_capacity(
         let resource = resource.context("CreateReservedResource returned null")?;
 
         let mut slots: Vec<Option<(ID3D12Heap, u64)>> = vec![None; num_tiles];
+        let mut mappings = Vec::with_capacity(initial_tiles);
         for i in 0..initial_tiles {
             let (heap, off) = pool.alloc_tile(&ld.device)?;
-            tiles::map_tile_run(&queue, &resource, i as u32, 1, &heap, off)?;
-            slots[i] = Some((heap.clone(), off));
+            mappings.push((i as u32, heap.clone(), off));
+            slots[i] = Some((heap, off));
         }
+        tiles::map_tiles_batched(&queue, &resource, &mappings)?;
         (resource, slots)
     };
 
@@ -1100,13 +1102,14 @@ pub(super) fn create_with_capacity(
     flags: BufferFlags,
 ) -> Result<(BufferHandle, u64)> {
     let cap = requested_capacity.max(initial_size);
-    let use_reserved = state.devices.get(&device_handle).is_some_and(|d| {
-        d.supports_reserved_buffers
-            && d.tile_heap_pool.is_some()
-            && cap > initial_size
-            && access == DataAccess::Scattered
-            && !flags.contains(BufferFlags::CPU_READABLE)
-    });
+    let use_reserved = !super::env_disable_reserved_buffers()
+        && state.devices.get(&device_handle).is_some_and(|d| {
+            d.supports_reserved_buffers
+                && d.tile_heap_pool.is_some()
+                && cap > initial_size
+                && access == DataAccess::Scattered
+                && !flags.contains(BufferFlags::CPU_READABLE)
+        });
     if use_reserved {
         let h =
             create_reserved_with_capacity(state, device_handle, initial_size, cap, element_stride, flags)?;
@@ -1189,16 +1192,19 @@ pub(super) fn set_logical_size(
                 .get_mut(&buffer_handle)
                 .expect("set_logical_size: buffer");
             if new_pages > old_pages {
+                let mut mappings = Vec::with_capacity((new_pages - old_pages) as usize);
                 for i in old_pages..new_pages {
                     let (heap, off) = pool.alloc_tile(&ld.device)?;
-                    tiles::map_tile_run(&queue, &buf.resource, i, 1, &heap, off)?;
-                    buf.reserved_tiles[i as usize] = Some((heap.clone(), off));
+                    mappings.push((i, heap.clone(), off));
+                    buf.reserved_tiles[i as usize] = Some((heap, off));
                 }
+                tiles::map_tiles_batched(&queue, &buf.resource, &mappings)?;
             } else if new_pages < old_pages {
+                let n = old_pages - new_pages;
+                tiles::unmap_tile_run(&queue, &buf.resource, new_pages, n)?;
                 for i in new_pages..old_pages {
                     if let Some((heap, off)) = buf.reserved_tiles.get_mut(i as usize).and_then(|s| s.take())
                     {
-                        tiles::unmap_tile_run(&queue, &buf.resource, i, 1)?;
                         pool.free_tile(&heap, off);
                     }
                 }
@@ -1297,10 +1303,24 @@ pub(super) fn hint_unused_above(state: &mut Dx12State, buffer_handle: BufferHand
     let Some(buf_mut) = buffers.get_mut(&buffer_handle) else {
         return;
     };
-    for i in first_tile..buf_mut.reserved_tiles.len() {
-        if let Some((heap, off)) = buf_mut.reserved_tiles[i].take() {
-            let _ = tiles::unmap_tile_run(queue, &buf_mut.resource, i as u32, 1);
-            pool.free_tile(&heap, off);
+    let mut i = first_tile;
+    while i < buf_mut.reserved_tiles.len() {
+        while i < buf_mut.reserved_tiles.len() && buf_mut.reserved_tiles[i].is_none() {
+            i += 1;
+        }
+        if i >= buf_mut.reserved_tiles.len() {
+            break;
+        }
+        let run_start = i;
+        while i < buf_mut.reserved_tiles.len() && buf_mut.reserved_tiles[i].is_some() {
+            i += 1;
+        }
+        let n = (i - run_start) as u32;
+        let _ = tiles::unmap_tile_run(queue, &buf_mut.resource, run_start as u32, n);
+        for j in run_start..i {
+            if let Some((heap, off)) = buf_mut.reserved_tiles[j].take() {
+                pool.free_tile(&heap, off);
+            }
         }
     }
 }

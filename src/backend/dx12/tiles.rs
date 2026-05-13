@@ -1,4 +1,18 @@
 //! Tile heap pool and [`ID3D12CommandQueue::UpdateTileMappings`] helpers for reserved buffers.
+//!
+//! ## Ordering vs command lists
+//!
+//! `UpdateTileMappings` is executed on the [`ID3D12CommandQueue`] directly (not inside a command
+//! list). On a given queue, the D3D12 runtime orders these calls relative to
+//! [`ID3D12CommandQueue::ExecuteCommandLists`]: mappings become visible to subsequent executes on
+//! **that same queue**. Goldy uses a single `DIRECT` queue per device, so tile map/unmap done
+//! during reserved-buffer creation, `set_logical_size`, or `hint_unused_above` in the `buffer`
+//! module is visible to the next compute/graphics submission without extra barriers. When a
+//! reserved buffer is migrated to a committed resource on resize, the copy command list is recorded
+//! and executed on that queue while source tiles are still mapped; teardown of the old reserved
+//! resource is deferred until the fence passes.
+
+use std::ffi::c_void;
 
 use anyhow::{Context, Result};
 use windows::core::Interface;
@@ -10,7 +24,7 @@ pub const BUFFER_TILE_BYTES: u32 = 65536;
 const TILES_PER_CHUNK: u32 = 256;
 
 #[inline]
-fn heap_ptr(h: &ID3D12Heap) -> *mut core::ffi::c_void {
+pub(crate) fn heap_ptr(h: &ID3D12Heap) -> *mut c_void {
     h.as_raw()
 }
 
@@ -105,7 +119,68 @@ pub(crate) fn tiles_needed_for_logical_size(size: u64) -> u32 {
     num_tiles_for_bytes(size)
 }
 
+/// Map many resource tiles in as few `UpdateTileMappings` calls as practical.
+///
+/// D3D12 allows only one `ID3D12Heap` per call. Within each heap group, consecutive resource tiles
+/// whose heap allocations are consecutive 64 KiB tiles are coalesced into a single
+/// [`map_tile_run`] (`NumTiles` > 1).
+pub(crate) fn map_tiles_batched(
+    queue: &ID3D12CommandQueue,
+    resource: &ID3D12Resource,
+    mappings: &[(u32, ID3D12Heap, u64)],
+) -> Result<()> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let mut groups: Vec<(ID3D12Heap, Vec<(u32, u64)>)> = Vec::new();
+    for (tile, heap, off) in mappings {
+        let p = heap_ptr(heap);
+        if let Some((_, vec)) = groups
+            .iter_mut()
+            .find(|(gheap, _)| heap_ptr(gheap) == p)
+        {
+            vec.push((*tile, *off));
+        } else {
+            groups.push((heap.clone(), vec![(*tile, *off)]));
+        }
+    }
+
+    for (heap, mut tiles) in groups {
+        tiles.sort_by_key(|(t, _)| *t);
+        let mut i = 0usize;
+        while i < tiles.len() {
+            let (t0, byte0) = tiles[i];
+            let heap_tile0 = u32::try_from(byte0 / u64::from(BUFFER_TILE_BYTES))
+                .map_err(|_| anyhow::anyhow!("heap tile index"))?;
+            let mut run_len = 1u32;
+            let mut expect_t = t0.saturating_add(1);
+            let mut expect_heap_tile = heap_tile0.saturating_add(1);
+            let mut j = i + 1;
+            while j < tiles.len() {
+                let (tj, bytej) = tiles[j];
+                let ht = u32::try_from(bytej / u64::from(BUFFER_TILE_BYTES))
+                    .map_err(|_| anyhow::anyhow!("heap tile index"))?;
+                if tj == expect_t && ht == expect_heap_tile {
+                    run_len = run_len.saturating_add(1);
+                    expect_t = expect_t.saturating_add(1);
+                    expect_heap_tile = expect_heap_tile.saturating_add(1);
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            map_tile_run(queue, resource, t0, run_len, &heap, byte0)?;
+            i = j;
+        }
+    }
+    Ok(())
+}
+
 /// [`UpdateTileMappings`](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12commandqueue-updatetilemappings)—map contiguous resource tiles to heap offsets.
+///
+/// `heap_start_offset` is the byte offset into `heap` from [`TileHeapPool`]. D3D12
+/// `pHeapRangeStartOffsets` uses **tile indices** (offset ÷ 64 KiB) into that heap.
 pub(crate) fn map_tile_run(
     queue: &ID3D12CommandQueue,
     resource: &ID3D12Resource,
@@ -130,9 +205,9 @@ pub(crate) fn map_tile_run(
         Height: 0,
         Depth: 0,
     };
-    let range_flag = D3D12_TILE_RANGE_FLAGS::default();
-    let heap_off = u32::try_from(heap_start_offset)
-        .map_err(|_| anyhow::anyhow!("heap offset exceeds UINT"))?;
+    let range_flag = D3D12_TILE_RANGE_FLAG_NONE;
+    let heap_range_start = u32::try_from(heap_start_offset / u64::from(BUFFER_TILE_BYTES))
+        .map_err(|_| anyhow::anyhow!("heap tile index"))?;
     unsafe {
         queue.UpdateTileMappings(
             resource,
@@ -142,9 +217,9 @@ pub(crate) fn map_tile_run(
             heap,
             1,
             Some(&range_flag),
-            Some(&heap_off),
+            Some(&heap_range_start),
             Some(&num_tiles),
-            D3D12_TILE_MAPPING_FLAGS::default(),
+            D3D12_TILE_MAPPING_FLAG_NONE,
         );
     }
     Ok(())
@@ -192,17 +267,33 @@ pub(crate) fn unmap_tile_run(
 }
 
 /// Unmap every mapped tile and return heap slots to `pool` (if any).
+///
+/// Coalesces adjacent mapped tiles into fewer `UpdateTileMappings` calls.
 pub(crate) fn teardown_reserved_mappings(
     queue: &ID3D12CommandQueue,
     pool: &mut Option<TileHeapPool>,
     resource: &ID3D12Resource,
     tiles: &[Option<(ID3D12Heap, u64)>],
 ) {
-    for (i, slot) in tiles.iter().enumerate() {
-        if let Some((heap, off)) = slot {
-            let _ = unmap_tile_run(queue, resource, i as u32, 1);
-            if let Some(p) = pool.as_mut() {
-                p.free_tile(heap, *off);
+    let mut i = 0usize;
+    while i < tiles.len() {
+        while i < tiles.len() && tiles[i].is_none() {
+            i += 1;
+        }
+        if i >= tiles.len() {
+            break;
+        }
+        let run_start = i;
+        while i < tiles.len() && tiles[i].is_some() {
+            i += 1;
+        }
+        let num_tiles = (i - run_start) as u32;
+        let _ = unmap_tile_run(queue, resource, run_start as u32, num_tiles);
+        if let Some(p) = pool.as_mut() {
+            for j in run_start..i {
+                if let Some((heap, off)) = &tiles[j] {
+                    p.free_tile(heap, *off);
+                }
             }
         }
     }

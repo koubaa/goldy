@@ -16,6 +16,13 @@
 //! See `docs/src/architecture/backends.md` (DX12 / WARP section) for NuGet side-loading
 //! instructions.
 //!
+//! ## Reserved (tiled) buffers
+//!
+//! When **`GOLDY_DX12_DISABLE_RESERVED_BUFFERS=1`**, oversize `Buffer::new_with_capacity_hint`
+//! uses committed resources instead of reserved resources and tile heap mapping. Device
+//! capabilities report `buffer_resize_cost` as `Copy` in that mode. Use this if a driver stack
+//! faults during tile mapping; capture a GPU hang dump / enable the D3D12 debug layer first.
+//!
 //! ## Module Structure
 //!
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
@@ -65,6 +72,17 @@ pub(crate) fn env_force_warp() -> bool {
 
 fn env_allow_warp() -> bool {
     env_force_warp()
+}
+
+/// Reserved (`CreateReservedResource`) buffers can be disabled for troubleshooting.
+///
+/// Set **`GOLDY_DX12_DISABLE_RESERVED_BUFFERS=1`** to use committed oversize allocations instead of
+/// tile heaps + [`UpdateTileMappings`]. In that mode, [`Dx12Backend::device_capabilities`] reports
+/// `buffer_resize_cost` as [`crate::types::BufferResizeCost::Copy`] (not `PageBind`).
+pub(crate) fn env_disable_reserved_buffers() -> bool {
+    std::env::var("GOLDY_DX12_DISABLE_RESERVED_BUFFERS").is_ok_and(|v| {
+        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+    })
 }
 
 static DEBUG_LAYER_INIT: Once = Once::new();
@@ -560,7 +578,7 @@ impl GpuBackend for Dx12Backend {
             .state
             .devices
             .get(&device)
-            .is_some_and(|d| d.supports_reserved_buffers)
+            .is_some_and(|d| d.supports_reserved_buffers && !env_disable_reserved_buffers())
         {
             caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
             caps.buffer_page_size = 64 * 1024;
