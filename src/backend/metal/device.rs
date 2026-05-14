@@ -112,6 +112,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             timeline_scheduled_max: 0,
             deletion_queue: DeletionQueue::new(),
             transient_heaps: std::collections::HashMap::new(),
+            last_committed_timeline: None,
         },
     );
 

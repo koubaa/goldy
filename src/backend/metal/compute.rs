@@ -258,15 +258,17 @@ pub(super) fn record_commands_to_buffer(
                     *offset + data.len() as u64 <= buf_state.size,
                     "WriteBuffer: write exceeds buffer bounds"
                 );
-                // Small writes to shared-mode buffers can use direct CPU memcpy,
-                // avoiding blit encoder transitions. Safe because shared-mode
-                // buffers have coherent CPU/GPU access on Apple Silicon, and the
-                // wave reordering guarantees writes precede dispatches in each
-                // wave, so a subsequent encoder creation provides ordering.
+                // Direct CPU memcpy is safe only when no previously-committed GPU
+                // work is still in flight: if the GPU has already signaled past the
+                // last committed timeline, all reads from this buffer are complete.
+                // Otherwise we fall through to the staged blit path to avoid a race.
                 const SMALL_WRITE_THRESHOLD: usize = 4096;
-                if !buf_state
-                    .flags
-                    .contains(crate::types::BufferFlags::GPU_ONLY)
+                let gpu_idle = logical_device
+                    .last_committed_timeline
+                    .map(|last| logical_device.timeline_event.as_ref().signaled_value() >= last)
+                    .unwrap_or(true);
+                if gpu_idle
+                    && !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                 {
                     let ptr = buf_state.buffer.contents();
@@ -282,8 +284,6 @@ pub(super) fn record_commands_to_buffer(
                     }
                 }
 
-                // Fall back to staging buffer + blit copy for GPU-only buffers,
-                // large writes, or if contents() was unexpectedly null.
                 ensure_blit!();
                 let staging = logical_device.device.new_buffer_with_data(
                     data.as_ptr() as *const _,
@@ -647,6 +647,7 @@ pub(super) fn submit(
     command_buffer_ref.commit();
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.last_committed_timeline = Some(signal_value);
         ld.process_deletion_queue_up_to_signaled();
     }
 
@@ -781,6 +782,7 @@ pub(super) fn submit_graph(
     command_buffer_ref.commit();
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.last_committed_timeline = Some(signal_value);
         ld.process_deletion_queue_up_to_signaled();
     }
 

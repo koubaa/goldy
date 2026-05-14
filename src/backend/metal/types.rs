@@ -481,6 +481,11 @@ pub(crate) struct LogicalDevice {
     pub deletion_queue: DeletionQueue,
     /// Per-submit aliasable heaps ([`GpuBackend::create_transient_heap`]).
     pub transient_heaps: std::collections::HashMap<TransientHeapHandle, TransientHeapTracking>,
+    /// Timeline value of the most recently committed command buffer, or `None` if nothing has
+    /// been submitted yet. Used to decide whether a direct CPU `memcpy` into a shared-mode
+    /// buffer is safe: it is safe only when `gpu_progress() >= last_committed_timeline`,
+    /// meaning all previously submitted GPU work has completed and no in-flight reads remain.
+    pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
 }
 
 impl LogicalDevice {
