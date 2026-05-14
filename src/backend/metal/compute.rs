@@ -103,10 +103,11 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 
 /// Begin a fresh compute encoder on the command buffer with heap and argument buffer bindings.
 ///
-/// Calls `use_resource` on each individual buffer so Metal's hazard tracking
-/// can detect cross-encoder dependencies (e.g. compute→blit→compute). Without
-/// this, Metal may overlap encoders that share buffers accessed via argument
-/// buffers, since the indirect access is opaque to automatic hazard tracking.
+/// Calls `use_resource` on every buffer and texture so Metal's hazard tracking
+/// can detect cross-encoder dependencies (e.g. compute→blit→compute). `use_heap`
+/// alone provides residency but NOT hazard tracking — without per-resource
+/// declarations, Metal GPU Validation rejects dispatches that touch heap-resident
+/// resources via argument buffers.
 pub(super) fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
     state: &MetalState,
@@ -118,17 +119,15 @@ pub(super) fn begin_compute_encoder<'a>(
     logical_device.texture_heap.use_heaps_for_compute(encoder);
     super::transient::use_transient_heaps_for_compute(logical_device, encoder);
     for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle && buf_state.is_device_allocated {
+        if buf_state.device_handle == device_handle {
             encoder.use_resource(
                 &buf_state.buffer,
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
             );
         }
     }
-    // Only non-heap textures (e.g. swapchain drawables) need individual
-    // `use_resource`; heap-resident textures are covered by `use_heaps_for_compute`.
     for tex_state in state.textures.values() {
-        if tex_state.device_handle == device_handle && !tex_state.is_heap_allocated {
+        if tex_state.device_handle == device_handle {
             let usage = if tex_state.is_storage_image {
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write
             } else {
@@ -839,7 +838,7 @@ fn record_render_pass_to_buffer(
         .use_heaps_for_render(encoder, render_stages);
     super::transient::use_transient_heaps_for_render(logical_device, encoder, render_stages);
     for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle && buf_state.is_device_allocated {
+        if buf_state.device_handle == device_handle {
             encoder.use_resource_at(
                 &buf_state.buffer,
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
