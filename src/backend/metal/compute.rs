@@ -23,13 +23,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     compute_shader: ShaderHandle,
 ) -> Result<ComputePipelineHandle> {
-    super::shader::ensure_stage_compiled(
-        &state.slang_compiler,
-        &state.devices,
-        &mut state.shaders,
-        compute_shader,
-        SlangStage::Compute,
-    )?;
+    super::shader::ensure_stage_compiled(state, compute_shader, SlangStage::Compute)?;
 
     let logical_device = state
         .devices

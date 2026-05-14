@@ -1042,7 +1042,24 @@ pub(super) struct MetalState {
     pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
     pub next_sampler_handle: SamplerHandle,
     pub next_transient_heap_handle: TransientHeapHandle,
-    pub slang_compiler: crate::slang::SlangCompiler,
+    /// `None` after release via [`crate::device::Device::release_idle_shader_compiler`].
+    /// Re-created automatically on demand when a shader must be lazily compiled.
+    pub slang_compiler: Option<crate::slang::SlangCompiler>,
+}
+
+impl MetalState {
+    #[inline]
+    pub(super) fn slang_compiler_mut_or_init(
+        &mut self,
+    ) -> anyhow::Result<&mut crate::slang::SlangCompiler> {
+        use anyhow::Context;
+        if self.slang_compiler.is_none() {
+            self.slang_compiler = Some(
+                crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?,
+            );
+        }
+        Ok(self.slang_compiler.as_mut().expect("just set"))
+    }
 }
 
 #[cfg(test)]

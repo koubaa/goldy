@@ -830,6 +830,12 @@ pub trait GpuBackend: Send + Sync {
     /// `reset_buffer_heaps` and *before* large allocations. No-op by default.
     fn ensure_buffer_heap_capacity(&mut self, _device: DeviceHandle, _min_capacity: u64) {}
 
+    /// Drop backend-held shader compiler state (Metal: Slang session) to reduce host memory.
+    ///
+    /// Safe after all lazily-compiled shader stages are resident. A later compile will
+    /// recreate the compiler automatically.
+    fn release_idle_shader_compiler(&mut self) {}
+
     /// Number of bindless descriptor slots still available for allocation in `category`.
     ///
     /// Backends report `max - live` where *live* = allocated-and-not-yet-freed

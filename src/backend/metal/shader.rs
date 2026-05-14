@@ -2,7 +2,7 @@
 
 use super::super::shared::{ShaderDesc, ShaderStageCompileDesc};
 use super::super::{DeviceHandle, ShaderHandle};
-use super::types::ShaderState;
+use super::types::{MetalState, ShaderState};
 use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -179,92 +179,101 @@ fn compile_stage_with_reflection(
 
 /// Ensure a shader stage is compiled. Compiles on first access.
 pub(super) fn ensure_stage_compiled(
-    slang_compiler: &SlangCompiler,
-    devices: &HashMap<DeviceHandle, super::types::LogicalDevice>,
-    shaders: &mut HashMap<ShaderHandle, ShaderState>,
+    state: &mut MetalState,
     shader_handle: ShaderHandle,
     stage: SlangStage,
 ) -> Result<()> {
-    let (entry_point, need_compile) = match stage {
-        SlangStage::Vertex => ("vs_main", {
-            let s = shaders
-                .get(&shader_handle)
-                .context("Invalid shader handle")?;
-            s.vertex_library.is_none()
-        }),
-        SlangStage::Fragment => ("fs_main", {
-            let s = shaders
-                .get(&shader_handle)
-                .context("Invalid shader handle")?;
-            s.fragment_library.is_none()
-        }),
-        SlangStage::Compute => ("cs_main", {
-            let s = shaders
-                .get(&shader_handle)
-                .context("Invalid shader handle")?;
-            s.compute_library.is_none()
-        }),
-        _ => anyhow::bail!("Metal backend only supports Vertex, Fragment, and Compute stages"),
-    };
-
-    if !need_compile {
-        return Ok(());
+    struct CompileScratch {
+        device_handle: DeviceHandle,
+        slang_source: String,
+        search_paths: Vec<String>,
+        optimization_level: crate::types::OptimizationLevel,
+        defines: Vec<(String, String)>,
+        layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+        entry_point: &'static str,
     }
 
-    let shader = shaders
-        .get(&shader_handle)
-        .context("Invalid shader handle")?;
-    let device_handle = shader.device_handle;
-    let slang_source = shader.slang_source.clone();
-    let search_paths = shader.search_paths.clone();
-    let optimization_level = shader.optimization_level;
-    let extra_defines: Vec<(&str, &str)> = shader
+    let maybe_scratch: Option<CompileScratch> = {
+        let shaders = &state.shaders;
+        let shader = shaders
+            .get(&shader_handle)
+            .context("Invalid shader handle")?;
+        let (entry_point, need_compile) = match stage {
+            SlangStage::Vertex => ("vs_main", shader.vertex_library.is_none()),
+            SlangStage::Fragment => ("fs_main", shader.fragment_library.is_none()),
+            SlangStage::Compute => ("cs_main", shader.compute_library.is_none()),
+            _ => anyhow::bail!("Metal backend only supports Vertex, Fragment, and Compute stages"),
+        };
+        if !need_compile {
+            None
+        } else {
+            Some(CompileScratch {
+                device_handle: shader.device_handle,
+                slang_source: shader.slang_source.clone(),
+                search_paths: shader.search_paths.clone(),
+                optimization_level: shader.optimization_level,
+                defines: shader.defines.clone(),
+                layout_checks: shader.layout_checks.clone(),
+                entry_point,
+            })
+        }
+    };
+
+    let Some(scratch) = maybe_scratch else {
+        return Ok(());
+    };
+
+    let mtl_dev = state
+        .devices
+        .get(&scratch.device_handle)
+        .context("Shader's device no longer valid")?
+        .device
+        .clone();
+
+    let search_path_refs: Vec<&str> = scratch.search_paths.iter().map(|s| s.as_str()).collect();
+    let extra_defines: Vec<(&str, &str)> = scratch
         .defines
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let layout_checks_snapshot = shader.layout_checks.clone();
-
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Shader's device no longer valid")?;
-
-    let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
     let compile_desc = ShaderStageCompileDesc {
-        slang_source: &slang_source,
+        slang_source: &scratch.slang_source,
         search_paths: &search_path_refs,
-        entry_point,
+        entry_point: scratch.entry_point,
         stage,
         extra_defines: &extra_defines,
-        layout_checks: &layout_checks_snapshot,
-        optimization_level,
+        layout_checks: &scratch.layout_checks,
+        optimization_level: scratch.optimization_level,
     };
-    let (library, reflection) =
-        compile_stage_with_reflection(slang_compiler, &logical_device.device, &compile_desc)?;
 
-    let shader = shaders
+    let compiler = state.slang_compiler_mut_or_init()?;
+    let (library, reflection) = compile_stage_with_reflection(compiler, &mtl_dev, &compile_desc)?;
+
+    let shader = state
+        .shaders
         .get_mut(&shader_handle)
         .expect("shader handle must be valid after ensure_stage_compiled");
     match stage {
         SlangStage::Vertex => shader.vertex_library = Some(library),
         SlangStage::Fragment => shader.fragment_library = Some(library),
         SlangStage::Compute => shader.compute_library = Some(library),
-        // `stage` was validated by `validate_stage` (called from `ensure_stage_compiled`)
-        // to be Vertex, Fragment, or Compute before we reach this point.
-        _ => unreachable!("stage already validated above"),
+        _ => unreachable!("stage already validated"),
     }
+
     if shader.reflection.is_none() {
         let reflection = reflection.map(|mut r| {
             if r.push_constant_categories.is_empty() {
                 r.push_constant_categories =
-                    crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
+                    crate::slang::virtual_main::extract_push_constant_categories(
+                        &scratch.slang_source,
+                    );
             }
             r
         });
         shader.reflection = reflection;
     }
 
-    if !layout_checks_snapshot.is_empty() {
+    if !scratch.layout_checks.is_empty() {
         shader.layout_checks.clear();
     }
 

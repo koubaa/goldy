@@ -672,6 +672,19 @@ impl Device {
             .ensure_buffer_heap_capacity(self.inner.handle, min_capacity);
     }
 
+    /// Drop backend-held Slang / driver compiler session state to reduce host RSS.
+    ///
+    /// On Metal this frees the persistent Slang compiler that usually holds large
+    /// IR caches. Call after all pipelines you need are created; any later lazy
+    /// compile will re-instantiate the compiler.
+    pub fn release_idle_shader_compiler(&self) {
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .release_idle_shader_compiler();
+    }
+
     /// No-op: texture uploads are scheduled via [`crate::task_graph::TaskGraph`].
     #[deprecated(
         since = "0.1.0",

@@ -330,6 +330,13 @@ bitflags! {
         /// Query [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`] to distinguish
         /// these at runtime.
         const CPU_READABLE = 1 << 2;
+        /// GPU-local storage (Metal: [`MTLStorageMode::Private`]), no CPU mapping.
+        ///
+        /// Intended for purely device-side buffers (e.g. frame scratch pools filled via blits /
+        /// compute only). Cannot be combined with [`Self::CPU_READABLE`].
+        ///
+        /// **Backends**: implemented on Metal. Other backends treat this flag as unused for now.
+        const GPU_ONLY = 1 << 3;
     }
 }
 
