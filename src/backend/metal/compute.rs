@@ -265,7 +265,9 @@ pub(super) fn record_commands_to_buffer(
                 // wave reordering guarantees writes precede dispatches in each
                 // wave, so a subsequent encoder creation provides ordering.
                 const SMALL_WRITE_THRESHOLD: usize = 4096;
-                if !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
+                if !buf_state
+                    .flags
+                    .contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                 {
                     let ptr = buf_state.buffer.contents();

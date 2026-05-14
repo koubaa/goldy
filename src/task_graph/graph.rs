@@ -612,7 +612,11 @@ impl TaskGraph {
 
     /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
     /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect`].
-    pub fn node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
+    pub fn node<'a>(
+        &'a mut self,
+        label: &'static str,
+        pipeline: &ComputePipeline,
+    ) -> NodeBuilder<'a> {
         NodeBuilder {
             graph: self,
             label,

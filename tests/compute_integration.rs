@@ -2370,3 +2370,230 @@ fn stride_validation_multi_binding_all_correct_passes() {
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     result.expect("dispatch with all-correct strides must succeed");
 }
+
+// ============================================================================
+// TransientAllocator integration tests
+//
+// Verify the trait, both strategies, and end-to-end frame lifecycle against a
+// real device. Each test uses a fresh device so they remain isolated.
+// ============================================================================
+
+use goldy::{
+    BumpResetAllocator, EpochRegionsAllocator, TransientAllocator, TransientAllocatorConfig,
+    TransientAllocatorStrategy,
+};
+
+fn small_config() -> TransientAllocatorConfig {
+    TransientAllocatorConfig {
+        initial_size: 4 * 1024,
+        expected_max: 64 * 1024,
+        min_region_size: 4 * 1024,
+        max_regions: 4,
+        alignment: 256,
+        flags: BufferFlags::GPU_ONLY,
+    }
+}
+
+/// Smoke test: each strategy can `create`, then `begin_frame` → `alloc` → `end_frame` with no
+/// GPU work and not panic. Covers the lazy-init and zero-work path.
+#[test]
+fn transient_allocator_smoke_both_strategies() {
+    let device = make_device();
+    for strategy in [
+        TransientAllocatorStrategy::BumpReset,
+        TransientAllocatorStrategy::EpochRegions,
+    ] {
+        let mut a = strategy
+            .create(&device, small_config())
+            .expect("create allocator");
+        a.begin_frame(&device, 0).expect("begin");
+        let view = a.alloc(&device, 256, Some(4)).expect("alloc");
+        // Submit empty work to advance the timeline.
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        drop(view);
+        a.end_frame(tv);
+        // Next frame: should not panic, and BumpReset should wait for tv internally.
+        a.begin_frame(&device, 0).expect("begin frame 2");
+        let _v2 = a.alloc(&device, 256, Some(4)).expect("alloc frame 2");
+    }
+}
+
+/// `from_env` defaults to `BumpReset` when no env var is set, and respects unknown values by
+/// falling back to default rather than panicking.
+#[test]
+fn transient_allocator_strategy_from_env_defaults_safely() {
+    // Save/clear/restore so we don't pollute concurrent tests.
+    let prev = std::env::var("GOLDY_TRANSIENT_ALLOCATOR").ok();
+    std::env::remove_var("GOLDY_TRANSIENT_ALLOCATOR");
+    assert_eq!(
+        TransientAllocatorStrategy::from_env(),
+        TransientAllocatorStrategy::BumpReset
+    );
+    std::env::set_var("GOLDY_TRANSIENT_ALLOCATOR", "garbage-value");
+    assert_eq!(
+        TransientAllocatorStrategy::from_env(),
+        TransientAllocatorStrategy::BumpReset
+    );
+    std::env::set_var("GOLDY_TRANSIENT_ALLOCATOR", "epoch");
+    assert_eq!(
+        TransientAllocatorStrategy::from_env(),
+        TransientAllocatorStrategy::EpochRegions
+    );
+    match prev {
+        Some(v) => std::env::set_var("GOLDY_TRANSIENT_ALLOCATOR", v),
+        None => std::env::remove_var("GOLDY_TRANSIENT_ALLOCATOR"),
+    }
+}
+
+/// Verifies that BumpResetAllocator waits for the previous frame's epoch before resetting.
+/// We measure the elapsed time of `begin_frame` after a submit-without-wait — if the
+/// wait kicks in, it should be roughly the GPU latency (non-zero); if it doesn't, the test
+/// at least proves no deadlock.
+#[test]
+fn bump_reset_blocks_on_prev_epoch() {
+    let device = make_device();
+    let mut a = BumpResetAllocator::new(&device, small_config()).expect("create");
+
+    a.begin_frame(&device, 0).expect("begin");
+    let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+
+    // begin_frame should wait for `tv` if it hasn't completed. After it returns,
+    // gpu_progress must be at least tv.
+    a.begin_frame(&device, 0).expect("begin 2");
+    assert!(
+        device.gpu_progress() >= tv,
+        "BumpReset must not allow reuse until prev epoch has been signaled"
+    );
+}
+
+/// Allocating more than a region's capacity in one frame causes EpochRegionsAllocator to
+/// spill into additional regions, not panic.
+#[test]
+fn epoch_regions_spills_when_active_full() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 4,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    a.begin_frame(&device, 0).expect("begin");
+    let before = a.region_count();
+    // Allocate 3 regions worth in 3 chunks — must spill twice.
+    let _v1 = a.alloc(&device, 3 * 1024, Some(4)).expect("alloc 1");
+    let _v2 = a.alloc(&device, 3 * 1024, Some(4)).expect("alloc 2");
+    let _v3 = a.alloc(&device, 3 * 1024, Some(4)).expect("alloc 3");
+    let after = a.region_count();
+    assert!(
+        after >= before + 2,
+        "expected at least 2 new regions after 3 region-sized allocs, got {} -> {}",
+        before,
+        after
+    );
+
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+    // After end_frame all active should be retired.
+    assert_eq!(a.retired_count(), after, "all active regions must retire");
+    assert_eq!(a.empty_count(), 0);
+}
+
+/// EpochRegionsAllocator reclaims retired regions opportunistically in `begin_frame` once
+/// the GPU has caught up — no explicit waits required on the hot path.
+#[test]
+fn epoch_regions_reclaims_after_gpu_catches_up() {
+    let device = make_device();
+    let mut a = EpochRegionsAllocator::new(&device, small_config()).expect("create");
+
+    // Frame 1: allocate, submit, retire.
+    a.begin_frame(&device, 0).expect("begin 1");
+    let _v = a.alloc(&device, 2048, Some(4)).expect("alloc");
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+    assert!(a.retired_count() >= 1);
+    assert_eq!(a.empty_count(), 0);
+
+    // Wait so the next begin_frame can reclaim.
+    device.wait_until(tv).expect("wait");
+
+    // Frame 2: begin_frame must promote the retired region back to empty before activating.
+    a.begin_frame(&device, 0).expect("begin 2");
+    // The previously retired region should now be Active (count == 1). No retired left.
+    assert_eq!(a.retired_count(), 0);
+}
+
+/// Across many frames, the EpochRegionsAllocator's region count stays bounded by max_regions.
+#[test]
+fn epoch_regions_respects_max_regions_cap() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg.clone()).expect("create");
+
+    // Push 10 frames through; each frame is small and submitted+waited so retirees can be
+    // reclaimed. Region count should stay ≤ max_regions.
+    for _ in 0..10 {
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        a.end_frame(tv);
+        device.wait_until(tv).expect("wait");
+        assert!(
+            a.region_count() <= cfg.max_regions,
+            "region count {} exceeded cap {}",
+            a.region_count(),
+            cfg.max_regions
+        );
+    }
+}
+
+/// `clear()` on either strategy must release all allocations and put the allocator into a
+/// clean state ready for re-use.
+#[test]
+fn transient_allocator_clear_resets_state() {
+    let device = make_device();
+    for strategy in [
+        TransientAllocatorStrategy::BumpReset,
+        TransientAllocatorStrategy::EpochRegions,
+    ] {
+        let mut a = strategy
+            .create(&device, small_config())
+            .expect("create allocator");
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        a.end_frame(tv);
+        device.wait_until(tv).expect("wait");
+        a.clear();
+        // After clear, used_this_frame should be zero and we can begin a new frame.
+        assert_eq!(a.used_this_frame(), 0);
+        a.begin_frame(&device, 0).expect("begin after clear");
+    }
+}
+
+/// BufferPool::would_fit must agree with alloc_bytes for power-of-two and non-power-of-two
+/// strides.
+#[test]
+fn buffer_pool_would_fit_agrees_with_alloc_bytes() {
+    let device = make_device();
+    let mut pool = BufferPool::new(&device, 4096).expect("pool");
+
+    assert!(pool.would_fit(1024, Some(4)));
+    let _v = pool.alloc_bytes(1024, Some(4)).expect("alloc");
+
+    // Non-power-of-two stride: 12 (vec3<f32>). LCM(256, 12) = 768.
+    // After consuming 1024 bytes at alignment 256, used == 1024. The next alloc with stride
+    // 12 aligns to 768 → aligned_offset = 1536.
+    assert!(pool.would_fit(1024, Some(12)));
+    let _v2 = pool.alloc_bytes(1024, Some(12)).expect("alloc np2");
+
+    // Remaining = 4096 - (1536 + 1024) = 1536. would_fit must reject anything larger.
+    assert!(pool.would_fit(1024, Some(4)));
+    assert!(!pool.would_fit(4096, Some(4)));
+}

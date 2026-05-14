@@ -879,6 +879,18 @@ impl BufferPool {
         Ok(view)
     }
 
+    /// Whether an [`Self::alloc_bytes`] of `size` bytes with the given `element_stride` would
+    /// fit in the remaining pool capacity without growth.
+    ///
+    /// Uses the same alignment math as [`Self::alloc_bytes`] so the answer is exact, including
+    /// for non-power-of-two strides (e.g. 12-byte `vec3<f32>`).
+    pub fn would_fit(&self, size: u64, element_stride: Option<u32>) -> bool {
+        let stride = element_stride.unwrap_or(4) as u64;
+        let alloc_align = lcm(self.alignment, stride);
+        let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
+        aligned_offset.saturating_add(size) <= self.backing.size()
+    }
+
     /// Allocate a raw byte region from the pool.
     ///
     /// `element_stride` determines the structured buffer stride for the view's descriptor.

@@ -403,21 +403,34 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
-                NodeKind::ClearBuffer { buffer, offset, size } => {
+                NodeKind::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
                     commands.push(GpuCommand::ClearBuffer {
                         buffer: *buffer,
                         offset: *offset,
                         size: *size,
                     });
                 }
-                NodeKind::WriteBuffer { buffer, offset, data } => {
+                NodeKind::WriteBuffer {
+                    buffer,
+                    offset,
+                    data,
+                } => {
                     commands.push(GpuCommand::WriteBuffer {
                         buffer: *buffer,
                         offset: *offset,
                         data: data.clone(),
                     });
                 }
-                NodeKind::WriteTexture { texture, data, width, height } => {
+                NodeKind::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
                     commands.push(GpuCommand::WriteTexture {
                         texture: *texture,
                         data: data.clone(),
@@ -425,7 +438,14 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
                         height: *height,
                     });
                 }
-                NodeKind::WriteTextureRegion { texture, x, y, width, height, data } => {
+                NodeKind::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
                     commands.push(GpuCommand::WriteTextureRegion {
                         texture: *texture,
                         x: *x,
@@ -500,21 +520,34 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
-                NodeKind::ClearBuffer { buffer, offset, size } => {
+                NodeKind::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
                     commands.push(GraphCommand::Compute(GpuCommand::ClearBuffer {
                         buffer: *buffer,
                         offset: *offset,
                         size: *size,
                     }));
                 }
-                NodeKind::WriteBuffer { buffer, offset, data } => {
+                NodeKind::WriteBuffer {
+                    buffer,
+                    offset,
+                    data,
+                } => {
                     commands.push(GraphCommand::Compute(GpuCommand::WriteBuffer {
                         buffer: *buffer,
                         offset: *offset,
                         data: data.clone(),
                     }));
                 }
-                NodeKind::WriteTexture { texture, data, width, height } => {
+                NodeKind::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
                     commands.push(GraphCommand::Compute(GpuCommand::WriteTexture {
                         texture: *texture,
                         data: data.clone(),
@@ -522,7 +555,14 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         height: *height,
                     }));
                 }
-                NodeKind::WriteTextureRegion { texture, x, y, width, height, data } => {
+                NodeKind::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
                     commands.push(GraphCommand::Compute(GpuCommand::WriteTextureRegion {
                         texture: *texture,
                         x: *x,
