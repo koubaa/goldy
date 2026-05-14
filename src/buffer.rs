@@ -47,12 +47,20 @@ impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T;
 
 /// A GPU buffer.
 pub struct Buffer {
-    _device: Device,
+    device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
+    /// Logical byte size (API-facing; may be smaller than reserved GPU storage).
     size: u64,
+    /// Reserved byte size (`MTLBuffer.length` / Vulkan allocation / …); >= [`Self::size`].
+    allocated_size: u64,
     access: DataAccess,
+    element_stride: Option<u32>,
     flags: BufferFlags,
+    /// Peak `allocated_size` ever observed on this buffer (telemetry; for profiling/tuning hints).
+    peak_committed_bytes: u64,
+    /// Number of completed [`Self::resize_to`] / [`Self::resize_to_uninitialized`] calls.
+    resize_count: u32,
 }
 
 impl Buffer {
@@ -74,6 +82,44 @@ impl Buffer {
         Self::new_with_stride_and_flags(device, size, access, None, BufferFlags::empty())
     }
 
+    /// Like [`Self::new`], with a peak-capacity hint for backends that support oversize virtual
+    /// reservations (e.g. Metal). `expected_max` is clamped with `initial_size`; allocation is at
+    /// least `max(initial_size, expected_max)` on supporting backends.
+    pub fn new_with_capacity_hint(
+        device: &Device,
+        initial_size: u64,
+        expected_max: u64,
+        access: DataAccess,
+    ) -> Result<Self> {
+        let capacity = expected_max.max(initial_size);
+        tracing::debug!(
+            initial_size,
+            capacity,
+            ?access,
+            "Creating buffer with capacity hint"
+        );
+        let mut backend = device.inner.backend.lock().unwrap();
+        let (handle, allocated_size) = backend.create_buffer_with_capacity(
+            device.inner.handle,
+            initial_size,
+            capacity,
+            access,
+            None,
+            BufferFlags::empty(),
+        )?;
+        Ok(Self {
+            device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
+            handle,
+            size: initial_size,
+            allocated_size,
+            access,
+            element_stride: None,
+            flags: BufferFlags::empty(),
+            peak_committed_bytes: allocated_size,
+            resize_count: 0,
+        })
+    }
     pub fn new_with_stride(
         device: &Device,
         size: u64,
@@ -97,12 +143,16 @@ impl Buffer {
             backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
 
         Ok(Self {
-            _device: device.clone(),
+            device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
             size,
+            allocated_size: size,
             access,
+            element_stride,
             flags,
+            peak_committed_bytes: size,
+            resize_count: 0,
         })
     }
 
@@ -146,12 +196,16 @@ impl Buffer {
         drop(backend);
 
         let buffer = Self {
-            _device: device.clone(),
+            device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
             size: bytes.len() as u64,
+            allocated_size: bytes.len() as u64,
             access,
+            element_stride: Some(element_stride),
             flags,
+            peak_committed_bytes: bytes.len() as u64,
+            resize_count: 0,
         };
         buffer.write(0, bytes)?;
         Ok(buffer)
@@ -209,12 +263,16 @@ impl Buffer {
         drop(backend);
 
         let buffer = Self {
-            _device: device.clone(),
+            device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
             size: data.len() as u64,
+            allocated_size: data.len() as u64,
             access,
+            element_stride: Some(element_stride),
             flags,
+            peak_committed_bytes: data.len() as u64,
+            resize_count: 0,
         };
         buffer.write(0, data)?;
         Ok(buffer)
@@ -234,11 +292,15 @@ impl Buffer {
         self.write(offset, bytemuck::cast_slice(data))
     }
 
-    /// Get the buffer size in bytes.
+    /// Logical byte size (may be less than reserved capacity; see [`Self::allocated_size`]).
     pub fn size(&self) -> u64 {
         self.size
     }
 
+    /// Reserved byte capacity (physical or virtual backing size).
+    pub fn allocated_size(&self) -> u64 {
+        self.allocated_size
+    }
     /// Get the buffer's access pattern.
     pub fn access(&self) -> DataAccess {
         self.access
@@ -247,6 +309,88 @@ impl Buffer {
     /// Creation flags (e.g. [`BufferFlags::CPU_READABLE`]).
     pub fn flags(&self) -> BufferFlags {
         self.flags
+    }
+
+    /// Element stride passed at creation (for structured-buffer descriptors), if any.
+    pub fn element_stride(&self) -> Option<u32> {
+        self.element_stride
+    }
+
+    /// Peak physically-committed bytes ever observed on this buffer.
+    ///
+    /// Equals [`Self::allocated_size`] at creation and grows monotonically each time a
+    /// [`Self::resize_to`] / [`Self::resize_to_uninitialized`] call causes the backend to
+    /// expand the physical backing. Useful for profiling capacity hints and detecting
+    /// over-allocation.
+    pub fn peak_committed_bytes(&self) -> u64 {
+        self.peak_committed_bytes
+    }
+
+    /// Number of completed resize operations ([`Self::resize_to`] / [`Self::resize_to_uninitialized`]).
+    ///
+    /// Incremented once per call that changes the logical size. No-op calls (same size as
+    /// current) are not counted.
+    pub fn resize_count(&self) -> u32 {
+        self.resize_count
+    }
+
+    /// Resize the buffer in place, preserving contents in `[0..min(old, new))` and zero-initialising
+    /// any newly exposed bytes. The [`Self::bindless_handle`] and internal resource handle stay stable.
+    pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
+        if new_size == self.size {
+            return Ok(());
+        }
+        self.resize_count = self.resize_count.saturating_add(1);
+        if new_size <= self.allocated_size {
+            let old_logical = self.size;
+            let mut backend = self.backend.lock().unwrap();
+            backend.set_buffer_logical_size(self.device.inner.handle, self.handle, new_size)?;
+            drop(backend);
+            if new_size > old_logical {
+                self.clear(
+                    &self.device,
+                    old_logical,
+                    new_size.saturating_sub(old_logical),
+                )?;
+            }
+            self.size = new_size;
+            return Ok(());
+        }
+        let mut backend = self.backend.lock().unwrap();
+        backend.resize_buffer(self.device.inner.handle, self.handle, new_size, true)?;
+        self.allocated_size = backend.buffer_capacity(self.handle);
+        self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
+        self.size = new_size;
+        Ok(())
+    }
+
+    /// Resize without preserving or initializing existing bytes (fast path for pools about to reset).
+    /// New storage may contain arbitrary data; only the handle stability contract applies.
+    pub fn resize_to_uninitialized(&mut self, new_size: u64) -> Result<()> {
+        if new_size == self.size {
+            return Ok(());
+        }
+        self.resize_count = self.resize_count.saturating_add(1);
+        if new_size <= self.allocated_size {
+            let mut backend = self.backend.lock().unwrap();
+            backend.set_buffer_logical_size(self.device.inner.handle, self.handle, new_size)?;
+            self.size = new_size;
+            return Ok(());
+        }
+        let mut backend = self.backend.lock().unwrap();
+        backend.resize_buffer(self.device.inner.handle, self.handle, new_size, false)?;
+        self.allocated_size = backend.buffer_capacity(self.handle);
+        self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
+        self.size = new_size;
+        Ok(())
+    }
+
+    /// Hint that bytes at and above `offset` are not needed until written again.
+    ///
+    /// On Metal (shared memory), may return physical pages to the OS. Other backends may no-op.
+    pub fn hint_unused_above(&mut self, offset: u64) {
+        let mut backend = self.backend.lock().unwrap();
+        backend.hint_buffer_unused_above(self.handle, offset);
     }
 
     /// Get the buffer's index in the global bindless descriptor set.
@@ -331,7 +475,7 @@ impl Buffer {
         let mut backend = self.backend.lock().unwrap();
         let handle = backend.create_buffer_view(self.handle, offset, size, element_stride)?;
         Ok(BufferView {
-            _device: self._device.clone(),
+            _device: self.device.clone(),
             backend: Arc::clone(&self.backend),
             handle,
             parent_handle: self.handle,
@@ -626,6 +770,43 @@ impl BufferPool {
         })
     }
 
+    /// Like [`Self::with_alignment`], but reserves up to `expected_max` bytes on supporting backends.
+    pub fn with_alignment_and_capacity_hint(
+        device: &Device,
+        total_size: u64,
+        expected_max: u64,
+        alignment: u64,
+    ) -> Result<Self> {
+        assert!(
+            alignment.is_power_of_two(),
+            "alignment must be a power of two"
+        );
+        tracing::debug!(
+            total_size,
+            expected_max,
+            alignment,
+            "Creating buffer pool with capacity hint"
+        );
+        let backing = Buffer::new_with_capacity_hint(
+            device,
+            total_size,
+            expected_max,
+            DataAccess::Scattered,
+        )?;
+        Ok(Self {
+            backing,
+            offset: 0,
+            alignment,
+        })
+    }
+
+    /// Resize the backing buffer in place (stable handle) and reset the bump allocator.
+    pub fn resize(&mut self, new_size: u64) -> Result<()> {
+        self.backing.resize_to(new_size)?;
+        self.offset = 0;
+        Ok(())
+    }
+
     /// Allocate a typed region from the pool.
     ///
     /// Returns a `BufferView` spanning `count` elements of type `T`, with the offset
@@ -705,128 +886,10 @@ impl BufferPool {
     pub fn backing_buffer(&self) -> &Buffer {
         &self.backing
     }
-}
 
-/// A fixed-size ring of [`BufferPool`]s for double- (or N-) buffered rendering.
-///
-/// Each frame calls [`advance`](Self::advance) to flip to the next pool, then
-/// [`prepare`](Self::prepare) to ensure it is large enough. The pool that was
-/// active N frames ago is now the current one; its GPU work has completed under
-/// normal pipelining, so `reset()` is safe.
-///
-/// ```ignore
-/// let mut ring = BufferPoolRing::new();
-/// // each frame:
-/// ring.advance();
-/// ring.prepare(&device, needed_bytes)?;
-/// let pool = ring.current_mut().unwrap();
-/// let view = pool.alloc_bytes(1024, Some(4))?;
-/// ```
-pub struct BufferPoolRing<const N: usize = 2> {
-    pools: [Option<BufferPool>; N],
-    clear_flags: [bool; N],
-    idx: usize,
-}
-
-impl<const N: usize> Default for BufferPoolRing<N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const N: usize> BufferPoolRing<N> {
-    /// Create an empty ring (all pool slots `None`).
-    pub fn new() -> Self {
-        Self {
-            pools: std::array::from_fn(|_| None),
-            clear_flags: [false; N],
-            idx: 0,
-        }
-    }
-
-    /// Advance to the next pool slot in the ring.
-    ///
-    /// Call this once at the start of each frame, **before** [`prepare`](Self::prepare).
-    pub fn advance(&mut self) {
-        self.idx = (self.idx + 1) % N;
-    }
-
-    /// Ensure the current pool slot has at least `size` bytes of capacity.
-    ///
-    /// If the existing pool is large enough it is reset (bump pointer back to 0).
-    /// If it is too small (or absent) a new pool is allocated and the clear flag
-    /// is set so the caller can zero-fill the backing buffer.
-    ///
-    /// If `max_size` is `Some(max)` and the current pool is larger than `max`,
-    /// the pool is reallocated at `size` (enabling shrinking with hysteresis).
-    ///
-    /// Calls [`Device::reset_buffer_heaps`] when a new allocation is needed.
-    pub fn prepare(&mut self, device: &Device, size: u64) -> Result<()> {
-        self.prepare_bounded(device, size, None)
-    }
-
-    /// Like [`prepare`](Self::prepare) but with an optional upper bound for shrinking.
-    pub fn prepare_bounded(
-        &mut self,
-        device: &Device,
-        size: u64,
-        max_size: Option<u64>,
-    ) -> Result<()> {
-        let idx = self.idx;
-        let (too_small, too_large) = match &self.pools[idx] {
-            Some(pool) => {
-                let cap = pool.capacity();
-                (cap < size, max_size.is_some_and(|max| cap > max))
-            }
-            None => (true, false),
-        };
-        if too_small || too_large {
-            self.pools[idx] = None;
-            device.reset_buffer_heaps();
-            device.ensure_buffer_heap_capacity(size);
-            let pool = BufferPool::new(device, size)?;
-            self.pools[idx] = Some(pool);
-            self.clear_flags[idx] = true;
-        } else {
-            self.pools[idx]
-                .as_mut()
-                .expect("pool must exist when need_new is false")
-                .reset();
-            self.clear_flags[idx] = false;
-        }
-        Ok(())
-    }
-
-    /// Mutable reference to the current pool (if allocated).
-    pub fn current_mut(&mut self) -> Option<&mut BufferPool> {
-        self.pools[self.idx].as_mut()
-    }
-
-    /// Shared reference to the current pool (if allocated).
-    pub fn current(&self) -> Option<&BufferPool> {
-        self.pools[self.idx].as_ref()
-    }
-
-    /// Check and consume the clear flag for the current pool.
-    ///
-    /// Returns `true` exactly once after [`prepare`](Self::prepare) allocates a
-    /// new backing buffer. The caller should issue a `clear_buffer` command for
-    /// the backing buffer when this returns `true`.
-    pub fn take_clear_flag(&mut self) -> bool {
-        let flag = self.clear_flags[self.idx];
-        self.clear_flags[self.idx] = false;
-        flag
-    }
-
-    /// Returns the capacity of the current pool slot, or `None` if unallocated.
-    pub fn current_capacity(&self) -> Option<u64> {
-        self.pools[self.idx].as_ref().map(|p| p.capacity())
-    }
-
-    /// Drop all pools and reset clear flags.
-    pub fn clear(&mut self) {
-        self.pools = std::array::from_fn(|_| None);
-        self.clear_flags = [false; N];
+    /// Forward [`Buffer::hint_unused_above`] on the backing allocation.
+    pub fn hint_unused_above(&mut self, offset: u64) {
+        self.backing.hint_unused_above(offset);
     }
 }
 
@@ -864,80 +927,5 @@ mod tests {
             size < 400 + 800 + 50 * 52 + 75 * 52 + 4 * 8192,
             "padded_size should be tighter than naive + magic constant"
         );
-    }
-
-    // ── BufferPoolRing state-machine tests (no GPU required) ──────────────────
-
-    /// New ring has no current pool and clear flag is false.
-    #[test]
-    fn ring_starts_empty() {
-        let mut ring = BufferPoolRing::<2>::new();
-        assert!(ring.current().is_none());
-        assert!(ring.current_mut().is_none());
-        assert!(!ring.take_clear_flag());
-    }
-
-    /// `advance()` cycles through the N slots and wraps back to 0.
-    #[test]
-    fn ring_advance_wraps() {
-        // Use a 3-slot ring to test non-power-of-two wrap as well.
-        let mut ring = BufferPoolRing::<3>::new();
-        // idx starts at 0; each advance increments mod N.
-        // We can observe this indirectly via `current()` being None vs Some
-        // after `prepare` fills only one slot — but we don't have a device
-        // here, so we just track that take_clear_flag never fires without
-        // prepare and that the ring doesn't panic on many advances.
-        for _ in 0..9 {
-            ring.advance(); // 1,2,0,1,2,0,1,2,0
-        }
-        // After 9 advances on a 3-ring we're back at slot 0. Still no pool.
-        assert!(ring.current().is_none());
-        assert!(!ring.take_clear_flag());
-    }
-
-    /// `take_clear_flag` returns false on a fresh ring even after many advances.
-    #[test]
-    fn ring_clear_flag_false_without_prepare() {
-        let mut ring = BufferPoolRing::<2>::new();
-        ring.advance();
-        ring.advance();
-        assert!(!ring.take_clear_flag());
-        assert!(!ring.take_clear_flag()); // idempotent: still false
-    }
-
-    /// `take_clear_flag` is consumed: second call in the same slot returns false.
-    /// (Without a real device we verify by directly manipulating the flag via
-    /// the only public interface: we'd need `prepare` for the first call to be
-    /// true. This test is therefore duplicated in integration tests; here we
-    /// only test the false-after-false invariant.)
-    #[test]
-    fn ring_take_clear_flag_is_idempotent_false() {
-        let mut ring = BufferPoolRing::<2>::new();
-        assert!(!ring.take_clear_flag());
-        assert!(!ring.take_clear_flag());
-    }
-
-    /// `clear()` resets to all-empty, all-false state.
-    #[test]
-    fn ring_clear_resets_state() {
-        // We can't call prepare without a device, but we can verify that
-        // after clear() the ring looks like a freshly constructed one.
-        let mut ring = BufferPoolRing::<2>::new();
-        ring.advance();
-        ring.clear();
-        assert!(ring.current().is_none());
-        assert!(!ring.take_clear_flag());
-    }
-
-    /// Default and `new()` produce equivalent empty rings.
-    #[test]
-    fn ring_default_equivalent_to_new() {
-        let a = BufferPoolRing::<2>::new();
-        let b = BufferPoolRing::<2>::default();
-        // Both have no current pool and no clear flag.
-        let mut a = a;
-        let mut b = b;
-        assert_eq!(a.current().is_none(), b.current().is_none());
-        assert_eq!(a.take_clear_flag(), b.take_clear_flag());
     }
 }

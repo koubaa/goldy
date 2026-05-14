@@ -219,6 +219,7 @@ pub(super) fn place_buffer_in_transient_heap(
             device_handle: device,
             resource,
             size,
+            allocation_size: size,
             bindless_offset: Some(uav_offset),
             bindless_srv_offset: Some(srv_offset),
             is_storage: true,
@@ -229,6 +230,11 @@ pub(super) fn place_buffer_in_transient_heap(
             coherent_readback_mapped: None,
             flags: crate::types::BufferFlags::empty(),
             transient_placed: true,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
         },
     );
     Ok(handle)

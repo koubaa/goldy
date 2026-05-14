@@ -393,6 +393,23 @@ pub trait GpuBackend: Send + Sync {
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<BufferHandle>;
+
+    /// Create a buffer with a reserved byte capacity (`capacity >= initial_size`).
+    /// Returns `(handle, actual_allocated_bytes)`. Default ignores `capacity` beyond `initial_size`.
+    fn create_buffer_with_capacity(
+        &mut self,
+        device: DeviceHandle,
+        initial_size: u64,
+        capacity: u64,
+        access: DataAccess,
+        element_stride: Option<u32>,
+        flags: BufferFlags,
+    ) -> Result<(BufferHandle, u64)> {
+        let _ = capacity;
+        let handle = self.create_buffer(device, initial_size, access, element_stride, flags)?;
+        Ok((handle, initial_size))
+    }
+
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
     /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
@@ -416,6 +433,25 @@ pub trait GpuBackend: Send + Sync {
         size: u64,
     ) -> Result<()>;
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
+
+    /// Bytes reserved for this buffer (>= [`Self::buffer_size`]). Used for oversize reservations.
+    fn buffer_capacity(&self, buffer: BufferHandle) -> u64 {
+        self.buffer_size(buffer)
+    }
+
+    /// Update logical size without changing physical storage (must be `<= buffer_capacity()`).
+    fn set_buffer_logical_size(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_logical_size: u64,
+    ) -> Result<()>;
+
+    /// Hint that bytes at and above `offset` may be discarded by the system (see [`crate::Buffer::hint_unused_above`]).
+    fn hint_buffer_unused_above(&mut self, buffer: BufferHandle, offset: u64) {
+        let _ = (buffer, offset);
+    }
+
     /// Get the buffer's index in the global bindless descriptor set.
     /// Returns None if the buffer is not registered.
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32>;
@@ -440,6 +476,15 @@ pub trait GpuBackend: Send + Sync {
         size: u64,
         element_stride: Option<u32>,
     ) -> Result<BufferHandle>;
+
+    /// Resize buffer storage in place. Logical handle and bindless offsets stay stable.
+    fn resize_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_size: u64,
+        preserve_contents: bool,
+    ) -> Result<()>;
 
     // Shader management
     fn create_shader_with_paths(

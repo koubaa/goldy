@@ -297,7 +297,18 @@ pub(crate) struct LogicalDevice {
     pub queue: vk::Queue,
     #[allow(dead_code)]
     pub queue_family: u32,
+    /// Queue used for [`vk::Device::queue_bind_sparse`] (often same as graphics).
+    pub sparse_binding_queue: vk::Queue,
     pub command_pool: vk::CommandPool,
+
+    /// Host-visible oversize pools use dense allocations; device-local oversize may use sparse binding.
+    pub supports_sparse_buffer: bool,
+    /// Sparse **buffer** binding alignment from [`vk::MemoryRequirements::alignment`] (typically 64 KiB).
+    pub sparse_buffer_block_size: u64,
+    #[allow(dead_code)] // captured at device init for diagnostics / future use
+    pub sparse_memory_type_index: u32,
+    /// Sub-allocated DEVICE_LOCAL pages for [`super::sparse::SparsePagePool`].
+    pub sparse_page_pool: Option<super::sparse::SparsePagePool>,
 
     // Vulkan 1.4 core via KHR extension loaders (ash 0.38 doesn't have core 1.4 wrappers yet)
     pub map_memory2: ash::khr::map_memory2::Device,
@@ -349,11 +360,15 @@ impl LogicalDevice {
 }
 
 /// GPU buffer state.
+#[derive(Clone)]
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
+    /// Logical byte size (descriptor range, bounds checks).
     pub size: u64,
+    /// Bytes reserved in the VkBuffer (`>= size` when oversize allocations are used).
+    pub allocation_size: u64,
     /// Index in the global bindless descriptor set (if bindless enabled)
     pub bindless_index: Option<u32>,
     /// Whether this is a storage buffer (vs uniform buffer)
@@ -377,6 +392,14 @@ pub(crate) struct BufferState {
     pub flags: crate::types::BufferFlags,
     /// Sub-allocated from [`crate::backend::GpuBackend::create_transient_heap`]; `memory` is shared.
     pub transient_heap_suballoc: bool,
+    /// Byte offset in parent for buffer views; [`None`] for root buffers.
+    pub view_byte_offset: Option<u64>,
+    /// `true` for device-local storage using sparse binding (`VkBuffer` sparse flags; no single `memory`).
+    pub is_sparse: bool,
+    /// Alignment from [`vk::MemoryRequirements::alignment`] when [`Self::is_sparse`]; `0` otherwise.
+    pub sparse_block_size: u64,
+    /// Per sparse page: physical backing from the page pool (`None` = unbound tile).
+    pub sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>>,
 }
 
 /// Shader module state with cached compiled stages.
@@ -576,6 +599,14 @@ pub(crate) struct PendingBuffer {
     pub offset: u64,
 }
 
+/// Deferred sparse teardown (after timeline barrier): unbind + pool recycle + buffer destroy.
+#[allow(dead_code)]
+pub(crate) struct SparseBufferTeardown {
+    pub allocation_size: u64,
+    pub block_size: u64,
+    pub binds: Vec<(u64, vk::DeviceMemory, vk::DeviceSize)>,
+}
+
 /// Resource pending deferred deletion.
 /// Resources are kept alive until the device timeline reaches the queued barrier
 /// ([`DeletionQueue::queue`]) — see [`crate::timeline`].
@@ -587,11 +618,30 @@ pub(crate) enum PendingDeletion {
         memory: vk::DeviceMemory,
         staging_buffer: Option<vk::Buffer>,
         staging_memory: Option<vk::DeviceMemory>,
+        /// When set, unbind sparse tiles and recycle before destroying `buffer`.
+        sparse_teardown: Option<SparseBufferTeardown>,
     },
     /// A buffer view whose Vk resources belong to the parent buffer; only the
     /// bindless descriptor index needs deregistration.
     BufferView {
         buffer_handle: BufferHandle,
+    },
+    /// Previous Vk allocation after [`super::buffer::resize`]; the logical
+    /// [`BufferHandle`] stays registered — destroy GPU objects only.
+    ReplacedBufferGpu {
+        buffer: vk::Buffer,
+        memory: vk::DeviceMemory,
+        staging_buffer: Option<vk::Buffer>,
+        staging_memory: Option<vk::DeviceMemory>,
+    },
+    /// Previous sparse buffer after resize / migration: unbind pages, recycle pool memory, destroy.
+    ReplacedSparseBufferGpu {
+        buffer: vk::Buffer,
+        allocation_size: u64,
+        block_size: u64,
+        binds: Vec<(u64, vk::DeviceMemory, vk::DeviceSize)>,
+        staging_buffer: Option<vk::Buffer>,
+        staging_memory: Option<vk::DeviceMemory>,
     },
     Texture {
         texture_handle: TextureHandle,
@@ -624,81 +674,160 @@ impl DeletionQueue {
         self.inner.push(barrier, resource);
     }
 
-    /// Drop resources whose barrier has been reached (`completed` is latest GPU timeline counter).
-    pub fn process_up_to(
-        &mut self,
-        device: &ash::Device,
-        registry: &mut ResourceRegistry,
-        completed: TimelineValue,
-    ) {
-        for resource in self.inner.drain_up_to(completed) {
-            Self::destroy_one(device, registry, resource);
-        }
+    pub fn drain_up_to(&mut self, completed: TimelineValue) -> Vec<PendingDeletion> {
+        self.inner.drain_up_to(completed)
     }
 
-    /// Flush all pending deletions immediately (used when destroying the device).
-    pub fn flush_all(&mut self, device: &ash::Device, registry: &mut ResourceRegistry) {
-        for resource in self.inner.flush_all() {
-            Self::destroy_one(device, registry, resource);
-        }
-    }
-
-    fn destroy_one(
-        device: &ash::Device,
-        registry: &mut ResourceRegistry,
-        resource: PendingDeletion,
-    ) {
-        unsafe {
-            match resource {
-                PendingDeletion::Buffer {
-                    buffer_handle,
-                    buffer,
-                    memory,
-                    staging_buffer,
-                    staging_memory,
-                } => {
-                    registry.unregister_buffer(buffer_handle);
-                    device.destroy_buffer(buffer, None);
-                    device.free_memory(memory, None);
-                    if let Some(buf) = staging_buffer {
-                        device.destroy_buffer(buf, None);
-                    }
-                    if let Some(mem) = staging_memory {
-                        device.free_memory(mem, None);
-                    }
-                }
-                PendingDeletion::BufferView { buffer_handle } => {
-                    registry.unregister_buffer(buffer_handle);
-                }
-                PendingDeletion::Texture {
-                    texture_handle,
-                    image,
-                    view,
-                    memory,
-                    staging_buffer,
-                    staging_memory,
-                } => {
-                    registry.unregister_texture(texture_handle);
-                    device.destroy_image_view(view, None);
-                    device.destroy_image(image, None);
-                    device.free_memory(memory, None);
-                    if let Some(buf) = staging_buffer {
-                        device.destroy_buffer(buf, None);
-                    }
-                    if let Some(mem) = staging_memory {
-                        device.free_memory(mem, None);
-                    }
-                }
-                PendingDeletion::Sampler { sampler } => {
-                    device.destroy_sampler(sampler, None);
-                }
-            }
-        }
+    /// Drain all pending deletions (device teardown).
+    pub fn flush_all_drain(&mut self) -> Vec<PendingDeletion> {
+        self.inner.flush_all().collect()
     }
 
     /// Number of resources currently pending deletion.
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+}
+
+/// Deferred-delete one entry ([`SparseBufferTeardown`] needs [`LogicalDevice`] for the page pool).
+pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: PendingDeletion) {
+    let device = &ld.device;
+    let registry = &mut ld.resource_registry;
+    let bind_queue = ld.sparse_binding_queue;
+
+    unsafe {
+        match resource {
+            PendingDeletion::Buffer {
+                buffer_handle,
+                buffer,
+                memory,
+                staging_buffer,
+                staging_memory,
+                sparse_teardown,
+            } => {
+                registry.unregister_buffer(buffer_handle);
+                if let Some(td) = sparse_teardown {
+                    if !td.binds.is_empty() {
+                        let mut sparse_binds = Vec::with_capacity(td.binds.len());
+                        for (res_off, _mem, _mem_off) in &td.binds {
+                            sparse_binds.push(
+                                vk::SparseMemoryBind::default()
+                                    .resource_offset(*res_off)
+                                    .size(td.block_size)
+                                    .memory(vk::DeviceMemory::default())
+                                    .memory_offset(0)
+                                    .flags(vk::SparseMemoryBindFlags::empty()),
+                            );
+                        }
+                        if let Err(e) = super::sparse::queue_bind_sparse_sync(
+                            device,
+                            bind_queue,
+                            buffer,
+                            &sparse_binds,
+                        ) {
+                            tracing::warn!(?e, "sparse unbind on buffer destroy failed");
+                        }
+                        for (_res_off, mem, mem_off) in &td.binds {
+                            if let Some(pool) = ld.sparse_page_pool.as_mut() {
+                                pool.free_page(*mem, *mem_off);
+                            }
+                        }
+                    }
+                    device.destroy_buffer(buffer, None);
+                } else {
+                    device.destroy_buffer(buffer, None);
+                    device.free_memory(memory, None);
+                }
+                if let Some(buf) = staging_buffer {
+                    device.destroy_buffer(buf, None);
+                }
+                if let Some(mem) = staging_memory {
+                    device.free_memory(mem, None);
+                }
+            }
+            PendingDeletion::BufferView { buffer_handle } => {
+                registry.unregister_buffer(buffer_handle);
+            }
+            PendingDeletion::ReplacedBufferGpu {
+                buffer,
+                memory,
+                staging_buffer,
+                staging_memory,
+            } => {
+                device.destroy_buffer(buffer, None);
+                device.free_memory(memory, None);
+                if let Some(buf) = staging_buffer {
+                    device.destroy_buffer(buf, None);
+                }
+                if let Some(mem) = staging_memory {
+                    device.free_memory(mem, None);
+                }
+            }
+            PendingDeletion::ReplacedSparseBufferGpu {
+                buffer,
+                allocation_size: _,
+                block_size,
+                binds,
+                staging_buffer,
+                staging_memory,
+            } => {
+                if !binds.is_empty() {
+                    let mut sparse_binds = Vec::with_capacity(binds.len());
+                    for (res_off, _mem, _mem_off) in &binds {
+                        sparse_binds.push(
+                            vk::SparseMemoryBind::default()
+                                .resource_offset(*res_off)
+                                .size(block_size)
+                                .memory(vk::DeviceMemory::default())
+                                .memory_offset(0)
+                                .flags(vk::SparseMemoryBindFlags::empty()),
+                        );
+                    }
+                    if let Err(e) = super::sparse::queue_bind_sparse_sync(
+                        device,
+                        bind_queue,
+                        buffer,
+                        &sparse_binds,
+                    ) {
+                        tracing::warn!(?e, "sparse unbind on replaced buffer failed");
+                    }
+                    for (_res_off, mem, mem_off) in &binds {
+                        if let Some(pool) = ld.sparse_page_pool.as_mut() {
+                            pool.free_page(*mem, *mem_off);
+                        }
+                    }
+                }
+                device.destroy_buffer(buffer, None);
+                if let Some(buf) = staging_buffer {
+                    device.destroy_buffer(buf, None);
+                }
+                if let Some(mem) = staging_memory {
+                    device.free_memory(mem, None);
+                }
+            }
+            PendingDeletion::Texture {
+                texture_handle,
+                image,
+                view,
+                memory,
+                staging_buffer,
+                staging_memory,
+            } => {
+                registry.unregister_texture(texture_handle);
+                device.destroy_image_view(view, None);
+                device.destroy_image(image, None);
+                device.free_memory(memory, None);
+                if let Some(buf) = staging_buffer {
+                    device.destroy_buffer(buf, None);
+                }
+                if let Some(mem) = staging_memory {
+                    device.free_memory(mem, None);
+                }
+            }
+            PendingDeletion::Sampler { sampler } => {
+                device.destroy_sampler(sampler, None);
+            }
+        }
     }
 }
 
@@ -710,8 +839,10 @@ impl LogicalDevice {
                 .get_semaphore_counter_value(self.timeline_semaphore)
                 .unwrap_or(0)
         };
-        self.deletion_queue
-            .process_up_to(&self.device, &mut self.resource_registry, completed);
+        let drained = self.deletion_queue.drain_up_to(completed);
+        for r in drained {
+            destroy_pending_deletion(self, r);
+        }
     }
 }
 

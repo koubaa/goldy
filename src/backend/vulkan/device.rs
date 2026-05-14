@@ -67,6 +67,25 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .map(|(idx, _)| idx as u32)
         .context("No graphics queue family found")?;
 
+    let pdev_features = unsafe {
+        state
+            .instance
+            .get_physical_device_features(physical_device_handle)
+    };
+    let supports_sparse =
+        pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0;
+
+    let sparse_queue_family_index = if supports_sparse {
+        queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::SPARSE_BINDING))
+            .map(|(idx, _)| idx as u32)
+            .context("sparse features enabled but no queue family reports SPARSE_BINDING")?
+    } else {
+        queue_family_index
+    };
+
     // Verify this physical device supports Vulkan 1.4
     let dev_api = physical_device.properties.api_version;
     let dev_major = vk::api_version_major(dev_api);
@@ -115,30 +134,40 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let mut pipeline_robustness_features =
         vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default().pipeline_robustness(true);
 
+    let core_features = vk::PhysicalDeviceFeatures {
+        vertex_pipeline_stores_and_atomics: vk::TRUE,
+        fragment_stores_and_atomics: vk::TRUE,
+        shader_int16: vk::TRUE,
+        shader_int64: vk::TRUE,
+        sparse_binding: if supports_sparse { vk::TRUE } else { vk::FALSE },
+        sparse_residency_buffer: if supports_sparse { vk::TRUE } else { vk::FALSE },
+        ..Default::default()
+    };
+
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
-        .features(
-            vk::PhysicalDeviceFeatures::default()
-                .vertex_pipeline_stores_and_atomics(true)
-                // Required so fragment shaders referencing the bindless storage
-                // heap (g_GoldyStorageHeap) don't need NonWritable decoration.
-                .fragment_stores_and_atomics(true)
-                // Required for SPIR-V Int16 / Int64 capabilities used by ekrano shaders.
-                .shader_int16(true)
-                .shader_int64(true),
-        )
+        .features(core_features)
         .push_next(&mut vulkan_11_features)
         .push_next(&mut vulkan_13_features)
         .push_next(&mut vulkan_12_features)
         .push_next(&mut pipeline_robustness_features);
 
     // Create logical device with swapchain extension
-    let queue_priorities = [1.0f32];
-    let queue_create_info = vk::DeviceQueueCreateInfo::default()
-        .queue_family_index(queue_family_index)
-        .queue_priorities(&queue_priorities);
+    let mut queue_family_set = std::collections::BTreeSet::new();
+    queue_family_set.insert(queue_family_index);
+    if supports_sparse {
+        queue_family_set.insert(sparse_queue_family_index);
+    }
 
+    let queue_priorities = [1.0f32];
+    let queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = queue_family_set
+        .iter()
+        .map(|&family| {
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(family)
+                .queue_priorities(&queue_priorities)
+        })
+        .collect();
     // Extensions: swapchain for presentation, plus 1.4-promoted extensions whose KHR
-    // aliases ash 0.38 needs (it predates core 1.4 headers, so it loads KHR names).
     let device_extensions = [
         khr::swapchain::NAME.as_ptr(),
         khr::map_memory2::NAME.as_ptr(),
@@ -146,7 +175,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     ];
 
     let device_create_info = vk::DeviceCreateInfo::default()
-        .queue_create_infos(std::slice::from_ref(&queue_create_info))
+        .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
         .push_next(&mut features2);
 
@@ -158,6 +187,31 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     .context("Failed to create logical device")?;
 
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+    let sparse_binding_queue = if supports_sparse {
+        unsafe { device.get_device_queue(sparse_queue_family_index, 0) }
+    } else {
+        vk::Queue::default()
+    };
+
+    let (sparse_buffer_block_size, sparse_memory_type_index, sparse_page_pool) = if supports_sparse
+    {
+        let bs = super::sparse::query_sparse_buffer_block_size(&device)
+            .context("query_sparse_buffer_block_size")?;
+        let (mt_idx, _) = super::sparse::sparse_storage_memory_type(
+            &state.instance,
+            physical_device_handle,
+            &device,
+        )
+        .context("sparse_storage_memory_type")?;
+        (
+            bs,
+            mt_idx,
+            Some(super::sparse::SparsePagePool::new(bs, mt_idx)),
+        )
+    } else {
+        (0u64, 0u32, None)
+    };
 
     // Load Vulkan 1.4 core APIs via KHR extension loaders (ash 0.38 predates 1.4 headers).
     // On a 1.4 device these functions are core — the KHR entry points are aliases.
@@ -343,7 +397,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             adapter_id,
             queue,
             queue_family: queue_family_index,
+            sparse_binding_queue,
             command_pool,
+            supports_sparse_buffer: supports_sparse,
+            sparse_buffer_block_size,
+            sparse_memory_type_index,
+            sparse_page_pool,
             map_memory2: map_memory2_loader,
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,
@@ -438,10 +497,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Flush any pending deferred deletions
-            logical_device.deletion_queue.flush_all(
-                &logical_device.device,
-                &mut logical_device.resource_registry,
-            );
+            let pending = logical_device.deletion_queue.flush_all_drain();
+            for r in pending {
+                types::destroy_pending_deletion(&mut logical_device, r);
+            }
 
             if let Some(mut belt) = state.staging_belts.remove(&device_handle) {
                 belt.destroy_all(&logical_device);

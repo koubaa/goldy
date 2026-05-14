@@ -1,6 +1,7 @@
 //! Buffer management logic.
 
 use super::barriers;
+use super::tiles;
 use super::types::{BufferState, Dx12State};
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::DataAccess;
@@ -9,16 +10,644 @@ use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
+use super::types::LogicalDevice;
+
+/// Minimum committed width for a uniform (upload) buffer so a CBV can be created.
+///
+/// [`D3D12_CONSTANT_BUFFER_VIEW_DESC::SizeInBytes`] must be a multiple of 256
+/// ([`D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT`]). We align the logical
+/// constant data size to that; the resource must be at least that wide.
+#[inline]
+fn uniform_buffer_allocation_width(logical_size: u64, requested_width: u64) -> u64 {
+    debug_assert!(logical_size <= requested_width);
+    let cbv_range = (logical_size + 255) & !255;
+    requested_width.max(cbv_range)
+}
+
+/// Allocates main buffer resource and optional CPU_READABLE readback pairing (same as [`create`]).
+fn alloc_committed_buffer_pair(
+    logical_device: &LogicalDevice,
+    size: u64,
+    is_storage: bool,
+    cpu_readable: bool,
+) -> Result<(ID3D12Resource, Option<ID3D12Resource>, Option<usize>)> {
+    if cpu_readable && !is_storage {
+        anyhow::bail!(
+            "BufferFlags::CPU_READABLE is only valid for storage (UAV) buffers on resize allocation"
+        );
+    }
+
+    let (heap_type, resource_flags) = if is_storage {
+        (
+            D3D12_HEAP_TYPE_DEFAULT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        )
+    } else {
+        (D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE)
+    };
+
+    let heap_properties = D3D12_HEAP_PROPERTIES {
+        Type: heap_type,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+
+    let resource_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: resource_flags,
+    };
+
+    let initial_state = if heap_type == D3D12_HEAP_TYPE_UPLOAD {
+        D3D12_RESOURCE_STATE_GENERIC_READ
+    } else {
+        D3D12_RESOURCE_STATE_COMMON
+    };
+
+    let mut resource: Option<ID3D12Resource> = None;
+    unsafe {
+        logical_device.device.CreateCommittedResource(
+            &heap_properties,
+            D3D12_HEAP_FLAG_NONE,
+            &resource_desc,
+            initial_state,
+            None,
+            &mut resource,
+        )
+    }
+    .context("resize: CreateCommittedResource main buffer")?;
+    let resource = resource.context("resize: main buffer null")?;
+
+    let (coherent_readback, coherent_readback_mapped) = if cpu_readable && is_storage {
+        let readback_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_READBACK,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+        let readback_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Alignment: 0,
+            Width: size,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_UNKNOWN,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_NONE,
+        };
+        let mut rb: Option<ID3D12Resource> = None;
+        unsafe {
+            logical_device.device.CreateCommittedResource(
+                &readback_heap,
+                D3D12_HEAP_FLAG_NONE,
+                &readback_desc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                None,
+                &mut rb,
+            )
+        }
+        .context("resize: CreateCommittedResource readback")?;
+        let rb = rb.context("resize: readback null")?;
+        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { rb.Map(0, Some(&no_read), Some(&mut mapped)) }.context("resize: map readback")?;
+        let p = mapped as *mut u8;
+        if p.is_null() {
+            anyhow::bail!("resize: Map readback returned null");
+        }
+        (Some(rb), Some(p as usize))
+    } else {
+        (None, None)
+    };
+
+    Ok((resource, coherent_readback, coherent_readback_mapped))
+}
+
+fn rewrite_root_buffer_descriptors(
+    logical_device: &LogicalDevice,
+    new_resource: &ID3D12Resource,
+    new_size: u64,
+    old: &BufferState,
+) -> Result<()> {
+    if old.is_storage {
+        let stride = old.element_stride.unwrap_or(4);
+        let num_elements = (new_size as u32) / stride;
+        if let Some(uav_off) = old.bindless_offset {
+            let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                Format: DXGI_FORMAT_UNKNOWN,
+                ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_UAV {
+                        FirstElement: 0,
+                        NumElements: num_elements,
+                        StructureByteStride: stride,
+                        CounterOffsetInBytes: 0,
+                        Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+                    },
+                },
+            };
+            let uav_cpu_handle = unsafe {
+                let mut cpu_handle = logical_device
+                    .cbv_srv_uav_heap
+                    .GetCPUDescriptorHandleForHeapStart();
+                cpu_handle.ptr += (uav_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                cpu_handle
+            };
+            unsafe {
+                logical_device.device.CreateUnorderedAccessView(
+                    new_resource,
+                    None,
+                    Some(&uav_desc),
+                    uav_cpu_handle,
+                );
+            }
+        }
+        if let Some(srv_off) = old.bindless_srv_offset {
+            let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: DXGI_FORMAT_UNKNOWN,
+                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_SRV {
+                        FirstElement: 0,
+                        NumElements: num_elements,
+                        StructureByteStride: stride,
+                        Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                    },
+                },
+            };
+            let srv_cpu_handle = unsafe {
+                let mut cpu_handle = logical_device
+                    .cbv_srv_uav_heap
+                    .GetCPUDescriptorHandleForHeapStart();
+                cpu_handle.ptr += (srv_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                cpu_handle
+            };
+            unsafe {
+                logical_device.device.CreateShaderResourceView(
+                    new_resource,
+                    Some(&srv_desc),
+                    srv_cpu_handle,
+                );
+            }
+        }
+    } else if let Some(cbv_off) = old.bindless_offset {
+        let aligned_size = (new_size + 255) & !255;
+        let cbv_desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
+            BufferLocation: unsafe { new_resource.GetGPUVirtualAddress() },
+            SizeInBytes: aligned_size as u32,
+        };
+        let cbv_handle = unsafe {
+            let mut cpu_handle = logical_device
+                .cbv_srv_uav_heap
+                .GetCPUDescriptorHandleForHeapStart();
+            cpu_handle.ptr += (cbv_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
+        };
+        unsafe {
+            logical_device
+                .device
+                .CreateConstantBufferView(Some(&cbv_desc), cbv_handle);
+        }
+    }
+    Ok(())
+}
+
+fn patch_buffer_views_after_parent_resize(
+    state: &mut Dx12State,
+    parent_handle: BufferHandle,
+) -> Result<()> {
+    let new_resource = state
+        .buffers
+        .get(&parent_handle)
+        .context("patch_buffer_views: parent missing")?
+        .resource
+        .clone();
+
+    let view_handles: Vec<BufferHandle> = state
+        .buffers
+        .iter()
+        .filter(|(_, b)| b.is_view && b.parent_for_view == Some(parent_handle))
+        .map(|(&h, _)| h)
+        .collect();
+
+    for vh in view_handles {
+        let (device_handle, stride, byte_off, view_size, uav_off, srv_off) = {
+            let v = state.buffers.get(&vh).context("patch_buffer_views: view")?;
+            (
+                v.device_handle,
+                v.element_stride.unwrap_or(4),
+                v.view_byte_offset
+                    .context("patch_buffer_views: view offset")?,
+                v.size,
+                v.bindless_offset,
+                v.bindless_srv_offset,
+            )
+        };
+        if stride == 0 {
+            anyhow::bail!("patch_buffer_views: stride 0");
+        }
+        if !byte_off.is_multiple_of(stride as u64) {
+            anyhow::bail!("patch_buffer_views: offset not stride-aligned");
+        }
+        let first_element = (byte_off / stride as u64) as u32;
+        let num_elements = (view_size as u32) / stride;
+
+        if let (Some(uav_off), Some(srv_off)) = (uav_off, srv_off) {
+            if num_elements > 0 {
+                let logical_device = state
+                    .devices
+                    .get_mut(&device_handle)
+                    .context("patch_buffer_views: device")?;
+
+                let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                    Format: DXGI_FORMAT_UNKNOWN,
+                    ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                    Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                        Buffer: D3D12_BUFFER_UAV {
+                            FirstElement: first_element as u64,
+                            NumElements: num_elements,
+                            StructureByteStride: stride,
+                            CounterOffsetInBytes: 0,
+                            Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+                        },
+                    },
+                };
+                let uav_cpu_handle = unsafe {
+                    let mut h = logical_device
+                        .cbv_srv_uav_heap
+                        .GetCPUDescriptorHandleForHeapStart();
+                    h.ptr += (uav_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                    h
+                };
+                unsafe {
+                    logical_device.device.CreateUnorderedAccessView(
+                        &new_resource,
+                        None,
+                        Some(&uav_desc),
+                        uav_cpu_handle,
+                    );
+                }
+
+                let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT_UNKNOWN,
+                    ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Buffer: D3D12_BUFFER_SRV {
+                            FirstElement: first_element as u64,
+                            NumElements: num_elements,
+                            StructureByteStride: stride,
+                            Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                        },
+                    },
+                };
+                let srv_cpu_handle = unsafe {
+                    let mut h = logical_device
+                        .cbv_srv_uav_heap
+                        .GetCPUDescriptorHandleForHeapStart();
+                    h.ptr += (srv_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                    h
+                };
+                unsafe {
+                    logical_device.device.CreateShaderResourceView(
+                        &new_resource,
+                        Some(&srv_desc),
+                        srv_cpu_handle,
+                    );
+                }
+            }
+        }
+
+        state
+            .buffers
+            .get_mut(&vh)
+            .context("patch_buffer_views: view mut")?
+            .resource = new_resource.clone();
+    }
+    Ok(())
+}
+
+/// Resize buffer storage in place; bindless heap indices stay stable.
+pub(super) fn resize(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    new_size: u64,
+    preserve_contents: bool,
+) -> Result<()> {
+    let old = state
+        .buffers
+        .get(&buffer_handle)
+        .cloned()
+        .context("resize_buffer: invalid buffer")?;
+
+    if old.device_handle != device_handle {
+        anyhow::bail!("resize_buffer: buffer belongs to a different device");
+    }
+    if old.is_view {
+        anyhow::bail!("resize_buffer: cannot resize a buffer view");
+    }
+    if old.transient_placed {
+        anyhow::bail!("resize_buffer: cannot resize a transient placed buffer");
+    }
+    if new_size == old.size {
+        return Ok(());
+    }
+    if old.is_reserved && new_size <= old.allocation_size {
+        anyhow::bail!(
+            "reserved buffer: growth within virtual capacity must use set_buffer_logical_size, not resize_buffer"
+        );
+    }
+
+    let cpu_readable = old.flags.contains(BufferFlags::CPU_READABLE);
+    if cpu_readable && !old.is_storage {
+        anyhow::bail!("resize_buffer: invalid CPU_READABLE uniform buffer");
+    }
+
+    let stride = old.element_stride.unwrap_or(4);
+    if old.is_storage && stride > 0 && new_size > 0 && !(new_size as u32).is_multiple_of(stride) {
+        anyhow::bail!("resize_buffer: new size {new_size} not divisible by stride {stride}");
+    }
+
+    let logical_device_ro = state
+        .devices
+        .get(&device_handle)
+        .context("resize_buffer: invalid device")?;
+
+    let mut deletion_fence_marker = unsafe { logical_device_ro.fence.GetCompletedValue() };
+
+    if old.coherent_readback_mapped.is_some() {
+        if let Some(ref rb) = old.coherent_readback {
+            let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+            unsafe { rb.Unmap(0, Some(&no_write)) };
+        }
+    }
+
+    let new_alloc_width = if old.is_storage {
+        new_size
+    } else {
+        uniform_buffer_allocation_width(new_size, new_size)
+    };
+
+    let (new_resource, new_readback, new_readback_mapped) = alloc_committed_buffer_pair(
+        logical_device_ro,
+        new_alloc_width,
+        old.is_storage,
+        cpu_readable,
+    )?;
+
+    let old_resource = old.resource.clone();
+    let copy_len = if preserve_contents {
+        old.size.min(new_size)
+    } else {
+        0
+    };
+
+    let need_copy = old.is_storage && copy_len > 0;
+    let need_tail_clear = old.is_storage && preserve_contents && new_size > old.size;
+
+    if old.is_storage && (need_copy || need_tail_clear) {
+        let device = state
+            .devices
+            .get(&device_handle)
+            .context("resize_buffer: device")?;
+
+        let copy_allocator: ID3D12CommandAllocator = unsafe {
+            device
+                .device
+                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+        }
+        .context("resize_buffer: allocator")?;
+        let cmd: ID3D12GraphicsCommandList = unsafe {
+            device.device.CreateCommandList(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                &copy_allocator,
+                None,
+            )
+        }
+        .context("resize_buffer: command list")?;
+        let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
+
+        unsafe {
+            cmd.SetDescriptorHeaps(&[
+                Some(device.cbv_srv_uav_heap.clone()),
+                Some(device.sampler_heap.clone()),
+            ]);
+        }
+
+        if need_copy {
+            let mut b_src = [barriers::buffer_barrier_full(
+                &old_resource,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+            )];
+            let mut b_dst = [barriers::buffer_barrier_full(
+                &new_resource,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_COMMON,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+            )];
+            unsafe {
+                barriers::barrier_buffers(&cmd7, &b_src);
+                barriers::drop_buffer_barriers(&mut b_src);
+                barriers::barrier_buffers(&cmd7, &b_dst);
+                barriers::drop_buffer_barriers(&mut b_dst);
+                cmd.CopyBufferRegion(&new_resource, 0, &old_resource, 0, copy_len);
+            }
+        }
+
+        if need_tail_clear {
+            let tail_len = new_size - old.size;
+            let mut b_to_uav = [if need_copy {
+                barriers::buffer_barrier_full(
+                    &new_resource,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                )
+            } else {
+                barriers::buffer_barrier_full(
+                    &new_resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                )
+            }];
+            unsafe {
+                barriers::barrier_buffers(&cmd7, &b_to_uav);
+                barriers::drop_buffer_barriers(&mut b_to_uav);
+            }
+            let tmp_state = BufferState {
+                device_handle,
+                resource: new_resource.clone(),
+                size: new_size,
+                allocation_size: new_size,
+                bindless_offset: None,
+                bindless_srv_offset: None,
+                is_storage: true,
+                upload_buffer: None,
+                element_stride: old.element_stride,
+                is_view: false,
+                coherent_readback: None,
+                coherent_readback_mapped: None,
+                flags: old.flags,
+                transient_placed: false,
+                parent_for_view: None,
+                view_byte_offset: None,
+                is_reserved: false,
+                tile_byte_size: 0,
+                reserved_tiles: Vec::new(),
+            };
+            uav_clear(device, &tmp_state, &cmd, old.size, tail_len)?;
+        }
+
+        unsafe { cmd.Close() }.context("resize_buffer: Close")?;
+        let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
+        unsafe { device.command_queue.ExecuteCommandLists(&lists) };
+
+        let fence_value = device.fence_value + 1;
+        unsafe { device.command_queue.Signal(&device.fence, fence_value) }
+            .context("resize_buffer: Signal")?;
+        wait_for_fence(&device.fence, fence_value)?;
+        deletion_fence_marker = fence_value;
+
+        if let Some(dev) = state.devices.get_mut(&device_handle) {
+            dev.fence_value = fence_value + 1;
+        }
+    } else if !old.is_storage && preserve_contents && copy_len > 0 {
+        let mut src: *mut std::ffi::c_void = std::ptr::null_mut();
+        let read_all = D3D12_RANGE {
+            Begin: 0,
+            End: old.size as usize,
+        };
+        unsafe { old_resource.Map(0, Some(&read_all), Some(&mut src)) }
+            .context("resize_buffer: map old uniform")?;
+        let mut dst: *mut std::ffi::c_void = std::ptr::null_mut();
+        let dst_range = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { new_resource.Map(0, Some(&dst_range), Some(&mut dst)) }
+            .context("resize_buffer: map new uniform")?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, copy_len as usize);
+            if new_size > old.size {
+                std::ptr::write_bytes(
+                    (dst as *mut u8).add(old.size as usize),
+                    0,
+                    (new_size - old.size) as usize,
+                );
+            }
+        }
+        let written = D3D12_RANGE {
+            Begin: 0,
+            End: new_size as usize,
+        };
+        unsafe { new_resource.Unmap(0, Some(&written)) };
+        let noop = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { old_resource.Unmap(0, Some(&noop)) };
+    }
+
+    let logical_device = state
+        .devices
+        .get_mut(&device_handle)
+        .context("resize_buffer: device for descriptors")?;
+    rewrite_root_buffer_descriptors(logical_device, &new_resource, new_size, &old)?;
+
+    state.buffers.insert(
+        buffer_handle,
+        BufferState {
+            device_handle,
+            resource: new_resource,
+            size: new_size,
+            allocation_size: new_alloc_width,
+            bindless_offset: old.bindless_offset,
+            bindless_srv_offset: old.bindless_srv_offset,
+            is_storage: old.is_storage,
+            upload_buffer: None,
+            element_stride: old.element_stride,
+            is_view: false,
+            coherent_readback: new_readback,
+            coherent_readback_mapped: new_readback_mapped,
+            flags: old.flags,
+            transient_placed: false,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
+        },
+    );
+
+    patch_buffer_views_after_parent_resize(state, buffer_handle)?;
+
+    let dev_mut = state
+        .devices
+        .get_mut(&device_handle)
+        .context("resize_buffer: queue deletion")?;
+    if old.is_reserved {
+        dev_mut.deletion_queue.queue(
+            deletion_fence_marker,
+            super::types::PendingDeletion::ReplacedReservedBufferGpu {
+                resource: old_resource,
+                tiles: old.reserved_tiles,
+                upload_buffer: old.upload_buffer,
+                coherent_readback: old.coherent_readback,
+            },
+        );
+    } else {
+        dev_mut.deletion_queue.queue(
+            deletion_fence_marker,
+            super::types::PendingDeletion::ReplacedBufferGpu {
+                resource: old_resource,
+                upload_buffer: old.upload_buffer,
+                coherent_readback: old.coherent_readback,
+            },
+        );
+    }
+
+    Ok(())
+}
+
 /// Create a buffer with the given size and access pattern.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
-    size: u64,
+    logical_size: u64,
+    allocation_size: u64,
     access: DataAccess,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
+    debug_assert!(logical_size <= allocation_size);
+    let allocation_size = if access == DataAccess::Broadcast {
+        uniform_buffer_allocation_width(logical_size, allocation_size)
+    } else {
+        allocation_size
+    };
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     // First pass: create the resource (immutable borrow of device)
     let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
@@ -56,7 +685,7 @@ pub(super) fn create(
         let resource_desc = D3D12_RESOURCE_DESC {
             Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
             Alignment: 0,
-            Width: size,
+            Width: allocation_size,
             Height: 1,
             DepthOrArraySize: 1,
             MipLevels: 1,
@@ -107,7 +736,7 @@ pub(super) fn create(
             let readback_desc = D3D12_RESOURCE_DESC {
                 Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
                 Alignment: 0,
-                Width: size,
+                Width: allocation_size,
                 Height: 1,
                 DepthOrArraySize: 1,
                 MipLevels: 1,
@@ -170,12 +799,12 @@ pub(super) fn create(
             // For storage buffers, create BOTH UAV (for compute write) and SRV (for graphics read)
             let stride = element_stride.unwrap_or(4);
             debug_assert!(
-                stride > 0 && (size as u32).is_multiple_of(stride),
-                "buffer size {size} not evenly divisible by element stride {stride} — \
+                stride > 0 && (logical_size as u32).is_multiple_of(stride),
+                "buffer logical size {logical_size} not evenly divisible by element stride {stride} — \
                  likely a stride mismatch (set BufferProxy::element_stride or \
                  update element_stride_for_buffer)"
             );
-            let num_elements = (size as u32) / stride;
+            let num_elements = (logical_size as u32) / stride;
 
             // Register UAV to get the next available descriptor offset
             let uav_offset = logical_device.resource_registry.register_buffer_uav(handle);
@@ -259,7 +888,13 @@ pub(super) fn create(
             let cbv_offset = logical_device.resource_registry.register_buffer_cbv(handle);
 
             // CBV size must be 256-byte aligned
-            let aligned_size = (size + 255) & !255;
+            let aligned_size = (logical_size + 255) & !255;
+
+            if aligned_size > allocation_size {
+                anyhow::bail!(
+                    "uniform buffer CBV size {aligned_size} exceeds allocation {allocation_size}"
+                );
+            }
 
             // Create CBV descriptor
             let cbv_desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
@@ -298,7 +933,8 @@ pub(super) fn create(
         BufferState {
             device_handle,
             resource,
-            size,
+            size: logical_size,
+            allocation_size,
             bindless_offset,
             bindless_srv_offset,
             is_storage,
@@ -309,10 +945,317 @@ pub(super) fn create(
             coherent_readback_mapped,
             flags,
             transient_placed: false,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
         },
     );
 
     Ok(handle)
+}
+
+pub(super) fn create_reserved_with_capacity(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    logical_size: u64,
+    capacity: u64,
+    element_stride: Option<u32>,
+    flags: BufferFlags,
+) -> Result<BufferHandle> {
+    let allocation_size = tiles::align_reserved_cap(capacity.max(logical_size));
+    let num_tiles = tiles::num_tiles_for_bytes(allocation_size) as usize;
+    let initial_tiles = tiles::tiles_needed_for_logical_size(logical_size) as usize;
+
+    let resource_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: allocation_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+    };
+
+    let (resource, reserved_tiles) = {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let pool = ld
+            .tile_heap_pool
+            .as_mut()
+            .context("internal: tile heap pool missing")?;
+        let queue = ld.command_queue.clone();
+
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe {
+            ld.device.CreateReservedResource(
+                &resource_desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                None,
+                &mut resource,
+            )
+        }
+        .context("CreateReservedResource")?;
+        let resource = resource.context("CreateReservedResource returned null")?;
+
+        let mut slots: Vec<Option<(ID3D12Heap, u64)>> = vec![None; num_tiles];
+        let mut mappings = Vec::with_capacity(initial_tiles);
+        for (i, slot) in slots.iter_mut().enumerate().take(initial_tiles) {
+            let (heap, off) = pool.alloc_tile(&ld.device)?;
+            mappings.push((i as u32, heap.clone(), off));
+            *slot = Some((heap, off));
+        }
+
+        tiles::map_tiles_batched(&queue, &resource, &mappings)?;
+        (resource, slots)
+    };
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+
+    let stride = element_stride.unwrap_or(4);
+    debug_assert!(
+        stride > 0 && (logical_size as u32).is_multiple_of(stride),
+        "buffer logical size {logical_size} not evenly divisible by element stride {stride}"
+    );
+    let num_elements = (logical_size as u32) / stride;
+
+    let (bindless_offset, bindless_srv_offset) = {
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let uav_offset = ld.resource_registry.register_buffer_uav(handle);
+        let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_UAV {
+                    FirstElement: 0,
+                    NumElements: num_elements,
+                    StructureByteStride: stride,
+                    CounterOffsetInBytes: 0,
+                    Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+                },
+            },
+        };
+        let uav_cpu_handle = unsafe {
+            let mut cpu_handle = ld.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+            cpu_handle.ptr += (uav_offset * ld.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
+        };
+        unsafe {
+            ld.device
+                .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
+        }
+
+        let srv_offset = ld.resource_registry.register_buffer_srv(handle);
+        let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 0,
+                    NumElements: num_elements,
+                    StructureByteStride: stride,
+                    Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                },
+            },
+        };
+        let srv_cpu_handle = unsafe {
+            let mut cpu_handle = ld.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+            cpu_handle.ptr += (srv_offset * ld.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
+        };
+        unsafe {
+            ld.device
+                .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
+        }
+        (Some(uav_offset), Some(srv_offset))
+    };
+
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            resource,
+            size: logical_size,
+            allocation_size,
+            bindless_offset,
+            bindless_srv_offset,
+            is_storage: true,
+            upload_buffer: None,
+            element_stride,
+            is_view: false,
+            coherent_readback: None,
+            coherent_readback_mapped: None,
+            flags,
+            transient_placed: false,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: true,
+            tile_byte_size: tiles::BUFFER_TILE_BYTES,
+            reserved_tiles,
+        },
+    );
+
+    Ok(handle)
+}
+
+pub(super) fn create_with_capacity(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    initial_size: u64,
+    requested_capacity: u64,
+    access: DataAccess,
+    element_stride: Option<u32>,
+    flags: BufferFlags,
+) -> Result<(BufferHandle, u64)> {
+    let cap = requested_capacity.max(initial_size);
+    let use_reserved = !super::env_disable_reserved_buffers()
+        && state.devices.get(&device_handle).is_some_and(|d| {
+            d.supports_reserved_buffers
+                && d.tile_heap_pool.is_some()
+                && cap > initial_size
+                && access == DataAccess::Scattered
+                && !flags.contains(BufferFlags::CPU_READABLE)
+        });
+    if use_reserved {
+        let h = create_reserved_with_capacity(
+            state,
+            device_handle,
+            initial_size,
+            cap,
+            element_stride,
+            flags,
+        )?;
+        return Ok((h, capacity(state, h)));
+    }
+    let h = create(
+        state,
+        device_handle,
+        initial_size,
+        cap,
+        access,
+        element_stride,
+        flags,
+    )?;
+    Ok((h, capacity(state, h)))
+}
+
+pub(super) fn capacity(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
+    state
+        .buffers
+        .get(&buffer_handle)
+        .map(|b| b.allocation_size)
+        .unwrap_or(0)
+}
+
+pub(super) fn set_logical_size(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    buffer_handle: BufferHandle,
+    new_logical_size: u64,
+) -> Result<()> {
+    let old = state
+        .buffers
+        .get(&buffer_handle)
+        .cloned()
+        .context("set_logical_size: invalid buffer")?;
+    if old.device_handle != device_handle {
+        anyhow::bail!("set_logical_size: buffer belongs to a different device");
+    }
+    if old.is_view {
+        anyhow::bail!("set_logical_size: cannot resize a buffer view");
+    }
+    if old.transient_placed {
+        anyhow::bail!("set_logical_size: cannot resize a transient placed buffer");
+    }
+    if new_logical_size > old.allocation_size {
+        anyhow::bail!("logical size exceeds allocation");
+    }
+    if new_logical_size == 0 {
+        anyhow::bail!("buffer size must be non-zero");
+    }
+    let stride = old.element_stride.unwrap_or(4);
+    if old.is_storage && stride > 0 && !(new_logical_size as u32).is_multiple_of(stride) {
+        anyhow::bail!(
+            "set_logical_size: new size {new_logical_size} not divisible by stride {stride}"
+        );
+    }
+    if !old.is_storage {
+        let aligned = (new_logical_size + 255) & !255;
+        if aligned > old.allocation_size {
+            anyhow::bail!("CBV aligned size exceeds allocation");
+        }
+    }
+
+    if old.is_reserved {
+        let old_pages = tiles::tiles_needed_for_logical_size(old.size);
+        let new_pages = tiles::tiles_needed_for_logical_size(new_logical_size);
+        {
+            let ld = state
+                .devices
+                .get_mut(&device_handle)
+                .context("set_logical_size: device")?;
+            let pool = ld
+                .tile_heap_pool
+                .as_mut()
+                .context("set_logical_size: tile heap pool")?;
+            let queue = ld.command_queue.clone();
+            let buf = state
+                .buffers
+                .get_mut(&buffer_handle)
+                .expect("set_logical_size: buffer");
+            if new_pages > old_pages {
+                let mut mappings = Vec::with_capacity((new_pages - old_pages) as usize);
+                for i in old_pages..new_pages {
+                    let (heap, off) = pool.alloc_tile(&ld.device)?;
+                    mappings.push((i, heap.clone(), off));
+                    buf.reserved_tiles[i as usize] = Some((heap, off));
+                }
+                tiles::map_tiles_batched(&queue, &buf.resource, &mappings)?;
+            } else if new_pages < old_pages {
+                let n = old_pages - new_pages;
+                tiles::unmap_tile_run(&queue, &buf.resource, new_pages, n)?;
+                for i in new_pages..old_pages {
+                    if let Some((heap, off)) = buf
+                        .reserved_tiles
+                        .get_mut(i as usize)
+                        .and_then(|s| s.take())
+                    {
+                        pool.free_tile(&heap, off);
+                    }
+                }
+            }
+        }
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("set_logical_size: device")?;
+        let buf = state.buffers.get(&buffer_handle).unwrap();
+        rewrite_root_buffer_descriptors(logical_device, &buf.resource, new_logical_size, buf)?;
+        state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+        return Ok(());
+    }
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("set_logical_size: device")?;
+    rewrite_root_buffer_descriptors(logical_device, &old.resource, new_logical_size, &old)?;
+    state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+    Ok(())
 }
 
 /// Destroy a buffer, queueing both the D3D12 resources and the bindless
@@ -348,8 +1291,65 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
                     resource: buffer.resource,
                     upload_buffer: buffer.upload_buffer,
                     coherent_readback: buffer.coherent_readback,
+                    reserved_tiles: if buffer.is_reserved {
+                        Some(buffer.reserved_tiles)
+                    } else {
+                        None
+                    },
                 },
             );
+        }
+    }
+}
+
+/// Hint unused reserved tiles at/above `offset` (bytes).
+pub(super) fn hint_unused_above(state: &mut Dx12State, buffer_handle: BufferHandle, offset: u64) {
+    let (device_handle, first_tile) = {
+        let Some(buf) = state.buffers.get(&buffer_handle) else {
+            return;
+        };
+        if !buf.is_reserved {
+            return;
+        }
+        let tile = u64::from(buf.tile_byte_size);
+        if tile == 0 {
+            return;
+        }
+        let ft = ((offset.saturating_add(tile.saturating_sub(1))) / tile) as usize;
+        if ft >= buf.reserved_tiles.len() {
+            return;
+        }
+        (buf.device_handle, ft)
+    };
+    let (devices, buffers) = (&mut state.devices, &mut state.buffers);
+    let Some(ld) = devices.get_mut(&device_handle) else {
+        return;
+    };
+    let Some(pool) = ld.tile_heap_pool.as_mut() else {
+        return;
+    };
+    let queue = &ld.command_queue;
+    let Some(buf_mut) = buffers.get_mut(&buffer_handle) else {
+        return;
+    };
+    let mut i = first_tile;
+    while i < buf_mut.reserved_tiles.len() {
+        while i < buf_mut.reserved_tiles.len() && buf_mut.reserved_tiles[i].is_none() {
+            i += 1;
+        }
+        if i >= buf_mut.reserved_tiles.len() {
+            break;
+        }
+        let run_start = i;
+        while i < buf_mut.reserved_tiles.len() && buf_mut.reserved_tiles[i].is_some() {
+            i += 1;
+        }
+        let n = (i - run_start) as u32;
+        let _ = tiles::unmap_tile_run(queue, &buf_mut.resource, run_start as u32, n);
+        for j in run_start..i {
+            if let Some((heap, off)) = buf_mut.reserved_tiles[j].take() {
+                pool.free_tile(&heap, off);
+            }
         }
     }
 }
@@ -501,6 +1501,7 @@ pub(super) fn create_view(
             device_handle,
             resource,
             size,
+            allocation_size: parent.allocation_size,
             bindless_offset,
             bindless_srv_offset,
             is_storage: true,
@@ -511,6 +1512,11 @@ pub(super) fn create_view(
             coherent_readback_mapped: None,
             flags: parent_flags,
             transient_placed: false,
+            parent_for_view: Some(parent_handle),
+            view_byte_offset: Some(offset),
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
         },
     );
 

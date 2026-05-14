@@ -96,7 +96,10 @@ struct MockDevice {
 #[allow(dead_code)]
 struct MockBuffer {
     device_handle: DeviceHandle,
+    /// Logical byte size.
     size: u64,
+    /// Backing storage (`data.len()`).
+    alloc_size: u64,
     data: Vec<u8>,
     bindless_index: u32,
     flags: BufferFlags,
@@ -304,6 +307,7 @@ impl GpuBackend for MockBackend {
             MockBuffer {
                 device_handle: device,
                 size,
+                alloc_size: size,
                 data: vec![0u8; size as usize],
                 bindless_index,
                 flags,
@@ -311,6 +315,41 @@ impl GpuBackend for MockBackend {
         );
 
         Ok(handle)
+    }
+
+    fn create_buffer_with_capacity(
+        &mut self,
+        device: DeviceHandle,
+        initial_size: u64,
+        capacity: u64,
+        _access: DataAccess,
+        _element_stride: Option<u32>,
+        flags: BufferFlags,
+    ) -> Result<(BufferHandle, u64)> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let handle = self.next_buffer_handle;
+        self.next_buffer_handle += 1;
+
+        let bindless_index = self.next_bindless_index;
+        self.next_bindless_index += 1;
+
+        let cap = capacity.max(initial_size);
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle: device,
+                size: initial_size,
+                alloc_size: cap,
+                data: vec![0u8; cap as usize],
+                bindless_index,
+                flags,
+            },
+        );
+
+        Ok((handle, cap))
     }
 
     fn destroy_buffer(&mut self, buffer: BufferHandle) {
@@ -325,7 +364,7 @@ impl GpuBackend for MockBackend {
 
         let start = offset as usize;
         let end = start + data.len();
-        if end > buf.data.len() {
+        if end > buf.size as usize {
             anyhow::bail!("Write exceeds buffer size");
         }
 
@@ -335,6 +374,30 @@ impl GpuBackend for MockBackend {
 
     fn buffer_size(&self, buffer: BufferHandle) -> u64 {
         self.buffers.get(&buffer).map(|b| b.size).unwrap_or(0)
+    }
+
+    fn buffer_capacity(&self, buffer: BufferHandle) -> u64 {
+        self.buffers.get(&buffer).map(|b| b.alloc_size).unwrap_or(0)
+    }
+
+    fn set_buffer_logical_size(
+        &mut self,
+        _device: DeviceHandle,
+        buffer: BufferHandle,
+        new_logical_size: u64,
+    ) -> Result<()> {
+        let buf = self
+            .buffers
+            .get_mut(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if new_logical_size > buf.alloc_size {
+            anyhow::bail!("logical size exceeds allocation");
+        }
+        if new_logical_size == 0 {
+            anyhow::bail!("buffer size must be non-zero");
+        }
+        buf.size = new_logical_size;
+        Ok(())
     }
 
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32> {
@@ -372,6 +435,7 @@ impl GpuBackend for MockBackend {
             MockBuffer {
                 device_handle,
                 size,
+                alloc_size: size,
                 data: vec![0; size as usize],
                 bindless_index: index,
                 flags: BufferFlags::empty(),
@@ -379,6 +443,31 @@ impl GpuBackend for MockBackend {
         );
 
         Ok(handle)
+    }
+
+    fn resize_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_size: u64,
+        preserve_contents: bool,
+    ) -> Result<()> {
+        let buf = self
+            .buffers
+            .get_mut(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if buf.device_handle != device {
+            anyhow::bail!("Buffer belongs to a different device");
+        }
+        let new_len = new_size as usize;
+        if preserve_contents {
+            buf.data.resize(new_len, 0);
+        } else {
+            buf.data = vec![0u8; new_len];
+        }
+        buf.size = new_size;
+        buf.alloc_size = new_size;
+        Ok(())
     }
 
     fn read_buffer_to_cpu(
@@ -392,7 +481,11 @@ impl GpuBackend for MockBackend {
             .get(&buffer)
             .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
 
-        let len = output.len().min(buf.data.len());
+        let len_u64 = output.len() as u64;
+        if len_u64 > buf.size {
+            anyhow::bail!("Read would exceed buffer bounds");
+        }
+        let len = len_u64 as usize;
         output[..len].copy_from_slice(&buf.data[..len]);
         Ok(())
     }
@@ -410,13 +503,13 @@ impl GpuBackend for MockBackend {
             .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
 
         let clear_size = if size == 0 {
-            buf.data.len().saturating_sub(offset as usize)
+            buf.size.saturating_sub(offset) as usize
         } else {
             size as usize
         };
 
         let start = offset as usize;
-        let end = (start + clear_size).min(buf.data.len());
+        let end = (start + clear_size).min(buf.size as usize);
         buf.data[start..end].fill(0);
         Ok(())
     }

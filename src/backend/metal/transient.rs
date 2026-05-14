@@ -8,6 +8,7 @@ use super::types::{
     ARGUMENT_BUFFER_SIZE,
 };
 use super::utils::format_to_mtl;
+use crate::backend::DataAccess;
 use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -171,9 +172,14 @@ pub(super) fn place_buffer_in_transient_heap(
             device_handle: device,
             buffer,
             size,
+            allocation_size: size,
+            is_device_allocated: false,
             arg_buffer_index,
             flags: crate::types::BufferFlags::empty(),
             element_stride: None,
+            parent_for_view: None,
+            access: DataAccess::Scattered,
+            view_byte_offset: None,
         },
     );
     Ok(handle)

@@ -261,6 +261,7 @@ pub(super) fn place_buffer_in_transient_heap(
             buffer,
             memory: shared_mem,
             size,
+            allocation_size: size,
             bindless_index,
             is_storage: true,
             element_stride: None,
@@ -270,6 +271,10 @@ pub(super) fn place_buffer_in_transient_heap(
             host_mapped: None,
             flags: crate::types::BufferFlags::empty(),
             transient_heap_suballoc: true,
+            view_byte_offset: None,
+            is_sparse: false,
+            sparse_block_size: 0,
+            sparse_pages: Vec::new(),
         },
     );
     Ok(handle)

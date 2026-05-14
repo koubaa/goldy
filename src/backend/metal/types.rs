@@ -62,7 +62,7 @@ const MIN_OVERFLOW_HEAP_SIZE: u64 = 16 * 1024 * 1024;
 /// the symptom (hours-long hangs, crash spirals logging tens of thousands
 /// of 12 GB allocation attempts) into a single clean error the caller can
 /// handle. Raise this if a legitimate workload needs it.
-const MAX_HEAP_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+pub(super) const MAX_HEAP_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 
 /// Multi-heap allocator for Metal buffer allocations.
 ///
@@ -847,15 +847,27 @@ impl ResourceRegistry {
 }
 
 /// GPU buffer state.
+#[derive(Clone)]
 pub(crate) struct BufferState {
     pub device_handle: DeviceHandle,
     pub buffer: MTLBuffer,
+    /// Logical byte size (API-visible).
     pub size: u64,
+    /// Backing allocation size (`MTLBuffer.length()`).
+    pub allocation_size: u64,
+    /// `true` when created via [`MTLDevice::new_buffer`] (jumbo) rather than a heap.
+    pub is_device_allocated: bool,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
     pub flags: crate::types::BufferFlags,
     /// Structured-buffer element stride from buffer creation (for stride validation).
     pub element_stride: Option<u32>,
+    /// For buffer views: parent [`BufferHandle`]. `None` for root buffers.
+    pub parent_for_view: Option<BufferHandle>,
+    /// Access pattern at creation (for argument-buffer re-encoding on resize).
+    pub access: DataAccess,
+    /// Byte offset into parent for views; [`None`] for root buffers.
+    pub view_byte_offset: Option<u64>,
 }
 
 /// Shader module state with cached compiled stages.

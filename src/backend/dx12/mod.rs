@@ -16,6 +16,13 @@
 //! See `docs/src/architecture/backends.md` (DX12 / WARP section) for NuGet side-loading
 //! instructions.
 //!
+//! ## Reserved (tiled) buffers
+//!
+//! When **`GOLDY_DX12_DISABLE_RESERVED_BUFFERS=1`**, oversize `Buffer::new_with_capacity_hint`
+//! uses committed resources instead of reserved resources and tile heap mapping. Device
+//! capabilities report `buffer_resize_cost` as `Copy` in that mode. Use this if a driver stack
+//! faults during tile mapping; capture a GPU hang dump / enable the D3D12 debug layer first.
+//!
 //! ## Module Structure
 //!
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
@@ -25,6 +32,7 @@ mod barriers;
 mod buffer;
 mod compute;
 mod diagnostic;
+mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod pipeline;
@@ -64,6 +72,16 @@ pub(crate) fn env_force_warp() -> bool {
 
 fn env_allow_warp() -> bool {
     env_force_warp()
+}
+
+/// Reserved (`CreateReservedResource`) buffers can be disabled for troubleshooting.
+///
+/// Set **`GOLDY_DX12_DISABLE_RESERVED_BUFFERS=1`** to use committed oversize allocations instead of
+/// tile heaps + [`UpdateTileMappings`]. In that mode, [`Dx12Backend::device_capabilities`] reports
+/// `buffer_resize_cost` as [`crate::types::BufferResizeCost::Copy`] (not `PageBind`).
+pub(crate) fn env_disable_reserved_buffers() -> bool {
+    std::env::var("GOLDY_DX12_DISABLE_RESERVED_BUFFERS")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
 }
 
 static DEBUG_LAYER_INIT: Once = Once::new();
@@ -290,9 +308,7 @@ impl Dx12Backend {
         transient::destroy_all_for_device(&mut self.state, device_handle);
         if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
-            logical_device
-                .deletion_queue
-                .flush_all(&mut logical_device.resource_registry);
+            logical_device.flush_deletion_queue();
 
             if logical_device.pso_disk_cache_dirty {
                 if let Some(cache_root) = dirs::cache_dir() {
@@ -445,6 +461,7 @@ impl GpuBackend for Dx12Backend {
             &mut self.state,
             device_handle,
             size,
+            size,
             access,
             element_stride,
             flags,
@@ -468,6 +485,48 @@ impl GpuBackend for Dx12Backend {
         buffer::size(&self.state, buffer_handle)
     }
 
+    fn buffer_capacity(&self, buffer_handle: BufferHandle) -> u64 {
+        buffer::capacity(&self.state, buffer_handle)
+    }
+
+    fn create_buffer_with_capacity(
+        &mut self,
+        device_handle: DeviceHandle,
+        initial_size: u64,
+        capacity: u64,
+        access: crate::backend::DataAccess,
+        element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
+    ) -> Result<(BufferHandle, u64)> {
+        buffer::create_with_capacity(
+            &mut self.state,
+            device_handle,
+            initial_size,
+            capacity,
+            access,
+            element_stride,
+            flags,
+        )
+    }
+
+    fn set_buffer_logical_size(
+        &mut self,
+        device_handle: DeviceHandle,
+        buffer_handle: BufferHandle,
+        new_logical_size: u64,
+    ) -> Result<()> {
+        buffer::set_logical_size(
+            &mut self.state,
+            device_handle,
+            buffer_handle,
+            new_logical_size,
+        )
+    }
+
+    fn hint_buffer_unused_above(&mut self, buffer_handle: BufferHandle, offset: u64) {
+        buffer::hint_unused_above(&mut self.state, buffer_handle, offset);
+    }
+
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
         buffer::bindless_index(&self.state, buffer_handle)
     }
@@ -486,6 +545,16 @@ impl GpuBackend for Dx12Backend {
         buffer::create_view(&mut self.state, parent, offset, size, element_stride)
     }
 
+    fn resize_buffer(
+        &mut self,
+        device: DeviceHandle,
+        buffer: BufferHandle,
+        new_size: u64,
+        preserve_contents: bool,
+    ) -> Result<()> {
+        buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
+    }
+
     fn read_buffer_to_cpu(
         &mut self,
         device: DeviceHandle,
@@ -496,11 +565,21 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
-        let _ = device;
-        crate::device::DeviceCapabilities {
+        let mut caps = crate::device::DeviceCapabilities {
             has_zero_copy_storage_readback: false,
             ..Default::default()
+        };
+        if self
+            .state
+            .devices
+            .get(&device)
+            .is_some_and(|d| d.supports_reserved_buffers && !env_disable_reserved_buffers())
+        {
+            caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
+            caps.buffer_page_size = 64 * 1024;
+            caps.buffer_decommit_supported = true;
         }
+        caps
     }
 
     fn clear_buffer(
@@ -693,8 +772,7 @@ impl GpuBackend for Dx12Backend {
             .clone();
         utils::wait_for_fence(&fence, value)?;
         if let Some(dev) = self.state.devices.get_mut(&device_handle) {
-            dev.deletion_queue
-                .process(&dev.fence, &mut dev.resource_registry);
+            dev.process_deletion_queue();
         }
         Ok(())
     }
@@ -715,8 +793,7 @@ impl GpuBackend for Dx12Backend {
         let ok = utils::wait_for_fence_timeout(&fence, value, timeout_ms)?;
         if ok {
             if let Some(dev) = self.state.devices.get_mut(&device_handle) {
-                dev.deletion_queue
-                    .process(&dev.fence, &mut dev.resource_registry);
+                dev.process_deletion_queue();
             }
         }
         Ok(ok)
@@ -992,8 +1069,7 @@ impl GpuBackend for Dx12Backend {
 
     fn flush_deferred_deletions(&mut self, device_handle: DeviceHandle) {
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            ld.deletion_queue
-                .process(&ld.fence, &mut ld.resource_registry);
+            ld.process_deletion_queue();
         }
     }
 

@@ -759,8 +759,7 @@ pub(super) fn submit(
         if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
-        dev.deletion_queue
-            .process(&dev.fence, &mut dev.resource_registry);
+        dev.process_deletion_queue();
     }
 
     state
@@ -1363,8 +1362,7 @@ pub(super) fn submit_graph(
         if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
-        dev.deletion_queue
-            .process(&dev.fence, &mut dev.resource_registry);
+        dev.process_deletion_queue();
     }
 
     state

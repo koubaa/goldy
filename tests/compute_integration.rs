@@ -8,8 +8,8 @@ mod common;
 
 use goldy::{
     types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
-    Buffer, BufferPool, BufferPoolRing, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
-    Instance, ShaderModule, Texture,
+    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
+    ShaderModule, Texture,
 };
 
 /// Simple compute shader that doubles each value in a buffer.
@@ -358,6 +358,288 @@ fn vk_api_validation_two_device_teardown() {
     drop(i1);
     drop(d2);
     drop(i2);
+}
+
+// ─── Buffer resize (Phase 1: stable handles, realloc-copy fallback) ───────────
+
+#[test]
+fn resize_preserves_contents() {
+    let device = make_device();
+    let mut buf = Buffer::with_data(&device, &[1u32, 2, 3, 4], DataAccess::Scattered).expect("buf");
+    buf.resize_to(32).expect("resize");
+    let mut out = vec![0u8; 32];
+    buf.read_to_cpu(&device, &mut out).expect("read");
+    let words: &[u32] = bytemuck::cast_slice(&out);
+    assert_eq!(&words[..4], &[1u32, 2, 3, 4]);
+    for w in &words[4..8] {
+        assert_eq!(*w, 0, "new region should be zero");
+    }
+}
+
+#[test]
+fn resize_preserves_bindless_index() {
+    let device = make_device();
+    let mut buf = Buffer::new(&device, 16, DataAccess::Scattered).expect("buf");
+    let idx = buf.bindless_index().expect("bindless");
+    buf.resize_to(256).expect("resize");
+    assert_eq!(buf.bindless_index(), Some(idx));
+}
+
+#[test]
+fn resize_down_truncates() {
+    let device = make_device();
+    let mut buf =
+        Buffer::with_data(&device, &[10u32, 20, 30, 40], DataAccess::Scattered).expect("buf");
+    buf.resize_to(8).expect("resize down");
+    let mut out = vec![0u8; 8];
+    buf.read_to_cpu(&device, &mut out).expect("read");
+    let words: &[u32] = bytemuck::cast_slice(&out);
+    assert_eq!(words, &[10u32, 20]);
+}
+
+#[test]
+fn resize_uninitialized_skips_copy() {
+    let device = make_device();
+    let mut buf =
+        Buffer::with_data(&device, &[0xABCD_BEEFu32], DataAccess::Scattered).expect("buf");
+    buf.resize_to_uninitialized(8).expect("resize uni");
+    let mut out = vec![0u8; 8];
+    buf.read_to_cpu(&device, &mut out).expect("read");
+}
+
+#[test]
+fn buffer_pool_resize() {
+    let device = make_device();
+    let mut pool = BufferPool::new(&device, 1024).expect("pool");
+    let v1 = pool.alloc::<u32>(4).expect("v1");
+    let v2 = pool.alloc::<u32>(4).expect("v2");
+    let i1 = v1.bindless_index().unwrap();
+    let i2 = v2.bindless_index().unwrap();
+    pool.resize(2048).expect("resize pool");
+    let _v3 = pool.alloc::<u32>(8).expect("v3");
+    assert_eq!(v1.bindless_index(), Some(i1));
+    assert_eq!(v2.bindless_index(), Some(i2));
+}
+
+#[test]
+fn new_with_capacity_hint_smoke() {
+    let device = make_device();
+    let b = Buffer::new_with_capacity_hint(&device, 16, 4096, DataAccess::Scattered).expect("b");
+    assert_eq!(b.size(), 16);
+    assert!(b.allocated_size() >= 4096, "expected oversize allocation");
+}
+
+#[test]
+fn oversize_resize_within_capacity_preserves_and_zeros_tail() {
+    let device = make_device();
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 16, 4096, DataAccess::Scattered).expect("buf");
+    let idx = buf.bindless_index().expect("bindless");
+    buf.write(0, &[0xabu8; 16]).expect("seed");
+    buf.resize_to(256).expect("grow within cap");
+    assert_eq!(buf.bindless_index(), Some(idx));
+    assert!(buf.size() >= 256);
+    let mut got = vec![0u8; 256];
+    buf.read_to_cpu(&device, &mut got).expect("read");
+    assert_eq!(&got[..16], &[0xabu8; 16]);
+    assert!(got[16..].iter().all(|&x| x == 0));
+}
+
+#[test]
+fn oversize_resize_beyond_capacity_falls_back_and_preserves() {
+    let device = make_device();
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 16, 256, DataAccess::Scattered).expect("buf");
+    buf.write(0, &[7u8; 16]).expect("w");
+    buf.resize_to(512).expect("grow past cap");
+    assert!(buf.allocated_size() >= 512);
+    let mut got = vec![0u8; 512];
+    buf.read_to_cpu(&device, &mut got).expect("r");
+    assert_eq!(&got[..16], &[7u8; 16]);
+}
+
+#[test]
+fn hint_unused_above_does_not_corrupt_prefix() {
+    let device = make_device();
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 64, 4096, DataAccess::Scattered).expect("buf");
+    buf.write(0, &[0x11u8; 64]).expect("w");
+    buf.hint_unused_above(32);
+    let mut got = vec![0u8; 32];
+    buf.read_to_cpu(&device, &mut got).expect("r");
+    assert_eq!(&got[..], &[0x11u8; 32]);
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[test]
+fn device_capabilities_metal_reports_constant_resize() {
+    use goldy::{types::BufferResizeCost, BackendType, Instance};
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::IntegratedGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::DiscreteGpu))
+        .expect("dev");
+    assert_eq!(device.backend_type(), BackendType::Metal);
+    let caps = device.capabilities();
+    assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);
+    assert!(caps.buffer_decommit_supported);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn device_capabilities_vulkan_reports_pagebind_when_sparse() {
+    use goldy::{types::BufferResizeCost, BackendType, Instance};
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
+        .expect("dev");
+    if device.backend_type() != BackendType::Vulkan {
+        return;
+    }
+    let caps = device.capabilities();
+    if caps.buffer_resize_cost == BufferResizeCost::PageBind {
+        assert_eq!(caps.buffer_page_size, 64 * 1024);
+        assert!(caps.buffer_decommit_supported);
+    }
+}
+
+#[cfg(feature = "dx12")]
+#[test]
+fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
+    use goldy::{types::BufferResizeCost, BackendType, Instance};
+    // With multiple backends enabled, `GOLDY_BACKEND` may select a non-DX12 API; skip in that case.
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
+        .expect("dev");
+    if device.backend_type() != BackendType::Dx12 {
+        return;
+    }
+    let caps = device.capabilities();
+    if caps.buffer_resize_cost == BufferResizeCost::PageBind {
+        assert_eq!(caps.buffer_page_size, 64 * 1024);
+        assert!(caps.buffer_decommit_supported);
+    }
+}
+
+#[cfg(any(feature = "vulkan", feature = "dx12"))]
+#[test]
+fn sparse_backend_oversize_resize_and_hint_within_capacity() {
+    use goldy::{types::BufferResizeCost, Instance};
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(goldy::DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
+        .expect("dev");
+    if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
+        return;
+    }
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 64, 4096, DataAccess::Scattered).expect("buf");
+    buf.write(0, &[0x11u8; 64]).expect("w");
+    buf.resize_to(256).expect("grow within cap");
+    let mut got = vec![0u8; 256];
+    buf.read_to_cpu(&device, &mut got).expect("r");
+    assert_eq!(&got[..64], &[0x11u8; 64]);
+    assert!(got[64..].iter().all(|&x| x == 0));
+
+    buf.hint_unused_above(32);
+    let mut prefix = vec![0u8; 32];
+    buf.read_to_cpu(&device, &mut prefix).expect("r2");
+    assert_eq!(&prefix[..], &[0x11u8; 32]);
+}
+
+/// DX12 reserved-buffer path: cross tile boundaries, `hint_unused_above`, regrowth, stable bindless, compute.
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+#[test]
+fn dx12_reserved_buffer_resize_compute_smoke() {
+    use goldy::types::BufferResizeCost;
+    const SMOKY_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(16, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
+}
+"#;
+    let inst = Instance::new().expect("i");
+    let device = inst
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| inst.create_device(DeviceType::IntegratedGpu))
+        .expect("dev");
+    if device.backend_type() != BackendType::Dx12 {
+        return;
+    }
+    if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
+        return;
+    }
+
+    let mut buf =
+        Buffer::new_with_capacity_hint(&device, 256, 4 * 64 * 1024, DataAccess::Scattered)
+            .expect("buf");
+    let bindless = buf.bindless_index().expect("bindless");
+
+    let initial: Vec<u32> = (1..=16).collect();
+    buf.write(0, bytemuck::cast_slice(&initial)).expect("w");
+
+    buf.resize_to(200 * 1024).expect("grow across tiles");
+    assert_eq!(buf.bindless_index(), Some(bindless));
+
+    let mut read = vec![0u32; 16];
+    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
+        .expect("read");
+    assert_eq!(read, initial);
+
+    let shader = ShaderModule::from_slang(&device, SMOKY_SHADER).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
+        .expect("read2");
+    for (i, &v) in read.iter().enumerate() {
+        assert_eq!(v, (i as u32 + 1) * 2, "after first dispatch[{i}]");
+    }
+
+    // Shrink to one tile, decommit reserved tail with `hint_unused_above`, then grow again.
+    buf.resize_to(64 * 1024).expect("shrink to one tile");
+    assert_eq!(buf.bindless_index(), Some(bindless));
+    buf.hint_unused_above(64 * 1024);
+    buf.resize_to(200 * 1024).expect("grow after decommit hint");
+    assert_eq!(buf.bindless_index(), Some(bindless));
+
+    let initial2: Vec<u32> = (0..16).collect();
+    buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buf]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch2");
+
+    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
+        .expect("read3");
+    for (i, &v) in read.iter().enumerate() {
+        assert_eq!(v, (i as u32) * 2, "after second dispatch[{i}]");
+    }
+}
+
+#[test]
+fn hint_unused_above_smoke() {
+    let device = make_device();
+    let mut buf = Buffer::new(&device, 64, DataAccess::Scattered).expect("buf");
+    buf.hint_unused_above(32);
 }
 
 // ─── Buffer read_to_cpu / clear tests ────────────────────────────────────────
@@ -1873,176 +2155,6 @@ fn flush_deferred_deletions_noop_on_idle_device() {
     assert_eq!(device.deferred_deletion_pending_count(), 0);
 }
 
-// ── BufferPoolRing integration tests ──────────────────────────────────────────
-
-/// `prepare` on an empty slot allocates a new pool and sets the clear flag
-/// exactly once; `take_clear_flag` is consumed on first call.
-#[test]
-fn ring_prepare_sets_clear_flag_once() {
-    let device = make_device();
-    let mut ring = BufferPoolRing::<2>::new();
-
-    ring.prepare(&device, 1024).expect("prepare");
-
-    assert!(
-        ring.take_clear_flag(),
-        "clear flag must be true after first allocation"
-    );
-    assert!(
-        !ring.take_clear_flag(),
-        "clear flag must be false after being consumed"
-    );
-}
-
-/// `prepare` with sufficient capacity resets the bump pointer and clears
-/// the clear flag (the backing buffer does not need re-zeroing).
-#[test]
-fn ring_prepare_reuse_clears_flag() {
-    let device = make_device();
-    let mut ring = BufferPoolRing::<2>::new();
-
-    // First prepare: new allocation → flag true.
-    ring.prepare(&device, 1024).expect("prepare initial");
-    assert!(ring.take_clear_flag());
-
-    // Advance and come back: second visit to same slot with same size.
-    ring.advance();
-    ring.prepare(&device, 512).expect("prepare slot 1");
-    ring.advance();
-    ring.prepare(&device, 1024).expect("prepare slot 0 again");
-
-    // Slot 0 already has 1024 bytes; no new allocation → flag false.
-    assert!(
-        !ring.take_clear_flag(),
-        "no clear flag when existing pool is reused"
-    );
-}
-
-/// `prepare` with insufficient capacity allocates a new pool (flag becomes true).
-#[test]
-fn ring_prepare_grows_pool_sets_flag() {
-    let device = make_device();
-    let mut ring = BufferPoolRing::<2>::new();
-
-    ring.prepare(&device, 512).expect("prepare small");
-    let _ = ring.take_clear_flag(); // consume
-
-    // Ask for more than the current capacity: must reallocate.
-    ring.prepare(&device, 4 * 1024 * 1024)
-        .expect("prepare large");
-    assert!(
-        ring.take_clear_flag(),
-        "clear flag must be set after capacity growth"
-    );
-    assert!(
-        ring.current().map(|p| p.capacity()).unwrap_or(0) >= 4 * 1024 * 1024,
-        "new pool must have at least the requested capacity"
-    );
-}
-
-/// `current_mut` allows sub-allocation after `prepare`.
-#[test]
-fn ring_current_mut_allocates_views() {
-    let device = make_device();
-    let mut ring = BufferPoolRing::<2>::new();
-
-    ring.prepare(&device, 2048).expect("prepare");
-    let pool = ring.current_mut().expect("pool must exist after prepare");
-    let view = pool.alloc::<u32>(64).expect("alloc");
-    assert_eq!(view.size(), 64 * 4);
-}
-
-/// Two pool slots hold independent backing buffers: allocations in slot 0
-/// and slot 1 return distinct bindless indices.
-#[test]
-fn ring_ping_pong_slots_are_independent() {
-    let device = make_device();
-    let mut ring = BufferPoolRing::<2>::new();
-
-    // Slot 0.
-    ring.prepare(&device, 1024).expect("prepare slot 0");
-    let idx0 = ring
-        .current_mut()
-        .unwrap()
-        .alloc::<u32>(4)
-        .expect("alloc slot 0")
-        .bindless_index()
-        .expect("bindless idx 0");
-
-    // Slot 1.
-    ring.advance();
-    ring.prepare(&device, 1024).expect("prepare slot 1");
-    let idx1 = ring
-        .current_mut()
-        .unwrap()
-        .alloc::<u32>(4)
-        .expect("alloc slot 1")
-        .bindless_index()
-        .expect("bindless idx 1");
-
-    assert_ne!(
-        idx0, idx1,
-        "ping-pong slots must have different bindless indices"
-    );
-}
-
-/// After `clear()`, all slots are empty and no clear flags are set.
-#[test]
-fn ring_clear_empties_all_slots() {
-    let device = make_device();
-    let mut ring = BufferPoolRing::<2>::new();
-
-    ring.prepare(&device, 1024).expect("prepare 0");
-    ring.advance();
-    ring.prepare(&device, 1024).expect("prepare 1");
-
-    ring.clear();
-
-    assert!(ring.current().is_none(), "slot 1 must be empty after clear");
-    assert!(!ring.take_clear_flag(), "no clear flag after ring::clear");
-
-    ring.advance();
-    assert!(ring.current().is_none(), "slot 0 must be empty after clear");
-    assert!(!ring.take_clear_flag());
-}
-
-/// A full 2-frame simulated ping-pong cycle: verify the bump pointer resets
-/// each time a slot is revisited and data written in one slot is not visible
-/// in the other.
-#[test]
-fn ring_two_frame_cycle_resets_bump() {
-    let device = make_device();
-    let mut ring = BufferPoolRing::<2>::new();
-
-    // Frame 1: slot 0.
-    ring.prepare(&device, 2048).expect("frame1 prepare");
-    {
-        let pool = ring.current_mut().unwrap();
-        let _v1 = pool.alloc::<u32>(64).expect("frame1 alloc");
-        assert!(pool.used() > 0, "used must be non-zero after alloc");
-    }
-
-    // Frame 2: slot 1.
-    ring.advance();
-    ring.prepare(&device, 2048).expect("frame2 prepare");
-    {
-        let pool = ring.current_mut().unwrap();
-        assert_eq!(pool.used(), 0, "fresh slot must start at 0");
-    }
-
-    // Frame 3: back to slot 0 — bump pointer must have been reset.
-    ring.advance();
-    ring.prepare(&device, 2048).expect("frame3 prepare");
-    {
-        let pool = ring.current_mut().unwrap();
-        assert_eq!(
-            pool.used(),
-            0,
-            "revisited slot must have bump pointer reset to 0"
-        );
-    }
-}
-
 // ============================================================================
 // Element-stride validation integration tests
 //
@@ -2186,10 +2298,9 @@ fn stride_validation_disabled_allows_mismatch() {
         .expect("dispatch must succeed when validation is off");
 }
 
-/// Multi-binding mismatch: shader expects broadcast struct (reflected stride)
-/// + `Scattered<float4>` (stride 16). Bind the broadcast slot correctly but
-/// give the second slot a buffer with stride 4. Only slot 1 should be
-/// reported.
+/// Multi-binding mismatch: the shader expects a broadcast struct (reflected stride) plus
+/// `Scattered<float4>` (stride 16). Bind the broadcast slot correctly but give the second slot
+/// a buffer with stride 4; only slot 1 should be reported.
 #[test]
 fn stride_validation_multi_binding_detects_second_slot_mismatch() {
     let _lock = STRIDE_ENV_LOCK.lock().unwrap();
