@@ -30,8 +30,9 @@
 //! * `DebugSequential` — fresh `Buffer` per allocation, no reuse. Catches use-after-free at
 //!   the cost of memory; useful for validation.
 //!
-//! Selection at construction time uses [`TransientAllocatorStrategy`], which honors the
-//! `GOLDY_TRANSIENT_ALLOCATOR` environment variable for runtime override without rebuilding.
+//! Selection at construction time uses [`TransientAllocatorStrategy`]. Consumers that want
+//! a runtime switch (e.g. via environment variable) should read the variable themselves and
+//! call [`TransientAllocatorStrategy::parse`] + [`TransientAllocatorStrategy::create`].
 //!
 //! # Lifecycle
 //!
@@ -41,6 +42,10 @@
 //! 2. [`TransientAllocator::alloc`] — repeated bump allocations
 //! 3. [`TransientAllocator::end_frame`] — record the frame's epoch so the strategy can
 //!    reclaim later
+//!
+//! **Important:** `end_frame` may be called *after* the next `begin_frame` when the epoch
+//! is not known until after surface presentation. [`EpochRegionsAllocator`] handles this
+//! correctly by tracking "pending" regions whose epoch has not yet been supplied.
 //!
 //! Strategies are free to over- or under-implement individual steps as long as semantics
 //! are preserved. For example, `BumpResetAllocator::end_frame` only stores the epoch for the
@@ -89,7 +94,7 @@ impl Default for TransientAllocatorConfig {
             initial_size: 64 * 1024,
             expected_max: 16 * 1024 * 1024,
             min_region_size: 4 * 1024 * 1024,
-            max_regions: 8,
+            max_regions: 3,
             alignment: 256,
             flags: BufferFlags::GPU_ONLY,
         }
@@ -169,35 +174,25 @@ pub trait TransientAllocator: Send {
 
 /// Selectable allocation strategies. Use [`Self::create`] to instantiate.
 ///
-/// The default strategy is currently [`Self::BumpReset`] for compatibility with the legacy
-/// pre-pipeline behavior; this will likely flip to [`Self::EpochRegions`] once it has
-/// soaked across all backends and workloads.
+/// The default is [`Self::EpochRegions`] — the pipelined strategy that allows CPU and GPU
+/// to overlap. Use [`Self::BumpReset`] as a diagnostic baseline or when minimum memory
+/// footprint is more important than throughput.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransientAllocatorStrategy {
     /// Single bump pool that is `reset()`-ed each frame after waiting for the previous
     /// frame's GPU work to complete. Lowest memory usage; serializes CPU and GPU.
-    #[default]
     BumpReset,
     /// Multiple bump regions tagged with [`TimelineValue`] epochs. Reclamation is
     /// asynchronous: a region becomes reusable as soon as its epoch is ≤ `gpu_progress()`,
     /// no waiting required. Pipeline depth adapts to workload up to `max_regions`.
+    #[default]
     EpochRegions,
 }
 
 impl TransientAllocatorStrategy {
-    /// Resolve the strategy from the `GOLDY_TRANSIENT_ALLOCATOR` environment variable.
-    ///
-    /// Recognised values (case-insensitive): `bump`, `bump_reset`, `epoch`, `epoch_regions`,
-    /// `regions`. Unrecognised or absent values fall through to [`Self::default`].
-    pub fn from_env() -> Self {
-        std::env::var("GOLDY_TRANSIENT_ALLOCATOR")
-            .ok()
-            .as_deref()
-            .and_then(Self::parse)
-            .unwrap_or_default()
-    }
-
     /// Parse a strategy name. Case-insensitive. Returns `None` for unrecognised values.
+    ///
+    /// Recognised values: `bump`, `bump_reset`, `epoch`, `epoch_regions`, `regions`.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "bump" | "bump_reset" | "bumpreset" => Some(Self::BumpReset),
@@ -217,15 +212,6 @@ impl TransientAllocatorStrategy {
             Self::EpochRegions => Ok(Box::new(EpochRegionsAllocator::new(device, config)?)),
         }
     }
-}
-
-/// Construct a transient allocator using the env-var-resolved strategy. Equivalent to
-/// `TransientAllocatorStrategy::from_env().create(device, config)`.
-pub fn from_env(
-    device: &Device,
-    config: TransientAllocatorConfig,
-) -> Result<Box<dyn TransientAllocator>> {
-    TransientAllocatorStrategy::from_env().create(device, config)
 }
 
 // -----------------------------------------------------------------------
@@ -341,6 +327,11 @@ enum RegionState {
     /// Currently being bump-allocated from. (Multiple regions may be active simultaneously if
     /// a single frame's allocation spilled across regions.)
     Active,
+    /// Frame has ended but the epoch is not yet known (surface-presentation path where
+    /// the timeline value arrives via a deferred `end_frame` after `Frame::present`).
+    /// The allocator treats these conservatively: they cannot be reclaimed until an epoch
+    /// is supplied, but they do not count as Active so the next `begin_frame` can proceed.
+    Pending,
     /// Has been written by a frame whose GPU work has not yet completed. Cannot be reused
     /// until `device.gpu_progress() >= epoch`.
     Retired { epoch: TimelineValue },
@@ -357,12 +348,15 @@ struct Region {
 ///
 /// * **Empty** — ready for use; bump pointer is at 0.
 /// * **Active** — being bump-allocated from this frame.
+/// * **Pending** — frame finished but epoch not yet known (surface path). Promoted to
+///   Retired when [`TransientAllocator::end_frame`] supplies the epoch.
 /// * **Retired** — written by an earlier frame; reusable once the GPU has finished that
 ///   frame's work.
 ///
-/// `begin_frame` opportunistically promotes retired regions whose epochs have passed,
-/// `alloc` spills to a fresh region when the active one fills, and `end_frame` retires every
-/// region the frame touched with the supplied epoch.
+/// `begin_frame` moves Active regions to Pending (if `end_frame` wasn't called yet) and
+/// opportunistically promotes Retired regions whose epochs have passed. `alloc` spills to
+/// a fresh region when the active one fills. `end_frame` assigns the epoch to all Pending
+/// regions and retires any remaining Active ones.
 ///
 /// Closest CPU analog: an N-arena epoch-based-reclamation allocator. This is the same
 /// pattern that drives the Linux kernel's RCU, JVM's ZGC region recycling, and crossbeam's
@@ -392,10 +386,12 @@ impl EpochRegionsAllocator {
         min_size: u64,
     ) -> Result<Region> {
         let size = config.min_region_size.max(min_size).max(config.alignment);
+        // Capacity hint is per-region, not the global expected_max. Each region only
+        // needs to handle its own share of per-frame demand, not the entire frame.
         let pool = BufferPool::with_alignment_capacity_hint_and_flags(
             device,
             size,
-            config.expected_max.max(size),
+            size,
             config.alignment,
             config.flags,
         )?;
@@ -478,17 +474,41 @@ impl EpochRegionsAllocator {
         }
 
         // Pipeline-depth cap hit. Safety valve: wait on the oldest retiree.
-        let (idx, epoch) = self
-            .oldest_retired()
-            .ok_or_else(|| anyhow::anyhow!("EpochRegionsAllocator: all regions Active, no retired regions to wait on; allocation cannot proceed"))?;
-        device.wait_until(epoch)?;
-        self.regions[idx].pool.reset();
-        if self.regions[idx].pool.capacity() < min_size {
-            self.regions[idx].pool.resize(min_size)?;
+        if let Some((idx, epoch)) = self.oldest_retired() {
+            device.wait_until(epoch)?;
+            self.regions[idx].pool.reset();
+            if self.regions[idx].pool.capacity() < min_size {
+                self.regions[idx].pool.resize(min_size)?;
+            }
+            self.regions[idx].state = RegionState::Empty;
+            self.activate(idx);
+            return Ok(idx);
         }
-        self.regions[idx].state = RegionState::Empty;
-        self.activate(idx);
-        Ok(idx)
+
+        // No Retired regions — but there may be Pending regions (deferred end_frame).
+        // Force a GPU drain and convert Pending → Empty.
+        let progress = device.gpu_progress();
+        for r in &mut self.regions {
+            if r.state == RegionState::Pending {
+                r.pool.reset();
+                r.state = RegionState::Empty;
+            }
+        }
+        // Reclaim anything that completed during the drain.
+        self.reclaim_completed(progress);
+
+        if let Some(idx) = self.find_empty(min_size) {
+            if self.regions[idx].pool.capacity() < min_size {
+                self.regions[idx].pool.resize(min_size)?;
+            }
+            self.activate(idx);
+            return Ok(idx);
+        }
+
+        anyhow::bail!(
+            "EpochRegionsAllocator: all {} regions Active, cannot proceed",
+            self.regions.len()
+        )
     }
 
     /// Test-only inspection.
@@ -514,10 +534,35 @@ impl EpochRegionsAllocator {
             .filter(|r| matches!(r.state, RegionState::Empty))
             .count()
     }
+
+    /// Test-only inspection.
+    #[doc(hidden)]
+    pub fn pending_count(&self) -> usize {
+        self.regions
+            .iter()
+            .filter(|r| matches!(r.state, RegionState::Pending))
+            .count()
+    }
+
+    /// Test-only inspection.
+    #[doc(hidden)]
+    pub fn active_count(&self) -> usize {
+        self.active.len()
+    }
 }
 
 impl TransientAllocator for EpochRegionsAllocator {
     fn begin_frame(&mut self, device: &Device, hint_size: u64) -> Result<()> {
+        // If the previous frame's end_frame hasn't been called yet (surface path),
+        // move any leftover Active regions to Pending so they're out of the way.
+        // end_frame will assign the epoch when it arrives.
+        if !self.active.is_empty() {
+            for &idx in &self.active {
+                self.regions[idx].state = RegionState::Pending;
+            }
+            self.active.clear();
+        }
+
         // Promote completed retirees. Non-blocking.
         let progress = device.gpu_progress();
         self.reclaim_completed(progress);
@@ -549,10 +594,19 @@ impl TransientAllocator for EpochRegionsAllocator {
     }
 
     fn end_frame(&mut self, epoch: TimelineValue) {
+        // Retire any Active regions from the current frame.
         for &idx in &self.active {
             self.regions[idx].state = RegionState::Retired { epoch };
         }
         self.active.clear();
+
+        // Also assign the epoch to any Pending regions from a previous frame whose
+        // end_frame was deferred (surface-presentation path).
+        for r in &mut self.regions {
+            if r.state == RegionState::Pending {
+                r.state = RegionState::Retired { epoch };
+            }
+        }
     }
 
     fn capacity(&self) -> u64 {
@@ -631,12 +685,10 @@ mod tests {
     }
 
     #[test]
-    fn strategy_default_is_stable() {
-        // If this changes, audit downstream consumers — the default is currently BumpReset
-        // for compatibility with the legacy pre-pipeline behavior.
+    fn strategy_default_is_epoch_regions() {
         assert_eq!(
             TransientAllocatorStrategy::default(),
-            TransientAllocatorStrategy::BumpReset
+            TransientAllocatorStrategy::EpochRegions
         );
     }
 

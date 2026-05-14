@@ -2418,31 +2418,22 @@ fn transient_allocator_smoke_both_strategies() {
     }
 }
 
-/// `from_env` defaults to `BumpReset` when no env var is set, and respects unknown values by
-/// falling back to default rather than panicking.
+/// Strategy::default() is EpochRegions, and parse handles all canonical names.
 #[test]
-fn transient_allocator_strategy_from_env_defaults_safely() {
-    // Save/clear/restore so we don't pollute concurrent tests.
-    let prev = std::env::var("GOLDY_TRANSIENT_ALLOCATOR").ok();
-    std::env::remove_var("GOLDY_TRANSIENT_ALLOCATOR");
+fn transient_allocator_strategy_default_and_parse() {
     assert_eq!(
-        TransientAllocatorStrategy::from_env(),
-        TransientAllocatorStrategy::BumpReset
+        TransientAllocatorStrategy::default(),
+        TransientAllocatorStrategy::EpochRegions,
     );
-    std::env::set_var("GOLDY_TRANSIENT_ALLOCATOR", "garbage-value");
     assert_eq!(
-        TransientAllocatorStrategy::from_env(),
-        TransientAllocatorStrategy::BumpReset
+        TransientAllocatorStrategy::parse("bump"),
+        Some(TransientAllocatorStrategy::BumpReset),
     );
-    std::env::set_var("GOLDY_TRANSIENT_ALLOCATOR", "epoch");
     assert_eq!(
-        TransientAllocatorStrategy::from_env(),
-        TransientAllocatorStrategy::EpochRegions
+        TransientAllocatorStrategy::parse("epoch"),
+        Some(TransientAllocatorStrategy::EpochRegions),
     );
-    match prev {
-        Some(v) => std::env::set_var("GOLDY_TRANSIENT_ALLOCATOR", v),
-        None => std::env::remove_var("GOLDY_TRANSIENT_ALLOCATOR"),
-    }
+    assert_eq!(TransientAllocatorStrategy::parse("garbage"), None);
 }
 
 /// Verifies that BumpResetAllocator waits for the previous frame's epoch before resetting.
@@ -2575,6 +2566,126 @@ fn transient_allocator_clear_resets_state() {
         assert_eq!(a.used_this_frame(), 0);
         a.begin_frame(&device, 0).expect("begin after clear");
     }
+}
+
+/// The surface-rendering path calls begin_frame before end_frame for the previous frame
+/// (because the timeline value is not known until after Frame::present). EpochRegions must
+/// handle this by parking the previous frame's regions as Pending and promoting them once
+/// the deferred end_frame arrives.
+#[test]
+fn epoch_regions_deferred_end_frame_does_not_leak() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    // Simulate surface-rendering lifecycle: begin → alloc → (no end_frame) → begin → ...
+    for i in 0..10u64 {
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        // Simulate: finish() happened, but timeline not known yet for surface path.
+        // The NEXT begin_frame arrives before end_frame.
+
+        // On odd frames, simulate delayed end_frame arriving (from note_frame_presented).
+        // On even frames, let it carry over.
+        if i % 2 == 1 {
+            a.end_frame(tv);
+            device.wait_until(tv).expect("wait");
+        }
+    }
+
+    // Final end_frame so everything can be reclaimed.
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+    device.wait_until(tv).expect("wait");
+
+    // All regions should be reclaimable. Region count must be bounded by max_regions.
+    assert!(
+        a.region_count() <= 3,
+        "region count {} exceeded max_regions 3",
+        a.region_count()
+    );
+}
+
+/// When end_frame is never called between begin_frames (worst case), the allocator must
+/// not panic or allocate unbounded memory. Pending regions are force-reclaimed when needed.
+#[test]
+fn epoch_regions_survives_continuous_begin_without_end() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    // 20 frames of begin_frame + alloc with NO end_frame at all.
+    for _ in 0..20 {
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
+        let _tv = ComputeEncoder::new().submit(&device).expect("submit");
+        // Deliberately skip end_frame — simulates broken caller or surface-path delay.
+    }
+
+    assert!(
+        a.region_count() <= 3,
+        "region count {} exceeded max_regions 3 even without end_frame",
+        a.region_count()
+    );
+    assert_eq!(
+        a.active_count(),
+        1,
+        "only the current frame should be Active"
+    );
+    // At most one Pending region (from the frame immediately before the current one).
+    // The rest must have been force-reclaimed when the safety valve fired.
+    assert!(
+        a.pending_count() <= 1,
+        "at most 1 pending region expected, got {}",
+        a.pending_count()
+    );
+}
+
+/// After a deferred end_frame, the assigned epoch enables proper reclamation of all
+/// previously-pending regions on the next begin_frame.
+#[test]
+fn epoch_regions_pending_promoted_to_retired_on_end_frame() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    // Frame 1: begin, alloc, NO end_frame (surface path).
+    a.begin_frame(&device, 0).expect("begin 1");
+    let _v1 = a.alloc(&device, 1024, Some(4)).expect("alloc 1");
+    let tv1 = ComputeEncoder::new().submit(&device).expect("submit 1");
+
+    // Frame 2: begin_frame moves frame 1's active regions to Pending.
+    a.begin_frame(&device, 0).expect("begin 2");
+    assert_eq!(a.pending_count(), 1, "frame 1's region should be Pending");
+    assert_eq!(a.active_count(), 1, "frame 2 should have one Active region");
+
+    // Deferred end_frame for frame 1 arrives.
+    a.end_frame(tv1);
+    assert_eq!(
+        a.pending_count(),
+        0,
+        "end_frame should promote Pending to Retired"
+    );
+    // Both frame 1's (was Pending) and frame 2's (was Active) regions are now Retired.
+    assert_eq!(a.retired_count(), 2);
+
+    // Wait and verify reclamation works.
+    device.wait_until(tv1).expect("wait");
+    a.begin_frame(&device, 0).expect("begin 3");
+    assert_eq!(a.retired_count(), 0, "waited regions should be reclaimed");
 }
 
 /// BufferPool::would_fit must agree with alloc_bytes for power-of-two and non-power-of-two
