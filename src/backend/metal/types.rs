@@ -952,6 +952,10 @@ pub(crate) struct TextureState {
     /// that re-encodes its drawable each frame) and should NOT be released
     /// when this `TextureState` is dropped. The owner manages slot lifetime.
     pub slot_owned_externally: bool,
+    /// `true` when allocated from a Goldy-owned `MTLHeap` (texture_heap or
+    /// transient heap). Heap-resident textures are already covered by
+    /// `use_heap` and don't need individual `use_resource` calls.
+    pub is_heap_allocated: bool,
 }
 
 /// GPU sampler state.

@@ -33,12 +33,12 @@
 //! graph.node("pathtag_reduce", &pipeline_a)
 //!     .bind_buffer(&scene_buf, NodeAccess::Read)
 //!     .bind_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
-//!     .bind_resources_raw(&[scene_idx, tagmonoid_idx])
+//!     .bind_resources_raw_slice(&[scene_idx, tagmonoid_idx])
 //!     .dispatch(64, 1, 1);
 //!
 //! graph.node("bbox_clear", &pipeline_b)
 //!     .bind_buffer(&bbox_buf, NodeAccess::Write)      // independent of above
-//!     .bind_resources_raw(&[bbox_idx])
+//!     .bind_resources_raw_slice(&[bbox_idx])
 //!     .dispatch(16, 1, 1);
 //!
 //! let tv = graph.submit(&device)?;

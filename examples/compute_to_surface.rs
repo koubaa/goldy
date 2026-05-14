@@ -278,7 +278,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     graph
         .node("compute", &state.compute_pipeline)
         .bind_buffer(&state.uniform_buffer, NodeAccess::Read)
-        .bind_resources_raw(&[uniform_handle.index(), texture_handle.index()])
+        .bind_resources_raw_slice(&[uniform_handle.index(), texture_handle.index()])
         .dispatch(wg_x, wg_y, 1);
     frame.submit_compute(&graph)?;
 

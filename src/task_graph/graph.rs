@@ -41,12 +41,12 @@ type TransientNativeBufferMap = HashMap<u32, (BufferHandle, u64, u64)>;
 /// // barriers automatically.
 /// graph.node("write_data", &pipeline_a)
 ///     .bind_buffer(&buf, NodeAccess::Write)
-///     .bind_resources_raw(&[buf_idx])
+///     .bind_resources_raw_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// graph.node("read_data", &pipeline_b)
 ///     .bind_buffer(&buf, NodeAccess::Read)
-///     .bind_resources_raw(&[buf_idx])
+///     .bind_resources_raw_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// let tv = graph.submit(&device)?;
@@ -314,7 +314,7 @@ impl TaskGraph {
                 })
                 .collect();
             nodes.push(TaskNode {
-                label: n.label.clone(),
+                label: n.label,
                 bindings: bindings?,
                 kind: n.kind.clone(),
             });
@@ -457,7 +457,7 @@ impl TaskGraph {
                 })
                 .collect();
             nodes.push(TaskNode {
-                label: n.label.clone(),
+                label: n.label,
                 bindings: bindings?,
                 kind: n.kind.clone(),
             });
@@ -612,10 +612,10 @@ impl TaskGraph {
 
     /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
     /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect`].
-    pub fn node<'a>(&'a mut self, label: &str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
+    pub fn node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
         NodeBuilder {
             graph: self,
-            label: label.to_string(),
+            label,
             pipeline: pipeline.handle,
             bindings: Vec::new(),
             resource_slots: Vec::new(),
@@ -629,7 +629,7 @@ impl TaskGraph {
     /// can insert barriers between this clear and any subsequent reader.
     pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
         self.ir.nodes.push(TaskNode {
-            label: "clear_buffer".to_string(),
+            label: "clear_buffer",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buffer.handle),
                 access: NodeAccess::Write,
@@ -659,7 +659,7 @@ impl TaskGraph {
             size
         };
         self.ir.nodes.push(TaskNode {
-            label: "clear_buffer_view".to_string(),
+            label: "clear_buffer_view",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::BufferRange {
                     parent: view.parent_handle(),
@@ -684,7 +684,7 @@ impl TaskGraph {
     /// subsequent reader, and serializes it after any prior reader (WAR).
     pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: Vec<u8>) {
         self.ir.nodes.push(TaskNode {
-            label: "write_buffer".to_string(),
+            label: "write_buffer",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buffer.handle),
                 access: NodeAccess::Write,
@@ -715,7 +715,7 @@ impl TaskGraph {
         let height = texture.height();
         let th = texture.handle();
         self.ir.nodes.push(TaskNode {
-            label: "write_texture".to_string(),
+            label: "write_texture",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(th),
                 access: NodeAccess::Write,
@@ -763,7 +763,7 @@ impl TaskGraph {
         }
         let th = texture.handle();
         self.ir.nodes.push(TaskNode {
-            label: "write_texture_region".to_string(),
+            label: "write_texture_region",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(th),
                 access: NodeAccess::Write,
@@ -783,12 +783,12 @@ impl TaskGraph {
     /// Begin building an offscreen [`crate::RenderTarget`] render pass node.
     pub fn render_pass<'a>(
         &'a mut self,
-        label: &str,
+        label: &'static str,
         target: &RenderTarget,
     ) -> RenderPassBuilder<'a> {
         RenderPassBuilder {
             graph: self,
-            label: label.to_string(),
+            label,
             target: target.backend_handle(),
             bindings: Vec::new(),
         }
@@ -868,7 +868,7 @@ impl Default for TaskGraph {
 /// [`dispatch`](NodeBuilder::dispatch) or [`dispatch_indirect`](NodeBuilder::dispatch_indirect).
 pub struct NodeBuilder<'a> {
     graph: &'a mut TaskGraph,
-    label: String,
+    label: &'static str,
     pipeline: crate::backend::ComputePipelineHandle,
     bindings: Vec<ResourceBinding>,
     resource_slots: Vec<u32>,
@@ -932,14 +932,21 @@ impl<'a> NodeBuilder<'a> {
     }
 
     /// Set the bindless resource slot indices for this node's dispatch (region A).
-    pub fn bind_resources_raw(mut self, indices: &[u32]) -> Self {
-        self.resource_slots = indices.to_vec();
+    /// Accepts an owned `Vec` to avoid re-allocation when the caller already has one.
+    pub fn bind_resources_raw(mut self, indices: Vec<u32>) -> Self {
+        self.resource_slots = indices;
         self
     }
 
+    /// Convenience wrapper that copies a slice into owned storage.
+    pub fn bind_resources_raw_slice(self, indices: &[u32]) -> Self {
+        self.bind_resources_raw(indices.to_vec())
+    }
+
     /// Set user scalar parameters for this node's dispatch (region B).
-    pub fn bind_resources_raw_with_user(mut self, indices: &[u32], user: &[u32]) -> Self {
-        self.resource_slots = indices.to_vec();
+    /// Accepts an owned `Vec` for indices to avoid re-allocation.
+    pub fn bind_resources_raw_with_user(mut self, indices: Vec<u32>, user: &[u32]) -> Self {
+        self.resource_slots = indices;
         self.user_slots = user.to_vec();
         self
     }
@@ -981,7 +988,7 @@ impl<'a> NodeBuilder<'a> {
 /// Builder for a render pass targeting an offscreen [`crate::RenderTarget`].
 pub struct RenderPassBuilder<'a> {
     graph: &'a mut TaskGraph,
-    label: String,
+    label: &'static str,
     target: RenderTargetHandle,
     bindings: Vec<ResourceBinding>,
 }
@@ -1087,7 +1094,7 @@ mod tests {
         graph
             .node("compute_write", &pipeline)
             .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw(&[1])
+            .bind_resources_raw_slice(&[1])
             .dispatch(1, 1, 1);
 
         let mut enc = CommandEncoder::new();
@@ -1120,7 +1127,7 @@ mod tests {
         graph
             .node("touch", &pipeline)
             .bind_transient_buffer(t, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&device).unwrap();
     }
@@ -1135,7 +1142,7 @@ mod tests {
         graph
             .node("touch_tex", &pipeline)
             .bind_transient_texture(tt, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&device).unwrap();
     }
@@ -1153,13 +1160,13 @@ mod tests {
             .node("w0", &pipeline)
             .bind_transient_texture(t0, NodeAccess::Write)
             .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("w1", &pipeline)
             .bind_buffer(&buf, NodeAccess::Read)
             .bind_transient_texture(t1, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&device).unwrap();
     }
@@ -1178,13 +1185,13 @@ mod tests {
             .node("wave0", &pipeline)
             .bind_transient_buffer(t0, NodeAccess::Write)
             .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("wave1", &pipeline)
             .bind_buffer(&buf, NodeAccess::Read)
             .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
         let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
@@ -1208,12 +1215,12 @@ mod tests {
         graph
             .node("a", &pipeline)
             .bind_transient_buffer(t0, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("b", &pipeline)
             .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
         let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
@@ -1239,13 +1246,13 @@ mod tests {
         graph
             .node("write", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Write)
-            .bind_resources_raw(&[42])
+            .bind_resources_raw_slice(&[42])
             .dispatch(8, 1, 1);
         graph
             .node("read_write", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Read)
             .bind_buffer(&buf_b, NodeAccess::Write)
-            .bind_resources_raw(&[43])
+            .bind_resources_raw_slice(&[43])
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();

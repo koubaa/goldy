@@ -108,7 +108,7 @@ pub enum NodeKind {
 #[derive(Debug, Clone)]
 pub struct TaskNode {
     #[allow(dead_code)]
-    pub label: String,
+    pub label: &'static str,
     /// Resource access declarations used by the dependency analyzer.
     pub bindings: Vec<ResourceBinding>,
     /// What this node actually executes.

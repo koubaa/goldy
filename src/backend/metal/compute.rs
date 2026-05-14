@@ -118,23 +118,17 @@ pub(super) fn begin_compute_encoder<'a>(
     logical_device.texture_heap.use_heaps_for_compute(encoder);
     super::transient::use_transient_heaps_for_compute(logical_device, encoder);
     for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle {
+        if buf_state.device_handle == device_handle && buf_state.is_device_allocated {
             encoder.use_resource(
                 &buf_state.buffer,
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
             );
         }
     }
-    // Declare textures resident for indirect access through the argument buffer.
-    //
-    // Heap-allocated textures are already covered by `use_heaps_for_compute`,
-    // but swapchain drawables (CAMetalLayer-owned `MTLTexture`s registered
-    // transiently in `state.textures`) are NOT in any Goldy-owned heap, so
-    // Metal Tier-2 bindless will read them as unresident unless we explicitly
-    // call `use_resource` on them before dispatch. Calling `use_resource` on
-    // already-heap-resident textures is safe and idempotent.
+    // Only non-heap textures (e.g. swapchain drawables) need individual
+    // `use_resource`; heap-resident textures are covered by `use_heaps_for_compute`.
     for tex_state in state.textures.values() {
-        if tex_state.device_handle == device_handle {
+        if tex_state.device_handle == device_handle && !tex_state.is_heap_allocated {
             let usage = if tex_state.is_storage_image {
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write
             } else {
@@ -265,10 +259,30 @@ pub(super) fn record_commands_to_buffer(
                     *offset + data.len() as u64 <= buf_state.size,
                     "WriteBuffer: write exceeds buffer bounds"
                 );
-                // Use a staging buffer + blit copy so each submission's data is
-                // isolated. A direct CPU memcpy would race when two command
-                // buffers target the same destination: the second memcpy
-                // overwrites the buffer before the first GPU dispatch reads it.
+                // Small writes to shared-mode buffers can use direct CPU memcpy,
+                // avoiding blit encoder transitions. Safe because shared-mode
+                // buffers have coherent CPU/GPU access on Apple Silicon, and the
+                // wave reordering guarantees writes precede dispatches in each
+                // wave, so a subsequent encoder creation provides ordering.
+                const SMALL_WRITE_THRESHOLD: usize = 4096;
+                if !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
+                    && data.len() <= SMALL_WRITE_THRESHOLD
+                {
+                    let ptr = buf_state.buffer.contents();
+                    if !ptr.is_null() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr(),
+                                (ptr as *mut u8).add(*offset as usize),
+                                data.len(),
+                            );
+                        }
+                        continue;
+                    }
+                }
+
+                // Fall back to staging buffer + blit copy for GPU-only buffers,
+                // large writes, or if contents() was unexpectedly null.
                 ensure_blit!();
                 let staging = logical_device.device.new_buffer_with_data(
                     data.as_ptr() as *const _,
@@ -823,7 +837,7 @@ fn record_render_pass_to_buffer(
         .use_heaps_for_render(encoder, render_stages);
     super::transient::use_transient_heaps_for_render(logical_device, encoder, render_stages);
     for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle {
+        if buf_state.device_handle == device_handle && buf_state.is_device_allocated {
             encoder.use_resource_at(
                 &buf_state.buffer,
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,

@@ -251,6 +251,7 @@ pub(super) fn place_texture_in_transient_heap(
             arg_buffer_index,
             is_storage_image,
             slot_owned_externally: false,
+            is_heap_allocated: true,
         },
     );
     Ok(handle)

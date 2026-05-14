@@ -397,6 +397,48 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
             });
         }
 
+        // Emit blit-type nodes (clears, uploads) before dispatches within each
+        // wave to minimize compute↔blit encoder transitions on Metal. Nodes in
+        // the same wave have no data dependencies, so reordering is safe.
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            match &node.kind {
+                NodeKind::ClearBuffer { buffer, offset, size } => {
+                    commands.push(GpuCommand::ClearBuffer {
+                        buffer: *buffer,
+                        offset: *offset,
+                        size: *size,
+                    });
+                }
+                NodeKind::WriteBuffer { buffer, offset, data } => {
+                    commands.push(GpuCommand::WriteBuffer {
+                        buffer: *buffer,
+                        offset: *offset,
+                        data: data.clone(),
+                    });
+                }
+                NodeKind::WriteTexture { texture, data, width, height } => {
+                    commands.push(GpuCommand::WriteTexture {
+                        texture: *texture,
+                        data: data.clone(),
+                        width: *width,
+                        height: *height,
+                    });
+                }
+                NodeKind::WriteTextureRegion { texture, x, y, width, height, data } => {
+                    commands.push(GpuCommand::WriteTextureRegion {
+                        texture: *texture,
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
+                        data: data.clone(),
+                    });
+                }
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
+            }
+        }
+
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
@@ -429,63 +471,12 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
                         }
                     }
                 }
-                NodeKind::ClearBuffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
-                    commands.push(GpuCommand::ClearBuffer {
-                        buffer: *buffer,
-                        offset: *offset,
-                        size: *size,
-                    });
-                }
-                NodeKind::WriteBuffer {
-                    buffer,
-                    offset,
-                    data,
-                } => {
-                    commands.push(GpuCommand::WriteBuffer {
-                        buffer: *buffer,
-                        offset: *offset,
-                        data: data.clone(),
-                    });
-                }
-                NodeKind::WriteTexture {
-                    texture,
-                    data,
-                    width,
-                    height,
-                } => {
-                    commands.push(GpuCommand::WriteTexture {
-                        texture: *texture,
-                        data: data.clone(),
-                        width: *width,
-                        height: *height,
-                    });
-                }
-                NodeKind::WriteTextureRegion {
-                    texture,
-                    x,
-                    y,
-                    width,
-                    height,
-                    data,
-                } => {
-                    commands.push(GpuCommand::WriteTextureRegion {
-                        texture: *texture,
-                        x: *x,
-                        y: *y,
-                        width: *width,
-                        height: *height,
-                        data: data.clone(),
-                    });
-                }
                 NodeKind::RenderPass { .. } => {
                     panic!(
                         "emit_commands: graph contains render_pass; use emit_graph_commands / TaskGraph::compile_graph_commands"
                     );
                 }
+                _ => {}
             }
         }
     }
@@ -505,6 +496,47 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
             }));
         }
 
+        // Blit-type nodes first to minimize encoder transitions.
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            match &node.kind {
+                NodeKind::ClearBuffer { buffer, offset, size } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::ClearBuffer {
+                        buffer: *buffer,
+                        offset: *offset,
+                        size: *size,
+                    }));
+                }
+                NodeKind::WriteBuffer { buffer, offset, data } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::WriteBuffer {
+                        buffer: *buffer,
+                        offset: *offset,
+                        data: data.clone(),
+                    }));
+                }
+                NodeKind::WriteTexture { texture, data, width, height } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::WriteTexture {
+                        texture: *texture,
+                        data: data.clone(),
+                        width: *width,
+                        height: *height,
+                    }));
+                }
+                NodeKind::WriteTextureRegion { texture, x, y, width, height, data } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::WriteTextureRegion {
+                        texture: *texture,
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
+                        data: data.clone(),
+                    }));
+                }
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
+            }
+        }
+
+        // Dispatches and render passes second.
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
@@ -537,58 +569,6 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         }
                     }
                 }
-                NodeKind::ClearBuffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
-                    commands.push(GraphCommand::Compute(GpuCommand::ClearBuffer {
-                        buffer: *buffer,
-                        offset: *offset,
-                        size: *size,
-                    }));
-                }
-                NodeKind::WriteBuffer {
-                    buffer,
-                    offset,
-                    data,
-                } => {
-                    commands.push(GraphCommand::Compute(GpuCommand::WriteBuffer {
-                        buffer: *buffer,
-                        offset: *offset,
-                        data: data.clone(),
-                    }));
-                }
-                NodeKind::WriteTexture {
-                    texture,
-                    data,
-                    width,
-                    height,
-                } => {
-                    commands.push(GraphCommand::Compute(GpuCommand::WriteTexture {
-                        texture: *texture,
-                        data: data.clone(),
-                        width: *width,
-                        height: *height,
-                    }));
-                }
-                NodeKind::WriteTextureRegion {
-                    texture,
-                    x,
-                    y,
-                    width,
-                    height,
-                    data,
-                } => {
-                    commands.push(GraphCommand::Compute(GpuCommand::WriteTextureRegion {
-                        texture: *texture,
-                        x: *x,
-                        y: *y,
-                        width: *width,
-                        height: *height,
-                        data: data.clone(),
-                    }));
-                }
                 NodeKind::RenderPass {
                     target,
                     commands: render_cmds,
@@ -598,6 +578,7 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         commands: render_cmds.clone(),
                     });
                 }
+                _ => {}
             }
         }
     }
@@ -617,13 +598,13 @@ mod tests {
 
     /// Build a dispatch `TaskNode` — the workhorse helper for analysis tests.
     fn dispatch_node(
-        label: &str,
+        label: &'static str,
         pipeline: u64,
         bindings: Vec<(ResourceId, NodeAccess)>,
         wg: u32,
     ) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: bindings
                 .into_iter()
                 .map(|(resource, access)| ResourceBinding { resource, access })
@@ -639,7 +620,7 @@ mod tests {
 
     /// Short alias used by the bulk of tests.
     fn node(
-        label: &str,
+        label: &'static str,
         pipeline: u64,
         bindings: Vec<(ResourceId, NodeAccess)>,
         wg: u32,
@@ -648,9 +629,9 @@ mod tests {
     }
 
     /// Build a `ClearBuffer` `TaskNode`.
-    fn clear_node(label: &str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+    fn clear_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: vec![ResourceBinding {
                 resource: buffer,
                 access: NodeAccess::Write,
@@ -664,9 +645,9 @@ mod tests {
     }
 
     /// Build a `WriteBuffer` `TaskNode`.
-    fn write_node(label: &str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+    fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: vec![ResourceBinding {
                 resource: buffer,
                 access: NodeAccess::Write,
@@ -679,9 +660,9 @@ mod tests {
         }
     }
 
-    fn write_texture_node(label: &str, texture: ResourceId, tex_handle: u64) -> TaskNode {
+    fn write_texture_node(label: &'static str, texture: ResourceId, tex_handle: u64) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: vec![ResourceBinding {
                 resource: texture,
                 access: NodeAccess::Write,
@@ -926,7 +907,7 @@ mod tests {
     fn command_emission_with_resource_slots() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "A".to_string(),
+                label: "A",
                 bindings: vec![ResourceBinding {
                     resource: buf(0),
                     access: NodeAccess::Write,

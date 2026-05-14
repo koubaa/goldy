@@ -314,7 +314,7 @@ pub(super) fn render(
         .use_heaps_for_render(encoder, render_stages);
     super::transient::use_transient_heaps_for_render(logical_device, encoder, render_stages);
     for buf_state in state.buffers.values() {
-        if buf_state.device_handle == surface_state.device_handle {
+        if buf_state.device_handle == surface_state.device_handle && buf_state.is_device_allocated {
             encoder.use_resource_at(
                 &buf_state.buffer,
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
@@ -641,6 +641,7 @@ fn register_surface_texture(
             arg_buffer_index: bindless_slot,
             is_storage_image: true,
             slot_owned_externally: true,
+            is_heap_allocated: false,
         },
     );
 

@@ -1723,7 +1723,7 @@ fn test_write_buffer_reuse_across_submissions() {
     g1.node("copy_a", &pipeline)
         .bind_buffer(&mid, NodeAccess::Read)
         .bind_buffer(&out_a, NodeAccess::Write)
-        .bind_resources_raw(&[idx_in, idx_out_a])
+        .bind_resources_raw_slice(&[idx_in, idx_out_a])
         .dispatch(1, 1, 1);
 
     let mut g2 = TaskGraph::new();
@@ -1731,7 +1731,7 @@ fn test_write_buffer_reuse_across_submissions() {
     g2.node("copy_b", &pipeline)
         .bind_buffer(&mid, NodeAccess::Read)
         .bind_buffer(&out_b, NodeAccess::Write)
-        .bind_resources_raw(&[idx_in, idx_out_b])
+        .bind_resources_raw_slice(&[idx_in, idx_out_b])
         .dispatch(1, 1, 1);
 
     let tv1 = g1.submit(&device).expect("submit 1");
