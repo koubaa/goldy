@@ -1013,6 +1013,7 @@ pub(crate) struct TextureState {
     /// `true` when allocated from a Goldy-owned `MTLHeap` (texture_heap or
     /// transient heap). Heap-resident textures are already covered by
     /// `use_heap` and don't need individual `use_resource` calls.
+    #[allow(dead_code)]
     pub is_heap_allocated: bool,
 }
 

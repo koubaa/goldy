@@ -110,7 +110,7 @@ impl TaskGraph {
     fn needs_transient_gpu_wait(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
     }
-    pub(crate) fn transient_heap_size_and_layout(&self) -> Result<(u64, HashMap<u32, u64>)> {
+    pub fn transient_heap_size_and_layout(&self) -> Result<(u64, HashMap<u32, u64>)> {
         Self::transient_heap_layout(&self.transient_specs, &self.ir)
     }
 
@@ -271,21 +271,71 @@ impl TaskGraph {
         Ok((next_off, m))
     }
 
-    pub(crate) fn transient_buffer_range_map(
+    pub fn transient_buffer_range_map(
         heap: &Buffer,
         layout: &HashMap<u32, u64>,
         specs: &[TransientBufferSpec],
     ) -> HashMap<u32, (BufferHandle, u64, u64)> {
+        Self::transient_buffer_range_map_with_base(heap, layout, specs, 0)
+    }
+
+    /// Like [`Self::transient_buffer_range_map`] but adds `base_offset` to every
+    /// layout offset. Used by the placement heap ring where each frame's transients
+    /// start at a different position within a shared backing buffer.
+    pub fn transient_buffer_range_map_with_base(
+        heap: &Buffer,
+        layout: &HashMap<u32, u64>,
+        specs: &[TransientBufferSpec],
+        base_offset: u64,
+    ) -> HashMap<u32, (BufferHandle, u64, u64)> {
         let parent = heap.gpu_buffer_handle();
         specs
             .iter()
-            .map(|s| (s.id, (parent, layout[&s.id], s.size)))
+            .map(|s| (s.id, (parent, base_offset + layout[&s.id], s.size)))
             .collect()
+    }
+
+    /// Resolve all transient buffer references in the IR: patch bindings
+    /// (`TransientBuffer` → `BufferRange`) AND patch `resource_slots` in
+    /// dispatch nodes (placeholder → real bindless index).
+    ///
+    /// `bindless_map` maps each transient id to its (UAV index, SRV index).
+    pub fn lower_transient_buffers_with_bindless(
+        &self,
+        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
+        bindless_map: &HashMap<u32, (u32, u32)>,
+    ) -> Result<GraphIR> {
+        Self::lower_transient_buffers_inner(&self.ir, range_map, Some(bindless_map))
+    }
+
+    /// Produce a new `TaskGraph` with all transient buffer specs cleared and
+    /// the IR fully resolved (no `TransientBuffer` resource ids remain).
+    /// The returned graph can be submitted via `compile_commands` or
+    /// `Frame::submit_compute` without triggering the transient assert.
+    pub fn into_resolved(
+        &self,
+        resolved_ir: GraphIR,
+    ) -> TaskGraph {
+        TaskGraph {
+            ir: resolved_ir,
+            transient_specs: Vec::new(),
+            next_transient_id: 0,
+            transient_texture_specs: self.transient_texture_specs.clone(),
+            next_transient_texture_id: self.next_transient_texture_id,
+        }
     }
 
     fn lower_transient_buffers(
         ir: &GraphIR,
         range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
+    ) -> Result<GraphIR> {
+        Self::lower_transient_buffers_inner(ir, range_map, None)
+    }
+
+    fn lower_transient_buffers_inner(
+        ir: &GraphIR,
+        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
+        bindless_map: Option<&HashMap<u32, (u32, u32)>>,
     ) -> Result<GraphIR> {
         let mut nodes = Vec::with_capacity(ir.nodes.len());
         for n in &ir.nodes {
@@ -313,10 +363,35 @@ impl TaskGraph {
                     })
                 })
                 .collect();
+
+            let kind = if let (Some(bmap), NodeKind::Dispatch { pipeline, resource_slots, user_slots, dispatch }) =
+                (bindless_map, &n.kind)
+            {
+                let mut patched_slots = resource_slots.clone();
+                for (i, b) in n.bindings.iter().enumerate() {
+                    if let ResourceId::TransientBuffer(t) = b.resource {
+                        if let Some(&(uav_idx, srv_idx)) = bmap.get(&t.0) {
+                            if i < patched_slots.len() {
+                                let is_read_only = b.access == NodeAccess::Read;
+                                patched_slots[i] = if is_read_only { srv_idx } else { uav_idx };
+                            }
+                        }
+                    }
+                }
+                NodeKind::Dispatch {
+                    pipeline: *pipeline,
+                    resource_slots: patched_slots,
+                    user_slots: user_slots.clone(),
+                    dispatch: dispatch.clone(),
+                }
+            } else {
+                n.kind.clone()
+            };
+
             nodes.push(TaskNode {
                 label: n.label,
                 bindings: bindings?,
-                kind: n.kind.clone(),
+                kind,
             });
         }
         Ok(GraphIR { nodes })
@@ -467,6 +542,16 @@ impl TaskGraph {
 
     pub(crate) fn has_transient_resources(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
+    }
+
+    /// True if the graph contains at least one transient buffer (graph-colored).
+    pub fn has_transient_buffers(&self) -> bool {
+        !self.transient_specs.is_empty()
+    }
+
+    /// Access the transient buffer specs (id + size) for coloring/layout.
+    pub fn transient_specs(&self) -> &[TransientBufferSpec] {
+        &self.transient_specs
     }
 
     /// Total bytes for a single native transient heap (buffers + textures).

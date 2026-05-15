@@ -87,7 +87,7 @@ mod graph;
 mod ir;
 
 pub use graph::{NodeBuilder, RenderPassBuilder, TaskGraph};
-pub use ir::NodeAccess;
+pub use ir::{GraphIR, NodeAccess};
 
 use crate::backend::{BufferHandle, TextureHandle};
 use crate::types::TextureFormat;
@@ -101,7 +101,7 @@ pub struct TransientId(pub u32);
 pub struct TransientTextureId(pub u32);
 
 #[derive(Debug, Clone)]
-pub(crate) struct TransientBufferSpec {
+pub struct TransientBufferSpec {
     pub id: u32,
     pub size: u64,
 }

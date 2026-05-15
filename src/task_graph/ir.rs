@@ -39,7 +39,8 @@ impl NodeAccess {
 /// A single resource binding within a task node.
 #[derive(Debug, Clone)]
 pub struct ResourceBinding {
-    pub resource: ResourceId,
+    /// Graph IR only; not exposed publicly so [`super::ResourceId`] can stay crate-private.
+    pub(crate) resource: ResourceId,
     pub access: NodeAccess,
 }
 
