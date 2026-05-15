@@ -830,6 +830,10 @@ pub trait GpuBackend: Send + Sync {
     /// `reset_buffer_heaps` and *before* large allocations. No-op by default.
     fn ensure_buffer_heap_capacity(&mut self, _device: DeviceHandle, _min_capacity: u64) {}
 
+    /// Drop empty overflow heaps (both buffer and texture) after frame cleanup.
+    /// Safe to call after retired buffers/textures have been dropped. No-op by default.
+    fn compact_overflow_heaps(&mut self, _device: DeviceHandle) {}
+
     /// Drop backend-held shader compiler state (Metal: Slang session) to reduce host memory.
     ///
     /// Safe after all lazily-compiled shader stages are resident. A later compile will

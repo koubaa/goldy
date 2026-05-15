@@ -121,10 +121,9 @@ impl HeapAllocator {
             return Some(buf);
         }
 
-        // Try the last few overflow heaps (most recently created first).
-        // Checking all heaps is O(n) and degrades when many are full; bounding
-        // the search keeps allocation latency predictable.
-        for heap in self.overflow.iter().rev().take(4) {
+        // Try all overflow heaps (newest first). The cap at MAX_OVERFLOW_HEAPS
+        // keeps the search bounded. Older heaps may have space from freed buffers.
+        for heap in self.overflow.iter().rev() {
             if let Some(buf) = heap.new_buffer(size, options) {
                 self.buffer_count += 1;
                 self.update_high_water_mark();
@@ -220,6 +219,22 @@ impl HeapAllocator {
         self.high_water_mark = 0;
     }
 
+    /// Drop overflow heaps that are completely empty (all buffers freed).
+    /// Lighter than `reset_for_frame` (no GPU idle required) — safe to call
+    /// after frame cleanup has dropped retired buffers.
+    pub fn compact_overflow(&mut self) {
+        let before = self.overflow.len();
+        self.overflow.retain(|heap| heap.used_size() > 0);
+        let dropped = before - self.overflow.len();
+        if dropped > 0 {
+            tracing::debug!(
+                "Compacted {} empty overflow buffer heaps ({} remaining)",
+                dropped,
+                self.overflow.len()
+            );
+        }
+    }
+
     /// Ensure the primary heap is right-sized for `min_capacity` bytes.
     /// Grows the heap if it's too small. Also shrinks if it's more than 4x
     /// the requested capacity (avoids holding a 1 GB heap when 64 MB suffices).
@@ -298,15 +313,15 @@ impl TextureHeapAllocator {
 
     /// Allocate a texture from the heap hierarchy.
     ///
-    /// Tries primary, then recent overflow heaps, then creates a new overflow.
-    /// Overflow heap creation is capped to prevent runaway growth.
+    /// Tries primary, then all overflow heaps (newest first), then creates a
+    /// new overflow. Overflow heap creation is capped to prevent runaway growth.
     pub fn allocate(&mut self, descriptor: &mtl::TextureDescriptorRef) -> Option<MTLTexture> {
         if let Some(tex) = self.primary.new_texture(descriptor) {
             self.texture_count += 1;
             return Some(tex);
         }
 
-        for heap in self.overflow.iter().rev().take(4) {
+        for heap in self.overflow.iter().rev() {
             if let Some(tex) = heap.new_texture(descriptor) {
                 self.texture_count += 1;
                 return Some(tex);
@@ -332,6 +347,21 @@ impl TextureHeapAllocator {
             self.texture_count += 1;
         }
         tex
+    }
+
+    /// Drop overflow heaps that are completely empty (all textures freed).
+    /// Called during frame cleanup when the GPU has retired old work.
+    pub fn compact_overflow(&mut self) {
+        let before = self.overflow.len();
+        self.overflow.retain(|heap| heap.used_size() > 0);
+        let dropped = before - self.overflow.len();
+        if dropped > 0 {
+            tracing::debug!(
+                "Compacted {} empty overflow texture heaps ({} remaining)",
+                dropped,
+                self.overflow.len()
+            );
+        }
     }
 
     pub fn has_textures(&self) -> bool {

@@ -775,6 +775,13 @@ impl GpuBackend for MetalBackend {
         }
     }
 
+    fn compact_overflow_heaps(&mut self, device: DeviceHandle) {
+        if let Some(logical_device) = self.state.devices.get_mut(&device) {
+            logical_device.heap_allocator.compact_overflow();
+            logical_device.texture_heap.compact_overflow();
+        }
+    }
+
     fn release_idle_shader_compiler(&mut self) {
         self.state.slang_compiler = None;
         tracing::info!("Released Metal Slang compiler session (freed host-side compiler memory)");

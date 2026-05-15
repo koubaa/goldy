@@ -714,19 +714,19 @@ impl HeapTransientAllocator {
     }
 
     /// Move any deferred frees whose epochs have retired into the free list.
+    /// Entries with `epoch = None` are pending the current frame's timeline
+    /// (not yet stamped by `end_frame`) and are skipped.
     fn drain_retired(&mut self, progress: TimelineValue) {
         let mut i = 0;
         while i < self.deferred.len() {
-            let ready = match self.deferred[i].epoch {
-                None => true,
-                Some(ep) => progress >= ep,
-            };
-            if ready {
-                let d = self.deferred.swap_remove(i);
-                self.insert_free(d.offset, d.size);
-            } else {
-                i += 1;
+            if let Some(ep) = self.deferred[i].epoch {
+                if progress >= ep {
+                    let d = self.deferred.swap_remove(i);
+                    self.insert_free(d.offset, d.size);
+                    continue;
+                }
             }
+            i += 1;
         }
     }
 
@@ -842,14 +842,14 @@ impl TransientAllocator for HeapTransientAllocator {
 
     fn alloc(
         &mut self,
-        device: &Device,
+        _device: &Device,
         size: u64,
         element_stride: Option<u32>,
     ) -> Result<BufferView> {
         let stride = element_stride.unwrap_or(4) as u64;
         let alloc_align = lcm(self.alignment, stride);
 
-        // Try allocation.
+        // Try allocation from free list or bump.
         if let Some(offset) = self.alloc_inner(size, alloc_align) {
             self.live_bytes += size;
             if self.live_bytes > self.peak_live_bytes {
@@ -858,19 +858,8 @@ impl TransientAllocator for HeapTransientAllocator {
             return self.pool.backing_buffer().create_view(offset, size, element_stride);
         }
 
-        // Drain any newly-retired frees, compact the watermark, and retry.
-        let progress = device.gpu_progress();
-        self.drain_retired(progress);
-        self.compact_watermark();
-        if let Some(offset) = self.alloc_inner(size, alloc_align) {
-            self.live_bytes += size;
-            if self.live_bytes > self.peak_live_bytes {
-                self.peak_live_bytes = self.live_bytes;
-            }
-            return self.pool.backing_buffer().create_view(offset, size, element_stride);
-        }
-
-        // Grow and retry. Account for alignment padding so the bump path has room.
+        // Grow the pool and retry. Deferred frees are only drained in begin_frame
+        // when we know the GPU has advanced past their epochs.
         let aligned_wm = (self.watermark + alloc_align - 1) / alloc_align * alloc_align;
         let needed = aligned_wm.saturating_add(size);
         self.grow(needed)?;
@@ -900,8 +889,14 @@ impl TransientAllocator for HeapTransientAllocator {
         });
     }
 
-    fn end_frame(&mut self, _epoch: TimelineValue) {
-        // No per-frame bookkeeping needed — frees are tracked individually by epoch.
+    fn end_frame(&mut self, epoch: TimelineValue) {
+        // Stamp any mid-frame frees (epoch=None) with this frame's timeline so
+        // they become eligible for reuse only after the GPU retires this frame.
+        for d in &mut self.deferred {
+            if d.epoch.is_none() {
+                d.epoch = Some(epoch);
+            }
+        }
     }
 
     fn capacity(&self) -> u64 {
@@ -1019,10 +1014,9 @@ mod tests {
         let v1_size = v1.size();
         assert_eq!(v1_size, 1024);
 
-        // Free with no epoch — immediately reusable.
-        alloc.free(v1_off, v1_size, None);
+        // Free with epoch=0 — retired immediately since mock GPU progress starts at 0.
+        alloc.free(v1_off, v1_size, Some(0));
 
-        // Drain: since epoch=None, it should be immediately available.
         alloc.begin_frame(&device, 0).unwrap();
 
         let v2 = alloc.alloc(&device, 1024, Some(4)).unwrap();
@@ -1074,10 +1068,10 @@ mod tests {
         let (v2_off, v2_sz) = (v2.offset(), v2.size());
         let (v3_off, v3_sz) = (v3.offset(), v3.size());
 
-        // Free all three immediately (no epoch).
-        alloc.free(v1_off, v1_sz, None);
-        alloc.free(v2_off, v2_sz, None);
-        alloc.free(v3_off, v3_sz, None);
+        // Free all three with epoch=0 (immediately retired).
+        alloc.free(v1_off, v1_sz, Some(0));
+        alloc.free(v2_off, v2_sz, Some(0));
+        alloc.free(v3_off, v3_sz, Some(0));
 
         // Drain deferred frees.
         alloc.begin_frame(&device, 0).unwrap();
@@ -1086,6 +1080,39 @@ mod tests {
         // from the coalesced free block.
         let big = alloc.alloc(&device, 768, Some(4)).unwrap();
         assert_eq!(big.offset(), v1_off, "coalesced range should start at v1's offset");
+    }
+
+    #[test]
+    fn heap_none_epoch_not_drained_until_stamped() {
+        let device = test_device();
+        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        let v1_off = v1.offset();
+
+        // Free with epoch=None (mid-pipeline free, pending stamp).
+        alloc.free(v1_off, 1024, None);
+
+        // drain_retired should NOT recycle it — epoch is None.
+        alloc.begin_frame(&device, 0).unwrap();
+        let v2 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        assert_ne!(v2.offset(), v1_off, "None-epoch range must not be reused before stamp");
+
+        // Stamp with epoch=1 via end_frame.
+        alloc.end_frame(1);
+
+        // Still not available — GPU progress is 0, epoch is 1.
+        alloc.begin_frame(&device, 0).unwrap();
+        let v3 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        assert_ne!(v3.offset(), v1_off, "range should not be reused before epoch retires");
+
+        // Advance past epoch=1.
+        device.wait_until(1).unwrap();
+        alloc.begin_frame(&device, 0).unwrap();
+        let v4 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        assert_eq!(v4.offset(), v1_off, "range should be reused after epoch retires");
     }
 
     #[test]

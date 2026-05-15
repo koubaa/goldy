@@ -780,6 +780,19 @@ impl Device {
             .ensure_buffer_heap_capacity(self.inner.handle, min_capacity);
     }
 
+    /// Drop empty overflow heaps (both buffer and texture) after frame cleanup.
+    ///
+    /// Safe to call after retired buffers/textures have been dropped. On Metal
+    /// this releases `MTLHeap` objects that accumulated during frames when the
+    /// primary heaps couldn't satisfy all allocations.
+    pub fn compact_overflow_heaps(&self) {
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .compact_overflow_heaps(self.inner.handle);
+    }
+
     /// Drop backend-held Slang / driver compiler session state to reduce host RSS.
     ///
     /// On Metal this frees the persistent Slang compiler that usually holds large
