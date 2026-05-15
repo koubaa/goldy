@@ -792,7 +792,7 @@ impl BufferPool {
             "alignment must be a power of two"
         );
         tracing::debug!(total_size, alignment, "Creating buffer pool");
-        let backing = Buffer::new(device, total_size, DataAccess::Scattered)?;
+        let backing = device.alloc_buffer(total_size, DataAccess::Scattered, None, BufferFlags::empty())?;
         Ok(Self {
             backing,
             offset: 0,
@@ -835,8 +835,7 @@ impl BufferPool {
             ?flags,
             "Creating buffer pool with capacity hint"
         );
-        let backing = Buffer::new_with_capacity_hint_and_flags(
-            device,
+        let backing = device.alloc_buffer_with_capacity(
             total_size,
             expected_max,
             DataAccess::Scattered,

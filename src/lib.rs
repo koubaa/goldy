@@ -38,6 +38,7 @@ pub mod validation_env;
 pub mod instrumentation;
 pub mod timeline;
 pub mod transient_allocator;
+pub mod vram_allocator;
 
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};

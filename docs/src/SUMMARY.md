@@ -37,6 +37,7 @@
 - [Textures and Samplers](./resources/textures.md)
 - [Pooling and Sub-Allocation](./resources/pooling.md)
 - [Transient Allocation](./resources/transient-allocation.md)
+- [VRAM Allocator](./resources/vram-allocator.md)
 
 # Backends
 

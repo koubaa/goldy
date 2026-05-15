@@ -151,6 +151,7 @@ impl Instance {
                 adapter_id,
                 device_type,
                 library_registry: Arc::new(Mutex::new(registry)),
+                vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator),
             }),
         })
     }
@@ -291,6 +292,7 @@ pub(crate) struct DeviceInner {
     adapter_id: u32,
     device_type: DeviceType,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
+    vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
 }
 
 impl Clone for Device {
@@ -406,6 +408,112 @@ impl Drop for ShaderLibraryRegistry {
 }
 
 impl Device {
+    // =======================================================================
+    // VramAllocator
+    // =======================================================================
+
+    /// Returns the currently installed [`VramAllocator`].
+    ///
+    /// The default is [`DefaultVramAllocator`] which delegates directly to the
+    /// backend with no overhead.
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    /// [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
+    pub fn vram_allocator(&self) -> &dyn crate::vram_allocator::VramAllocator {
+        &*self.inner.vram_allocator
+    }
+
+    /// Returns a clone of the [`Arc`] holding the current [`VramAllocator`].
+    pub fn vram_allocator_arc(&self) -> Arc<dyn crate::vram_allocator::VramAllocator> {
+        Arc::clone(&self.inner.vram_allocator)
+    }
+
+    /// Create a new `Device` handle sharing the same GPU device but using
+    /// a different [`VramAllocator`].
+    ///
+    /// All resources created through the returned handle will go through the
+    /// new allocator. Resources created through the original handle are
+    /// unaffected.
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    pub fn with_vram_allocator(
+        &self,
+        allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DeviceInner {
+                backend: Arc::clone(&self.inner.backend),
+                handle: self.inner.handle,
+                adapter_id: self.inner.adapter_id,
+                device_type: self.inner.device_type,
+                library_registry: Arc::clone(&self.inner.library_registry),
+                vram_allocator: allocator,
+            }),
+        }
+    }
+
+    /// Allocate a GPU buffer through the device's [`VramAllocator`].
+    ///
+    /// Equivalent to calling [`VramAllocator::alloc_buffer`] on the installed
+    /// allocator. Prefer this over [`Buffer::new`] when you want allocations to
+    /// go through the unified allocator for tracking and budgeting.
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    /// [`VramAllocator::alloc_buffer`]: crate::vram_allocator::VramAllocator::alloc_buffer
+    /// [`Buffer::new`]: crate::buffer::Buffer::new
+    pub fn alloc_buffer(
+        &self,
+        size: u64,
+        access: DataAccess,
+        element_stride: Option<u32>,
+        flags: BufferFlags,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        self.inner.vram_allocator.alloc_buffer(self, size, access, element_stride, flags)
+    }
+
+    /// Allocate a GPU buffer with a capacity hint through the device's [`VramAllocator`].
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    pub fn alloc_buffer_with_capacity(
+        &self,
+        initial_size: u64,
+        expected_max: u64,
+        access: DataAccess,
+        flags: BufferFlags,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        self.inner.vram_allocator.alloc_buffer_with_capacity(
+            self,
+            initial_size,
+            expected_max,
+            access,
+            flags,
+        )
+    }
+
+    /// Allocate a GPU texture through the device's [`VramAllocator`].
+    ///
+    /// Equivalent to calling [`VramAllocator::alloc_texture`] on the installed
+    /// allocator. Prefer this over [`Texture::new`] when you want allocations to
+    /// go through the unified allocator for tracking and budgeting.
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    /// [`VramAllocator::alloc_texture`]: crate::vram_allocator::VramAllocator::alloc_texture
+    /// [`Texture::new`]: crate::texture::Texture::new
+    pub fn alloc_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: SpatialAccess,
+        flags: TextureFlags,
+    ) -> anyhow::Result<crate::texture::Texture> {
+        self.inner.vram_allocator.alloc_texture(self, width, height, format, access, flags)
+    }
+
+    // =======================================================================
+    // Device metadata
+    // =======================================================================
+
     /// Get the adapter ID this device was created on.
     pub fn adapter_id(&self) -> u32 {
         self.inner.adapter_id
@@ -749,6 +857,7 @@ impl Device {
                 adapter_id: 0,
                 device_type: DeviceType::Other,
                 library_registry: Arc::new(Mutex::new(registry)),
+                vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator),
             }),
         })
     }
