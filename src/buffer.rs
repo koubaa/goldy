@@ -884,7 +884,11 @@ impl BufferPool {
     /// Uses the same alignment math as [`Self::alloc_bytes`] so the answer is exact, including
     /// for non-power-of-two strides (e.g. 12-byte `vec3<f32>`).
     pub fn would_fit(&self, size: u64, element_stride: Option<u32>) -> bool {
-        let stride = element_stride.unwrap_or(4) as u64;
+        let stride_u32 = element_stride.unwrap_or(4);
+        if stride_u32 == 0 || size % stride_u32 as u64 != 0 {
+            return false;
+        }
+        let stride = stride_u32 as u64;
         let alloc_align = lcm(self.alignment, stride);
         let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
         aligned_offset.saturating_add(size) <= self.backing.size()
@@ -898,7 +902,17 @@ impl BufferPool {
     /// Each allocation is aligned to satisfy both pool alignment (256) and
     /// `offset % element_stride == 0` (required by DX12 StructuredBuffer views).
     pub fn alloc_bytes(&mut self, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
-        let stride = element_stride.unwrap_or(4) as u64;
+        let stride_u32 = element_stride.unwrap_or(4);
+        if stride_u32 == 0 {
+            anyhow::bail!("BufferPool alloc_bytes: element stride must be non-zero");
+        }
+        if size % stride_u32 as u64 != 0 {
+            anyhow::bail!(
+                "BufferPool alloc_bytes: size {size} must be a multiple of element stride {stride_u32} \
+                 (StructuredBuffer views require an integral element count)"
+            );
+        }
+        let stride = stride_u32 as u64;
         let alloc_align = lcm(self.alignment, stride);
         let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
 

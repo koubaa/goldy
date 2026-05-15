@@ -2705,11 +2705,12 @@ fn buffer_pool_would_fit_agrees_with_alloc_bytes() {
 
     // Non-power-of-two stride: 12 (vec3<f32>). LCM(256, 12) = 768.
     // After consuming 1024 bytes at alignment 256, used == 1024. The next alloc with stride
-    // 12 aligns to 768 → aligned_offset = 1536.
-    assert!(pool.would_fit(1024, Some(12)));
-    let _v2 = pool.alloc_bytes(1024, Some(12)).expect("alloc np2");
+    // 12 aligns to 768 → aligned_offset = 1536. Byte size must be a multiple of 12 for
+    // StructuredBuffer views (e.g. 1020 = 85 × 12, not 1024).
+    assert!(pool.would_fit(1020, Some(12)));
+    let _v2 = pool.alloc_bytes(1020, Some(12)).expect("alloc np2");
 
-    // Remaining = 4096 - (1536 + 1024) = 1536. would_fit must reject anything larger.
+    // Remaining tail after second slot: 4096 - (1536 + 1020). would_fit must reject oversize allocs.
     assert!(pool.would_fit(1024, Some(4)));
     assert!(!pool.would_fit(4096, Some(4)));
 }
