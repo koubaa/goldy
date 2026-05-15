@@ -52,6 +52,12 @@ const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 /// Minimum overflow heap size (16 MB).
 const MIN_OVERFLOW_HEAP_SIZE: u64 = 16 * 1024 * 1024;
 
+/// Maximum number of overflow heaps per allocator. Prevents runaway heap
+/// creation when frames are submitted faster than the GPU retires resources
+/// (e.g. vsync off). Beyond this limit, allocations return `None` and the
+/// caller must wait for GPU progress or reduce pipelining depth.
+const MAX_OVERFLOW_HEAPS: usize = 16;
+
 /// Upper bound on any single heap allocation. Metal can nominally create
 /// heaps up to the device's `maxBufferLength` (tens of GB on Apple Silicon),
 /// but in practice a request that large always reflects an upstream bug:
@@ -93,7 +99,9 @@ impl HeapAllocator {
 
     /// Allocate a buffer from the heap hierarchy.
     ///
-    /// Tries primary, then the last overflow heap, then creates a new overflow.
+    /// Tries primary, then recent overflow heaps, then creates a new overflow.
+    /// Overflow heap creation is capped to prevent runaway growth when the GPU
+    /// hasn't yet freed resources from retired command buffers.
     /// Returns `None` if the requested size is larger than [`MAX_HEAP_SIZE`]
     /// (see rationale there — we'd rather fail this one allocation than let
     /// a corrupt size request wedge the whole process).
@@ -113,12 +121,22 @@ impl HeapAllocator {
             return Some(buf);
         }
 
-        if let Some(last) = self.overflow.last() {
-            if let Some(buf) = last.new_buffer(size, options) {
+        // Try the last few overflow heaps (most recently created first).
+        // Checking all heaps is O(n) and degrades when many are full; bounding
+        // the search keeps allocation latency predictable.
+        for heap in self.overflow.iter().rev().take(4) {
+            if let Some(buf) = heap.new_buffer(size, options) {
                 self.buffer_count += 1;
                 self.update_high_water_mark();
                 return Some(buf);
             }
+        }
+
+        // Cap overflow heaps to prevent runaway growth when frames queue faster
+        // than the GPU retires them (vsync off). The caller should handle None
+        // by waiting for GPU progress or reducing pipelining depth.
+        if self.overflow.len() >= MAX_OVERFLOW_HEAPS {
+            return None;
         }
 
         // Clamp the overflow heap size too: `size * 2` on a ~1 GB request is
@@ -280,18 +298,23 @@ impl TextureHeapAllocator {
 
     /// Allocate a texture from the heap hierarchy.
     ///
-    /// Tries primary, then the last overflow heap, then creates a new overflow.
+    /// Tries primary, then recent overflow heaps, then creates a new overflow.
+    /// Overflow heap creation is capped to prevent runaway growth.
     pub fn allocate(&mut self, descriptor: &mtl::TextureDescriptorRef) -> Option<MTLTexture> {
         if let Some(tex) = self.primary.new_texture(descriptor) {
             self.texture_count += 1;
             return Some(tex);
         }
 
-        if let Some(last) = self.overflow.last() {
-            if let Some(tex) = last.new_texture(descriptor) {
+        for heap in self.overflow.iter().rev().take(4) {
+            if let Some(tex) = heap.new_texture(descriptor) {
                 self.texture_count += 1;
                 return Some(tex);
             }
+        }
+
+        if self.overflow.len() >= MAX_OVERFLOW_HEAPS {
+            return None;
         }
 
         let alloc_size = self.device.heap_texture_size_and_align(descriptor).size;

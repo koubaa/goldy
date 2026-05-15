@@ -19,16 +19,10 @@
 //!   reclamation is asynchronous via [`Device::gpu_progress`]. Closest analog: epoch-based
 //!   reclamation (EBR) used by lock-free data structures and region-based garbage collectors
 //!   like G1. Non-blocking hot path; pipeline depth adapts to workload.
-//!
-//! Future strategies (not yet implemented) might include:
-//!
-//! * `PerNameRecycle` — per-`(name, size_class)` `Buffer` pool, modeled after Vello/wgpu's
-//!   internal resource pool. Easier to reason about across backends but loses the
-//!   "single virtual address range" property.
-//! * `BackendNative` — delegate to a backend-specific primitive (Metal placement heap with
-//!   `makeAliasable`, Vulkan sparse rebind, DX12 tiled `UpdateTileMappings`).
-//! * `DebugSequential` — fresh `Buffer` per allocation, no reuse. Catches use-after-free at
-//!   the cost of memory; useful for validation.
+//! * [`HeapTransientAllocator`] — single monolithic buffer with a real free list (best-fit
+//!   with coalescing). Freed sub-allocations return to the free list once their GPU epoch
+//!   retires, enabling mid-pipeline memory reuse. Peak memory ≈ peak live working set rather
+//!   than sum of everything allocated.
 //!
 //! Selection at construction time uses [`TransientAllocatorStrategy`]. Consumers that want
 //! a runtime switch (e.g. via environment variable) should read the variable themselves and
@@ -51,12 +45,12 @@
 //! are preserved. For example, `BumpResetAllocator::end_frame` only stores the epoch for the
 //! next `begin_frame`'s wait; `EpochRegionsAllocator::end_frame` tags every region used.
 
-use crate::buffer::{BufferPool, BufferView};
+use crate::buffer::{BufferPool, BufferView, lcm};
 use crate::device::Device;
 use crate::timeline::TimelineValue;
 use crate::types::BufferFlags;
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 // -----------------------------------------------------------------------
 // Config
@@ -162,6 +156,20 @@ pub trait TransientAllocator: Send {
     /// to release physical pages. Default is a no-op.
     fn hint_unused_above(&mut self, _offset: u64) {}
 
+    /// Return a sub-allocation's byte range to the allocator for reuse.
+    ///
+    /// `offset` and `size` identify the byte range within the backing buffer.
+    /// `epoch` is the timeline value of the last GPU dispatch that reads this buffer. The
+    /// allocator must not reuse the byte range until `device.gpu_progress() >= epoch`.
+    /// If `epoch` is `None`, the range is immediately available (caller guarantees no GPU use).
+    ///
+    /// The caller retains ownership of the `BufferView` (and its bindless slot) for deferred
+    /// cleanup — only the byte range is returned to the allocator.
+    ///
+    /// The default implementation is a no-op — bump-style allocators that reclaim entire
+    /// regions at once simply ignore per-view frees.
+    fn free(&mut self, _offset: u64, _size: u64, _epoch: Option<TimelineValue>) {}
+
     /// Optional emergency reset — drops all backing storage and forgets any in-flight epochs.
     /// Callers are responsible for ensuring no GPU work still references this allocator's
     /// allocations.
@@ -185,8 +193,13 @@ pub enum TransientAllocatorStrategy {
     /// Multiple bump regions tagged with [`TimelineValue`] epochs. Reclamation is
     /// asynchronous: a region becomes reusable as soon as its epoch is ≤ `gpu_progress()`,
     /// no waiting required. Pipeline depth adapts to workload up to `max_regions`.
-    #[default]
     EpochRegions,
+    /// Single monolithic buffer with a real free list. Mid-pipeline `free()` calls return
+    /// sub-allocations to a deferred-free queue keyed by GPU timeline; once retired, ranges
+    /// merge back into the free list for reuse within the same or subsequent frames.
+    /// Peak memory ≈ peak live working set, not sum of all allocations.
+    #[default]
+    Heap,
 }
 
 impl TransientAllocatorStrategy {
@@ -197,6 +210,7 @@ impl TransientAllocatorStrategy {
         match s.to_ascii_lowercase().as_str() {
             "bump" | "bump_reset" | "bumpreset" => Some(Self::BumpReset),
             "epoch" | "regions" | "epoch_regions" | "epochregions" => Some(Self::EpochRegions),
+            "heap" | "freelist" | "heap_freelist" => Some(Self::Heap),
             _ => None,
         }
     }
@@ -210,6 +224,7 @@ impl TransientAllocatorStrategy {
         match self {
             Self::BumpReset => Ok(Box::new(BumpResetAllocator::new(device, config)?)),
             Self::EpochRegions => Ok(Box::new(EpochRegionsAllocator::new(device, config)?)),
+            Self::Heap => Ok(Box::new(HeapTransientAllocator::new(device, config)?)),
         }
     }
 }
@@ -642,6 +657,274 @@ impl TransientAllocator for EpochRegionsAllocator {
 }
 
 // -----------------------------------------------------------------------
+// Heap strategy (free-list inside a monolithic buffer)
+// -----------------------------------------------------------------------
+
+/// A pending free: byte range + the GPU epoch that must retire before reuse.
+struct DeferredFree {
+    offset: u64,
+    size: u64,
+    epoch: Option<TimelineValue>,
+}
+
+/// Best-fit free-list allocator inside a single monolithic [`BufferPool`].
+///
+/// Unlike the bump-only strategies, `HeapTransientAllocator` supports mid-frame
+/// [`TransientAllocator::free`] calls. Freed ranges enter a deferred-free queue
+/// keyed by GPU timeline value; once the GPU retires past that epoch, the range
+/// is merged back into a coalescing free list (`BTreeMap<offset, size>`).
+///
+/// Allocation uses best-fit search over the free list, falling back to bumping the
+/// high-water mark, and finally growing the backing buffer. This gives peak memory
+/// proportional to the peak *live* working set rather than the sum of all allocations.
+pub struct HeapTransientAllocator {
+    pool: BufferPool,
+    alignment: u64,
+    /// Bump pointer (high-water mark). Ranges below this that aren't in the free list
+    /// are considered in-use.
+    watermark: u64,
+    /// Coalesced free ranges available for immediate reuse: `offset -> size`.
+    free_list: BTreeMap<u64, u64>,
+    /// Ranges freed this frame or earlier, waiting for their GPU epoch to retire.
+    deferred: Vec<DeferredFree>,
+    /// Bytes currently live (allocated minus freed-and-retired).
+    live_bytes: u64,
+    /// Peak `live_bytes` observed across the lifetime of this allocator (diagnostic).
+    peak_live_bytes: u64,
+}
+
+impl HeapTransientAllocator {
+    pub fn new(device: &Device, config: TransientAllocatorConfig) -> Result<Self> {
+        let pool = BufferPool::with_alignment_capacity_hint_and_flags(
+            device,
+            config.initial_size.max(config.alignment),
+            config.expected_max.max(config.initial_size),
+            config.alignment,
+            config.flags,
+        )?;
+        Ok(Self {
+            pool,
+            alignment: config.alignment,
+            watermark: 0,
+            free_list: BTreeMap::new(),
+            deferred: Vec::new(),
+            live_bytes: 0,
+            peak_live_bytes: 0,
+        })
+    }
+
+    /// Move any deferred frees whose epochs have retired into the free list.
+    fn drain_retired(&mut self, progress: TimelineValue) {
+        let mut i = 0;
+        while i < self.deferred.len() {
+            let ready = match self.deferred[i].epoch {
+                None => true,
+                Some(ep) => progress >= ep,
+            };
+            if ready {
+                let d = self.deferred.swap_remove(i);
+                self.insert_free(d.offset, d.size);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Pull the watermark back when the highest free range extends up to (or past) it.
+    /// Prevents the watermark from creeping forward indefinitely due to fragmentation.
+    fn compact_watermark(&mut self) {
+        while let Some((&off, &size)) = self.free_list.iter().next_back() {
+            if off + size >= self.watermark {
+                self.free_list.remove(&off);
+                self.watermark = off;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Insert a range into the free list, coalescing with adjacent neighbours.
+    fn insert_free(&mut self, offset: u64, size: u64) {
+        let mut merged_off = offset;
+        let mut merged_size = size;
+
+        // Coalesce with the preceding range if it ends exactly at our start.
+        if let Some((&prev_off, &prev_size)) = self.free_list.range(..offset).next_back() {
+            if prev_off + prev_size == offset {
+                merged_off = prev_off;
+                merged_size += prev_size;
+                self.free_list.remove(&prev_off);
+            }
+        }
+
+        // Coalesce with the following range if it starts exactly at our end.
+        let end = merged_off + merged_size;
+        if let Some((&next_off, &next_size)) = self.free_list.range(end..).next() {
+            if next_off == end {
+                merged_size += next_size;
+                self.free_list.remove(&next_off);
+            }
+        }
+
+        self.free_list.insert(merged_off, merged_size);
+    }
+
+    /// Best-fit search: find the smallest free range that can satisfy `aligned_size` with
+    /// the given `alloc_align`. Returns `(offset_in_range, aligned_start, range_key)`.
+    fn best_fit(&self, size: u64, alloc_align: u64) -> Option<(u64, u64)> {
+        let mut best: Option<(u64, u64, u64)> = None; // (aligned_start, range_off, range_size)
+        for (&off, &rng_size) in &self.free_list {
+            let aligned_start = (off + alloc_align - 1) / alloc_align * alloc_align;
+            let end = aligned_start + size;
+            if end <= off + rng_size {
+                let waste = rng_size - size;
+                if best.is_none() || waste < best.unwrap().2 {
+                    best = Some((aligned_start, off, waste));
+                }
+            }
+        }
+        best.map(|(aligned_start, range_off, _)| (aligned_start, range_off))
+    }
+
+    /// Allocate from the free list or bump the watermark.
+    fn alloc_inner(&mut self, size: u64, alloc_align: u64) -> Option<u64> {
+        // Try free list first (best fit).
+        if let Some((aligned_start, range_off)) = self.best_fit(size, alloc_align) {
+            let range_size = self.free_list.remove(&range_off).unwrap();
+            let range_end = range_off + range_size;
+            let alloc_end = aligned_start + size;
+
+            // Return any leftover prefix (between range start and aligned alloc start).
+            if aligned_start > range_off {
+                self.free_list.insert(range_off, aligned_start - range_off);
+            }
+            // Return any leftover suffix.
+            if alloc_end < range_end {
+                self.free_list.insert(alloc_end, range_end - alloc_end);
+            }
+            return Some(aligned_start);
+        }
+
+        // Bump the watermark.
+        let aligned_wm = (self.watermark + alloc_align - 1) / alloc_align * alloc_align;
+        let end = aligned_wm + size;
+        if end <= self.pool.capacity() {
+            self.watermark = end;
+            return Some(aligned_wm);
+        }
+        None
+    }
+
+    fn grow(&mut self, min_capacity: u64) -> Result<()> {
+        let current = self.pool.capacity();
+        // Grow to at least min_capacity with 25% headroom. No hard cap: with pipelining
+        // the concurrent live set spans multiple frames, so the pool must be allowed to
+        // grow beyond the single-frame `expected_max`. The heap recycles freed ranges, so
+        // once the pipeline is full the capacity stabilises at the peak concurrent set.
+        let target = min_capacity.max(current + current / 4);
+        self.pool.resize(target)
+    }
+
+    /// Peak live bytes observed (diagnostic).
+    #[doc(hidden)]
+    pub fn peak_live_bytes(&self) -> u64 {
+        self.peak_live_bytes
+    }
+}
+
+impl TransientAllocator for HeapTransientAllocator {
+    fn begin_frame(&mut self, device: &Device, _hint_size: u64) -> Result<()> {
+        let progress = device.gpu_progress();
+        self.drain_retired(progress);
+        self.compact_watermark();
+        Ok(())
+    }
+
+    fn alloc(
+        &mut self,
+        device: &Device,
+        size: u64,
+        element_stride: Option<u32>,
+    ) -> Result<BufferView> {
+        let stride = element_stride.unwrap_or(4) as u64;
+        let alloc_align = lcm(self.alignment, stride);
+
+        // Try allocation.
+        if let Some(offset) = self.alloc_inner(size, alloc_align) {
+            self.live_bytes += size;
+            if self.live_bytes > self.peak_live_bytes {
+                self.peak_live_bytes = self.live_bytes;
+            }
+            return self.pool.backing_buffer().create_view(offset, size, element_stride);
+        }
+
+        // Drain any newly-retired frees, compact the watermark, and retry.
+        let progress = device.gpu_progress();
+        self.drain_retired(progress);
+        self.compact_watermark();
+        if let Some(offset) = self.alloc_inner(size, alloc_align) {
+            self.live_bytes += size;
+            if self.live_bytes > self.peak_live_bytes {
+                self.peak_live_bytes = self.live_bytes;
+            }
+            return self.pool.backing_buffer().create_view(offset, size, element_stride);
+        }
+
+        // Grow and retry. Account for alignment padding so the bump path has room.
+        let aligned_wm = (self.watermark + alloc_align - 1) / alloc_align * alloc_align;
+        let needed = aligned_wm.saturating_add(size);
+        self.grow(needed)?;
+        if let Some(offset) = self.alloc_inner(size, alloc_align) {
+            self.live_bytes += size;
+            if self.live_bytes > self.peak_live_bytes {
+                self.peak_live_bytes = self.live_bytes;
+            }
+            return self.pool.backing_buffer().create_view(offset, size, element_stride);
+        }
+
+        anyhow::bail!(
+            "HeapTransientAllocator: failed to allocate {} bytes (capacity={}, watermark={}, free_ranges={})",
+            size,
+            self.pool.capacity(),
+            self.watermark,
+            self.free_list.len()
+        )
+    }
+
+    fn free(&mut self, offset: u64, size: u64, epoch: Option<TimelineValue>) {
+        self.live_bytes = self.live_bytes.saturating_sub(size);
+        self.deferred.push(DeferredFree {
+            offset,
+            size,
+            epoch,
+        });
+    }
+
+    fn end_frame(&mut self, _epoch: TimelineValue) {
+        // No per-frame bookkeeping needed — frees are tracked individually by epoch.
+    }
+
+    fn capacity(&self) -> u64 {
+        self.pool.capacity()
+    }
+
+    fn used_this_frame(&self) -> u64 {
+        self.live_bytes
+    }
+
+    fn name(&self) -> &'static str {
+        "heap"
+    }
+
+    fn clear(&mut self) {
+        self.watermark = 0;
+        self.free_list.clear();
+        self.deferred.clear();
+        self.live_bytes = 0;
+    }
+}
+
+// -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
 
@@ -685,10 +968,10 @@ mod tests {
     }
 
     #[test]
-    fn strategy_default_is_epoch_regions() {
+    fn strategy_default_is_heap() {
         assert_eq!(
             TransientAllocatorStrategy::default(),
-            TransientAllocatorStrategy::EpochRegions
+            TransientAllocatorStrategy::Heap
         );
     }
 
@@ -700,5 +983,161 @@ mod tests {
         assert!(c.min_region_size > 0);
         assert!(c.max_regions > 0);
         assert!(c.expected_max >= c.initial_size);
+    }
+
+    // ---------------------------------------------------------------
+    // HeapTransientAllocator tests
+    // ---------------------------------------------------------------
+
+    use crate::backend::mock::MockBackend;
+    use crate::device::Device;
+
+    fn test_device() -> Device {
+        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    fn heap_config() -> TransientAllocatorConfig {
+        TransientAllocatorConfig {
+            initial_size: 64 * 1024,
+            expected_max: 1024 * 1024,
+            min_region_size: 64 * 1024,
+            max_regions: 3,
+            alignment: 256,
+            flags: crate::types::BufferFlags::empty(),
+        }
+    }
+
+    #[test]
+    fn heap_alloc_and_free_reuses_range() {
+        let device = test_device();
+        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        let v1_off = v1.offset();
+        let v1_size = v1.size();
+        assert_eq!(v1_size, 1024);
+
+        // Free with no epoch — immediately reusable.
+        alloc.free(v1_off, v1_size, None);
+
+        // Drain: since epoch=None, it should be immediately available.
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v2 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        assert_eq!(v2.offset(), v1_off, "freed range should be reused");
+    }
+
+    #[test]
+    fn heap_deferred_free_respects_epoch() {
+        let device = test_device();
+        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        let v1_off = v1.offset();
+        let v1_size = v1.size();
+
+        // Free with epoch=5. GPU progress is still 0, so it shouldn't be reused.
+        alloc.free(v1_off, v1_size, Some(5));
+
+        // Begin frame: gpu_progress=0, epoch=5 not retired.
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v2 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        // v2 should NOT reuse v1's range because epoch hasn't retired.
+        assert_ne!(v2.offset(), v1_off, "epoch not retired — should not reuse");
+
+        // Now advance GPU timeline past epoch=5.
+        device.wait_until(5).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v3 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        // v3 should reuse the first range (v1_off) which is now retired.
+        assert_eq!(v3.offset(), v1_off, "epoch retired — should reuse freed range");
+    }
+
+    #[test]
+    fn heap_coalescing_merges_adjacent_frees() {
+        let device = test_device();
+        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v1 = alloc.alloc(&device, 256, Some(4)).unwrap();
+        let v2 = alloc.alloc(&device, 256, Some(4)).unwrap();
+        let v3 = alloc.alloc(&device, 256, Some(4)).unwrap();
+        let (v1_off, v1_sz) = (v1.offset(), v1.size());
+        let (v2_off, v2_sz) = (v2.offset(), v2.size());
+        let (v3_off, v3_sz) = (v3.offset(), v3.size());
+
+        // Free all three immediately (no epoch).
+        alloc.free(v1_off, v1_sz, None);
+        alloc.free(v2_off, v2_sz, None);
+        alloc.free(v3_off, v3_sz, None);
+
+        // Drain deferred frees.
+        alloc.begin_frame(&device, 0).unwrap();
+
+        // Now we should be able to allocate a contiguous 768-byte region
+        // from the coalesced free block.
+        let big = alloc.alloc(&device, 768, Some(4)).unwrap();
+        assert_eq!(big.offset(), v1_off, "coalesced range should start at v1's offset");
+    }
+
+    #[test]
+    fn heap_peak_live_bytes_tracks_maximum() {
+        let device = test_device();
+        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+
+        let v1 = alloc.alloc(&device, 4096, Some(4)).unwrap();
+        let v2 = alloc.alloc(&device, 8192, Some(4)).unwrap();
+        assert_eq!(alloc.peak_live_bytes(), 4096 + 8192);
+
+        alloc.free(v1.offset(), v1.size(), None);
+        assert_eq!(alloc.peak_live_bytes(), 4096 + 8192, "peak should not decrease on free");
+
+        alloc.free(v2.offset(), v2.size(), None);
+        assert_eq!(alloc.used_this_frame(), 0);
+        assert_eq!(alloc.peak_live_bytes(), 4096 + 8192);
+    }
+
+    #[test]
+    fn heap_strategy_parse_and_default() {
+        assert_eq!(
+            TransientAllocatorStrategy::parse("heap"),
+            Some(TransientAllocatorStrategy::Heap)
+        );
+        assert_eq!(
+            TransientAllocatorStrategy::parse("freelist"),
+            Some(TransientAllocatorStrategy::Heap)
+        );
+        assert_eq!(
+            TransientAllocatorStrategy::default(),
+            TransientAllocatorStrategy::Heap
+        );
+    }
+
+    #[test]
+    fn heap_grows_when_needed() {
+        let device = test_device();
+        let config = TransientAllocatorConfig {
+            initial_size: 1024,
+            expected_max: 1024,
+            ..heap_config()
+        };
+        let mut alloc = HeapTransientAllocator::new(&device, config).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+
+        // Allocate more than initial_size — should grow.
+        let v1 = alloc.alloc(&device, 2048, Some(4)).unwrap();
+        assert!(alloc.capacity() >= 2048);
+        assert_eq!(v1.size(), 2048);
     }
 }

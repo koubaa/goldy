@@ -614,7 +614,7 @@ impl BufferView {
     }
 
     /// Get the view's offset within the parent buffer in bytes.
-    pub(crate) fn offset(&self) -> u64 {
+    pub fn offset(&self) -> u64 {
         self.offset
     }
 
@@ -709,7 +709,7 @@ impl Drop for BufferView {
 }
 
 /// GCD for alignment computation. Returns 0 if both are 0.
-fn gcd(a: u64, b: u64) -> u64 {
+pub(crate) fn gcd(a: u64, b: u64) -> u64 {
     let (mut a, mut b) = (a, b);
     while b != 0 {
         (a, b) = (b, a % b);
@@ -718,7 +718,7 @@ fn gcd(a: u64, b: u64) -> u64 {
 }
 
 /// LCM for alignment: smallest value divisible by both a and b.
-fn lcm(a: u64, b: u64) -> u64 {
+pub(crate) fn lcm(a: u64, b: u64) -> u64 {
     if a == 0 || b == 0 {
         return 0;
     }

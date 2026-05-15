@@ -2397,11 +2397,12 @@ fn small_config() -> TransientAllocatorConfig {
 /// Smoke test: each strategy can `create`, then `begin_frame` → `alloc` → `end_frame` with no
 /// GPU work and not panic. Covers the lazy-init and zero-work path.
 #[test]
-fn transient_allocator_smoke_both_strategies() {
+fn transient_allocator_smoke_all_strategies() {
     let device = make_device();
     for strategy in [
         TransientAllocatorStrategy::BumpReset,
         TransientAllocatorStrategy::EpochRegions,
+        TransientAllocatorStrategy::Heap,
     ] {
         let mut a = strategy
             .create(&device, small_config())
@@ -2418,12 +2419,12 @@ fn transient_allocator_smoke_both_strategies() {
     }
 }
 
-/// Strategy::default() is EpochRegions, and parse handles all canonical names.
+/// Strategy::default() is Heap, and parse handles all canonical names.
 #[test]
 fn transient_allocator_strategy_default_and_parse() {
     assert_eq!(
         TransientAllocatorStrategy::default(),
-        TransientAllocatorStrategy::EpochRegions,
+        TransientAllocatorStrategy::Heap,
     );
     assert_eq!(
         TransientAllocatorStrategy::parse("bump"),
@@ -2432,6 +2433,10 @@ fn transient_allocator_strategy_default_and_parse() {
     assert_eq!(
         TransientAllocatorStrategy::parse("epoch"),
         Some(TransientAllocatorStrategy::EpochRegions),
+    );
+    assert_eq!(
+        TransientAllocatorStrategy::parse("heap"),
+        Some(TransientAllocatorStrategy::Heap),
     );
     assert_eq!(TransientAllocatorStrategy::parse("garbage"), None);
 }
