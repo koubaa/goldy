@@ -101,7 +101,7 @@ impl Default for TransientAllocatorConfig {
 
 /// A pluggable strategy for sub-allocating short-lived GPU buffers across rendering frames.
 ///
-/// Implementations carve [`BufferView`]s out of one or more backing [`Buffer`]s and must
+/// Implementations carve [`BufferView`]s out of one or more backing [`Buffer`](crate::buffer::Buffer)s and must
 /// guarantee that memory returned from [`Self::alloc`] is safe for GPU consumption until at
 /// least the corresponding [`Self::end_frame`]'s epoch has been reached on the device timeline.
 ///
@@ -152,7 +152,7 @@ pub trait TransientAllocator: Send {
     }
 
     /// Hint that bytes at and above `offset` in the most-recently-active region are unused
-    /// for the rest of this frame. Strategies may forward to [`Buffer::hint_unused_above`]
+    /// for the rest of this frame. Strategies may forward to [`Buffer::hint_unused_above`](crate::buffer::Buffer::hint_unused_above)
     /// to release physical pages. Default is a no-op.
     fn hint_unused_above(&mut self, _offset: u64) {}
 
@@ -774,7 +774,7 @@ impl HeapTransientAllocator {
     fn best_fit(&self, size: u64, alloc_align: u64) -> Option<(u64, u64)> {
         let mut best: Option<(u64, u64, u64)> = None; // (aligned_start, range_off, range_size)
         for (&off, &rng_size) in &self.free_list {
-            let aligned_start = (off + alloc_align - 1) / alloc_align * alloc_align;
+            let aligned_start = off.div_ceil(alloc_align) * alloc_align;
             let end = aligned_start + size;
             if end <= off + rng_size {
                 let waste = rng_size - size;
@@ -806,7 +806,7 @@ impl HeapTransientAllocator {
         }
 
         // Bump the watermark.
-        let aligned_wm = (self.watermark + alloc_align - 1) / alloc_align * alloc_align;
+        let aligned_wm = self.watermark.div_ceil(alloc_align) * alloc_align;
         let end = aligned_wm + size;
         if end <= self.pool.capacity() {
             self.watermark = end;
@@ -863,7 +863,7 @@ impl TransientAllocator for HeapTransientAllocator {
 
         // Grow the pool and retry. Deferred frees are only drained in begin_frame
         // when we know the GPU has advanced past their epochs.
-        let aligned_wm = (self.watermark + alloc_align - 1) / alloc_align * alloc_align;
+        let aligned_wm = self.watermark.div_ceil(alloc_align) * alloc_align;
         let needed = aligned_wm.saturating_add(size);
         self.grow(needed)?;
         if let Some(offset) = self.alloc_inner(size, alloc_align) {

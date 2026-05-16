@@ -890,7 +890,7 @@ impl BufferPool {
     /// for non-power-of-two strides (e.g. 12-byte `vec3<f32>`).
     pub fn would_fit(&self, size: u64, element_stride: Option<u32>) -> bool {
         let stride_u32 = element_stride.unwrap_or(4);
-        if stride_u32 == 0 || size % stride_u32 as u64 != 0 {
+        if stride_u32 == 0 || !size.is_multiple_of(stride_u32 as u64) {
             return false;
         }
         let stride = stride_u32 as u64;
@@ -911,7 +911,7 @@ impl BufferPool {
         if stride_u32 == 0 {
             anyhow::bail!("BufferPool alloc_bytes: element stride must be non-zero");
         }
-        if size % stride_u32 as u64 != 0 {
+        if !size.is_multiple_of(stride_u32 as u64) {
             anyhow::bail!(
                 "BufferPool alloc_bytes: size {size} must be a multiple of element stride {stride_u32} \
                  (StructuredBuffer views require an integral element count)"

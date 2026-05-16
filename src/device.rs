@@ -424,6 +424,8 @@ impl Device {
     }
 
     /// Returns a clone of the [`Arc`] holding the current [`VramAllocator`].
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     pub fn vram_allocator_arc(&self) -> Arc<dyn crate::vram_allocator::VramAllocator> {
         Arc::clone(&self.inner.vram_allocator)
     }

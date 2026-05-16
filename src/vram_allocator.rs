@@ -43,7 +43,7 @@
 //! # Usage
 //!
 //! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. Call
-//! [`Device::set_vram_allocator`] before creating any GPU resources to install
+//! [`Device::with_vram_allocator`] before creating any GPU resources to install
 //! a custom allocator. The default ([`DefaultVramAllocator`]) delegates directly
 //! to the backend with zero overhead.
 //!
@@ -53,6 +53,9 @@
 //! [`Texture::new`]: crate::texture::Texture::new
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
+//! [`Device::with_vram_allocator`]: crate::device::Device::with_vram_allocator
+//! [`VramAllocator`]: crate::vram_allocator::VramAllocator
+//! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
 
 use crate::buffer::Buffer;
 use crate::device::Device;
