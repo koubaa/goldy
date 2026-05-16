@@ -308,6 +308,12 @@ impl Dx12Backend {
         transient::destroy_all_for_device(&mut self.state, device_handle);
         if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
+            // Advance fence_value past the value consumed by wait_for_gpu so that
+            // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing
+            // fence values. Without this, PendingDeletion::Buffer re-signals the same value
+            // that wait_for_gpu already used, violating D3D12's monotonic fence requirement
+            // and causing an abnormal process exit (exit code 2173) on teardown.
+            logical_device.fence_value += 1;
             logical_device.flush_deletion_queue();
 
             if logical_device.pso_disk_cache_dirty {

@@ -38,6 +38,16 @@ impl SparsePagePool {
         self.page_size
     }
 
+    /// Free all backing VkDeviceMemory allocations. Call this immediately before
+    /// vkDestroyDevice once all sparse buffers have been unbound and destroyed.
+    pub fn destroy(self, device: &ash::Device) {
+        for chunk in self.chunks {
+            unsafe {
+                device.free_memory(chunk.memory, None);
+            }
+        }
+    }
+
     fn push_chunk_and_take_first_page(
         &mut self,
         device: &ash::Device,
