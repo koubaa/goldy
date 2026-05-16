@@ -398,10 +398,14 @@ impl TaskGraph {
                 let mut patched_slots = resource_slots.clone();
                 for (i, b) in n.bindings.iter().enumerate() {
                     if let ResourceId::TransientBuffer(t) = b.resource {
-                        if let Some(&(uav_idx, srv_idx)) = bmap.get(&t.0) {
+                        if let Some(&(uav_idx, _srv_idx)) = bmap.get(&t.0) {
                             if i < patched_slots.len() {
-                                let is_read_only = b.access == NodeAccess::Read;
-                                patched_slots[i] = if is_read_only { srv_idx } else { uav_idx };
+                                // Always use the UAV bindless index.
+                                // goldy_exp's Scattered<T> always accesses the UAV
+                                // descriptor slot regardless of NodeAccess (read vs.
+                                // write). Read/write ordering is enforced by barriers,
+                                // not by descriptor type.
+                                patched_slots[i] = uav_idx;
                             }
                         }
                     }
