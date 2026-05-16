@@ -2727,20 +2727,17 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 }
 "#;
 
-/// Exercises the graph-colored transient-buffer path end-to-end:
+/// Exercises the device-owned placement heap transient-buffer path end-to-end:
 ///
 /// 1. Graph has one transient buffer T.
 /// 2. Dispatch A writes `id.x + 1` into T.
-/// 3. Dispatch B copies T → output (a regular CPU-readable buffer).
-/// 4. Read back output and verify values.
-///
-/// The graph submission resolves T via `lower_transient_buffers_with_bindless`,
-/// creating a `BufferView` into a temporary heap, patching bindless indices, and
-/// scheduling waves with barriers — the same infrastructure ekrano uses.
+/// 3. Dispatch B copies T -> output (a regular CPU-readable buffer).
+/// 4. `graph.dispatch(&device)` resolves transients via the device-owned
+///    placement heap (view creation, bindless patching, submission).
+/// 5. Read back output and verify values.
 #[test]
 fn test_transient_buffer_write_then_copy() {
     use goldy::{NodeAccess, TaskGraph};
-    use std::collections::HashMap;
 
     let device = make_device();
 
@@ -2758,19 +2755,15 @@ fn test_transient_buffer_write_then_copy() {
     let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
     let output_uav = output.bindless_index().expect("output UAV");
 
-    // ── Build graph with one transient buffer ──
-
     let mut graph = TaskGraph::new();
     let tid = graph.transient_buffer(byte_size);
 
-    // Dispatch A: write iota into transient (binding 0 = transient, Write)
     graph
         .node("write_iota", &write_pipeline)
         .bind_transient_buffer(tid, NodeAccess::Write)
-        .bind_resources_raw_slice(&[u32::MAX]) // placeholder
+        .bind_resources_raw_slice(&[u32::MAX])
         .dispatch(1, 1, 1);
 
-    // Dispatch B: copy transient → output (binding 0 = transient Read, binding 1 = output Write)
     graph
         .node("copy_out", &copy_pipeline)
         .bind_transient_buffer(tid, NodeAccess::Read)
@@ -2778,35 +2771,7 @@ fn test_transient_buffer_write_then_copy() {
         .bind_resources_raw_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
 
-    // ── Resolve transients via the graph-colored path ──
-
-    let (total_size, _, layout) = graph.transient_heap_size_and_layout().expect("heap layout");
-
-    let heap_buf =
-        Buffer::new(&device, total_size.max(256), DataAccess::Scattered).expect("heap buffer");
-
-    let range_map =
-        TaskGraph::transient_buffer_range_map(&heap_buf, &layout, graph.transient_specs());
-
-    let view = heap_buf
-        .create_view(layout[&tid.0 as &u32], byte_size, Some(4))
-        .expect("create transient view");
-    let uav = view.bindless_index().expect("view UAV");
-
-    let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::new();
-    bindless_map.insert(tid.0, (uav, uav));
-
-    let resolved_ir = graph
-        .lower_transient_buffers_with_bindless(&range_map, &bindless_map)
-        .expect("lower transients");
-
-    let resolved_graph = graph.into_resolved(resolved_ir);
-
-    // ── Submit and read back ──
-
-    resolved_graph
-        .dispatch(&device)
-        .expect("dispatch resolved graph");
+    graph.dispatch(&device).expect("dispatch transient graph");
 
     let mut raw = vec![0u8; byte_size as usize];
     output.read_to_cpu(&device, &mut raw).expect("read output");

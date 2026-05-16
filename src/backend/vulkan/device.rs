@@ -1,7 +1,7 @@
 //! Device management logic.
 
 use super::types::{self, PhysicalDeviceInfo};
-use super::{transient, DeviceHandle, VulkanState};
+use super::{DeviceHandle, VulkanState};
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
 use ash::vk;
@@ -439,7 +439,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         samplers = state.samplers.len(),
         "destroying Vulkan device"
     );
-    transient::destroy_all_for_device(state, device_handle);
     if let Some(mut logical_device) = state.devices.remove(&device_handle) {
         unsafe {
             let wait_result = logical_device.device.device_wait_idle();
@@ -480,9 +479,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 state
                     .compute_fence_pool
                     .retain(|_, (dh, _, _)| *dh != device_handle);
-                state
-                    .transient_heaps
-                    .retain(|_, e| e.device_handle != device_handle);
                 let staging_drop: Vec<(DeviceHandle, u64)> = state
                     .compute_texture_staging_pool
                     .keys()

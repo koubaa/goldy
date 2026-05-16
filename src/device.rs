@@ -36,8 +36,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-type TransientSubmitBufferRanges = HashMap<u32, (backend::BufferHandle, u64, u64)>;
-
 /// Unique ID generator for temp directories
 static REGISTRY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -152,6 +150,7 @@ impl Instance {
                 device_type,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator),
+                placement_heap: Mutex::new(None),
             }),
         })
     }
@@ -293,6 +292,7 @@ pub(crate) struct DeviceInner {
     device_type: DeviceType,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
+    pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
 }
 
 impl Clone for Device {
@@ -450,6 +450,7 @@ impl Device {
                 device_type: self.inner.device_type,
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
+                placement_heap: Mutex::new(None),
             }),
         }
     }
@@ -604,53 +605,140 @@ impl Device {
     }
 
     /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).
+    ///
+    /// Graphs containing transient buffers are resolved automatically using a
+    /// persistent [`PlacementHeap`](crate::placement_heap::PlacementHeap) owned
+    /// by the device. The heap is lazily created on first use and reused across
+    /// submissions — callers never need to manage transient buffer backing
+    /// storage, view creation, or bindless index patching.
     pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
-        let mut backend = self.inner.backend.lock().unwrap();
-        let hints = backend.transient_heap_alignment_hints(self.inner.handle);
-
         if !graph.has_transient_resources() {
+            let mut backend = self.inner.backend.lock().unwrap();
             return graph.submit_with_backend(self, backend.as_mut(), None, &HashMap::new());
         }
 
-        let total = {
-            let b: &mut dyn GpuBackend = &mut **backend;
-            graph.transient_native_heap_total_size(b, self.inner.handle, &hints)?
-        };
-        if let Some(heap) = backend.create_transient_heap(self.inner.handle, total)? {
-            let (buf_map, tex_map) = {
-                let b: &mut dyn GpuBackend = &mut **backend;
-                graph.place_transients_on_native_heap(b, self.inner.handle, heap, &hints)?
-            };
-            let tv =
-                graph.submit_with_backend(self, backend.as_mut(), buf_map.as_ref(), &tex_map)?;
-            backend.destroy_transient_heap(self.inner.handle, heap)?;
-            return Ok(tv);
+        let (_tex_keepalive, tex_handles) = graph.allocate_transient_textures(self)?;
+
+        if graph.has_transient_buffers() {
+            return self.submit_with_placement_heap(graph, &tex_handles);
         }
 
+        let mut backend = self.inner.backend.lock().unwrap();
+        graph.submit_with_backend(self, backend.as_mut(), None, &tex_handles)
+    }
+
+    /// Default pipeline depth for initial placement heap sizing.
+    const DEFAULT_PIPELINE_DEPTH: u64 = 4;
+
+    /// Resolve transient buffers via the device-owned placement heap and submit.
+    ///
+    /// 1. Compute wave-interval coloring layout
+    /// 2. Lazily create / reclaim / acquire from the persistent placement heap
+    /// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
+    /// 4. Patch dispatch `resource_slots` with real bindless indices
+    /// 5. Submit the resolved IR (views kept alive in the heap ring until GPU retires)
+    fn submit_with_placement_heap(
+        &self,
+        graph: &TaskGraph,
+        tex_handles: &HashMap<u32, backend::TextureHandle>,
+    ) -> Result<TimelineValue> {
+        let (total_size, base_align, layout) = graph.transient_heap_size_and_layout()?;
+
+        // Over-allocate by `base_align - 1` so we can align the returned offset.
+        let alloc_size = (total_size + base_align - 1).max(256);
+
+        let mut heap_guard = self.inner.placement_heap.lock().unwrap();
+
+        // Lazily create or grow the placement heap.
+        if heap_guard.is_none() {
+            let cap = (256 * 1024 * 1024u64).max(alloc_size * Self::DEFAULT_PIPELINE_DEPTH);
+            *heap_guard = Some(
+                crate::placement_heap::PlacementHeap::with_capacity(self, cap)
+                    .context("failed to create device placement heap")?,
+            );
+        }
+        let heap = heap_guard.as_mut().unwrap();
+
+        // Reclaim any retired regions from previous frames.
+        let progress = self.gpu_progress();
+        heap.reclaim(progress);
+
+        // Acquire a region from the placement heap, then align the start.
+        let raw_offset = match heap.acquire(alloc_size) {
+            Some(off) => off,
+            None => {
+                // Ring full — try reclaim again (progress may have advanced).
+                let progress2 = self.gpu_progress();
+                heap.reclaim(progress2);
+                heap.acquire(alloc_size).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
+                        alloc_size,
+                        heap.capacity(),
+                        heap.in_flight_bytes(),
+                    )
+                })?
+            }
+        };
+        let base_offset = raw_offset.div_ceil(base_align) * base_align;
+
+        let buf = heap.buffer();
+
+        // Create BufferViews at colored offsets, collecting bindless indices.
+        let mut views = Vec::with_capacity(layout.len());
+        let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
+
+        for spec in graph.transient_specs() {
+            let offset = base_offset + layout[&spec.id];
+            let view_stride = spec.stride.max(1);
+            let view = buf.create_view(offset, spec.size, Some(view_stride))?;
+            let uav = view.bindless_index().unwrap_or(u32::MAX);
+            let srv = view.bindless_srv_index().unwrap_or(uav);
+            bindless_map.insert(spec.id, (uav, srv));
+            views.push(view);
+        }
+
+        // Lower IR: patch TransientBuffer -> BufferRange + patch resource_slots.
+        let range_map = TaskGraph::transient_buffer_range_map_with_base(
+            buf,
+            &layout,
+            graph.transient_specs(),
+            base_offset,
+        );
+        let resolved_ir = graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
+
+        // Build a resolved graph (no transient specs) and submit.
+        let resolved_graph = graph.into_resolved(resolved_ir);
+
+        // Drop the heap lock before acquiring the backend lock for submission.
+        drop(heap_guard);
+
+        let mut backend = self.inner.backend.lock().unwrap();
+        let tv = resolved_graph.submit_with_backend(self, backend.as_mut(), None, tex_handles)?;
         drop(backend);
 
-        // Committed fallback: allocate a single buffer and/or textures before acquiring the lock
-        // for `submit_with_backend` (mirrors the historical transient buffer path).
-        let buffer_submit: Option<(crate::buffer::Buffer, TransientSubmitBufferRanges)> =
-            if graph.transient_specs.is_empty() {
-                None
-            } else {
-                let (total, _, layout) = graph.transient_heap_size_and_layout()?;
-                let heap = crate::buffer::Buffer::new(self, total, crate::DataAccess::Scattered)?;
-                let ranges =
-                    TaskGraph::transient_buffer_range_map(&heap, &layout, &graph.transient_specs);
-                Some((heap, ranges))
-            };
-        let buf_ranges_ref = buffer_submit.as_ref().map(|(_, r)| r);
-        let (_texture_keepalive, tex_handles) = graph.allocate_transient_textures(self)?;
-        let mut backend = self.inner.backend.lock().unwrap();
-        graph.submit_with_backend(self, backend.as_mut(), buf_ranges_ref, &tex_handles)
+        // Stamp and attach views to the region so they're dropped on reclaim.
+        let mut heap_guard = self.inner.placement_heap.lock().unwrap();
+        let heap = heap_guard.as_mut().unwrap();
+        heap.stamp(tv);
+        heap.attach_views(views);
+
+        Ok(tv)
     }
 
     /// Submit a task graph and block until it completes.
     pub fn dispatch(&self, graph: &TaskGraph) -> Result<()> {
         let v = self.submit(graph)?;
         self.wait_until(v)
+    }
+
+    /// Snapshot of the device-owned placement heap's state for diagnostics.
+    ///
+    /// Returns `None` if the heap hasn't been created yet (no transient-buffer
+    /// graphs have been submitted).
+    pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        heap_guard.as_ref().map(|h| h.stats())
     }
 
     /// Get device capabilities and format preferences.
@@ -877,6 +965,7 @@ impl Device {
                 device_type: DeviceType::Other,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator),
+                placement_heap: Mutex::new(None),
             }),
         })
     }
@@ -890,6 +979,17 @@ impl Drop for DeviceInner {
             device_type = ?self.device_type,
             "Destroying GPU device"
         );
+        // Wait for any in-flight placement heap work before destroying resources.
+        if let Ok(mut heap_guard) = self.placement_heap.lock() {
+            if let Some(ref heap) = *heap_guard {
+                if let Some(tv) = heap.max_in_flight_timeline() {
+                    let mut backend = self.backend.lock().unwrap();
+                    let _ = backend.wait_until(self.handle, tv);
+                }
+            }
+            // Drop the heap (and its views/buffer) while the device is still alive.
+            *heap_guard = None;
+        }
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_device(self.handle);
     }

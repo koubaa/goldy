@@ -12,12 +12,23 @@
 use crate::buffer::{Buffer, BufferView};
 use crate::device::Device;
 use crate::timeline::TimelineValue;
-use crate::types::DataAccess;
+use crate::types::{BufferFlags, DataAccess};
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
 
 /// Default page size for alignment within the heap (4 MiB).
 const DEFAULT_PAGE_SIZE: u64 = 4 * 1024 * 1024;
+
+/// Snapshot of the placement heap's state, useful for diagnostics and tests.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacementHeapStats {
+    /// Total capacity of the backing buffer in bytes.
+    pub capacity: u64,
+    /// Bytes currently occupied by in-flight regions.
+    pub in_flight_bytes: u64,
+    /// Number of in-flight regions (one per submitted frame).
+    pub in_flight_count: usize,
+}
 
 /// Persistent GPU buffer with ring-based allocation for graph-colored transient heaps.
 ///
@@ -59,7 +70,8 @@ impl PlacementHeap {
     pub fn new(device: &Device, capacity: u64, page_size: u64) -> Result<Self> {
         let page_size = page_size.max(256);
         let capacity = round_up(capacity.max(page_size), page_size);
-        let buffer = Buffer::new(device, capacity, DataAccess::Scattered)
+        let buffer = device
+            .alloc_buffer(capacity, DataAccess::Scattered, None, BufferFlags::empty())
             .context("PlacementHeap: failed to allocate backing buffer")?;
         Ok(Self {
             buffer,
@@ -200,6 +212,20 @@ impl PlacementHeap {
         &self.buffer
     }
 
+    /// Highest in-flight timeline value across all regions, or `None` if idle.
+    pub fn max_in_flight_timeline(&self) -> Option<TimelineValue> {
+        self.regions.iter().filter_map(|r| r.timeline).max()
+    }
+
+    /// Snapshot of the heap's current state for diagnostics.
+    pub fn stats(&self) -> PlacementHeapStats {
+        PlacementHeapStats {
+            capacity: self.capacity(),
+            in_flight_bytes: self.in_flight_bytes(),
+            in_flight_count: self.in_flight_count(),
+        }
+    }
+
     /// Grow the heap to at least `new_capacity`.
     ///
     /// Only safe when the ring is empty (no in-flight regions). Returns `Err`
@@ -215,7 +241,13 @@ impl PlacementHeap {
         if aligned_cap <= self.buffer.allocated_size() {
             return Ok(());
         }
-        self.buffer = Buffer::new(device, aligned_cap, DataAccess::Scattered)
+        self.buffer = device
+            .alloc_buffer(
+                aligned_cap,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .context("PlacementHeap::grow: failed to allocate new backing buffer")?;
         self.bump = 0;
         Ok(())

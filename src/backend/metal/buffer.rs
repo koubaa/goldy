@@ -37,6 +37,7 @@ fn allocate_mtl_storage_buffer(
     Ok((buf, false))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_buffer_common(
     state: &mut MetalState,
     device_handle: DeviceHandle,

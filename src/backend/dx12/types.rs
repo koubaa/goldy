@@ -12,7 +12,7 @@
 
 use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle, TransientHeapHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
@@ -723,14 +723,6 @@ pub(crate) struct SurfaceState {
     pub pending_frame_compute: Vec<crate::backend::GpuCommand>,
 }
 
-/// Sub-heap for transient task-graph packing ([`GpuBackend::create_transient_heap`](crate::backend::GpuBackend::create_transient_heap)).
-pub(crate) struct TransientHeapEntry {
-    pub device_handle: DeviceHandle,
-    pub heap: Direct3D12::ID3D12Heap,
-    pub buffers: Vec<BufferHandle>,
-    pub textures: Vec<TextureHandle>,
-}
-
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
 pub(super) struct Dx12State {
@@ -769,6 +761,4 @@ pub(super) struct Dx12State {
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-device upload belts for `GpuCommand::WriteBuffer`.
     pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
-    pub transient_heaps: HashMap<TransientHeapHandle, TransientHeapEntry>,
-    pub next_transient_heap_handle: TransientHeapHandle,
 }

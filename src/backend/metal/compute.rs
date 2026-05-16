@@ -117,7 +117,6 @@ pub(super) fn begin_compute_encoder<'a>(
     let encoder = command_buffer.new_compute_command_encoder();
     logical_device.heap_allocator.use_heaps_for_compute(encoder);
     logical_device.texture_heap.use_heaps_for_compute(encoder);
-    super::transient::use_transient_heaps_for_compute(logical_device, encoder);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == device_handle {
             encoder.use_resource(
@@ -840,7 +839,6 @@ fn record_render_pass_to_buffer(
     logical_device
         .texture_heap
         .use_heaps_for_render(encoder, render_stages);
-    super::transient::use_transient_heaps_for_render(logical_device, encoder, render_stages);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == device_handle {
             encoder.use_resource_at(
