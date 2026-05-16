@@ -151,6 +151,7 @@ impl Instance {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator),
                 placement_heap: Mutex::new(None),
+                high_water_timeline: AtomicU64::new(0),
             }),
         })
     }
@@ -293,6 +294,9 @@ pub(crate) struct DeviceInner {
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
     pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
+    /// Largest TimelineValue ever returned from submit(). Used in Drop to ensure
+    /// all submitted GPU work has completed before destroying the device.
+    high_water_timeline: AtomicU64,
 }
 
 impl Clone for Device {
@@ -451,6 +455,7 @@ impl Device {
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
                 placement_heap: Mutex::new(None),
+                high_water_timeline: AtomicU64::new(0),
             }),
         }
     }
@@ -552,6 +557,15 @@ impl Device {
         backend.gpu_progress(self.inner.handle)
     }
 
+    /// The largest [`TimelineValue`] ever returned by [`submit`](Self::submit) on this device.
+    ///
+    /// Waiting on this value guarantees that all GPU work submitted through this device handle
+    /// has completed. Primarily useful for diagnostics; `Drop for DeviceInner` uses this
+    /// automatically before tearing down the backend device.
+    pub fn high_water_timeline(&self) -> TimelineValue {
+        self.inner.high_water_timeline.load(Ordering::Relaxed)
+    }
+
     /// Block until the device timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<()> {
         let mut backend = self.inner.backend.lock().unwrap();
@@ -614,17 +628,29 @@ impl Device {
     pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
         if !graph.has_transient_resources() {
             let mut backend = self.inner.backend.lock().unwrap();
-            return graph.submit_with_backend(self, backend.as_mut(), None, &HashMap::new());
+            let tv = graph.submit_with_backend(self, backend.as_mut(), None, &HashMap::new())?;
+            self.inner
+                .high_water_timeline
+                .fetch_max(tv, Ordering::Relaxed);
+            return Ok(tv);
         }
 
         let (_tex_keepalive, tex_handles) = graph.allocate_transient_textures(self)?;
 
         if graph.has_transient_buffers() {
-            return self.submit_with_placement_heap(graph, &tex_handles);
+            let tv = self.submit_with_placement_heap(graph, &tex_handles)?;
+            self.inner
+                .high_water_timeline
+                .fetch_max(tv, Ordering::Relaxed);
+            return Ok(tv);
         }
 
         let mut backend = self.inner.backend.lock().unwrap();
-        graph.submit_with_backend(self, backend.as_mut(), None, &tex_handles)
+        let tv = graph.submit_with_backend(self, backend.as_mut(), None, &tex_handles)?;
+        self.inner
+            .high_water_timeline
+            .fetch_max(tv, Ordering::Relaxed);
+        Ok(tv)
     }
 
     /// Default pipeline depth for initial placement heap sizing.
@@ -966,6 +992,7 @@ impl Device {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator),
                 placement_heap: Mutex::new(None),
+                high_water_timeline: AtomicU64::new(0),
             }),
         })
     }
@@ -979,15 +1006,16 @@ impl Drop for DeviceInner {
             device_type = ?self.device_type,
             "Destroying GPU device"
         );
-        // Wait for any in-flight placement heap work before destroying resources.
+        // Wait for all submitted GPU work to complete. This covers any in-flight work not
+        // covered by the placement-heap wait below (e.g. non-transient submits held by callers).
+        let high_water = self.high_water_timeline.load(Ordering::Relaxed);
+        if high_water > 0 {
+            let mut backend = self.backend.lock().unwrap();
+            let _ = backend.wait_until(self.handle, high_water);
+        }
+        // Drop the placement heap (and its views/buffer) while the device is still alive.
+        // The heap's in-flight work is already covered by the high-water wait above.
         if let Ok(mut heap_guard) = self.placement_heap.lock() {
-            if let Some(ref heap) = *heap_guard {
-                if let Some(tv) = heap.max_in_flight_timeline() {
-                    let mut backend = self.backend.lock().unwrap();
-                    let _ = backend.wait_until(self.handle, tv);
-                }
-            }
-            // Drop the heap (and its views/buffer) while the device is still alive.
             *heap_guard = None;
         }
         let mut backend = self.backend.lock().unwrap();
@@ -1002,6 +1030,27 @@ mod tests {
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    #[test]
+    fn high_water_timeline_starts_at_zero() {
+        let device = test_device();
+        assert_eq!(device.high_water_timeline(), 0);
+    }
+
+    #[test]
+    fn high_water_timeline_advances_after_submit() {
+        use crate::task_graph::TaskGraph;
+        let device = test_device();
+        assert_eq!(device.high_water_timeline(), 0);
+        let graph = TaskGraph::new();
+        let tv = device.submit(&graph).unwrap();
+        assert!(tv > 0);
+        assert_eq!(device.high_water_timeline(), tv);
+        // Second submit advances it further.
+        let tv2 = device.submit(&graph).unwrap();
+        assert!(tv2 > tv);
+        assert_eq!(device.high_water_timeline(), tv2);
     }
 
     #[test]
