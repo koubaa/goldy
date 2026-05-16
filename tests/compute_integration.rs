@@ -2780,7 +2780,7 @@ fn test_transient_buffer_write_then_copy() {
 
     // ── Resolve transients via the graph-colored path ──
 
-    let (total_size, layout) = graph.transient_heap_size_and_layout().expect("heap layout");
+    let (total_size, _, layout) = graph.transient_heap_size_and_layout().expect("heap layout");
 
     let heap_buf =
         Buffer::new(&device, total_size.max(256), DataAccess::Scattered).expect("heap buffer");
