@@ -2792,10 +2792,9 @@ fn test_transient_buffer_write_then_copy() {
         .create_view(layout[&tid.0 as &u32], byte_size, Some(4))
         .expect("create transient view");
     let uav = view.bindless_index().expect("view UAV");
-    let srv = view.bindless_srv_index().unwrap_or(uav);
 
     let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::new();
-    bindless_map.insert(tid.0, (uav, srv));
+    bindless_map.insert(tid.0, (uav, uav));
 
     let resolved_ir = graph
         .lower_transient_buffers_with_bindless(&range_map, &bindless_map)
@@ -2843,7 +2842,6 @@ fn test_regular_buffer_write_then_copy() {
 
     let scratch = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("scratch buffer");
     let scratch_uav = scratch.bindless_index().expect("scratch UAV");
-    let scratch_srv = scratch.bindless_srv_index().unwrap_or(scratch_uav);
 
     let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
     let output_uav = output.bindless_index().expect("output UAV");
@@ -2862,7 +2860,7 @@ fn test_regular_buffer_write_then_copy() {
         .node("copy_out", &copy_pipeline)
         .bind_buffer(&scratch, NodeAccess::Read)
         .bind_buffer(&output, NodeAccess::Write)
-        .bind_resources_raw_slice(&[scratch_srv, output_uav])
+        .bind_resources_raw_slice(&[scratch_uav, output_uav])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).expect("dispatch graph");

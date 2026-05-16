@@ -225,12 +225,13 @@ pub(super) fn submit(
         (allocator, token, slot_idx)
     };
 
-    let fence_clone = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?
-        .fence
-        .clone();
+    let (fence_clone, use_global_buffer_barriers) = {
+        let dev = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        (dev.fence.clone(), dev.adapter_id == super::WARP_ADAPTER_ID)
+    };
     state
         .staging_belts
         .entry(device_handle)
@@ -458,19 +459,25 @@ pub(super) fn submit(
                     .as_ref()
                     .context("DispatchIndirect: compute indirect signature not available")?;
 
-                // Transition the indirect argument buffer from UAV to
-                // INDIRECT_ARGUMENT for ExecuteIndirect. This is an access-mode
-                // transition, not a data-dependency barrier (the graph's
-                // ResourceBarrier handles data visibility).
-                let mut to_indirect = [barriers::buffer_barrier_full(
-                    &buf_state.resource,
-                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                )];
-                unsafe { barriers::barrier_buffers(&command_list7, &to_indirect) };
-                unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
+                if use_global_buffer_barriers {
+                    let g = D3D12_GLOBAL_BARRIER {
+                        SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        SyncAfter: D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        AccessAfter: D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                    };
+                    unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                } else {
+                    let mut to_indirect = [barriers::buffer_barrier_full(
+                        &buf_state.resource,
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                    )];
+                    unsafe { barriers::barrier_buffers(&command_list7, &to_indirect) };
+                    unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
+                }
 
                 unsafe {
                     command_list.ExecuteIndirect(
@@ -483,15 +490,25 @@ pub(super) fn submit(
                     );
                 }
 
-                let mut to_uav = [barriers::buffer_barrier_full(
-                    &buf_state.resource,
-                    D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                )];
-                unsafe { barriers::barrier_buffers(&command_list7, &to_uav) };
-                unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
+                if use_global_buffer_barriers {
+                    let g = D3D12_GLOBAL_BARRIER {
+                        SyncBefore: D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                        SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        AccessBefore: D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                        AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    };
+                    unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                } else {
+                    let mut to_uav = [barriers::buffer_barrier_full(
+                        &buf_state.resource,
+                        D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    )];
+                    unsafe { barriers::barrier_buffers(&command_list7, &to_uav) };
+                    unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
+                }
             }
             GpuCommand::Barrier => {
                 let g = D3D12_GLOBAL_BARRIER {
@@ -509,41 +526,48 @@ pub(super) fn submit(
                 buffers: buf_handles,
                 textures: tex_handles,
             } => {
-                // Per-resource enhanced barriers at graph wave boundaries.
-                let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
-                    .iter()
-                    .filter_map(|h| state.buffers.get(h))
-                    .map(|bs| {
-                        barriers::buffer_barrier_full(
-                            &bs.resource,
-                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                            D3D12_BARRIER_ACCESS(
+                // WARP silently removes the device when D3D12_BARRIER_TYPE_BUFFER
+                // enhanced barriers are used, causing ExecuteCommandLists to fail
+                // and the subsequent Signal() to AV. Fall back to a global barrier
+                // which is correct (just less precise).
+                if use_global_buffer_barriers || buf_handles.is_empty() {
+                    if !buf_handles.is_empty() {
+                        let g = D3D12_GLOBAL_BARRIER {
+                            SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            AccessAfter: D3D12_BARRIER_ACCESS(
                                 D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
                                     | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                             ),
-                        )
-                    })
-                    .collect();
-                unsafe { barriers::barrier_buffers(&command_list7, &buf_barriers) };
-                unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
+                        };
+                        unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                    }
+                } else {
+                    let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
+                        .iter()
+                        .filter_map(|h| state.buffers.get(h))
+                        .map(|bs| {
+                            barriers::buffer_barrier_full(
+                                &bs.resource,
+                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                D3D12_BARRIER_ACCESS(
+                                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                        | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                                ),
+                            )
+                        })
+                        .collect();
+                    unsafe { barriers::barrier_buffers(&command_list7, &buf_barriers) };
+                    unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
+                }
 
                 let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_handles
                     .iter()
                     .filter_map(|h| state.textures.get(h))
                     .map(|ts| {
-                        // Enhanced barriers require Access and Layout to agree:
-                        // `AccessAfter` bits including SHADER_RESOURCE are
-                        // incompatible with `LayoutAfter = UNORDERED_ACCESS`
-                        // (and vice versa), so we can't use the buffer-style
-                        // "UAV | SRV" conservative after-access for textures.
-                        // Since a Goldy texture is materialized once as
-                        // either Direct (UAV) or Interpolated (SRV) and that
-                        // category is fixed for its lifetime, the graph-
-                        // emitted barrier between two compute nodes that
-                        // both touch the same texture just needs to
-                        // synchronise within that single access mode.
                         let (access, layout) = if ts.last_layout
                             == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
                             || ts.last_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
@@ -649,7 +673,6 @@ pub(super) fn submit(
                     };
                     unsafe { buf_state.resource.Unmap(0, Some(&written_range)) };
                 } else {
-                    // DEFAULT heap: copy from staging belt slice (prepended in pre-pass).
                     let belt_entry = belt_slices
                         .get(belt_idx)
                         .context("WriteBuffer: belt slice missing (internal)")?;
@@ -658,32 +681,58 @@ pub(super) fn submit(
                     let upload_off = belt_entry.1;
                     let buf_state = state.buffers.get(buf_handle).unwrap();
 
-                    let mut b_to_copy = [barriers::buffer_barrier_full(
-                        &buf_state.resource,
-                        D3D12_BARRIER_SYNC_ALL,
-                        D3D12_BARRIER_SYNC_COPY,
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                        D3D12_BARRIER_ACCESS_COPY_DEST,
-                    )];
-                    let mut b_to_uav = [barriers::buffer_barrier_full(
-                        &buf_state.resource,
-                        D3D12_BARRIER_SYNC_COPY,
-                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                        D3D12_BARRIER_ACCESS_COPY_DEST,
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    )];
-                    unsafe {
-                        barriers::barrier_buffers(&command_list7, &b_to_copy);
-                        barriers::drop_buffer_barriers(&mut b_to_copy);
-                        command_list.CopyBufferRegion(
+                    if use_global_buffer_barriers {
+                        let pre = D3D12_GLOBAL_BARRIER {
+                            SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                            SyncAfter: D3D12_BARRIER_SYNC_COPY,
+                            AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            AccessAfter: D3D12_BARRIER_ACCESS_COPY_DEST,
+                        };
+                        let post = D3D12_GLOBAL_BARRIER {
+                            SyncBefore: D3D12_BARRIER_SYNC_COPY,
+                            SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            AccessBefore: D3D12_BARRIER_ACCESS_COPY_DEST,
+                            AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        };
+                        unsafe {
+                            barriers::barrier_globals(&command_list7, &[pre]);
+                            command_list.CopyBufferRegion(
+                                &buf_state.resource,
+                                *offset,
+                                &upload_src,
+                                upload_off,
+                                data.len() as u64,
+                            );
+                            barriers::barrier_globals(&command_list7, &[post]);
+                        }
+                    } else {
+                        let mut b_to_copy = [barriers::buffer_barrier_full(
                             &buf_state.resource,
-                            *offset,
-                            &upload_src,
-                            upload_off,
-                            data.len() as u64,
-                        );
-                        barriers::barrier_buffers(&command_list7, &b_to_uav);
-                        barriers::drop_buffer_barriers(&mut b_to_uav);
+                            D3D12_BARRIER_SYNC_ALL,
+                            D3D12_BARRIER_SYNC_COPY,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            D3D12_BARRIER_ACCESS_COPY_DEST,
+                        )];
+                        let mut b_to_uav = [barriers::buffer_barrier_full(
+                            &buf_state.resource,
+                            D3D12_BARRIER_SYNC_COPY,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_ACCESS_COPY_DEST,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        )];
+                        unsafe {
+                            barriers::barrier_buffers(&command_list7, &b_to_copy);
+                            barriers::drop_buffer_barriers(&mut b_to_copy);
+                            command_list.CopyBufferRegion(
+                                &buf_state.resource,
+                                *offset,
+                                &upload_src,
+                                upload_off,
+                                data.len() as u64,
+                            );
+                            barriers::barrier_buffers(&command_list7, &b_to_uav);
+                            barriers::drop_buffer_barriers(&mut b_to_uav);
+                        }
                     }
                 }
             }
@@ -835,12 +884,13 @@ pub(super) fn submit_graph(
     };
 
     // --- Staging belt reclaim ---
-    let fence_clone = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?
-        .fence
-        .clone();
+    let (fence_clone, use_global_buffer_barriers) = {
+        let dev = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        (dev.fence.clone(), dev.adapter_id == super::WARP_ADAPTER_ID)
+    };
     state
         .staging_belts
         .entry(device_handle)
@@ -1034,15 +1084,25 @@ pub(super) fn submit_graph(
                         .as_ref()
                         .context("DispatchIndirect: compute indirect signature not available")?;
 
-                    let mut to_indirect = [barriers::buffer_barrier_full(
-                        &buf_state.resource,
-                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                        D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                        D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                    )];
-                    unsafe { barriers::barrier_buffers(&command_list7, &to_indirect) };
-                    unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
+                    if use_global_buffer_barriers {
+                        let g = D3D12_GLOBAL_BARRIER {
+                            SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            SyncAfter: D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                            AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            AccessAfter: D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                        };
+                        unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                    } else {
+                        let mut to_indirect = [barriers::buffer_barrier_full(
+                            &buf_state.resource,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                        )];
+                        unsafe { barriers::barrier_buffers(&command_list7, &to_indirect) };
+                        unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
+                    }
 
                     unsafe {
                         command_list.ExecuteIndirect(
@@ -1055,15 +1115,25 @@ pub(super) fn submit_graph(
                         );
                     }
 
-                    let mut to_uav = [barriers::buffer_barrier_full(
-                        &buf_state.resource,
-                        D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                        D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    )];
-                    unsafe { barriers::barrier_buffers(&command_list7, &to_uav) };
-                    unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
+                    if use_global_buffer_barriers {
+                        let g = D3D12_GLOBAL_BARRIER {
+                            SyncBefore: D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                            SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            AccessBefore: D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                            AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        };
+                        unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                    } else {
+                        let mut to_uav = [barriers::buffer_barrier_full(
+                            &buf_state.resource,
+                            D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        )];
+                        unsafe { barriers::barrier_buffers(&command_list7, &to_uav) };
+                        unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
+                    }
                 }
                 GpuCommand::Barrier => {
                     let g = D3D12_GLOBAL_BARRIER {
@@ -1081,24 +1151,39 @@ pub(super) fn submit_graph(
                     buffers: buf_handles,
                     textures: tex_handles,
                 } => {
-                    let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
-                        .iter()
-                        .filter_map(|h| state.buffers.get(h))
-                        .map(|bs| {
-                            barriers::buffer_barrier_full(
-                                &bs.resource,
-                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                                D3D12_BARRIER_ACCESS(
+                    if use_global_buffer_barriers || buf_handles.is_empty() {
+                        if !buf_handles.is_empty() {
+                            let g = D3D12_GLOBAL_BARRIER {
+                                SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                AccessAfter: D3D12_BARRIER_ACCESS(
                                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
                                         | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                                 ),
-                            )
-                        })
-                        .collect();
-                    unsafe { barriers::barrier_buffers(&command_list7, &buf_barriers) };
-                    unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
+                            };
+                            unsafe { barriers::barrier_globals(&command_list7, &[g]) };
+                        }
+                    } else {
+                        let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
+                            .iter()
+                            .filter_map(|h| state.buffers.get(h))
+                            .map(|bs| {
+                                barriers::buffer_barrier_full(
+                                    &bs.resource,
+                                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                    D3D12_BARRIER_ACCESS(
+                                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                                    ),
+                                )
+                            })
+                            .collect();
+                        unsafe { barriers::barrier_buffers(&command_list7, &buf_barriers) };
+                        unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
+                    }
 
                     let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_handles
                         .iter()
@@ -1214,32 +1299,58 @@ pub(super) fn submit_graph(
                         let upload_off = belt_entry.1;
                         let buf_state = state.buffers.get(buf_handle).unwrap();
 
-                        let mut b_to_copy = [barriers::buffer_barrier_full(
-                            &buf_state.resource,
-                            D3D12_BARRIER_SYNC_ALL,
-                            D3D12_BARRIER_SYNC_COPY,
-                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                            D3D12_BARRIER_ACCESS_COPY_DEST,
-                        )];
-                        let mut b_to_uav = [barriers::buffer_barrier_full(
-                            &buf_state.resource,
-                            D3D12_BARRIER_SYNC_COPY,
-                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                            D3D12_BARRIER_ACCESS_COPY_DEST,
-                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                        )];
-                        unsafe {
-                            barriers::barrier_buffers(&command_list7, &b_to_copy);
-                            barriers::drop_buffer_barriers(&mut b_to_copy);
-                            command_list.CopyBufferRegion(
+                        if use_global_buffer_barriers {
+                            let pre = D3D12_GLOBAL_BARRIER {
+                                SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                                SyncAfter: D3D12_BARRIER_SYNC_COPY,
+                                AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                AccessAfter: D3D12_BARRIER_ACCESS_COPY_DEST,
+                            };
+                            let post = D3D12_GLOBAL_BARRIER {
+                                SyncBefore: D3D12_BARRIER_SYNC_COPY,
+                                SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                AccessBefore: D3D12_BARRIER_ACCESS_COPY_DEST,
+                                AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            };
+                            unsafe {
+                                barriers::barrier_globals(&command_list7, &[pre]);
+                                command_list.CopyBufferRegion(
+                                    &buf_state.resource,
+                                    *offset,
+                                    &upload_src,
+                                    upload_off,
+                                    data.len() as u64,
+                                );
+                                barriers::barrier_globals(&command_list7, &[post]);
+                            }
+                        } else {
+                            let mut b_to_copy = [barriers::buffer_barrier_full(
                                 &buf_state.resource,
-                                *offset,
-                                &upload_src,
-                                upload_off,
-                                data.len() as u64,
-                            );
-                            barriers::barrier_buffers(&command_list7, &b_to_uav);
-                            barriers::drop_buffer_barriers(&mut b_to_uav);
+                                D3D12_BARRIER_SYNC_ALL,
+                                D3D12_BARRIER_SYNC_COPY,
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                D3D12_BARRIER_ACCESS_COPY_DEST,
+                            )];
+                            let mut b_to_uav = [barriers::buffer_barrier_full(
+                                &buf_state.resource,
+                                D3D12_BARRIER_SYNC_COPY,
+                                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                D3D12_BARRIER_ACCESS_COPY_DEST,
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            )];
+                            unsafe {
+                                barriers::barrier_buffers(&command_list7, &b_to_copy);
+                                barriers::drop_buffer_barriers(&mut b_to_copy);
+                                command_list.CopyBufferRegion(
+                                    &buf_state.resource,
+                                    *offset,
+                                    &upload_src,
+                                    upload_off,
+                                    data.len() as u64,
+                                );
+                                barriers::barrier_buffers(&command_list7, &b_to_uav);
+                                barriers::drop_buffer_barriers(&mut b_to_uav);
+                            }
                         }
                     }
                 }

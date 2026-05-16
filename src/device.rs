@@ -133,7 +133,7 @@ impl Instance {
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         {
             if adapter_id == crate::backend::dx12::WARP_ADAPTER_ID
-                && self.backend_type() == BackendType::Dx12
+                && backend.backend_type() == BackendType::Dx12
             {
                 crate::backend::dx12::log_warp_module_path_once();
             }
