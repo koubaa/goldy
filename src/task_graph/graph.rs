@@ -140,7 +140,7 @@ impl TaskGraph {
     /// the layout is placed at a non-zero base offset (e.g. inside a ring
     /// buffer), that base must be a multiple of this value so that every
     /// internal offset remains stride-aligned for its buffer view descriptor.
-    pub fn transient_heap_size_and_layout(&self) -> Result<(u64, u64, HashMap<u32, u64>)> {
+    pub(crate) fn transient_heap_size_and_layout(&self) -> Result<(u64, u64, HashMap<u32, u64>)> {
         Self::transient_heap_layout(&self.transient_specs, &self.ir)
     }
 
@@ -307,7 +307,8 @@ impl TaskGraph {
         Ok((next_off, max_align, m))
     }
 
-    pub fn transient_buffer_range_map(
+    #[allow(dead_code)]
+    pub(crate) fn transient_buffer_range_map(
         heap: &Buffer,
         layout: &HashMap<u32, u64>,
         specs: &[TransientBufferSpec],
@@ -318,7 +319,7 @@ impl TaskGraph {
     /// Like [`Self::transient_buffer_range_map`] but adds `base_offset` to every
     /// layout offset. Used by the placement heap ring where each frame's transients
     /// start at a different position within a shared backing buffer.
-    pub fn transient_buffer_range_map_with_base(
+    pub(crate) fn transient_buffer_range_map_with_base(
         heap: &Buffer,
         layout: &HashMap<u32, u64>,
         specs: &[TransientBufferSpec],
@@ -336,7 +337,7 @@ impl TaskGraph {
     /// dispatch nodes (placeholder → real bindless index).
     ///
     /// `bindless_map` maps each transient id to its (UAV index, SRV index).
-    pub fn lower_transient_buffers_with_bindless(
+    pub(crate) fn lower_transient_buffers_with_bindless(
         &self,
         range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
         bindless_map: &HashMap<u32, (u32, u32)>,
@@ -348,7 +349,8 @@ impl TaskGraph {
     /// the IR fully resolved (no `TransientBuffer` resource ids remain).
     /// The returned graph can be submitted via `compile_commands` or
     /// `Frame::submit_compute` without triggering the transient assert.
-    pub fn into_resolved(&self, resolved_ir: GraphIR) -> TaskGraph {
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn into_resolved(&self, resolved_ir: GraphIR) -> TaskGraph {
         TaskGraph {
             ir: resolved_ir,
             transient_specs: Vec::new(),
@@ -590,11 +592,12 @@ impl TaskGraph {
     }
 
     /// Access the transient buffer specs (id + size) for coloring/layout.
-    pub fn transient_specs(&self) -> &[TransientBufferSpec] {
+    pub(crate) fn transient_specs(&self) -> &[TransientBufferSpec] {
         &self.transient_specs
     }
 
     /// Total bytes for a single native transient heap (buffers + textures).
+    #[allow(dead_code)]
     pub(crate) fn transient_native_heap_total_size(
         &self,
         backend: &mut dyn GpuBackend,
@@ -632,6 +635,7 @@ impl TaskGraph {
         Ok(total)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn place_transients_on_native_heap(
         &self,
         backend: &mut dyn GpuBackend,
@@ -710,6 +714,7 @@ impl TaskGraph {
         Ok((buf_map, tex_map))
     }
 
+    #[allow(dead_code)]
     fn align_up_u64(x: u64, a: u64) -> Result<u64> {
         if a == 0 {
             return Ok(x);

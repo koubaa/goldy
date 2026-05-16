@@ -239,8 +239,17 @@ impl Frame {
         self.presented = true;
         let _ = self.texture.take();
         let token = self.token;
-        let mut backend = self.backend.lock().unwrap();
-        backend.end_frame(token)
+        let tv = {
+            let mut backend = self.backend.lock().unwrap();
+            backend.end_frame(token)?
+        };
+        // Stamp any pending placement heap regions with the present timeline.
+        if let Ok(mut heap_guard) = self._device.inner.placement_heap.lock() {
+            if let Some(ref mut heap) = *heap_guard {
+                heap.stamp_all_pending(tv);
+            }
+        }
+        Ok(tv)
     }
 
     pub fn width(&self) -> u32 {

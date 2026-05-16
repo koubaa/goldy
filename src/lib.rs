@@ -60,8 +60,7 @@ pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
 pub use task_graph::{
-    GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientBufferSpec,
-    TransientId, TransientTextureId,
+    GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId,
 };
 
 pub use texture::Texture;
