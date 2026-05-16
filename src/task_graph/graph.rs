@@ -21,8 +21,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type TransientNativeBufferMap = HashMap<u32, (BufferHandle, u64, u64)>;
-
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let t = b;
@@ -307,18 +305,6 @@ impl TaskGraph {
         Ok((next_off, max_align, m))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn transient_buffer_range_map(
-        heap: &Buffer,
-        layout: &HashMap<u32, u64>,
-        specs: &[TransientBufferSpec],
-    ) -> HashMap<u32, (BufferHandle, u64, u64)> {
-        Self::transient_buffer_range_map_with_base(heap, layout, specs, 0)
-    }
-
-    /// Like [`Self::transient_buffer_range_map`] but adds `base_offset` to every
-    /// layout offset. Used by the placement heap ring where each frame's transients
-    /// start at a different position within a shared backing buffer.
     pub(crate) fn transient_buffer_range_map_with_base(
         heap: &Buffer,
         layout: &HashMap<u32, u64>,
@@ -594,134 +580,6 @@ impl TaskGraph {
     /// Access the transient buffer specs (id + size) for coloring/layout.
     pub(crate) fn transient_specs(&self) -> &[TransientBufferSpec] {
         &self.transient_specs
-    }
-
-    /// Total bytes for a single native transient heap (buffers + textures).
-    #[allow(dead_code)]
-    pub(crate) fn transient_native_heap_total_size(
-        &self,
-        backend: &mut dyn GpuBackend,
-        device: crate::backend::DeviceHandle,
-        hints: &crate::backend::TransientHeapAlignments,
-    ) -> Result<u64> {
-        let mut total = 0u64;
-        if !self.transient_specs.is_empty() {
-            let (buf_total, _, _) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
-            total = buf_total;
-        }
-        if !self.transient_texture_specs.is_empty() {
-            if !self.transient_specs.is_empty() {
-                let g = hints.buffer_base_align.max(hints.buffer_image_granularity);
-                total = Self::align_up_u64(total, g)?;
-            }
-            let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
-            let (_, color_keys) =
-                Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
-            for k in &color_keys {
-                let (a, sz) = backend.transient_texture_heap_footprint(
-                    device,
-                    k.width,
-                    k.height,
-                    k.format,
-                    SpatialAccess::Direct,
-                    TextureFlags::COPY_DST,
-                )?;
-                total = Self::align_up_u64(total, a)?;
-                total = total
-                    .checked_add(sz)
-                    .ok_or_else(|| anyhow::anyhow!("transient native heap overflow"))?;
-            }
-        }
-        Ok(total)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn place_transients_on_native_heap(
-        &self,
-        backend: &mut dyn GpuBackend,
-        device: crate::backend::DeviceHandle,
-        heap: crate::backend::TransientHeapHandle,
-        hints: &crate::backend::TransientHeapAlignments,
-    ) -> Result<(
-        Option<TransientNativeBufferMap>,
-        HashMap<u32, TextureHandle>,
-    )> {
-        let buf_map = if self.transient_specs.is_empty() {
-            None
-        } else {
-            let (_, _, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
-            let mut by_base: HashMap<u64, Vec<&TransientBufferSpec>> = HashMap::new();
-            for s in &self.transient_specs {
-                by_base.entry(layout[&s.id]).or_default().push(s);
-            }
-            let mut out = HashMap::new();
-            for (base, specs_g) in by_base {
-                let max_sz = specs_g.iter().map(|s| s.size).max().unwrap();
-                let h = backend.place_buffer_in_transient_heap(device, heap, base, max_sz)?;
-                for s in specs_g {
-                    out.insert(s.id, (h, 0, s.size));
-                }
-            }
-            Some(out)
-        };
-
-        let mut tex_map = HashMap::new();
-        if !self.transient_texture_specs.is_empty() {
-            let buf_total = if self.transient_specs.is_empty() {
-                0u64
-            } else {
-                Self::transient_heap_layout(&self.transient_specs, &self.ir)?.0
-            };
-            let mut off = buf_total;
-            if !self.transient_specs.is_empty() {
-                let g = hints.buffer_base_align.max(hints.buffer_image_granularity);
-                off = Self::align_up_u64(off, g)?;
-            }
-            let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
-            let (id_to_color, color_keys) =
-                Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
-            let mut per_color_th: Vec<TextureHandle> = Vec::with_capacity(color_keys.len());
-            for k in &color_keys {
-                let (a, footprint) = backend.transient_texture_heap_footprint(
-                    device,
-                    k.width,
-                    k.height,
-                    k.format,
-                    SpatialAccess::Direct,
-                    TextureFlags::COPY_DST,
-                )?;
-                off = Self::align_up_u64(off, a)?;
-                let th = backend.place_texture_in_transient_heap(
-                    device,
-                    heap,
-                    off,
-                    k.width,
-                    k.height,
-                    k.format,
-                    SpatialAccess::Direct,
-                    TextureFlags::COPY_DST,
-                )?;
-                per_color_th.push(th);
-                off = off.checked_add(footprint).ok_or_else(|| {
-                    anyhow::anyhow!("transient native heap texture placement overflow")
-                })?;
-            }
-            for s in &self.transient_texture_specs {
-                let c = id_to_color[&s.id];
-                tex_map.insert(s.id, per_color_th[c]);
-            }
-        }
-        Ok((buf_map, tex_map))
-    }
-
-    #[allow(dead_code)]
-    fn align_up_u64(x: u64, a: u64) -> Result<u64> {
-        if a == 0 {
-            return Ok(x);
-        }
-        x.div_ceil(a)
-            .checked_mul(a)
-            .ok_or_else(|| anyhow::anyhow!("align overflow"))
     }
 
     pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {

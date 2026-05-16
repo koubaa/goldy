@@ -23,7 +23,6 @@ mod sparse;
 mod staging;
 mod surface;
 mod texture;
-mod transient;
 mod types;
 mod utils;
 
@@ -256,8 +255,6 @@ impl VulkanBackend {
             compute_texture_staging_pool: HashMap::new(),
             staging_belts: HashMap::new(),
             timeline_cmd_buffers: HashMap::new(),
-            transient_heaps: HashMap::new(),
-            next_transient_heap_handle: 1,
         };
 
         Ok(Self { state })
@@ -1113,80 +1110,6 @@ impl GpuBackend for VulkanBackend {
         ) {
             unsafe { belt.trim(logical_device) };
         }
-    }
-
-    fn transient_texture_heap_footprint(
-        &self,
-        device: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: crate::types::TextureFormat,
-        access: crate::types::SpatialAccess,
-        flags: crate::types::TextureFlags,
-    ) -> Result<(u64, u64)> {
-        transient::transient_texture_heap_footprint(
-            &self.state,
-            device,
-            width,
-            height,
-            format,
-            access,
-            flags,
-        )
-    }
-
-    fn create_transient_heap(
-        &mut self,
-        device: DeviceHandle,
-        size: u64,
-    ) -> Result<Option<TransientHeapHandle>> {
-        transient::create_transient_heap(&mut self.state, device, size)
-    }
-
-    fn place_buffer_in_transient_heap(
-        &mut self,
-        device: DeviceHandle,
-        heap: TransientHeapHandle,
-        offset: u64,
-        size: u64,
-    ) -> Result<BufferHandle> {
-        transient::place_buffer_in_transient_heap(&mut self.state, device, heap, offset, size)
-    }
-
-    fn place_texture_in_transient_heap(
-        &mut self,
-        device: DeviceHandle,
-        heap: TransientHeapHandle,
-        offset: u64,
-        width: u32,
-        height: u32,
-        format: crate::types::TextureFormat,
-        access: crate::types::SpatialAccess,
-        flags: crate::types::TextureFlags,
-    ) -> Result<TextureHandle> {
-        transient::place_texture_in_transient_heap(
-            &mut self.state,
-            device,
-            heap,
-            offset,
-            width,
-            height,
-            format,
-            access,
-            flags,
-        )
-    }
-
-    fn destroy_transient_heap(
-        &mut self,
-        device: DeviceHandle,
-        heap: TransientHeapHandle,
-    ) -> Result<()> {
-        transient::destroy_transient_heap(&mut self.state, device, heap)
-    }
-
-    fn transient_heap_alignment_hints(&self, device: DeviceHandle) -> TransientHeapAlignments {
-        transient::transient_heap_alignment_hints(&self.state, device)
     }
 
     fn available_bindless_slots(
