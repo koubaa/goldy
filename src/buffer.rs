@@ -91,11 +91,36 @@ impl Buffer {
         expected_max: u64,
         access: DataAccess,
     ) -> Result<Self> {
+        Self::new_with_capacity_hint_and_flags(
+            device,
+            initial_size,
+            expected_max,
+            access,
+            BufferFlags::empty(),
+        )
+    }
+
+    /// Like [`Self::new_with_capacity_hint`], with explicit [`BufferFlags`].
+    ///
+    /// Use [`BufferFlags::GPU_ONLY`] for device-local frame scratch pools on Metal.
+    pub fn new_with_capacity_hint_and_flags(
+        device: &Device,
+        initial_size: u64,
+        expected_max: u64,
+        access: DataAccess,
+        flags: BufferFlags,
+    ) -> Result<Self> {
+        if flags.contains(BufferFlags::GPU_ONLY) && flags.contains(BufferFlags::CPU_READABLE) {
+            anyhow::bail!(
+                "BufferFlags::GPU_ONLY cannot be combined with BufferFlags::CPU_READABLE"
+            );
+        }
         let capacity = expected_max.max(initial_size);
         tracing::debug!(
             initial_size,
             capacity,
             ?access,
+            ?flags,
             "Creating buffer with capacity hint"
         );
         let mut backend = device.inner.backend.lock().unwrap();
@@ -105,7 +130,7 @@ impl Buffer {
             capacity,
             access,
             None,
-            BufferFlags::empty(),
+            flags,
         )?;
         Ok(Self {
             device: device.clone(),
@@ -115,7 +140,7 @@ impl Buffer {
             allocated_size,
             access,
             element_stride: None,
-            flags: BufferFlags::empty(),
+            flags,
             peak_committed_bytes: allocated_size,
             resize_count: 0,
         })
@@ -138,6 +163,11 @@ impl Buffer {
         flags: BufferFlags,
     ) -> Result<Self> {
         tracing::debug!(size, ?access, element_stride, ?flags, "Creating buffer");
+        if flags.contains(BufferFlags::GPU_ONLY) && flags.contains(BufferFlags::CPU_READABLE) {
+            anyhow::bail!(
+                "BufferFlags::GPU_ONLY cannot be combined with BufferFlags::CPU_READABLE"
+            );
+        }
         let mut backend = device.inner.backend.lock().unwrap();
         let handle =
             backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
@@ -584,7 +614,7 @@ impl BufferView {
     }
 
     /// Get the view's offset within the parent buffer in bytes.
-    pub(crate) fn offset(&self) -> u64 {
+    pub fn offset(&self) -> u64 {
         self.offset
     }
 
@@ -679,7 +709,7 @@ impl Drop for BufferView {
 }
 
 /// GCD for alignment computation. Returns 0 if both are 0.
-fn gcd(a: u64, b: u64) -> u64 {
+pub(crate) fn gcd(a: u64, b: u64) -> u64 {
     let (mut a, mut b) = (a, b);
     while b != 0 {
         (a, b) = (b, a % b);
@@ -688,7 +718,7 @@ fn gcd(a: u64, b: u64) -> u64 {
 }
 
 /// LCM for alignment: smallest value divisible by both a and b.
-fn lcm(a: u64, b: u64) -> u64 {
+pub(crate) fn lcm(a: u64, b: u64) -> u64 {
     if a == 0 || b == 0 {
         return 0;
     }
@@ -762,7 +792,12 @@ impl BufferPool {
             "alignment must be a power of two"
         );
         tracing::debug!(total_size, alignment, "Creating buffer pool");
-        let backing = Buffer::new(device, total_size, DataAccess::Scattered)?;
+        let backing = device.alloc_buffer(
+            total_size,
+            DataAccess::Scattered,
+            None,
+            BufferFlags::empty(),
+        )?;
         Ok(Self {
             backing,
             offset: 0,
@@ -777,6 +812,23 @@ impl BufferPool {
         expected_max: u64,
         alignment: u64,
     ) -> Result<Self> {
+        Self::with_alignment_capacity_hint_and_flags(
+            device,
+            total_size,
+            expected_max,
+            alignment,
+            BufferFlags::empty(),
+        )
+    }
+
+    /// Like [`Self::with_alignment_and_capacity_hint`] with [`BufferFlags`].
+    pub fn with_alignment_capacity_hint_and_flags(
+        device: &Device,
+        total_size: u64,
+        expected_max: u64,
+        alignment: u64,
+        flags: BufferFlags,
+    ) -> Result<Self> {
         assert!(
             alignment.is_power_of_two(),
             "alignment must be a power of two"
@@ -785,13 +837,14 @@ impl BufferPool {
             total_size,
             expected_max,
             alignment,
+            ?flags,
             "Creating buffer pool with capacity hint"
         );
-        let backing = Buffer::new_with_capacity_hint(
-            device,
+        let backing = device.alloc_buffer_with_capacity(
             total_size,
             expected_max,
             DataAccess::Scattered,
+            flags,
         )?;
         Ok(Self {
             backing,
@@ -830,6 +883,22 @@ impl BufferPool {
         Ok(view)
     }
 
+    /// Whether an [`Self::alloc_bytes`] of `size` bytes with the given `element_stride` would
+    /// fit in the remaining pool capacity without growth.
+    ///
+    /// Uses the same alignment math as [`Self::alloc_bytes`] so the answer is exact, including
+    /// for non-power-of-two strides (e.g. 12-byte `vec3<f32>`).
+    pub fn would_fit(&self, size: u64, element_stride: Option<u32>) -> bool {
+        let stride_u32 = element_stride.unwrap_or(4);
+        if stride_u32 == 0 || !size.is_multiple_of(stride_u32 as u64) {
+            return false;
+        }
+        let stride = stride_u32 as u64;
+        let alloc_align = lcm(self.alignment, stride);
+        let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
+        aligned_offset.saturating_add(size) <= self.backing.size()
+    }
+
     /// Allocate a raw byte region from the pool.
     ///
     /// `element_stride` determines the structured buffer stride for the view's descriptor.
@@ -838,7 +907,17 @@ impl BufferPool {
     /// Each allocation is aligned to satisfy both pool alignment (256) and
     /// `offset % element_stride == 0` (required by DX12 StructuredBuffer views).
     pub fn alloc_bytes(&mut self, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
-        let stride = element_stride.unwrap_or(4) as u64;
+        let stride_u32 = element_stride.unwrap_or(4);
+        if stride_u32 == 0 {
+            anyhow::bail!("BufferPool alloc_bytes: element stride must be non-zero");
+        }
+        if !size.is_multiple_of(stride_u32 as u64) {
+            anyhow::bail!(
+                "BufferPool alloc_bytes: size {size} must be a multiple of element stride {stride_u32} \
+                 (StructuredBuffer views require an integral element count)"
+            );
+        }
+        let stride = stride_u32 as u64;
         let alloc_align = lcm(self.alignment, stride);
         let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
 

@@ -397,38 +397,12 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
             });
         }
 
+        // Emit blit-type nodes (clears, uploads) before dispatches within each
+        // wave to minimize compute↔blit encoder transitions on Metal. Nodes in
+        // the same wave have no data dependencies, so reordering is safe.
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
-                NodeKind::Dispatch {
-                    pipeline,
-                    resource_slots,
-                    user_slots,
-                    dispatch,
-                } => {
-                    commands.push(GpuCommand::SetPipeline(*pipeline));
-                    if !resource_slots.is_empty() || !user_slots.is_empty() {
-                        commands.push(GpuCommand::BindResourcesRaw {
-                            indices: resource_slots.clone(),
-                            user: user_slots.clone(),
-                        });
-                    }
-                    match dispatch {
-                        super::ir::DispatchDim::Direct { x, y, z } => {
-                            commands.push(GpuCommand::Dispatch {
-                                workgroups_x: *x,
-                                workgroups_y: *y,
-                                workgroups_z: *z,
-                            });
-                        }
-                        super::ir::DispatchDim::Indirect { buffer, offset } => {
-                            commands.push(GpuCommand::DispatchIndirect {
-                                buffer: *buffer,
-                                offset: *offset,
-                            });
-                        }
-                    }
-                }
                 NodeKind::ClearBuffer {
                     buffer,
                     offset,
@@ -481,11 +455,48 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
                         data: data.clone(),
                     });
                 }
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
+            }
+        }
+
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            match &node.kind {
+                NodeKind::Dispatch {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    dispatch,
+                } => {
+                    commands.push(GpuCommand::SetPipeline(*pipeline));
+                    if !resource_slots.is_empty() || !user_slots.is_empty() {
+                        commands.push(GpuCommand::BindResourcesRaw {
+                            indices: resource_slots.clone(),
+                            user: user_slots.clone(),
+                        });
+                    }
+                    match dispatch {
+                        super::ir::DispatchDim::Direct { x, y, z } => {
+                            commands.push(GpuCommand::Dispatch {
+                                workgroups_x: *x,
+                                workgroups_y: *y,
+                                workgroups_z: *z,
+                            });
+                        }
+                        super::ir::DispatchDim::Indirect { buffer, offset } => {
+                            commands.push(GpuCommand::DispatchIndirect {
+                                buffer: *buffer,
+                                offset: *offset,
+                            });
+                        }
+                    }
+                }
                 NodeKind::RenderPass { .. } => {
                     panic!(
                         "emit_commands: graph contains render_pass; use emit_graph_commands / TaskGraph::compile_graph_commands"
                     );
                 }
+                _ => {}
             }
         }
     }
@@ -505,38 +516,10 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
             }));
         }
 
+        // Blit-type nodes first to minimize encoder transitions.
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
-                NodeKind::Dispatch {
-                    pipeline,
-                    resource_slots,
-                    user_slots,
-                    dispatch,
-                } => {
-                    commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
-                    if !resource_slots.is_empty() || !user_slots.is_empty() {
-                        commands.push(GraphCommand::Compute(GpuCommand::BindResourcesRaw {
-                            indices: resource_slots.clone(),
-                            user: user_slots.clone(),
-                        }));
-                    }
-                    match dispatch {
-                        super::ir::DispatchDim::Direct { x, y, z } => {
-                            commands.push(GraphCommand::Compute(GpuCommand::Dispatch {
-                                workgroups_x: *x,
-                                workgroups_y: *y,
-                                workgroups_z: *z,
-                            }));
-                        }
-                        super::ir::DispatchDim::Indirect { buffer, offset } => {
-                            commands.push(GraphCommand::Compute(GpuCommand::DispatchIndirect {
-                                buffer: *buffer,
-                                offset: *offset,
-                            }));
-                        }
-                    }
-                }
                 NodeKind::ClearBuffer {
                     buffer,
                     offset,
@@ -589,6 +572,43 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         data: data.clone(),
                     }));
                 }
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
+            }
+        }
+
+        // Dispatches and render passes second.
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            match &node.kind {
+                NodeKind::Dispatch {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    dispatch,
+                } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
+                    if !resource_slots.is_empty() || !user_slots.is_empty() {
+                        commands.push(GraphCommand::Compute(GpuCommand::BindResourcesRaw {
+                            indices: resource_slots.clone(),
+                            user: user_slots.clone(),
+                        }));
+                    }
+                    match dispatch {
+                        super::ir::DispatchDim::Direct { x, y, z } => {
+                            commands.push(GraphCommand::Compute(GpuCommand::Dispatch {
+                                workgroups_x: *x,
+                                workgroups_y: *y,
+                                workgroups_z: *z,
+                            }));
+                        }
+                        super::ir::DispatchDim::Indirect { buffer, offset } => {
+                            commands.push(GraphCommand::Compute(GpuCommand::DispatchIndirect {
+                                buffer: *buffer,
+                                offset: *offset,
+                            }));
+                        }
+                    }
+                }
                 NodeKind::RenderPass {
                     target,
                     commands: render_cmds,
@@ -598,6 +618,7 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         commands: render_cmds.clone(),
                     });
                 }
+                _ => {}
             }
         }
     }
@@ -617,13 +638,13 @@ mod tests {
 
     /// Build a dispatch `TaskNode` — the workhorse helper for analysis tests.
     fn dispatch_node(
-        label: &str,
+        label: &'static str,
         pipeline: u64,
         bindings: Vec<(ResourceId, NodeAccess)>,
         wg: u32,
     ) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: bindings
                 .into_iter()
                 .map(|(resource, access)| ResourceBinding { resource, access })
@@ -639,7 +660,7 @@ mod tests {
 
     /// Short alias used by the bulk of tests.
     fn node(
-        label: &str,
+        label: &'static str,
         pipeline: u64,
         bindings: Vec<(ResourceId, NodeAccess)>,
         wg: u32,
@@ -648,9 +669,9 @@ mod tests {
     }
 
     /// Build a `ClearBuffer` `TaskNode`.
-    fn clear_node(label: &str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+    fn clear_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: vec![ResourceBinding {
                 resource: buffer,
                 access: NodeAccess::Write,
@@ -664,9 +685,9 @@ mod tests {
     }
 
     /// Build a `WriteBuffer` `TaskNode`.
-    fn write_node(label: &str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+    fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: vec![ResourceBinding {
                 resource: buffer,
                 access: NodeAccess::Write,
@@ -679,9 +700,9 @@ mod tests {
         }
     }
 
-    fn write_texture_node(label: &str, texture: ResourceId, tex_handle: u64) -> TaskNode {
+    fn write_texture_node(label: &'static str, texture: ResourceId, tex_handle: u64) -> TaskNode {
         TaskNode {
-            label: label.to_string(),
+            label,
             bindings: vec![ResourceBinding {
                 resource: texture,
                 access: NodeAccess::Write,
@@ -926,7 +947,7 @@ mod tests {
     fn command_emission_with_resource_slots() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "A".to_string(),
+                label: "A",
                 bindings: vec![ResourceBinding {
                     resource: buf(0),
                     access: NodeAccess::Write,

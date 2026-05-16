@@ -172,7 +172,7 @@ impl RenderState {
             .node("update_particles", &self.compute_pipeline)
             .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
             .bind_buffer(&self.params_buffer, NodeAccess::Read)
-            .bind_resources_raw(&[
+            .bind_resources_raw_slice(&[
                 self.particle_buffer.bindless_index().unwrap(),
                 self.params_buffer.bindless_index().unwrap(),
             ])

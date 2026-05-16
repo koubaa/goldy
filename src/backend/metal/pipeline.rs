@@ -22,20 +22,8 @@ pub(super) fn create_with_depth(
     let topology = desc.raster.topology;
     let target_format = desc.raster.target_format;
     let depth_stencil = desc.raster.depth_stencil;
-    super::shader::ensure_stage_compiled(
-        &state.slang_compiler,
-        &state.devices,
-        &mut state.shaders,
-        vertex_shader,
-        SlangStage::Vertex,
-    )?;
-    super::shader::ensure_stage_compiled(
-        &state.slang_compiler,
-        &state.devices,
-        &mut state.shaders,
-        fragment_shader,
-        SlangStage::Fragment,
-    )?;
+    super::shader::ensure_stage_compiled(state, vertex_shader, SlangStage::Vertex)?;
+    super::shader::ensure_stage_compiled(state, fragment_shader, SlangStage::Fragment)?;
 
     let logical_device = state
         .devices

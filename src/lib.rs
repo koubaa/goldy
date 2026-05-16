@@ -36,7 +36,10 @@ pub mod validation_env;
 
 // Structured instrumentation for debugging and profiling
 pub mod instrumentation;
+pub mod placement_heap;
 pub mod timeline;
+pub mod transient_allocator;
+pub mod vram_allocator;
 
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
@@ -57,11 +60,16 @@ pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
 pub use task_graph::{
-    NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId,
+    GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientBufferSpec,
+    TransientId, TransientTextureId,
 };
 
 pub use texture::Texture;
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
+pub use transient_allocator::{
+    BumpResetAllocator, EpochRegionsAllocator, TransientAllocator, TransientAllocatorConfig,
+    TransientAllocatorStrategy,
+};
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};
 

@@ -1723,7 +1723,7 @@ fn test_write_buffer_reuse_across_submissions() {
     g1.node("copy_a", &pipeline)
         .bind_buffer(&mid, NodeAccess::Read)
         .bind_buffer(&out_a, NodeAccess::Write)
-        .bind_resources_raw(&[idx_in, idx_out_a])
+        .bind_resources_raw_slice(&[idx_in, idx_out_a])
         .dispatch(1, 1, 1);
 
     let mut g2 = TaskGraph::new();
@@ -1731,7 +1731,7 @@ fn test_write_buffer_reuse_across_submissions() {
     g2.node("copy_b", &pipeline)
         .bind_buffer(&mid, NodeAccess::Read)
         .bind_buffer(&out_b, NodeAccess::Write)
-        .bind_resources_raw(&[idx_in, idx_out_b])
+        .bind_resources_raw_slice(&[idx_in, idx_out_b])
         .dispatch(1, 1, 1);
 
     let tv1 = g1.submit(&device).expect("submit 1");
@@ -2369,4 +2369,510 @@ fn stride_validation_multi_binding_all_correct_passes() {
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     result.expect("dispatch with all-correct strides must succeed");
+}
+
+// ============================================================================
+// TransientAllocator integration tests
+//
+// Verify the trait, both strategies, and end-to-end frame lifecycle against a
+// real device. Each test uses a fresh device so they remain isolated.
+// ============================================================================
+
+use goldy::{
+    BumpResetAllocator, EpochRegionsAllocator, TransientAllocator, TransientAllocatorConfig,
+    TransientAllocatorStrategy,
+};
+
+fn small_config() -> TransientAllocatorConfig {
+    TransientAllocatorConfig {
+        initial_size: 4 * 1024,
+        expected_max: 64 * 1024,
+        min_region_size: 4 * 1024,
+        max_regions: 4,
+        alignment: 256,
+        flags: BufferFlags::GPU_ONLY,
+    }
+}
+
+/// Smoke test: each strategy can `create`, then `begin_frame` → `alloc` → `end_frame` with no
+/// GPU work and not panic. Covers the lazy-init and zero-work path.
+#[test]
+fn transient_allocator_smoke_all_strategies() {
+    let device = make_device();
+    for strategy in [
+        TransientAllocatorStrategy::BumpReset,
+        TransientAllocatorStrategy::EpochRegions,
+        TransientAllocatorStrategy::Heap,
+    ] {
+        let mut a = strategy
+            .create(&device, small_config())
+            .expect("create allocator");
+        a.begin_frame(&device, 0).expect("begin");
+        let view = a.alloc(&device, 256, Some(4)).expect("alloc");
+        // Submit empty work to advance the timeline.
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        drop(view);
+        a.end_frame(tv);
+        // Next frame: should not panic, and BumpReset should wait for tv internally.
+        a.begin_frame(&device, 0).expect("begin frame 2");
+        let _v2 = a.alloc(&device, 256, Some(4)).expect("alloc frame 2");
+    }
+}
+
+/// Strategy::default() is Heap, and parse handles all canonical names.
+#[test]
+fn transient_allocator_strategy_default_and_parse() {
+    assert_eq!(
+        TransientAllocatorStrategy::default(),
+        TransientAllocatorStrategy::Heap,
+    );
+    assert_eq!(
+        TransientAllocatorStrategy::parse("bump"),
+        Some(TransientAllocatorStrategy::BumpReset),
+    );
+    assert_eq!(
+        TransientAllocatorStrategy::parse("epoch"),
+        Some(TransientAllocatorStrategy::EpochRegions),
+    );
+    assert_eq!(
+        TransientAllocatorStrategy::parse("heap"),
+        Some(TransientAllocatorStrategy::Heap),
+    );
+    assert_eq!(TransientAllocatorStrategy::parse("garbage"), None);
+}
+
+/// Verifies that BumpResetAllocator waits for the previous frame's epoch before resetting.
+/// We measure the elapsed time of `begin_frame` after a submit-without-wait — if the
+/// wait kicks in, it should be roughly the GPU latency (non-zero); if it doesn't, the test
+/// at least proves no deadlock.
+#[test]
+fn bump_reset_blocks_on_prev_epoch() {
+    let device = make_device();
+    let mut a = BumpResetAllocator::new(&device, small_config()).expect("create");
+
+    a.begin_frame(&device, 0).expect("begin");
+    let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+
+    // begin_frame should wait for `tv` if it hasn't completed. After it returns,
+    // gpu_progress must be at least tv.
+    a.begin_frame(&device, 0).expect("begin 2");
+    assert!(
+        device.gpu_progress() >= tv,
+        "BumpReset must not allow reuse until prev epoch has been signaled"
+    );
+}
+
+/// Allocating more than a region's capacity in one frame causes EpochRegionsAllocator to
+/// spill into additional regions, not panic.
+#[test]
+fn epoch_regions_spills_when_active_full() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 4,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    a.begin_frame(&device, 0).expect("begin");
+    let before = a.region_count();
+    // Allocate 3 regions worth in 3 chunks — must spill twice.
+    let _v1 = a.alloc(&device, 3 * 1024, Some(4)).expect("alloc 1");
+    let _v2 = a.alloc(&device, 3 * 1024, Some(4)).expect("alloc 2");
+    let _v3 = a.alloc(&device, 3 * 1024, Some(4)).expect("alloc 3");
+    let after = a.region_count();
+    assert!(
+        after >= before + 2,
+        "expected at least 2 new regions after 3 region-sized allocs, got {} -> {}",
+        before,
+        after
+    );
+
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+    // After end_frame all active should be retired.
+    assert_eq!(a.retired_count(), after, "all active regions must retire");
+    assert_eq!(a.empty_count(), 0);
+}
+
+/// EpochRegionsAllocator reclaims retired regions opportunistically in `begin_frame` once
+/// the GPU has caught up — no explicit waits required on the hot path.
+#[test]
+fn epoch_regions_reclaims_after_gpu_catches_up() {
+    let device = make_device();
+    let mut a = EpochRegionsAllocator::new(&device, small_config()).expect("create");
+
+    // Frame 1: allocate, submit, retire.
+    a.begin_frame(&device, 0).expect("begin 1");
+    let _v = a.alloc(&device, 2048, Some(4)).expect("alloc");
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+    assert!(a.retired_count() >= 1);
+    assert_eq!(a.empty_count(), 0);
+
+    // Wait so the next begin_frame can reclaim.
+    device.wait_until(tv).expect("wait");
+
+    // Frame 2: begin_frame must promote the retired region back to empty before activating.
+    a.begin_frame(&device, 0).expect("begin 2");
+    // The previously retired region should now be Active (count == 1). No retired left.
+    assert_eq!(a.retired_count(), 0);
+}
+
+/// Across many frames, the EpochRegionsAllocator's region count stays bounded by max_regions.
+#[test]
+fn epoch_regions_respects_max_regions_cap() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg.clone()).expect("create");
+
+    // Push 10 frames through; each frame is small and submitted+waited so retirees can be
+    // reclaimed. Region count should stay ≤ max_regions.
+    for _ in 0..10 {
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        a.end_frame(tv);
+        device.wait_until(tv).expect("wait");
+        assert!(
+            a.region_count() <= cfg.max_regions,
+            "region count {} exceeded cap {}",
+            a.region_count(),
+            cfg.max_regions
+        );
+    }
+}
+
+/// `clear()` on either strategy must release all allocations and put the allocator into a
+/// clean state ready for re-use.
+#[test]
+fn transient_allocator_clear_resets_state() {
+    let device = make_device();
+    for strategy in [
+        TransientAllocatorStrategy::BumpReset,
+        TransientAllocatorStrategy::EpochRegions,
+    ] {
+        let mut a = strategy
+            .create(&device, small_config())
+            .expect("create allocator");
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        a.end_frame(tv);
+        device.wait_until(tv).expect("wait");
+        a.clear();
+        // After clear, used_this_frame should be zero and we can begin a new frame.
+        assert_eq!(a.used_this_frame(), 0);
+        a.begin_frame(&device, 0).expect("begin after clear");
+    }
+}
+
+/// The surface-rendering path calls begin_frame before end_frame for the previous frame
+/// (because the timeline value is not known until after Frame::present). EpochRegions must
+/// handle this by parking the previous frame's regions as Pending and promoting them once
+/// the deferred end_frame arrives.
+#[test]
+fn epoch_regions_deferred_end_frame_does_not_leak() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    // Simulate surface-rendering lifecycle: begin → alloc → (no end_frame) → begin → ...
+    for i in 0..10u64 {
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        // Simulate: finish() happened, but timeline not known yet for surface path.
+        // The NEXT begin_frame arrives before end_frame.
+
+        // On odd frames, simulate delayed end_frame arriving (from note_frame_presented).
+        // On even frames, let it carry over.
+        if i % 2 == 1 {
+            a.end_frame(tv);
+            device.wait_until(tv).expect("wait");
+        }
+    }
+
+    // Final end_frame so everything can be reclaimed.
+    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    a.end_frame(tv);
+    device.wait_until(tv).expect("wait");
+
+    // All regions should be reclaimable. Region count must be bounded by max_regions.
+    assert!(
+        a.region_count() <= 3,
+        "region count {} exceeded max_regions 3",
+        a.region_count()
+    );
+}
+
+/// When end_frame is never called between begin_frames (worst case), the allocator must
+/// not panic or allocate unbounded memory. Pending regions are force-reclaimed when needed.
+#[test]
+fn epoch_regions_survives_continuous_begin_without_end() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    // 20 frames of begin_frame + alloc with NO end_frame at all.
+    for _ in 0..20 {
+        a.begin_frame(&device, 0).expect("begin");
+        let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
+        let _tv = ComputeEncoder::new().submit(&device).expect("submit");
+        // Deliberately skip end_frame — simulates broken caller or surface-path delay.
+    }
+
+    assert!(
+        a.region_count() <= 3,
+        "region count {} exceeded max_regions 3 even without end_frame",
+        a.region_count()
+    );
+    assert_eq!(
+        a.active_count(),
+        1,
+        "only the current frame should be Active"
+    );
+    // At most one Pending region (from the frame immediately before the current one).
+    // The rest must have been force-reclaimed when the safety valve fired.
+    assert!(
+        a.pending_count() <= 1,
+        "at most 1 pending region expected, got {}",
+        a.pending_count()
+    );
+}
+
+/// After a deferred end_frame, the assigned epoch enables proper reclamation of all
+/// previously-pending regions on the next begin_frame.
+#[test]
+fn epoch_regions_pending_promoted_to_retired_on_end_frame() {
+    let device = make_device();
+    let cfg = TransientAllocatorConfig {
+        min_region_size: 4 * 1024,
+        max_regions: 3,
+        ..small_config()
+    };
+    let mut a = EpochRegionsAllocator::new(&device, cfg).expect("create");
+
+    // Frame 1: begin, alloc, NO end_frame (surface path).
+    a.begin_frame(&device, 0).expect("begin 1");
+    let _v1 = a.alloc(&device, 1024, Some(4)).expect("alloc 1");
+    let tv1 = ComputeEncoder::new().submit(&device).expect("submit 1");
+
+    // Frame 2: begin_frame moves frame 1's active regions to Pending.
+    a.begin_frame(&device, 0).expect("begin 2");
+    assert_eq!(a.pending_count(), 1, "frame 1's region should be Pending");
+    assert_eq!(a.active_count(), 1, "frame 2 should have one Active region");
+
+    // Deferred end_frame for frame 1 arrives.
+    a.end_frame(tv1);
+    assert_eq!(
+        a.pending_count(),
+        0,
+        "end_frame should promote Pending to Retired"
+    );
+    // Both frame 1's (was Pending) and frame 2's (was Active) regions are now Retired.
+    assert_eq!(a.retired_count(), 2);
+
+    // Wait and verify reclamation works.
+    device.wait_until(tv1).expect("wait");
+    a.begin_frame(&device, 0).expect("begin 3");
+    assert_eq!(a.retired_count(), 0, "waited regions should be reclaimed");
+}
+
+/// BufferPool::would_fit must agree with alloc_bytes for power-of-two and non-power-of-two
+/// strides.
+#[test]
+fn buffer_pool_would_fit_agrees_with_alloc_bytes() {
+    let device = make_device();
+    let mut pool = BufferPool::new(&device, 4096).expect("pool");
+
+    assert!(pool.would_fit(1024, Some(4)));
+    let _v = pool.alloc_bytes(1024, Some(4)).expect("alloc");
+
+    // Non-power-of-two stride: 12 (vec3<f32>). LCM(256, 12) = 768.
+    // After consuming 1024 bytes at alignment 256, used == 1024. The next alloc with stride
+    // 12 aligns to 768 → aligned_offset = 1536. Byte size must be a multiple of 12 for
+    // StructuredBuffer views (e.g. 1020 = 85 × 12, not 1024).
+    assert!(pool.would_fit(1020, Some(12)));
+    let _v2 = pool.alloc_bytes(1020, Some(12)).expect("alloc np2");
+
+    // Remaining tail after second slot: 4096 - (1536 + 1020). would_fit must reject oversize allocs.
+    assert!(pool.would_fit(1024, Some(4)));
+    assert!(!pool.would_fit(4096, Some(4)));
+}
+
+// ─── Transient buffer (graph-colored) path ─────────────────────────────────────
+
+const WRITE_IOTA_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    if (id.x < 64) data[id.x] = id.x + 1;
+}
+"#;
+
+/// Exercises the graph-colored transient-buffer path end-to-end:
+///
+/// 1. Graph has one transient buffer T.
+/// 2. Dispatch A writes `id.x + 1` into T.
+/// 3. Dispatch B copies T → output (a regular CPU-readable buffer).
+/// 4. Read back output and verify values.
+///
+/// The graph submission resolves T via `lower_transient_buffers_with_bindless`,
+/// creating a `BufferView` into a temporary heap, patching bindless indices, and
+/// scheduling waves with barriers — the same infrastructure ekrano uses.
+#[test]
+fn test_transient_buffer_write_then_copy() {
+    use goldy::{NodeAccess, TaskGraph};
+    use std::collections::HashMap;
+
+    let device = make_device();
+
+    let write_shader =
+        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
+    let write_pipeline =
+        ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
+
+    const N: usize = 64;
+    let byte_size = (N * core::mem::size_of::<u32>()) as u64;
+
+    let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
+    let output_uav = output.bindless_index().expect("output UAV");
+
+    // ── Build graph with one transient buffer ──
+
+    let mut graph = TaskGraph::new();
+    let tid = graph.transient_buffer(byte_size);
+
+    // Dispatch A: write iota into transient (binding 0 = transient, Write)
+    graph
+        .node("write_iota", &write_pipeline)
+        .bind_transient_buffer(tid, NodeAccess::Write)
+        .bind_resources_raw_slice(&[u32::MAX]) // placeholder
+        .dispatch(1, 1, 1);
+
+    // Dispatch B: copy transient → output (binding 0 = transient Read, binding 1 = output Write)
+    graph
+        .node("copy_out", &copy_pipeline)
+        .bind_transient_buffer(tid, NodeAccess::Read)
+        .bind_buffer(&output, NodeAccess::Write)
+        .bind_resources_raw_slice(&[u32::MAX, output_uav])
+        .dispatch(1, 1, 1);
+
+    // ── Resolve transients via the graph-colored path ──
+
+    let (total_size, _, layout) = graph.transient_heap_size_and_layout().expect("heap layout");
+
+    let heap_buf =
+        Buffer::new(&device, total_size.max(256), DataAccess::Scattered).expect("heap buffer");
+
+    let range_map =
+        TaskGraph::transient_buffer_range_map(&heap_buf, &layout, graph.transient_specs());
+
+    let view = heap_buf
+        .create_view(layout[&tid.0 as &u32], byte_size, Some(4))
+        .expect("create transient view");
+    let uav = view.bindless_index().expect("view UAV");
+
+    let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::new();
+    bindless_map.insert(tid.0, (uav, uav));
+
+    let resolved_ir = graph
+        .lower_transient_buffers_with_bindless(&range_map, &bindless_map)
+        .expect("lower transients");
+
+    let resolved_graph = graph.into_resolved(resolved_ir);
+
+    // ── Submit and read back ──
+
+    resolved_graph
+        .dispatch(&device)
+        .expect("dispatch resolved graph");
+
+    let mut raw = vec![0u8; byte_size as usize];
+    output.read_to_cpu(&device, &mut raw).expect("read output");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    let expected: Vec<u32> = (1..=N as u32).collect();
+    assert_eq!(
+        result,
+        &expected[..],
+        "transient buffer graph-colored path produced wrong data"
+    );
+}
+
+/// Control test: same dispatches but with a regular buffer instead of transient.
+/// If this passes but the transient version fails, the issue is in the
+/// graph-colored infrastructure.
+#[test]
+fn test_regular_buffer_write_then_copy() {
+    use goldy::{NodeAccess, TaskGraph};
+
+    let device = make_device();
+
+    let write_shader =
+        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
+    let write_pipeline =
+        ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
+
+    const N: usize = 64;
+    let byte_size = (N * core::mem::size_of::<u32>()) as u64;
+
+    let scratch = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("scratch buffer");
+    let scratch_uav = scratch.bindless_index().expect("scratch UAV");
+
+    let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
+    let output_uav = output.bindless_index().expect("output UAV");
+
+    let mut graph = TaskGraph::new();
+
+    graph.clear_buffer(&scratch, 0, byte_size);
+
+    graph
+        .node("write_iota", &write_pipeline)
+        .bind_buffer(&scratch, NodeAccess::Write)
+        .bind_resources_raw_slice(&[scratch_uav])
+        .dispatch(1, 1, 1);
+
+    graph
+        .node("copy_out", &copy_pipeline)
+        .bind_buffer(&scratch, NodeAccess::Read)
+        .bind_buffer(&output, NodeAccess::Write)
+        .bind_resources_raw_slice(&[scratch_uav, output_uav])
+        .dispatch(1, 1, 1);
+
+    graph.dispatch(&device).expect("dispatch graph");
+
+    let mut raw = vec![0u8; byte_size as usize];
+    output.read_to_cpu(&device, &mut raw).expect("read output");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    let expected: Vec<u32> = (1..=N as u32).collect();
+    assert_eq!(
+        result,
+        &expected[..],
+        "regular buffer path produced wrong data"
+    );
 }

@@ -78,7 +78,7 @@ impl TexturePool {
                 return Ok(tex);
             }
         }
-        Texture::new(device, width, height, format, access, flags)
+        device.alloc_texture(width, height, format, access, flags)
     }
 
     /// Return an owned texture to the pool after the GPU has finished using it.

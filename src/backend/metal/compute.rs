@@ -23,13 +23,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     compute_shader: ShaderHandle,
 ) -> Result<ComputePipelineHandle> {
-    super::shader::ensure_stage_compiled(
-        &state.slang_compiler,
-        &state.devices,
-        &mut state.shaders,
-        compute_shader,
-        SlangStage::Compute,
-    )?;
+    super::shader::ensure_stage_compiled(state, compute_shader, SlangStage::Compute)?;
 
     let logical_device = state
         .devices
@@ -109,10 +103,11 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 
 /// Begin a fresh compute encoder on the command buffer with heap and argument buffer bindings.
 ///
-/// Calls `use_resource` on each individual buffer so Metal's hazard tracking
-/// can detect cross-encoder dependencies (e.g. compute→blit→compute). Without
-/// this, Metal may overlap encoders that share buffers accessed via argument
-/// buffers, since the indirect access is opaque to automatic hazard tracking.
+/// Calls `use_resource` on every buffer and texture so Metal's hazard tracking
+/// can detect cross-encoder dependencies (e.g. compute→blit→compute). `use_heap`
+/// alone provides residency but NOT hazard tracking — without per-resource
+/// declarations, Metal GPU Validation rejects dispatches that touch heap-resident
+/// resources via argument buffers.
 pub(super) fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
     state: &MetalState,
@@ -131,14 +126,6 @@ pub(super) fn begin_compute_encoder<'a>(
             );
         }
     }
-    // Declare textures resident for indirect access through the argument buffer.
-    //
-    // Heap-allocated textures are already covered by `use_heaps_for_compute`,
-    // but swapchain drawables (CAMetalLayer-owned `MTLTexture`s registered
-    // transiently in `state.textures`) are NOT in any Goldy-owned heap, so
-    // Metal Tier-2 bindless will read them as unresident unless we explicitly
-    // call `use_resource` on them before dispatch. Calling `use_resource` on
-    // already-heap-resident textures is safe and idempotent.
     for tex_state in state.textures.values() {
         if tex_state.device_handle == device_handle {
             let usage = if tex_state.is_storage_image {
@@ -271,10 +258,34 @@ pub(super) fn record_commands_to_buffer(
                     *offset + data.len() as u64 <= buf_state.size,
                     "WriteBuffer: write exceeds buffer bounds"
                 );
-                // Use a staging buffer + blit copy so each submission's data is
-                // isolated. A direct CPU memcpy would race when two command
-                // buffers target the same destination: the second memcpy
-                // overwrites the buffer before the first GPU dispatch reads it.
+                // Direct CPU memcpy is safe only when no previously-committed GPU
+                // work is still in flight: if the GPU has already signaled past the
+                // last committed timeline, all reads from this buffer are complete.
+                // Otherwise we fall through to the staged blit path to avoid a race.
+                const SMALL_WRITE_THRESHOLD: usize = 4096;
+                let gpu_idle = logical_device
+                    .last_committed_timeline
+                    .map(|last| logical_device.timeline_event.as_ref().signaled_value() >= last)
+                    .unwrap_or(true);
+                if gpu_idle
+                    && !buf_state
+                        .flags
+                        .contains(crate::types::BufferFlags::GPU_ONLY)
+                    && data.len() <= SMALL_WRITE_THRESHOLD
+                {
+                    let ptr = buf_state.buffer.contents();
+                    if !ptr.is_null() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr(),
+                                (ptr as *mut u8).add(*offset as usize),
+                                data.len(),
+                            );
+                        }
+                        continue;
+                    }
+                }
+
                 ensure_blit!();
                 let staging = logical_device.device.new_buffer_with_data(
                     data.as_ptr() as *const _,
@@ -638,6 +649,7 @@ pub(super) fn submit(
     command_buffer_ref.commit();
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.last_committed_timeline = Some(signal_value);
         ld.process_deletion_queue_up_to_signaled();
     }
 
@@ -772,6 +784,7 @@ pub(super) fn submit_graph(
     command_buffer_ref.commit();
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.last_committed_timeline = Some(signal_value);
         ld.process_deletion_queue_up_to_signaled();
     }
 

@@ -39,7 +39,8 @@ impl NodeAccess {
 /// A single resource binding within a task node.
 #[derive(Debug, Clone)]
 pub struct ResourceBinding {
-    pub resource: ResourceId,
+    /// Graph IR only; not exposed publicly so [`super::ResourceId`] can stay crate-private.
+    pub(crate) resource: ResourceId,
     pub access: NodeAccess,
 }
 
@@ -108,7 +109,7 @@ pub enum NodeKind {
 #[derive(Debug, Clone)]
 pub struct TaskNode {
     #[allow(dead_code)]
-    pub label: String,
+    pub label: &'static str,
     /// Resource access declarations used by the dependency analyzer.
     pub bindings: Vec<ResourceBinding>,
     /// What this node actually executes.
@@ -119,6 +120,31 @@ pub struct TaskNode {
 #[derive(Debug, Clone, Default)]
 pub struct GraphIR {
     pub nodes: Vec<TaskNode>,
+}
+
+impl GraphIR {
+    /// Insert a zero-fill node at the front of the IR so that it executes
+    /// before every other node that touches the same parent buffer.
+    ///
+    /// Used by the graph-colored transient path to guarantee that the
+    /// placement-heap region is zeroed before any dispatch reads from it.
+    pub fn prepend_clear_buffer(&mut self, buffer: &crate::Buffer, offset: u64, size: u64) {
+        self.nodes.insert(
+            0,
+            TaskNode {
+                label: "clear_transient_region",
+                bindings: vec![ResourceBinding {
+                    resource: super::ResourceId::Buffer(buffer.handle),
+                    access: NodeAccess::Write,
+                }],
+                kind: NodeKind::ClearBuffer {
+                    buffer: buffer.handle,
+                    offset,
+                    size,
+                },
+            },
+        );
+    }
 }
 
 /// Resources that need a barrier before a wave executes.

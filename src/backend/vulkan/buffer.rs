@@ -525,6 +525,28 @@ pub(super) fn set_logical_size(
         return Ok(());
     }
 
+    // When growing, the existing staging buffer was sized for the old (smaller) logical
+    // size. Invalidate it so ensure_staging recreates it at the new size.
+    if new_logical_size > old_logical {
+        let (old_stg_buf, old_stg_mem) = {
+            let buf = buffers.get_mut(&buffer_handle).unwrap();
+            (buf.staging_buffer.take(), buf.staging_memory.take())
+        };
+        if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
+            let ld = devices.get_mut(&device_handle).unwrap();
+            let barrier = ld.timeline_next.saturating_sub(1);
+            ld.deletion_queue.queue(
+                barrier,
+                types::PendingDeletion::ReplacedBufferGpu {
+                    buffer: stg_buf,
+                    memory: stg_mem,
+                    staging_buffer: None,
+                    staging_memory: None,
+                },
+            );
+        }
+    }
+
     let bindless_descriptor_set = devices
         .get(&device_handle)
         .context("Invalid device handle")?
@@ -670,6 +692,28 @@ fn set_logical_size_sparse(
     }
 
     buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+
+    // When growing, the existing staging buffer was sized for the old (smaller) logical
+    // size. Invalidate it so ensure_staging recreates it at the new size.
+    if new_logical_size > old_logical {
+        let (old_stg_buf, old_stg_mem) = {
+            let buf = buffers.get_mut(&buffer_handle).unwrap();
+            (buf.staging_buffer.take(), buf.staging_memory.take())
+        };
+        if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
+            let ld = devices.get_mut(&device_handle).unwrap();
+            let barrier = ld.timeline_next.saturating_sub(1);
+            ld.deletion_queue.queue(
+                barrier,
+                types::PendingDeletion::ReplacedBufferGpu {
+                    buffer: stg_buf,
+                    memory: stg_mem,
+                    staging_buffer: None,
+                    staging_memory: None,
+                },
+            );
+        }
+    }
 
     let bindless_descriptor_set = devices
         .get(&device_handle)

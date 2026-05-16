@@ -229,7 +229,7 @@ impl RenderState {
                 .node("game_of_life", &self.compute_pipeline)
                 .bind_buffer_view(read_view, NodeAccess::Read)
                 .bind_buffer_view(write_view, NodeAccess::Write)
-                .bind_resources_raw(&[
+                .bind_resources_raw_slice(&[
                     read_view.bindless_handle().unwrap().index(),
                     write_view.bindless_handle().unwrap().index(),
                 ])

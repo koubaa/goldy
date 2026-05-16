@@ -109,6 +109,7 @@ pub(super) fn create(
             arg_buffer_index,
             is_storage_image,
             slot_owned_externally: false,
+            is_heap_allocated: true,
         },
     );
 

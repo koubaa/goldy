@@ -131,13 +131,13 @@ fn graph_linear_chain() {
         .node("double", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&dst, NodeAccess::Write)
-        .bind_resources_raw(&[src_idx, dst_idx])
+        .bind_resources_raw_slice(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
 
     graph
         .node("add_ten", &add_pipe)
         .bind_buffer(&dst, NodeAccess::ReadWrite)
-        .bind_resources_raw(&[dst_idx])
+        .bind_resources_raw_slice(&[dst_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -170,12 +170,12 @@ fn graph_independent_dispatches() {
     graph
         .node("fill_a", &pipe_42)
         .bind_buffer(&buf_a, NodeAccess::Write)
-        .bind_resources_raw(&[idx_a])
+        .bind_resources_raw_slice(&[idx_a])
         .dispatch(1, 1, 1);
     graph
         .node("fill_b", &pipe_99)
         .bind_buffer(&buf_b, NodeAccess::Write)
-        .bind_resources_raw(&[idx_b])
+        .bind_resources_raw_slice(&[idx_b])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -237,7 +237,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     graph
         .node("fill_src", &fill_pipe)
         .bind_buffer(&src, NodeAccess::Write)
-        .bind_resources_raw(&[src_idx])
+        .bind_resources_raw_slice(&[src_idx])
         .dispatch(1, 1, 1);
 
     // B: double src -> y
@@ -245,7 +245,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .node("double_to_y", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&y, NodeAccess::Write)
-        .bind_resources_raw(&[src_idx, y_idx])
+        .bind_resources_raw_slice(&[src_idx, y_idx])
         .dispatch(1, 1, 1);
 
     // C: double src -> z
@@ -253,7 +253,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .node("double_to_z", &double_pipe)
         .bind_buffer(&src, NodeAccess::Read)
         .bind_buffer(&z, NodeAccess::Write)
-        .bind_resources_raw(&[src_idx, z_idx])
+        .bind_resources_raw_slice(&[src_idx, z_idx])
         .dispatch(1, 1, 1);
 
     // D: sum y + z -> out
@@ -262,7 +262,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .bind_buffer(&y, NodeAccess::Read)
         .bind_buffer(&z, NodeAccess::Read)
         .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw(&[y_idx, z_idx, out_idx])
+        .bind_resources_raw_slice(&[y_idx, z_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -328,12 +328,12 @@ fn graph_matches_encoder() {
         .node("double", &double_pipe)
         .bind_buffer(&src_graph, NodeAccess::Read)
         .bind_buffer(&dst_graph, NodeAccess::Write)
-        .bind_resources_raw(&[src_graph_idx, dst_graph_idx])
+        .bind_resources_raw_slice(&[src_graph_idx, dst_graph_idx])
         .dispatch(1, 1, 1);
     graph
         .node("add_ten", &add_pipe)
         .bind_buffer(&dst_graph, NodeAccess::ReadWrite)
-        .bind_resources_raw(&[dst_graph_idx])
+        .bind_resources_raw_slice(&[dst_graph_idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&device).unwrap();
 
@@ -361,7 +361,7 @@ fn graph_nonblocking_submit() {
     graph
         .node("fill", &pipe)
         .bind_buffer(&buf, NodeAccess::Write)
-        .bind_resources_raw(&[idx])
+        .bind_resources_raw_slice(&[idx])
         .dispatch(1, 1, 1);
 
     let tv = graph.submit(&device).unwrap();
@@ -413,7 +413,7 @@ fn clear_then_dispatch_reads_zeros() {
         .node("copy", &copy_pipe)
         .bind_buffer(&buf, NodeAccess::Read)
         .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw(&[buf_idx, out_idx])
+        .bind_resources_raw_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();
@@ -458,7 +458,7 @@ fn write_then_dispatch_reads_uploaded_data() {
         .node("copy", &copy_pipe)
         .bind_buffer(&buf, NodeAccess::Read)
         .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw(&[buf_idx, out_idx])
+        .bind_resources_raw_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&device).unwrap();

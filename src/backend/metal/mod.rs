@@ -118,7 +118,7 @@ impl MetalBackend {
                 samplers: std::collections::HashMap::new(),
                 next_sampler_handle: 1,
                 next_transient_heap_handle: 1,
-                slang_compiler,
+                slang_compiler: Some(slang_compiler),
             },
         })
     }
@@ -773,6 +773,18 @@ impl GpuBackend for MetalBackend {
                 .heap_allocator
                 .ensure_primary_capacity(min_capacity);
         }
+    }
+
+    fn compact_overflow_heaps(&mut self, device: DeviceHandle) {
+        if let Some(logical_device) = self.state.devices.get_mut(&device) {
+            logical_device.heap_allocator.compact_overflow();
+            logical_device.texture_heap.compact_overflow();
+        }
+    }
+
+    fn release_idle_shader_compiler(&mut self) {
+        self.state.slang_compiler = None;
+        tracing::info!("Released Metal Slang compiler session (freed host-side compiler memory)");
     }
 
     fn deferred_deletion_pending_count(&self, device: DeviceHandle) -> usize {

@@ -52,6 +52,12 @@ const MIN_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 /// Minimum overflow heap size (16 MB).
 const MIN_OVERFLOW_HEAP_SIZE: u64 = 16 * 1024 * 1024;
 
+/// Maximum number of overflow heaps per allocator. Prevents runaway heap
+/// creation when frames are submitted faster than the GPU retires resources
+/// (e.g. vsync off). Beyond this limit, allocations return `None` and the
+/// caller must wait for GPU progress or reduce pipelining depth.
+const MAX_OVERFLOW_HEAPS: usize = 16;
+
 /// Upper bound on any single heap allocation. Metal can nominally create
 /// heaps up to the device's `maxBufferLength` (tens of GB on Apple Silicon),
 /// but in practice a request that large always reflects an upstream bug:
@@ -93,7 +99,9 @@ impl HeapAllocator {
 
     /// Allocate a buffer from the heap hierarchy.
     ///
-    /// Tries primary, then the last overflow heap, then creates a new overflow.
+    /// Tries primary, then recent overflow heaps, then creates a new overflow.
+    /// Overflow heap creation is capped to prevent runaway growth when the GPU
+    /// hasn't yet freed resources from retired command buffers.
     /// Returns `None` if the requested size is larger than [`MAX_HEAP_SIZE`]
     /// (see rationale there — we'd rather fail this one allocation than let
     /// a corrupt size request wedge the whole process).
@@ -113,12 +121,21 @@ impl HeapAllocator {
             return Some(buf);
         }
 
-        if let Some(last) = self.overflow.last() {
-            if let Some(buf) = last.new_buffer(size, options) {
+        // Try all overflow heaps (newest first). The cap at MAX_OVERFLOW_HEAPS
+        // keeps the search bounded. Older heaps may have space from freed buffers.
+        for heap in self.overflow.iter().rev() {
+            if let Some(buf) = heap.new_buffer(size, options) {
                 self.buffer_count += 1;
                 self.update_high_water_mark();
                 return Some(buf);
             }
+        }
+
+        // Cap overflow heaps to prevent runaway growth when frames queue faster
+        // than the GPU retires them (vsync off). The caller should handle None
+        // by waiting for GPU progress or reducing pipelining depth.
+        if self.overflow.len() >= MAX_OVERFLOW_HEAPS {
+            return None;
         }
 
         // Clamp the overflow heap size too: `size * 2` on a ~1 GB request is
@@ -202,6 +219,22 @@ impl HeapAllocator {
         self.high_water_mark = 0;
     }
 
+    /// Drop overflow heaps that are completely empty (all buffers freed).
+    /// Lighter than `reset_for_frame` (no GPU idle required) — safe to call
+    /// after frame cleanup has dropped retired buffers.
+    pub fn compact_overflow(&mut self) {
+        let before = self.overflow.len();
+        self.overflow.retain(|heap| heap.used_size() > 0);
+        let dropped = before - self.overflow.len();
+        if dropped > 0 {
+            tracing::debug!(
+                "Compacted {} empty overflow buffer heaps ({} remaining)",
+                dropped,
+                self.overflow.len()
+            );
+        }
+    }
+
     /// Ensure the primary heap is right-sized for `min_capacity` bytes.
     /// Grows the heap if it's too small. Also shrinks if it's more than 4x
     /// the requested capacity (avoids holding a 1 GB heap when 64 MB suffices).
@@ -280,18 +313,23 @@ impl TextureHeapAllocator {
 
     /// Allocate a texture from the heap hierarchy.
     ///
-    /// Tries primary, then the last overflow heap, then creates a new overflow.
+    /// Tries primary, then all overflow heaps (newest first), then creates a
+    /// new overflow. Overflow heap creation is capped to prevent runaway growth.
     pub fn allocate(&mut self, descriptor: &mtl::TextureDescriptorRef) -> Option<MTLTexture> {
         if let Some(tex) = self.primary.new_texture(descriptor) {
             self.texture_count += 1;
             return Some(tex);
         }
 
-        if let Some(last) = self.overflow.last() {
-            if let Some(tex) = last.new_texture(descriptor) {
+        for heap in self.overflow.iter().rev() {
+            if let Some(tex) = heap.new_texture(descriptor) {
                 self.texture_count += 1;
                 return Some(tex);
             }
+        }
+
+        if self.overflow.len() >= MAX_OVERFLOW_HEAPS {
+            return None;
         }
 
         let alloc_size = self.device.heap_texture_size_and_align(descriptor).size;
@@ -309,6 +347,21 @@ impl TextureHeapAllocator {
             self.texture_count += 1;
         }
         tex
+    }
+
+    /// Drop overflow heaps that are completely empty (all textures freed).
+    /// Called during frame cleanup when the GPU has retired old work.
+    pub fn compact_overflow(&mut self) {
+        let before = self.overflow.len();
+        self.overflow.retain(|heap| heap.used_size() > 0);
+        let dropped = before - self.overflow.len();
+        if dropped > 0 {
+            tracing::debug!(
+                "Compacted {} empty overflow texture heaps ({} remaining)",
+                dropped,
+                self.overflow.len()
+            );
+        }
     }
 
     pub fn has_textures(&self) -> bool {
@@ -481,6 +534,11 @@ pub(crate) struct LogicalDevice {
     pub deletion_queue: DeletionQueue,
     /// Per-submit aliasable heaps ([`GpuBackend::create_transient_heap`]).
     pub transient_heaps: std::collections::HashMap<TransientHeapHandle, TransientHeapTracking>,
+    /// Timeline value of the most recently committed command buffer, or `None` if nothing has
+    /// been submitted yet. Used to decide whether a direct CPU `memcpy` into a shared-mode
+    /// buffer is safe: it is safe only when `gpu_progress() >= last_committed_timeline`,
+    /// meaning all previously submitted GPU work has completed and no in-flight reads remain.
+    pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
 }
 
 impl LogicalDevice {
@@ -952,6 +1010,11 @@ pub(crate) struct TextureState {
     /// that re-encodes its drawable each frame) and should NOT be released
     /// when this `TextureState` is dropped. The owner manages slot lifetime.
     pub slot_owned_externally: bool,
+    /// `true` when allocated from a Goldy-owned `MTLHeap` (texture_heap or
+    /// transient heap). Heap-resident textures are already covered by
+    /// `use_heap` and don't need individual `use_resource` calls.
+    #[allow(dead_code)]
+    pub is_heap_allocated: bool,
 }
 
 /// GPU sampler state.
@@ -1042,7 +1105,24 @@ pub(super) struct MetalState {
     pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
     pub next_sampler_handle: SamplerHandle,
     pub next_transient_heap_handle: TransientHeapHandle,
-    pub slang_compiler: crate::slang::SlangCompiler,
+    /// `None` after release via [`crate::device::Device::release_idle_shader_compiler`].
+    /// Re-created automatically on demand when a shader must be lazily compiled.
+    pub slang_compiler: Option<crate::slang::SlangCompiler>,
+}
+
+impl MetalState {
+    #[inline]
+    pub(super) fn slang_compiler_mut_or_init(
+        &mut self,
+    ) -> anyhow::Result<&mut crate::slang::SlangCompiler> {
+        use anyhow::Context;
+        if self.slang_compiler.is_none() {
+            self.slang_compiler = Some(
+                crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?,
+            );
+        }
+        Ok(self.slang_compiler.as_mut().expect("just set"))
+    }
 }
 
 #[cfg(test)]

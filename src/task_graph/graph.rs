@@ -23,6 +23,22 @@ use std::sync::Arc;
 
 type TransientNativeBufferMap = HashMap<u32, (BufferHandle, u64, u64)>;
 
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+fn lcm(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 {
+        return a | b;
+    }
+    a / gcd(a, b) * b
+}
+
 /// A task graph that analyzes dependencies at submit time.
 ///
 /// Build a DAG of task nodes — compute dispatches, buffer clears, and buffer
@@ -41,12 +57,12 @@ type TransientNativeBufferMap = HashMap<u32, (BufferHandle, u64, u64)>;
 /// // barriers automatically.
 /// graph.node("write_data", &pipeline_a)
 ///     .bind_buffer(&buf, NodeAccess::Write)
-///     .bind_resources_raw(&[buf_idx])
+///     .bind_resources_raw_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// graph.node("read_data", &pipeline_b)
 ///     .bind_buffer(&buf, NodeAccess::Read)
-///     .bind_resources_raw(&[buf_idx])
+///     .bind_resources_raw_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// let tv = graph.submit(&device)?;
@@ -79,9 +95,17 @@ impl TaskGraph {
     /// Graphs using transients **block until the submit completes** so the staging
     /// heap can be freed.
     pub fn transient_buffer(&mut self, size: u64) -> TransientId {
+        self.transient_buffer_with_stride(size, 4)
+    }
+
+    /// Like [`Self::transient_buffer`] but with an explicit element stride for the
+    /// structured buffer descriptor. The stride is forwarded to
+    /// [`crate::Buffer::create_view`] when the transient is materialised.
+    pub fn transient_buffer_with_stride(&mut self, size: u64, stride: u32) -> TransientId {
         let id = self.next_transient_id;
         self.next_transient_id += 1;
-        self.transient_specs.push(TransientBufferSpec { id, size });
+        self.transient_specs
+            .push(TransientBufferSpec { id, size, stride });
         TransientId(id)
     }
 
@@ -110,7 +134,13 @@ impl TaskGraph {
     fn needs_transient_gpu_wait(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
     }
-    pub(crate) fn transient_heap_size_and_layout(&self) -> Result<(u64, HashMap<u32, u64>)> {
+    /// Returns `(total_size, required_base_alignment, offset_map)`.
+    ///
+    /// `required_base_alignment` is the LCM of all per-color alignments. When
+    /// the layout is placed at a non-zero base offset (e.g. inside a ring
+    /// buffer), that base must be a multiple of this value so that every
+    /// internal offset remains stride-aligned for its buffer view descriptor.
+    pub fn transient_heap_size_and_layout(&self) -> Result<(u64, u64, HashMap<u32, u64>)> {
         Self::transient_heap_layout(&self.transient_specs, &self.ir)
     }
 
@@ -181,9 +211,9 @@ impl TaskGraph {
     fn transient_heap_layout(
         specs: &[TransientBufferSpec],
         ir: &GraphIR,
-    ) -> Result<(u64, HashMap<u32, u64>)> {
+    ) -> Result<(u64, u64, HashMap<u32, u64>)> {
         if specs.is_empty() {
-            return Ok((0, HashMap::new()));
+            return Ok((0, 256, HashMap::new()));
         }
 
         let intervals = analysis::transient_wave_intervals(ir)?;
@@ -247,15 +277,21 @@ impl TaskGraph {
         }
 
         let mut color_max: Vec<u64> = vec![0; colors.len()];
+        let mut color_align: Vec<u64> = vec![256; colors.len()];
         for s in specs {
             let c = id_to_color[&s.id];
             color_max[c] = color_max[c].max(s.size);
+            let stride = s.stride.max(1) as u64;
+            color_align[c] = lcm(color_align[c], stride);
         }
 
+        let mut max_align = 256u64;
         let mut next_off = 0u64;
         let mut color_base: Vec<u64> = vec![0; colors.len()];
         for c in 0..colors.len() {
-            next_off = (next_off + 255) & !255u64;
+            let a = color_align[c];
+            max_align = lcm(max_align, a);
+            next_off = next_off.div_ceil(a) * a;
             color_base[c] = next_off;
             next_off = next_off
                 .checked_add(color_max[c])
@@ -268,24 +304,71 @@ impl TaskGraph {
             m.insert(s.id, color_base[c]);
         }
 
-        Ok((next_off, m))
+        Ok((next_off, max_align, m))
     }
 
-    pub(crate) fn transient_buffer_range_map(
+    pub fn transient_buffer_range_map(
         heap: &Buffer,
         layout: &HashMap<u32, u64>,
         specs: &[TransientBufferSpec],
     ) -> HashMap<u32, (BufferHandle, u64, u64)> {
+        Self::transient_buffer_range_map_with_base(heap, layout, specs, 0)
+    }
+
+    /// Like [`Self::transient_buffer_range_map`] but adds `base_offset` to every
+    /// layout offset. Used by the placement heap ring where each frame's transients
+    /// start at a different position within a shared backing buffer.
+    pub fn transient_buffer_range_map_with_base(
+        heap: &Buffer,
+        layout: &HashMap<u32, u64>,
+        specs: &[TransientBufferSpec],
+        base_offset: u64,
+    ) -> HashMap<u32, (BufferHandle, u64, u64)> {
         let parent = heap.gpu_buffer_handle();
         specs
             .iter()
-            .map(|s| (s.id, (parent, layout[&s.id], s.size)))
+            .map(|s| (s.id, (parent, base_offset + layout[&s.id], s.size)))
             .collect()
+    }
+
+    /// Resolve all transient buffer references in the IR: patch bindings
+    /// (`TransientBuffer` → `BufferRange`) AND patch `resource_slots` in
+    /// dispatch nodes (placeholder → real bindless index).
+    ///
+    /// `bindless_map` maps each transient id to its (UAV index, SRV index).
+    pub fn lower_transient_buffers_with_bindless(
+        &self,
+        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
+        bindless_map: &HashMap<u32, (u32, u32)>,
+    ) -> Result<GraphIR> {
+        Self::lower_transient_buffers_inner(&self.ir, range_map, Some(bindless_map))
+    }
+
+    /// Produce a new `TaskGraph` with all transient buffer specs cleared and
+    /// the IR fully resolved (no `TransientBuffer` resource ids remain).
+    /// The returned graph can be submitted via `compile_commands` or
+    /// `Frame::submit_compute` without triggering the transient assert.
+    pub fn into_resolved(&self, resolved_ir: GraphIR) -> TaskGraph {
+        TaskGraph {
+            ir: resolved_ir,
+            transient_specs: Vec::new(),
+            next_transient_id: 0,
+            transient_texture_specs: self.transient_texture_specs.clone(),
+            next_transient_texture_id: self.next_transient_texture_id,
+        }
     }
 
     fn lower_transient_buffers(
         ir: &GraphIR,
         range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
+    ) -> Result<GraphIR> {
+        Self::lower_transient_buffers_inner(ir, range_map, None)
+    }
+
+    fn lower_transient_buffers_inner(
+        ir: &GraphIR,
+        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
+        bindless_map: Option<&HashMap<u32, (u32, u32)>>,
     ) -> Result<GraphIR> {
         let mut nodes = Vec::with_capacity(ir.nodes.len());
         for n in &ir.nodes {
@@ -313,10 +396,42 @@ impl TaskGraph {
                     })
                 })
                 .collect();
+
+            let kind = if let (
+                Some(bmap),
+                NodeKind::Dispatch {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    dispatch,
+                },
+            ) = (bindless_map, &n.kind)
+            {
+                let mut patched_slots = resource_slots.clone();
+                for (i, b) in n.bindings.iter().enumerate() {
+                    if let ResourceId::TransientBuffer(t) = b.resource {
+                        if let Some(&(uav_idx, srv_idx)) = bmap.get(&t.0) {
+                            if i < patched_slots.len() {
+                                let is_read_only = b.access == NodeAccess::Read;
+                                patched_slots[i] = if is_read_only { srv_idx } else { uav_idx };
+                            }
+                        }
+                    }
+                }
+                NodeKind::Dispatch {
+                    pipeline: *pipeline,
+                    resource_slots: patched_slots,
+                    user_slots: user_slots.clone(),
+                    dispatch: dispatch.clone(),
+                }
+            } else {
+                n.kind.clone()
+            };
+
             nodes.push(TaskNode {
-                label: n.label.clone(),
+                label: n.label,
                 bindings: bindings?,
-                kind: n.kind.clone(),
+                kind,
             });
         }
         Ok(GraphIR { nodes })
@@ -457,7 +572,7 @@ impl TaskGraph {
                 })
                 .collect();
             nodes.push(TaskNode {
-                label: n.label.clone(),
+                label: n.label,
                 bindings: bindings?,
                 kind: n.kind.clone(),
             });
@@ -469,6 +584,16 @@ impl TaskGraph {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
     }
 
+    /// True if the graph contains at least one transient buffer (graph-colored).
+    pub fn has_transient_buffers(&self) -> bool {
+        !self.transient_specs.is_empty()
+    }
+
+    /// Access the transient buffer specs (id + size) for coloring/layout.
+    pub fn transient_specs(&self) -> &[TransientBufferSpec] {
+        &self.transient_specs
+    }
+
     /// Total bytes for a single native transient heap (buffers + textures).
     pub(crate) fn transient_native_heap_total_size(
         &self,
@@ -478,7 +603,7 @@ impl TaskGraph {
     ) -> Result<u64> {
         let mut total = 0u64;
         if !self.transient_specs.is_empty() {
-            let (buf_total, _) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
+            let (buf_total, _, _) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
             total = buf_total;
         }
         if !self.transient_texture_specs.is_empty() {
@@ -520,7 +645,7 @@ impl TaskGraph {
         let buf_map = if self.transient_specs.is_empty() {
             None
         } else {
-            let (_, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
+            let (_, _, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
             let mut by_base: HashMap<u64, Vec<&TransientBufferSpec>> = HashMap::new();
             for s in &self.transient_specs {
                 by_base.entry(layout[&s.id]).or_default().push(s);
@@ -612,10 +737,14 @@ impl TaskGraph {
 
     /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
     /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect`].
-    pub fn node<'a>(&'a mut self, label: &str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
+    pub fn node<'a>(
+        &'a mut self,
+        label: &'static str,
+        pipeline: &ComputePipeline,
+    ) -> NodeBuilder<'a> {
         NodeBuilder {
             graph: self,
-            label: label.to_string(),
+            label,
             pipeline: pipeline.handle,
             bindings: Vec::new(),
             resource_slots: Vec::new(),
@@ -629,7 +758,7 @@ impl TaskGraph {
     /// can insert barriers between this clear and any subsequent reader.
     pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
         self.ir.nodes.push(TaskNode {
-            label: "clear_buffer".to_string(),
+            label: "clear_buffer",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buffer.handle),
                 access: NodeAccess::Write,
@@ -659,7 +788,7 @@ impl TaskGraph {
             size
         };
         self.ir.nodes.push(TaskNode {
-            label: "clear_buffer_view".to_string(),
+            label: "clear_buffer_view",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::BufferRange {
                     parent: view.parent_handle(),
@@ -684,7 +813,7 @@ impl TaskGraph {
     /// subsequent reader, and serializes it after any prior reader (WAR).
     pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: Vec<u8>) {
         self.ir.nodes.push(TaskNode {
-            label: "write_buffer".to_string(),
+            label: "write_buffer",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buffer.handle),
                 access: NodeAccess::Write,
@@ -715,7 +844,7 @@ impl TaskGraph {
         let height = texture.height();
         let th = texture.handle();
         self.ir.nodes.push(TaskNode {
-            label: "write_texture".to_string(),
+            label: "write_texture",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(th),
                 access: NodeAccess::Write,
@@ -763,7 +892,7 @@ impl TaskGraph {
         }
         let th = texture.handle();
         self.ir.nodes.push(TaskNode {
-            label: "write_texture_region".to_string(),
+            label: "write_texture_region",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(th),
                 access: NodeAccess::Write,
@@ -783,12 +912,12 @@ impl TaskGraph {
     /// Begin building an offscreen [`crate::RenderTarget`] render pass node.
     pub fn render_pass<'a>(
         &'a mut self,
-        label: &str,
+        label: &'static str,
         target: &RenderTarget,
     ) -> RenderPassBuilder<'a> {
         RenderPassBuilder {
             graph: self,
-            label: label.to_string(),
+            label,
             target: target.backend_handle(),
             bindings: Vec::new(),
         }
@@ -868,7 +997,7 @@ impl Default for TaskGraph {
 /// [`dispatch`](NodeBuilder::dispatch) or [`dispatch_indirect`](NodeBuilder::dispatch_indirect).
 pub struct NodeBuilder<'a> {
     graph: &'a mut TaskGraph,
-    label: String,
+    label: &'static str,
     pipeline: crate::backend::ComputePipelineHandle,
     bindings: Vec<ResourceBinding>,
     resource_slots: Vec<u32>,
@@ -932,14 +1061,21 @@ impl<'a> NodeBuilder<'a> {
     }
 
     /// Set the bindless resource slot indices for this node's dispatch (region A).
-    pub fn bind_resources_raw(mut self, indices: &[u32]) -> Self {
-        self.resource_slots = indices.to_vec();
+    /// Accepts an owned `Vec` to avoid re-allocation when the caller already has one.
+    pub fn bind_resources_raw(mut self, indices: Vec<u32>) -> Self {
+        self.resource_slots = indices;
         self
     }
 
+    /// Convenience wrapper that copies a slice into owned storage.
+    pub fn bind_resources_raw_slice(self, indices: &[u32]) -> Self {
+        self.bind_resources_raw(indices.to_vec())
+    }
+
     /// Set user scalar parameters for this node's dispatch (region B).
-    pub fn bind_resources_raw_with_user(mut self, indices: &[u32], user: &[u32]) -> Self {
-        self.resource_slots = indices.to_vec();
+    /// Accepts an owned `Vec` for indices to avoid re-allocation.
+    pub fn bind_resources_raw_with_user(mut self, indices: Vec<u32>, user: &[u32]) -> Self {
+        self.resource_slots = indices;
         self.user_slots = user.to_vec();
         self
     }
@@ -981,7 +1117,7 @@ impl<'a> NodeBuilder<'a> {
 /// Builder for a render pass targeting an offscreen [`crate::RenderTarget`].
 pub struct RenderPassBuilder<'a> {
     graph: &'a mut TaskGraph,
-    label: String,
+    label: &'static str,
     target: RenderTargetHandle,
     bindings: Vec<ResourceBinding>,
 }
@@ -1087,7 +1223,7 @@ mod tests {
         graph
             .node("compute_write", &pipeline)
             .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw(&[1])
+            .bind_resources_raw_slice(&[1])
             .dispatch(1, 1, 1);
 
         let mut enc = CommandEncoder::new();
@@ -1120,7 +1256,7 @@ mod tests {
         graph
             .node("touch", &pipeline)
             .bind_transient_buffer(t, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&device).unwrap();
     }
@@ -1135,7 +1271,7 @@ mod tests {
         graph
             .node("touch_tex", &pipeline)
             .bind_transient_texture(tt, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&device).unwrap();
     }
@@ -1153,13 +1289,13 @@ mod tests {
             .node("w0", &pipeline)
             .bind_transient_texture(t0, NodeAccess::Write)
             .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("w1", &pipeline)
             .bind_buffer(&buf, NodeAccess::Read)
             .bind_transient_texture(t1, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&device).unwrap();
     }
@@ -1178,16 +1314,16 @@ mod tests {
             .node("wave0", &pipeline)
             .bind_transient_buffer(t0, NodeAccess::Write)
             .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("wave1", &pipeline)
             .bind_buffer(&buf, NodeAccess::Read)
             .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
-        let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
+        let (total, _, layout) = graph.transient_heap_size_and_layout().unwrap();
         assert_eq!(
             total, 256,
             "sequential transients should pack into one 256-byte slot"
@@ -1208,15 +1344,15 @@ mod tests {
         graph
             .node("a", &pipeline)
             .bind_transient_buffer(t0, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("b", &pipeline)
             .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw(&[0])
+            .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
-        let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
+        let (total, _, layout) = graph.transient_heap_size_and_layout().unwrap();
         assert!(
             total >= 512,
             "concurrent transients need disjoint heap regions, got {}",
@@ -1239,13 +1375,13 @@ mod tests {
         graph
             .node("write", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Write)
-            .bind_resources_raw(&[42])
+            .bind_resources_raw_slice(&[42])
             .dispatch(8, 1, 1);
         graph
             .node("read_write", &pipeline)
             .bind_buffer(&buf_a, NodeAccess::Read)
             .bind_buffer(&buf_b, NodeAccess::Write)
-            .bind_resources_raw(&[43])
+            .bind_resources_raw_slice(&[43])
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();

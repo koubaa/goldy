@@ -10,22 +10,31 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
 
-/// Heap allocation, or direct device buffer when larger than [`MAX_HEAP_SIZE`].
+fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
+    if flags.contains(BufferFlags::GPU_ONLY) {
+        MTLResourceOptions::StorageModePrivate
+    } else {
+        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache
+    }
+}
+
+/// Heap allocation, direct device buffer for GPU-only / jumbo sizes ([`MAX_HEAP_SIZE`]).
 fn allocate_mtl_storage_buffer(
     logical_device: &mut super::types::LogicalDevice,
     allocation_size: u64,
-    options: MTLResourceOptions,
+    flags: BufferFlags,
 ) -> Result<(mtl::Buffer, bool)> {
-    if allocation_size > MAX_HEAP_SIZE {
+    let options = mtl_resource_options(flags);
+    let gpu_only = flags.contains(BufferFlags::GPU_ONLY);
+    if gpu_only || allocation_size > MAX_HEAP_SIZE {
         let buf = logical_device.device.new_buffer(allocation_size, options);
-        Ok((buf, true))
-    } else {
-        let buf = logical_device
-            .heap_allocator
-            .allocate(allocation_size, options)
-            .context("Metal buffer heap allocation failed — all heaps exhausted")?;
-        Ok((buf, false))
+        return Ok((buf, true));
     }
+    let buf = logical_device
+        .heap_allocator
+        .allocate(allocation_size, options)
+        .context("Metal buffer heap allocation failed — all heaps exhausted")?;
+    Ok((buf, false))
 }
 
 fn insert_buffer_common(
@@ -128,6 +137,9 @@ pub(super) fn create(
             "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
         );
     }
+    if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
+        anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_READABLE");
+    }
 
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
@@ -136,10 +148,8 @@ pub(super) fn create(
         .devices
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
-    let options =
-        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
 
-    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(logical_device, size, options)?;
+    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(logical_device, size, flags)?;
 
     insert_buffer_common(
         state,
@@ -176,6 +186,9 @@ pub(super) fn create_with_capacity(
             "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
         );
     }
+    if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
+        anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_READABLE");
+    }
     if logical_size > capacity {
         anyhow::bail!("logical_size {logical_size} exceeds capacity {capacity}");
     }
@@ -190,11 +203,9 @@ pub(super) fn create_with_capacity(
         .devices
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
-    let options =
-        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
 
     let (buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(logical_device, capacity, options)?;
+        allocate_mtl_storage_buffer(logical_device, capacity, flags)?;
 
     insert_buffer_common(
         state,
@@ -254,6 +265,9 @@ pub(super) fn hint_unused_above(state: &mut MetalState, buffer_handle: BufferHan
     let Some(b) = state.buffers.get(&buffer_handle) else {
         return;
     };
+    if b.flags.contains(BufferFlags::GPU_ONLY) {
+        return;
+    }
     if b.parent_for_view.is_some() {
         return;
     }
@@ -387,10 +401,8 @@ pub(super) fn resize(
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
-    let options =
-        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache;
     let (new_buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(logical_device, new_size, options)?;
+        allocate_mtl_storage_buffer(logical_device, new_size, old_state.flags)?;
 
     let copy_len = if preserve_contents {
         old_state.size.min(new_size)
@@ -405,9 +417,11 @@ pub(super) fn resize(
     }
     if preserve_contents && new_size > copy_len {
         let tail = new_size - copy_len;
-        unsafe {
-            let ptr = (new_buffer.contents() as *mut u8).add(copy_len as usize);
-            std::ptr::write_bytes(ptr, 0, tail as usize);
+        if !old_state.flags.contains(BufferFlags::GPU_ONLY) {
+            unsafe {
+                let ptr = (new_buffer.contents() as *mut u8).add(copy_len as usize);
+                std::ptr::write_bytes(ptr, 0, tail as usize);
+            }
         }
         let range = mtl::NSRange::new(copy_len, tail);
         blit.fill_buffer(&new_buffer, range, 0);
@@ -552,9 +566,12 @@ pub(super) fn write(
         return Ok(());
     }
 
-    unsafe {
-        let ptr = buffer.buffer.contents().add(offset as usize);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+    let gpu_only = buffer.flags.contains(BufferFlags::GPU_ONLY);
+    if !gpu_only {
+        unsafe {
+            let ptr = buffer.buffer.contents().add(offset as usize);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+        }
     }
 
     let device_handle = buffer.device_handle;
@@ -620,6 +637,31 @@ pub(super) fn read_to_cpu(
         anyhow::bail!("Read would exceed buffer bounds");
     }
 
+    if buffer.flags.contains(BufferFlags::GPU_ONLY) {
+        let device_handle = buffer.device_handle;
+        let logical_device = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+
+        let staging = logical_device.device.new_buffer(
+            len,
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache,
+        );
+        let command_buffer = logical_device.command_queue.new_command_buffer();
+        let blit = command_buffer.new_blit_command_encoder();
+        blit.copy_from_buffer(&buffer.buffer, 0, &staging, 0, len);
+        blit.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        unsafe {
+            let ptr = staging.contents() as *const u8;
+            std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
+        }
+        return Ok(());
+    }
+
     unsafe {
         let ptr = buffer.buffer.contents() as *const u8;
         std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
@@ -683,9 +725,11 @@ pub(super) fn clear(
         return Ok(());
     }
 
-    unsafe {
-        let ptr = (buffer.buffer.contents() as *mut u8).add(offset as usize);
-        std::ptr::write_bytes(ptr, 0, clear_size as usize);
+    if !buffer.flags.contains(BufferFlags::GPU_ONLY) {
+        unsafe {
+            let ptr = (buffer.buffer.contents() as *mut u8).add(offset as usize);
+            std::ptr::write_bytes(ptr, 0, clear_size as usize);
+        }
     }
 
     let logical_device = state

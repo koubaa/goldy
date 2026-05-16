@@ -1384,10 +1384,12 @@ pub(super) fn create_view(
     }
 
     let stride = element_stride.unwrap_or(4);
-    debug_assert!(
-        stride > 0 && (size as u32).is_multiple_of(stride),
-        "view size {size} not evenly divisible by element stride {stride}"
-    );
+    if stride == 0 {
+        anyhow::bail!("Buffer view element stride must be non-zero");
+    }
+    if !(size as u32).is_multiple_of(stride) {
+        anyhow::bail!("View byte size {size} is not evenly divisible by element stride {stride}");
+    }
     if !offset.is_multiple_of(stride as u64) {
         anyhow::bail!(
             "View offset {} is not aligned to element stride {}",

@@ -641,6 +641,7 @@ fn register_surface_texture(
             arg_buffer_index: bindless_slot,
             is_storage_image: true,
             slot_owned_externally: true,
+            is_heap_allocated: false,
         },
     );
 

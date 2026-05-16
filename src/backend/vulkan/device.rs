@@ -847,6 +847,14 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             logical_device
                 .device
                 .destroy_command_pool(logical_device.command_pool, None);
+
+            // Free all VkDeviceMemory chunks held by the sparse page pool.
+            // All sparse buffers have already been unbound and destroyed above,
+            // so the memories are no longer bound to any VkBuffer sparse region.
+            if let Some(pool) = logical_device.sparse_page_pool.take() {
+                pool.destroy(&logical_device.device);
+            }
+
             logical_device.device.destroy_device(None);
         }
         tracing::info!(%device_handle, "destroyed Vulkan device");
