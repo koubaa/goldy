@@ -36,8 +36,8 @@ pub mod validation_env;
 
 // Structured instrumentation for debugging and profiling
 pub mod instrumentation;
-pub mod timeline;
 pub mod placement_heap;
+pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
 

@@ -45,7 +45,7 @@
 //! are preserved. For example, `BumpResetAllocator::end_frame` only stores the epoch for the
 //! next `begin_frame`'s wait; `EpochRegionsAllocator::end_frame` tags every region used.
 
-use crate::buffer::{BufferPool, BufferView, lcm};
+use crate::buffer::{lcm, BufferPool, BufferView};
 use crate::device::Device;
 use crate::timeline::TimelineValue;
 use crate::types::BufferFlags;
@@ -855,7 +855,10 @@ impl TransientAllocator for HeapTransientAllocator {
             if self.live_bytes > self.peak_live_bytes {
                 self.peak_live_bytes = self.live_bytes;
             }
-            return self.pool.backing_buffer().create_view(offset, size, element_stride);
+            return self
+                .pool
+                .backing_buffer()
+                .create_view(offset, size, element_stride);
         }
 
         // Grow the pool and retry. Deferred frees are only drained in begin_frame
@@ -868,7 +871,10 @@ impl TransientAllocator for HeapTransientAllocator {
             if self.live_bytes > self.peak_live_bytes {
                 self.peak_live_bytes = self.live_bytes;
             }
-            return self.pool.backing_buffer().create_view(offset, size, element_stride);
+            return self
+                .pool
+                .backing_buffer()
+                .create_view(offset, size, element_stride);
         }
 
         anyhow::bail!(
@@ -1051,7 +1057,11 @@ mod tests {
 
         let v3 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         // v3 should reuse the first range (v1_off) which is now retired.
-        assert_eq!(v3.offset(), v1_off, "epoch retired — should reuse freed range");
+        assert_eq!(
+            v3.offset(),
+            v1_off,
+            "epoch retired — should reuse freed range"
+        );
     }
 
     #[test]
@@ -1079,7 +1089,11 @@ mod tests {
         // Now we should be able to allocate a contiguous 768-byte region
         // from the coalesced free block.
         let big = alloc.alloc(&device, 768, Some(4)).unwrap();
-        assert_eq!(big.offset(), v1_off, "coalesced range should start at v1's offset");
+        assert_eq!(
+            big.offset(),
+            v1_off,
+            "coalesced range should start at v1's offset"
+        );
     }
 
     #[test]
@@ -1098,7 +1112,11 @@ mod tests {
         // drain_retired should NOT recycle it — epoch is None.
         alloc.begin_frame(&device, 0).unwrap();
         let v2 = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        assert_ne!(v2.offset(), v1_off, "None-epoch range must not be reused before stamp");
+        assert_ne!(
+            v2.offset(),
+            v1_off,
+            "None-epoch range must not be reused before stamp"
+        );
 
         // Stamp with epoch=1 via end_frame.
         alloc.end_frame(1);
@@ -1106,13 +1124,21 @@ mod tests {
         // Still not available — GPU progress is 0, epoch is 1.
         alloc.begin_frame(&device, 0).unwrap();
         let v3 = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        assert_ne!(v3.offset(), v1_off, "range should not be reused before epoch retires");
+        assert_ne!(
+            v3.offset(),
+            v1_off,
+            "range should not be reused before epoch retires"
+        );
 
         // Advance past epoch=1.
         device.wait_until(1).unwrap();
         alloc.begin_frame(&device, 0).unwrap();
         let v4 = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        assert_eq!(v4.offset(), v1_off, "range should be reused after epoch retires");
+        assert_eq!(
+            v4.offset(),
+            v1_off,
+            "range should be reused after epoch retires"
+        );
     }
 
     #[test]
@@ -1127,7 +1153,11 @@ mod tests {
         assert_eq!(alloc.peak_live_bytes(), 4096 + 8192);
 
         alloc.free(v1.offset(), v1.size(), None);
-        assert_eq!(alloc.peak_live_bytes(), 4096 + 8192, "peak should not decrease on free");
+        assert_eq!(
+            alloc.peak_live_bytes(),
+            4096 + 8192,
+            "peak should not decrease on free"
+        );
 
         alloc.free(v2.offset(), v2.size(), None);
         assert_eq!(alloc.used_this_frame(), 0);

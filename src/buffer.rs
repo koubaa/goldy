@@ -792,7 +792,12 @@ impl BufferPool {
             "alignment must be a power of two"
         );
         tracing::debug!(total_size, alignment, "Creating buffer pool");
-        let backing = device.alloc_buffer(total_size, DataAccess::Scattered, None, BufferFlags::empty())?;
+        let backing = device.alloc_buffer(
+            total_size,
+            DataAccess::Scattered,
+            None,
+            BufferFlags::empty(),
+        )?;
         Ok(Self {
             backing,
             offset: 0,

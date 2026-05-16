@@ -2714,3 +2714,167 @@ fn buffer_pool_would_fit_agrees_with_alloc_bytes() {
     assert!(pool.would_fit(1024, Some(4)));
     assert!(!pool.would_fit(4096, Some(4)));
 }
+
+// ─── Transient buffer (graph-colored) path ─────────────────────────────────────
+
+const WRITE_IOTA_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    if (id.x < 64) data[id.x] = id.x + 1;
+}
+"#;
+
+/// Exercises the graph-colored transient-buffer path end-to-end:
+///
+/// 1. Graph has one transient buffer T.
+/// 2. Dispatch A writes `id.x + 1` into T.
+/// 3. Dispatch B copies T → output (a regular CPU-readable buffer).
+/// 4. Read back output and verify values.
+///
+/// The graph submission resolves T via `lower_transient_buffers_with_bindless`,
+/// creating a `BufferView` into a temporary heap, patching bindless indices, and
+/// scheduling waves with barriers — the same infrastructure ekrano uses.
+#[test]
+fn test_transient_buffer_write_then_copy() {
+    use goldy::{NodeAccess, TaskGraph};
+    use std::collections::HashMap;
+
+    let device = make_device();
+
+    let write_shader =
+        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
+    let write_pipeline =
+        ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
+
+    const N: usize = 64;
+    let byte_size = (N * core::mem::size_of::<u32>()) as u64;
+
+    let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
+    let output_uav = output.bindless_index().expect("output UAV");
+
+    // ── Build graph with one transient buffer ──
+
+    let mut graph = TaskGraph::new();
+    let tid = graph.transient_buffer(byte_size);
+
+    // Dispatch A: write iota into transient (binding 0 = transient, Write)
+    graph
+        .node("write_iota", &write_pipeline)
+        .bind_transient_buffer(tid, NodeAccess::Write)
+        .bind_resources_raw_slice(&[u32::MAX]) // placeholder
+        .dispatch(1, 1, 1);
+
+    // Dispatch B: copy transient → output (binding 0 = transient Read, binding 1 = output Write)
+    graph
+        .node("copy_out", &copy_pipeline)
+        .bind_transient_buffer(tid, NodeAccess::Read)
+        .bind_buffer(&output, NodeAccess::Write)
+        .bind_resources_raw_slice(&[u32::MAX, output_uav])
+        .dispatch(1, 1, 1);
+
+    // ── Resolve transients via the graph-colored path ──
+
+    let (total_size, layout) = graph.transient_heap_size_and_layout().expect("heap layout");
+
+    let heap_buf =
+        Buffer::new(&device, total_size.max(256), DataAccess::Scattered).expect("heap buffer");
+
+    let range_map =
+        TaskGraph::transient_buffer_range_map(&heap_buf, &layout, graph.transient_specs());
+
+    let view = heap_buf
+        .create_view(layout[&tid.0 as &u32], byte_size, Some(4))
+        .expect("create transient view");
+    let uav = view.bindless_index().expect("view UAV");
+    let srv = view.bindless_srv_index().unwrap_or(uav);
+
+    let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::new();
+    bindless_map.insert(tid.0, (uav, srv));
+
+    let resolved_ir = graph
+        .lower_transient_buffers_with_bindless(&range_map, &bindless_map)
+        .expect("lower transients");
+
+    let resolved_graph = graph.into_resolved(resolved_ir);
+
+    // ── Submit and read back ──
+
+    resolved_graph
+        .dispatch(&device)
+        .expect("dispatch resolved graph");
+
+    let mut raw = vec![0u8; byte_size as usize];
+    output.read_to_cpu(&device, &mut raw).expect("read output");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    let expected: Vec<u32> = (1..=N as u32).collect();
+    assert_eq!(
+        result,
+        &expected[..],
+        "transient buffer graph-colored path produced wrong data"
+    );
+}
+
+/// Control test: same dispatches but with a regular buffer instead of transient.
+/// If this passes but the transient version fails, the issue is in the
+/// graph-colored infrastructure.
+#[test]
+fn test_regular_buffer_write_then_copy() {
+    use goldy::{NodeAccess, TaskGraph};
+
+    let device = make_device();
+
+    let write_shader =
+        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
+    let write_pipeline =
+        ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
+
+    const N: usize = 64;
+    let byte_size = (N * core::mem::size_of::<u32>()) as u64;
+
+    let scratch = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("scratch buffer");
+    let scratch_uav = scratch.bindless_index().expect("scratch UAV");
+    let scratch_srv = scratch.bindless_srv_index().unwrap_or(scratch_uav);
+
+    let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
+    let output_uav = output.bindless_index().expect("output UAV");
+
+    let mut graph = TaskGraph::new();
+
+    graph.clear_buffer(&scratch, 0, byte_size);
+
+    graph
+        .node("write_iota", &write_pipeline)
+        .bind_buffer(&scratch, NodeAccess::Write)
+        .bind_resources_raw_slice(&[scratch_uav])
+        .dispatch(1, 1, 1);
+
+    graph
+        .node("copy_out", &copy_pipeline)
+        .bind_buffer(&scratch, NodeAccess::Read)
+        .bind_buffer(&output, NodeAccess::Write)
+        .bind_resources_raw_slice(&[scratch_srv, output_uav])
+        .dispatch(1, 1, 1);
+
+    graph.dispatch(&device).expect("dispatch graph");
+
+    let mut raw = vec![0u8; byte_size as usize];
+    output.read_to_cpu(&device, &mut raw).expect("read output");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    let expected: Vec<u32> = (1..=N as u32).collect();
+    assert_eq!(
+        result,
+        &expected[..],
+        "regular buffer path produced wrong data"
+    );
+}

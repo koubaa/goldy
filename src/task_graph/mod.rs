@@ -104,6 +104,9 @@ pub struct TransientTextureId(pub u32);
 pub struct TransientBufferSpec {
     pub id: u32,
     pub size: u64,
+    /// Element stride for the structured buffer descriptor (bytes).
+    /// Defaults to 4 (u32) when not specified.
+    pub stride: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

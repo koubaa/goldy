@@ -122,6 +122,31 @@ pub struct GraphIR {
     pub nodes: Vec<TaskNode>,
 }
 
+impl GraphIR {
+    /// Insert a zero-fill node at the front of the IR so that it executes
+    /// before every other node that touches the same parent buffer.
+    ///
+    /// Used by the graph-colored transient path to guarantee that the
+    /// placement-heap region is zeroed before any dispatch reads from it.
+    pub fn prepend_clear_buffer(&mut self, buffer: &crate::Buffer, offset: u64, size: u64) {
+        self.nodes.insert(
+            0,
+            TaskNode {
+                label: "clear_transient_region",
+                bindings: vec![ResourceBinding {
+                    resource: super::ResourceId::Buffer(buffer.handle),
+                    access: NodeAccess::Write,
+                }],
+                kind: NodeKind::ClearBuffer {
+                    buffer: buffer.handle,
+                    offset,
+                    size,
+                },
+            },
+        );
+    }
+}
+
 /// Resources that need a barrier before a wave executes.
 #[derive(Debug, Clone, Default)]
 pub struct BarrierSet {

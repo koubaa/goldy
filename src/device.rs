@@ -468,7 +468,9 @@ impl Device {
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        self.inner.vram_allocator.alloc_buffer(self, size, access, element_stride, flags)
+        self.inner
+            .vram_allocator
+            .alloc_buffer(self, size, access, element_stride, flags)
     }
 
     /// Allocate a GPU buffer with a capacity hint through the device's [`VramAllocator`].
@@ -507,7 +509,9 @@ impl Device {
         access: SpatialAccess,
         flags: TextureFlags,
     ) -> anyhow::Result<crate::texture::Texture> {
-        self.inner.vram_allocator.alloc_texture(self, width, height, format, access, flags)
+        self.inner
+            .vram_allocator
+            .alloc_texture(self, width, height, format, access, flags)
     }
 
     // =======================================================================
@@ -629,7 +633,7 @@ impl Device {
             if graph.transient_specs.is_empty() {
                 None
             } else {
-                let (total, layout) = graph.transient_heap_size_and_layout()?;
+                let (total, _, layout) = graph.transient_heap_size_and_layout()?;
                 let heap = crate::buffer::Buffer::new(self, total, crate::DataAccess::Scattered)?;
                 let ranges =
                     TaskGraph::transient_buffer_range_map(&heap, &layout, &graph.transient_specs);

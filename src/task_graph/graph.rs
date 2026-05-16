@@ -23,6 +23,22 @@ use std::sync::Arc;
 
 type TransientNativeBufferMap = HashMap<u32, (BufferHandle, u64, u64)>;
 
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+fn lcm(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 {
+        return a | b;
+    }
+    a / gcd(a, b) * b
+}
+
 /// A task graph that analyzes dependencies at submit time.
 ///
 /// Build a DAG of task nodes — compute dispatches, buffer clears, and buffer
@@ -79,9 +95,17 @@ impl TaskGraph {
     /// Graphs using transients **block until the submit completes** so the staging
     /// heap can be freed.
     pub fn transient_buffer(&mut self, size: u64) -> TransientId {
+        self.transient_buffer_with_stride(size, 4)
+    }
+
+    /// Like [`Self::transient_buffer`] but with an explicit element stride for the
+    /// structured buffer descriptor. The stride is forwarded to
+    /// [`crate::Buffer::create_view`] when the transient is materialised.
+    pub fn transient_buffer_with_stride(&mut self, size: u64, stride: u32) -> TransientId {
         let id = self.next_transient_id;
         self.next_transient_id += 1;
-        self.transient_specs.push(TransientBufferSpec { id, size });
+        self.transient_specs
+            .push(TransientBufferSpec { id, size, stride });
         TransientId(id)
     }
 
@@ -110,7 +134,13 @@ impl TaskGraph {
     fn needs_transient_gpu_wait(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
     }
-    pub fn transient_heap_size_and_layout(&self) -> Result<(u64, HashMap<u32, u64>)> {
+    /// Returns `(total_size, required_base_alignment, offset_map)`.
+    ///
+    /// `required_base_alignment` is the LCM of all per-color alignments. When
+    /// the layout is placed at a non-zero base offset (e.g. inside a ring
+    /// buffer), that base must be a multiple of this value so that every
+    /// internal offset remains stride-aligned for its buffer view descriptor.
+    pub fn transient_heap_size_and_layout(&self) -> Result<(u64, u64, HashMap<u32, u64>)> {
         Self::transient_heap_layout(&self.transient_specs, &self.ir)
     }
 
@@ -181,9 +211,9 @@ impl TaskGraph {
     fn transient_heap_layout(
         specs: &[TransientBufferSpec],
         ir: &GraphIR,
-    ) -> Result<(u64, HashMap<u32, u64>)> {
+    ) -> Result<(u64, u64, HashMap<u32, u64>)> {
         if specs.is_empty() {
-            return Ok((0, HashMap::new()));
+            return Ok((0, 256, HashMap::new()));
         }
 
         let intervals = analysis::transient_wave_intervals(ir)?;
@@ -247,15 +277,21 @@ impl TaskGraph {
         }
 
         let mut color_max: Vec<u64> = vec![0; colors.len()];
+        let mut color_align: Vec<u64> = vec![256; colors.len()];
         for s in specs {
             let c = id_to_color[&s.id];
             color_max[c] = color_max[c].max(s.size);
+            let stride = s.stride.max(1) as u64;
+            color_align[c] = lcm(color_align[c], stride);
         }
 
+        let mut max_align = 256u64;
         let mut next_off = 0u64;
         let mut color_base: Vec<u64> = vec![0; colors.len()];
         for c in 0..colors.len() {
-            next_off = (next_off + 255) & !255u64;
+            let a = color_align[c];
+            max_align = lcm(max_align, a);
+            next_off = next_off.div_ceil(a) * a;
             color_base[c] = next_off;
             next_off = next_off
                 .checked_add(color_max[c])
@@ -268,7 +304,7 @@ impl TaskGraph {
             m.insert(s.id, color_base[c]);
         }
 
-        Ok((next_off, m))
+        Ok((next_off, max_align, m))
     }
 
     pub fn transient_buffer_range_map(
@@ -312,10 +348,7 @@ impl TaskGraph {
     /// the IR fully resolved (no `TransientBuffer` resource ids remain).
     /// The returned graph can be submitted via `compile_commands` or
     /// `Frame::submit_compute` without triggering the transient assert.
-    pub fn into_resolved(
-        &self,
-        resolved_ir: GraphIR,
-    ) -> TaskGraph {
+    pub fn into_resolved(&self, resolved_ir: GraphIR) -> TaskGraph {
         TaskGraph {
             ir: resolved_ir,
             transient_specs: Vec::new(),
@@ -364,8 +397,15 @@ impl TaskGraph {
                 })
                 .collect();
 
-            let kind = if let (Some(bmap), NodeKind::Dispatch { pipeline, resource_slots, user_slots, dispatch }) =
-                (bindless_map, &n.kind)
+            let kind = if let (
+                Some(bmap),
+                NodeKind::Dispatch {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    dispatch,
+                },
+            ) = (bindless_map, &n.kind)
             {
                 let mut patched_slots = resource_slots.clone();
                 for (i, b) in n.bindings.iter().enumerate() {
@@ -563,7 +603,7 @@ impl TaskGraph {
     ) -> Result<u64> {
         let mut total = 0u64;
         if !self.transient_specs.is_empty() {
-            let (buf_total, _) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
+            let (buf_total, _, _) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
             total = buf_total;
         }
         if !self.transient_texture_specs.is_empty() {
@@ -605,7 +645,7 @@ impl TaskGraph {
         let buf_map = if self.transient_specs.is_empty() {
             None
         } else {
-            let (_, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
+            let (_, _, layout) = Self::transient_heap_layout(&self.transient_specs, &self.ir)?;
             let mut by_base: HashMap<u64, Vec<&TransientBufferSpec>> = HashMap::new();
             for s in &self.transient_specs {
                 by_base.entry(layout[&s.id]).or_default().push(s);
@@ -1283,7 +1323,7 @@ mod tests {
             .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
-        let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
+        let (total, _, layout) = graph.transient_heap_size_and_layout().unwrap();
         assert_eq!(
             total, 256,
             "sequential transients should pack into one 256-byte slot"
@@ -1312,7 +1352,7 @@ mod tests {
             .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
-        let (total, layout) = graph.transient_heap_size_and_layout().unwrap();
+        let (total, _, layout) = graph.transient_heap_size_and_layout().unwrap();
         assert!(
             total >= 512,
             "concurrent transients need disjoint heap regions, got {}",

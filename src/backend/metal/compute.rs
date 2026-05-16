@@ -268,7 +268,9 @@ pub(super) fn record_commands_to_buffer(
                     .map(|last| logical_device.timeline_event.as_ref().signaled_value() >= last)
                     .unwrap_or(true);
                 if gpu_idle
-                    && !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
+                    && !buf_state
+                        .flags
+                        .contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                 {
                     let ptr = buf_state.buffer.contents();

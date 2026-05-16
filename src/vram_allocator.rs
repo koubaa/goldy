@@ -241,8 +241,11 @@ impl VramAllocator for TrackingVramAllocator {
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(size)?;
-        let buf = self.inner.alloc_buffer(device, size, access, element_stride, flags)?;
-        self.live_bytes.fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
+        let buf = self
+            .inner
+            .alloc_buffer(device, size, access, element_stride, flags)?;
+        self.live_bytes
+            .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
         Ok(buf)
     }
 
@@ -255,8 +258,15 @@ impl VramAllocator for TrackingVramAllocator {
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(expected_max.max(initial_size))?;
-        let buf = self.inner.alloc_buffer_with_capacity(device, initial_size, expected_max, access, flags)?;
-        self.live_bytes.fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
+        let buf = self.inner.alloc_buffer_with_capacity(
+            device,
+            initial_size,
+            expected_max,
+            access,
+            flags,
+        )?;
+        self.live_bytes
+            .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
         Ok(buf)
     }
 
@@ -271,8 +281,11 @@ impl VramAllocator for TrackingVramAllocator {
     ) -> Result<Texture> {
         let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
         self.check_budget(estimated)?;
-        let tex = self.inner.alloc_texture(device, width, height, format, access, flags)?;
-        self.live_bytes.fetch_add(tex.byte_size() as i64, Ordering::Relaxed);
+        let tex = self
+            .inner
+            .alloc_texture(device, width, height, format, access, flags)?;
+        self.live_bytes
+            .fetch_add(tex.byte_size() as i64, Ordering::Relaxed);
         Ok(tex)
     }
 
@@ -282,7 +295,8 @@ impl VramAllocator for TrackingVramAllocator {
     }
 
     fn notify_texture_freed(&self, byte_size: usize) {
-        self.live_bytes.fetch_sub(byte_size as i64, Ordering::Relaxed);
+        self.live_bytes
+            .fetch_sub(byte_size as i64, Ordering::Relaxed);
         self.inner.notify_texture_freed(byte_size);
     }
 
@@ -333,7 +347,13 @@ mod tests {
         let device = test_device();
         let alloc = DefaultVramAllocator;
         let buf = alloc
-            .alloc_buffer(&device, 1024, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(
+                &device,
+                1024,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
         assert_eq!(buf.size(), 1024);
     }
@@ -364,7 +384,13 @@ mod tests {
         assert_eq!(alloc.allocated_bytes(), 0);
 
         let buf = alloc
-            .alloc_buffer(&device, 4096, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(
+                &device,
+                4096,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
         assert!(alloc.allocated_bytes() >= 4096);
 
@@ -380,7 +406,13 @@ mod tests {
         let alloc = TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator), 8192);
 
         let _buf = alloc
-            .alloc_buffer(&device, 4096, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(
+                &device,
+                4096,
+                DataAccess::Scattered,
+                None,
+                BufferFlags::empty(),
+            )
             .unwrap();
 
         let result = alloc.alloc_buffer(

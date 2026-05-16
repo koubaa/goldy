@@ -1388,9 +1388,7 @@ pub(super) fn create_view(
         anyhow::bail!("Buffer view element stride must be non-zero");
     }
     if !(size as u32).is_multiple_of(stride) {
-        anyhow::bail!(
-            "View byte size {size} is not evenly divisible by element stride {stride}"
-        );
+        anyhow::bail!("View byte size {size} is not evenly divisible by element stride {stride}");
     }
     if !offset.is_multiple_of(stride as u64) {
         anyhow::bail!(
