@@ -532,8 +532,13 @@ pub(super) fn submit(
                 // which is correct (just less precise).
                 if use_global_buffer_barriers || buf_handles.is_empty() {
                     if !buf_handles.is_empty() {
+                        // Use SYNC_ALL for SyncBefore so this barrier covers all
+                        // preceding work regardless of sync scope: UAV clears run in
+                        // CLEAR_UNORDERED_ACCESS_VIEW, copies run in COPY, and indirect
+                        // dispatches run in EXECUTE_INDIRECT. A wave may mix all of
+                        // these, so SYNC_ALL is the only correct conservative choice.
                         let g = D3D12_GLOBAL_BARRIER {
-                            SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            SyncBefore: D3D12_BARRIER_SYNC_ALL,
                             SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                             AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                             AccessAfter: D3D12_BARRIER_ACCESS(
@@ -1168,8 +1173,11 @@ pub(super) fn submit_graph(
                 } => {
                     if use_global_buffer_barriers || buf_handles.is_empty() {
                         if !buf_handles.is_empty() {
+                            // SYNC_ALL covers UAV clears (CLEAR_UNORDERED_ACCESS_VIEW),
+                            // buffer copies (COPY), and indirect dispatches
+                            // (EXECUTE_INDIRECT) that may have run in the prior wave.
                             let g = D3D12_GLOBAL_BARRIER {
-                                SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                SyncBefore: D3D12_BARRIER_SYNC_ALL,
                                 SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                                 AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                                 AccessAfter: D3D12_BARRIER_ACCESS(
