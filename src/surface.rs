@@ -10,8 +10,10 @@ use crate::task_graph::TaskGraph;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
-use anyhow::Result;
+use crate::vram_allocator::DeferredPayload;
+use anyhow::{Context, Result};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// A GPU surface for zero-copy presentation to a window.
@@ -34,6 +36,10 @@ pub struct Frame {
     width: u32,
     height: u32,
     presented: bool,
+    /// Resources (e.g. transient textures) that must outlive the frame's GPU work.
+    /// Deferred to the VramAllocator ring at present time. Uses a Mutex so
+    /// submit_compute can push to it via &self without requiring &mut Frame.
+    keepalive: Mutex<DeferredPayload>,
 }
 
 impl Surface {
@@ -126,6 +132,7 @@ impl Surface {
             width: w,
             height: h,
             presented: false,
+            keepalive: Mutex::new(DeferredPayload::new()),
         })
     }
 
@@ -220,10 +227,133 @@ impl Frame {
     }
 
     /// Record analyzed compute / transfer work for this frame (e.g. compute into the swapchain).
+    ///
+    /// Graphs containing transient buffers and/or transient textures are resolved
+    /// automatically using the device-owned placement heap. The caller does not need
+    /// to call [`Device::submit`](crate::Device::submit) for graphs with transients;
+    /// this method handles the full resolution transparently.
     pub fn submit_compute(&self, graph: &TaskGraph) -> Result<()> {
-        let commands = graph.compile_commands();
+        if !graph.has_transient_resources() {
+            let commands = graph.compile_commands();
+            let mut backend = self.backend.lock().unwrap();
+            return backend.record_gpu_work(&self.token, &commands);
+        }
+
+        // Resolve transient textures first (may be needed even without transient buffers).
+        let (tex_keepalive, tex_handles) = graph.allocate_transient_textures(&self._device)?;
+
+        let commands = if graph.has_transient_buffers() {
+            self.resolve_and_compile_transient_buffers(graph, tex_handles)?
+        } else {
+            // Transient textures only — lower the IR and compile.
+            let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
+            TaskGraph::compile_ir_to_gpu_commands(&resolved_ir)
+        };
+
+        // Stash textures so they survive until do_present defers them via VramAllocator.
+        if !tex_keepalive.is_empty() {
+            let mut keepalive = self.keepalive.lock().unwrap();
+            for tex in tex_keepalive {
+                keepalive.push(tex);
+            }
+        }
+
         let mut backend = self.backend.lock().unwrap();
         backend.record_gpu_work(&self.token, &commands)
+    }
+
+    /// Acquire a placement-heap region, create BufferViews at colored offsets, lower the
+    /// graph IR, and compile it to a flat GPU command stream.
+    ///
+    /// Mirrors the logic in `Device::submit_with_placement_heap` but targets the
+    /// surface-frame path: views are attached to the heap ring entry *unstamped*;
+    /// `do_present` stamps all pending regions via `stamp_all_pending`.
+    fn resolve_and_compile_transient_buffers(
+        &self,
+        graph: &TaskGraph,
+        tex_handles: HashMap<u32, crate::backend::TextureHandle>,
+    ) -> Result<Vec<crate::backend::GpuCommand>> {
+        use crate::buffer::BufferView;
+        use crate::placement_heap::PlacementHeap;
+
+        let (total_size, base_align, layout) = graph.transient_heap_size_and_layout()?;
+        let alloc_size = (total_size + base_align - 1).max(256);
+
+        let mut heap_guard = self._device.inner.placement_heap.lock().unwrap();
+
+        // Lazily create or grow the placement heap (same logic as Device::submit).
+        if heap_guard.is_none() {
+            let cap = (256 * 1024 * 1024u64)
+                .max(alloc_size * crate::device::Device::DEFAULT_PIPELINE_DEPTH);
+            *heap_guard = Some(
+                PlacementHeap::with_capacity(&self._device, cap)
+                    .context("failed to create device placement heap")?,
+            );
+        }
+        let heap = heap_guard.as_mut().unwrap();
+
+        let progress = self._device.gpu_progress();
+        heap.reclaim(progress);
+
+        let raw_offset = match heap.acquire(alloc_size) {
+            Some(off) => off,
+            None => {
+                let progress2 = self._device.gpu_progress();
+                heap.reclaim(progress2);
+                heap.acquire(alloc_size).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
+                        alloc_size,
+                        heap.capacity(),
+                        heap.in_flight_bytes(),
+                    )
+                })?
+            }
+        };
+        let base_offset = raw_offset.div_ceil(base_align) * base_align;
+
+        let buf = heap.buffer();
+
+        let mut views: Vec<BufferView> = Vec::with_capacity(layout.len());
+        let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
+
+        for spec in graph.transient_specs() {
+            let offset = base_offset + layout[&spec.id];
+            let view_stride = spec.stride.max(1);
+            let view = buf.create_view(offset, spec.size, Some(view_stride))?;
+            let uav = view.bindless_index().unwrap_or(u32::MAX);
+            let srv = view.bindless_srv_index().unwrap_or(uav);
+            bindless_map.insert(spec.id, (uav, srv));
+            views.push(view);
+        }
+
+        let range_map = TaskGraph::transient_buffer_range_map_with_base(
+            buf,
+            &layout,
+            graph.transient_specs(),
+            base_offset,
+        );
+        let mut resolved_ir =
+            graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
+
+        // Also lower transient textures if present.
+        if !tex_handles.is_empty() {
+            resolved_ir = TaskGraph::lower_transient_textures(&resolved_ir, &tex_handles)?;
+        }
+
+        let commands = TaskGraph::compile_ir_to_gpu_commands(&resolved_ir);
+
+        // Defer views via keepalive so they outlive the GPU work.
+        // do_present drains keepalive via device.defer_release(tv, ...).
+        // This keeps PlacementHeap ring entries free of view ownership (#150).
+        {
+            let mut keepalive = self.keepalive.lock().unwrap();
+            for view in views {
+                keepalive.push(view);
+            }
+        }
+
+        Ok(commands)
     }
 
     /// Submit all work and present. Returns the GPU timeline value when this frame completes.
@@ -248,6 +378,12 @@ impl Frame {
             if let Some(ref mut heap) = *heap_guard {
                 heap.stamp_all_pending(tv);
             }
+        }
+        // Defer any keepalive resources (e.g. transient textures from submit_compute)
+        // until the GPU retires this frame's timeline.
+        let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
+        if !keepalive.is_empty() {
+            self._device.defer_release(tv, keepalive);
         }
         Ok(tv)
     }

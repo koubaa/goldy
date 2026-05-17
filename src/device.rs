@@ -608,8 +608,13 @@ impl Device {
     /// non-blocking frame drain) can call this to reclaim slots immediately
     /// rather than waiting for the next internal call.
     ///
-    /// Also reclaims any [`DeferredPayload`]s registered via [`defer_release`] whose
-    /// epoch has been reached.
+    /// Drives all epoch-based reclamation: `VramAllocator::reclaim` drops any
+    /// [`DeferredPayload`]s registered via [`defer_release`] whose epoch has been
+    /// reached. This includes:
+    /// - `BufferView`s from the placement heap (for transient buffer lifetimes)
+    /// - `RegionReclaimToken`s from `EpochRegionsAllocator`
+    /// - `FreeRangeToken`s from `HeapTransientAllocator`
+    /// - `ResetToken`s from `BumpResetAllocator`
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
@@ -696,7 +701,7 @@ impl Device {
     }
 
     /// Default pipeline depth for initial placement heap sizing.
-    const DEFAULT_PIPELINE_DEPTH: u64 = 4;
+    pub(crate) const DEFAULT_PIPELINE_DEPTH: u64 = 4;
 
     /// Resolve transient buffers via the device-owned placement heap and submit.
     ///
@@ -785,11 +790,11 @@ impl Device {
         let tv = resolved_graph.submit_with_backend(self, backend.as_mut(), None, tex_handles)?;
         drop(backend);
 
-        // Stamp and attach views to the region so they're dropped on reclaim.
+        // Stamp the ring entry and immediately defer views to VramAllocator.
+        // This keeps PlacementHeap ring entries free of view ownership (#150).
         let mut heap_guard = self.inner.placement_heap.lock().unwrap();
         let heap = heap_guard.as_mut().unwrap();
-        heap.stamp(tv);
-        heap.attach_views(views);
+        heap.stamp_and_defer_views(tv, views, self);
 
         Ok(tv)
     }

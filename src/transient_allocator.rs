@@ -138,7 +138,9 @@ pub trait TransientAllocator: Send {
     /// Strategies use this epoch to track when in-flight regions become safe to reclaim.
     /// For surface-presented frames, pass the [`TimelineValue`] returned by `Frame::present`.
     /// For headless rendering, pass the value returned by `Device::submit`.
-    fn end_frame(&mut self, epoch: TimelineValue);
+    ///
+    /// `device` is used to call [`Device::defer_release`] for epoch-based resource cleanup.
+    fn end_frame(&mut self, device: &Device, epoch: TimelineValue);
 
     /// Total bytes of GPU memory currently held across all backing storage.
     fn capacity(&self) -> u64;
@@ -233,6 +235,19 @@ impl TransientAllocatorStrategy {
 // BumpReset strategy
 // -----------------------------------------------------------------------
 
+/// Token pushed into a [`DeferredPayload`] at `end_frame`.
+///
+/// When the VramAllocator ring drops this token (after `gpu_progress >= epoch`),
+/// it sets `reset_ready` to `true`. `begin_frame` checks this flag and, if set,
+/// can reset the pool without blocking on `wait_until`.
+struct ResetToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ResetToken {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Single-pool bump allocator that resets between frames.
 ///
 /// `begin_frame` blocks on the previous frame's epoch (if any) before resetting the bump
@@ -240,11 +255,17 @@ impl TransientAllocatorStrategy {
 /// for debugging, but it serializes the CPU and the GPU — the CPU cannot begin recording
 /// frame N+1 until frame N's GPU work is done.
 ///
+/// When the deferred reset token fires via the VramAllocator ring (`Device::flush_deferred_deletions`),
+/// `begin_frame` can reset the pool non-blockingly. Otherwise it falls back to `wait_until`.
+///
 /// Equivalent to a per-thread arena allocator with synchronous reset.
 pub struct BumpResetAllocator {
     pool: BufferPool,
     last_epoch: Option<TimelineValue>,
     expected_max: u64,
+    /// Set to `true` once the deferred reset token is dropped after `gpu_progress >= last_epoch`.
+    /// Reset to `false` in `end_frame` when a new token is issued.
+    reset_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BumpResetAllocator {
@@ -261,20 +282,27 @@ impl BumpResetAllocator {
             pool,
             last_epoch: None,
             expected_max: config.expected_max,
+            reset_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         })
     }
 }
 
 impl TransientAllocator for BumpResetAllocator {
     fn begin_frame(&mut self, device: &Device, hint_size: u64) -> Result<()> {
-        // Wait for the previous frame's GPU work to finish before reusing the pool. This is
-        // the *fundamental* synchronization cost of the single-pool strategy: a tighter
-        // pipeline requires either a ring of pools or epoch-tagged regions (see
-        // EpochRegionsAllocator).
-        if let Some(tv) = self.last_epoch {
-            if device.gpu_progress() < tv {
-                device.wait_until(tv)?;
+        // Give the VramAllocator a chance to fire the ResetToken non-blockingly.
+        device.flush_deferred_deletions();
+
+        // If the token hasn't fired yet (GPU still in flight), fall back to blocking wait.
+        // This is the same serialization cost as before; the token path is an optimization
+        // for callers that call flush_deferred_deletions eagerly between frames.
+        if !self.reset_ready.load(std::sync::atomic::Ordering::Acquire) {
+            if let Some(tv) = self.last_epoch {
+                if device.gpu_progress() < tv {
+                    device.wait_until(tv)?;
+                }
             }
+            // Drain after wait to catch any newly-fired tokens.
+            device.flush_deferred_deletions();
         }
 
         // Grow to fit the hint if known.
@@ -303,8 +331,17 @@ impl TransientAllocator for BumpResetAllocator {
         self.pool.alloc_bytes(size, element_stride)
     }
 
-    fn end_frame(&mut self, epoch: TimelineValue) {
+    fn end_frame(&mut self, device: &Device, epoch: TimelineValue) {
         self.last_epoch = Some(epoch);
+        // Mark not-ready and issue a ResetToken to the VramAllocator ring.
+        // When the token fires, reset_ready becomes true and begin_frame can
+        // skip the blocking wait_until.
+        self.reset_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        let token = ResetToken(std::sync::Arc::clone(&self.reset_ready));
+        let mut payload = crate::vram_allocator::DeferredPayload::new();
+        payload.push(token);
+        device.defer_release(epoch, payload);
     }
 
     fn capacity(&self) -> u64 {
@@ -326,6 +363,8 @@ impl TransientAllocator for BumpResetAllocator {
     fn clear(&mut self) {
         self.pool.reset();
         self.last_epoch = None;
+        self.reset_ready
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -347,9 +386,29 @@ enum RegionState {
     /// The allocator treats these conservatively: they cannot be reclaimed until an epoch
     /// is supplied, but they do not count as Active so the next `begin_frame` can proceed.
     Pending,
-    /// Has been written by a frame whose GPU work has not yet completed. Cannot be reused
-    /// until `device.gpu_progress() >= epoch`.
-    Retired { epoch: TimelineValue },
+    /// Reclamation has been deferred to the VramAllocator ring via a reclaim token.
+    /// The token's Drop impl adds the region index to `pending_resets`; `begin_frame` then
+    /// applies the reset. The epoch is retained for the safety-valve wait path.
+    DeferredReclaim { epoch: TimelineValue },
+}
+
+/// Token pushed into a [`DeferredPayload`] at `end_frame`.
+///
+/// When the VramAllocator ring drops this token (i.e., after `gpu_progress >= epoch`),
+/// the token appends the region indices to the allocator's `pending_resets` list.
+/// The next `begin_frame` call drains `pending_resets` and transitions those regions
+/// to `Empty`, making them available for reuse.
+struct RegionReclaimToken {
+    pending_resets: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    indices: Vec<usize>,
+}
+
+impl Drop for RegionReclaimToken {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending_resets.lock() {
+            pending.extend_from_slice(&self.indices);
+        }
+    }
 }
 
 struct Region {
@@ -380,8 +439,11 @@ pub struct EpochRegionsAllocator {
     config: TransientAllocatorConfig,
     regions: Vec<Region>,
     /// Indices of regions in `Active` state, in the order they were activated this frame.
-    /// On `end_frame`, every index here is moved to `Retired`.
+    /// On `end_frame`, every index here is moved to `DeferredReclaim`.
     active: VecDeque<usize>,
+    /// Region indices enqueued when a reclaim token is dropped once the VramAllocator ring
+    /// has retired their epoch. Drained at the start of `begin_frame`.
+    pending_resets: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
 impl EpochRegionsAllocator {
@@ -392,6 +454,7 @@ impl EpochRegionsAllocator {
             config,
             regions: vec![region],
             active: VecDeque::new(),
+            pending_resets: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -416,15 +479,16 @@ impl EpochRegionsAllocator {
         })
     }
 
-    /// Promote any retired region whose epoch has passed back to Empty (resetting its bump
-    /// pointer). Cheap — one comparison per region.
-    fn reclaim_completed(&mut self, progress: TimelineValue) {
-        for r in &mut self.regions {
-            if let RegionState::Retired { epoch } = r.state {
-                if progress >= epoch {
-                    r.pool.reset();
-                    r.state = RegionState::Empty;
-                }
+    /// Drain any region indices enqueued when reclaim tokens drop and reset them.
+    ///
+    /// Called at the start of `begin_frame` after `device.flush_deferred_deletions()`.
+    fn drain_pending_resets(&mut self) {
+        let indices: Vec<usize> =
+            std::mem::take(&mut *self.pending_resets.lock().expect("pending_resets poisoned"));
+        for idx in indices {
+            if matches!(self.regions[idx].state, RegionState::DeferredReclaim { .. }) {
+                self.regions[idx].pool.reset();
+                self.regions[idx].state = RegionState::Empty;
             }
         }
     }
@@ -444,13 +508,13 @@ impl EpochRegionsAllocator {
             .position(|r| matches!(r.state, RegionState::Empty))
     }
 
-    /// Index of the retired region with the smallest epoch, if any.
-    fn oldest_retired(&self) -> Option<(usize, TimelineValue)> {
+    /// Index of the `DeferredReclaim` region with the smallest epoch (for the safety-valve wait).
+    fn oldest_deferred(&self) -> Option<(usize, TimelineValue)> {
         self.regions
             .iter()
             .enumerate()
             .filter_map(|(i, r)| match r.state {
-                RegionState::Retired { epoch } => Some((i, epoch)),
+                RegionState::DeferredReclaim { epoch } => Some((i, epoch)),
                 _ => None,
             })
             .min_by_key(|(_, e)| *e)
@@ -466,9 +530,9 @@ impl EpochRegionsAllocator {
     /// Acquire a region to allocate from, growing or waiting as needed. Used both at the
     /// start of a frame and when an active region runs out mid-frame.
     fn acquire_region(&mut self, device: &Device, min_size: u64) -> Result<usize> {
-        // Lazy reclaim — cheap; off the steady-state hot path nothing here will succeed.
-        let progress = device.gpu_progress();
-        self.reclaim_completed(progress);
+        // Drain any tokens that fired via VramAllocator reclaim (non-blocking).
+        device.flush_deferred_deletions();
+        self.drain_pending_resets();
 
         if let Some(idx) = self.find_empty(min_size) {
             // Grow the region if it was empty but undersized.
@@ -488,29 +552,35 @@ impl EpochRegionsAllocator {
             return Ok(idx);
         }
 
-        // Pipeline-depth cap hit. Safety valve: wait on the oldest retiree.
-        if let Some((idx, epoch)) = self.oldest_retired() {
+        // Pipeline-depth cap hit. Safety valve: wait on the oldest DeferredReclaim.
+        if let Some((idx, epoch)) = self.oldest_deferred() {
             device.wait_until(epoch)?;
-            self.regions[idx].pool.reset();
+            // After waiting, drain the now-completed tokens.
+            device.flush_deferred_deletions();
+            self.drain_pending_resets();
+            // The region should now be Empty from the token, but force-reset as fallback.
+            if matches!(self.regions[idx].state, RegionState::DeferredReclaim { .. }) {
+                self.regions[idx].pool.reset();
+                self.regions[idx].state = RegionState::Empty;
+            }
             if self.regions[idx].pool.capacity() < min_size {
                 self.regions[idx].pool.resize(min_size)?;
             }
-            self.regions[idx].state = RegionState::Empty;
             self.activate(idx);
             return Ok(idx);
         }
 
-        // No Retired regions — but there may be Pending regions (deferred end_frame).
+        // No DeferredReclaim regions — but there may be Pending regions (deferred end_frame).
         // Force a GPU drain and convert Pending → Empty.
-        let progress = device.gpu_progress();
         for r in &mut self.regions {
             if r.state == RegionState::Pending {
                 r.pool.reset();
                 r.state = RegionState::Empty;
             }
         }
-        // Reclaim anything that completed during the drain.
-        self.reclaim_completed(progress);
+        // Flush again after forcing Pending→Empty.
+        device.flush_deferred_deletions();
+        self.drain_pending_resets();
 
         if let Some(idx) = self.find_empty(min_size) {
             if self.regions[idx].pool.capacity() < min_size {
@@ -532,12 +602,12 @@ impl EpochRegionsAllocator {
         self.regions.len()
     }
 
-    /// Test-only inspection.
+    /// Test-only inspection. Returns the count of `DeferredReclaim` regions.
     #[doc(hidden)]
     pub fn retired_count(&self) -> usize {
         self.regions
             .iter()
-            .filter(|r| matches!(r.state, RegionState::Retired { .. }))
+            .filter(|r| matches!(r.state, RegionState::DeferredReclaim { .. }))
             .count()
     }
 
@@ -578,9 +648,10 @@ impl TransientAllocator for EpochRegionsAllocator {
             self.active.clear();
         }
 
-        // Promote completed retirees. Non-blocking.
-        let progress = device.gpu_progress();
-        self.reclaim_completed(progress);
+        // Drain any RegionReclaimTokens that fired via VramAllocator reclaim.
+        // flush_deferred_deletions() processes all payloads whose epoch <= gpu_progress.
+        device.flush_deferred_deletions();
+        self.drain_pending_resets();
 
         // Pre-acquire one region so the first alloc is hot-path lock-free. If hint_size is 0
         // (caller has no estimate), use min_region_size so we don't allocate a tiny region.
@@ -608,20 +679,37 @@ impl TransientAllocator for EpochRegionsAllocator {
         self.regions[idx].pool.alloc_bytes(size, element_stride)
     }
 
-    fn end_frame(&mut self, epoch: TimelineValue) {
-        // Retire any Active regions from the current frame.
+    fn end_frame(&mut self, device: &Device, epoch: TimelineValue) {
+        // Collect indices to retire from the active set and any Pending regions.
+        let mut retiring: Vec<usize> = Vec::with_capacity(self.active.len());
         for &idx in &self.active {
-            self.regions[idx].state = RegionState::Retired { epoch };
+            retiring.push(idx);
         }
         self.active.clear();
 
-        // Also assign the epoch to any Pending regions from a previous frame whose
-        // end_frame was deferred (surface-presentation path).
-        for r in &mut self.regions {
+        // Also promote Pending regions (surface-path deferred end_frame).
+        for (idx, r) in self.regions.iter_mut().enumerate() {
             if r.state == RegionState::Pending {
-                r.state = RegionState::Retired { epoch };
+                retiring.push(idx);
             }
         }
+
+        if retiring.is_empty() {
+            return;
+        }
+
+        // Transition to DeferredReclaim and push a RegionReclaimToken.
+        for &idx in &retiring {
+            self.regions[idx].state = RegionState::DeferredReclaim { epoch };
+        }
+
+        let token = RegionReclaimToken {
+            pending_resets: std::sync::Arc::clone(&self.pending_resets),
+            indices: retiring,
+        };
+        let mut payload = crate::vram_allocator::DeferredPayload::new();
+        payload.push(token);
+        device.defer_release(epoch, payload);
     }
 
     fn capacity(&self) -> u64 {
@@ -667,6 +755,25 @@ struct DeferredFree {
     epoch: Option<TimelineValue>,
 }
 
+/// Token pushed into a [`DeferredPayload`] when a heap range is freed.
+///
+/// When the VramAllocator ring drops this token (after `gpu_progress >= epoch`),
+/// it enqueues the `(offset, size)` pairs into `pending_frees`. The next
+/// `begin_frame` call drains `pending_frees` and merges them back into the
+/// allocator's free list via `insert_free`.
+struct FreeRangeToken {
+    pending_frees: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
+    ranges: Vec<(u64, u64)>,
+}
+
+impl Drop for FreeRangeToken {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending_frees.lock() {
+            pending.extend_from_slice(&self.ranges);
+        }
+    }
+}
+
 /// Best-fit free-list allocator inside a single monolithic [`BufferPool`].
 ///
 /// Unlike the bump-only strategies, `HeapTransientAllocator` supports mid-frame
@@ -685,8 +792,13 @@ pub struct HeapTransientAllocator {
     watermark: u64,
     /// Coalesced free ranges available for immediate reuse: `offset -> size`.
     free_list: BTreeMap<u64, u64>,
-    /// Ranges freed this frame or earlier, waiting for their GPU epoch to retire.
+    /// Ranges freed via `free()` awaiting epoch assignment or deferral.
+    /// `None` epoch means the epoch is not yet known (assigned in `end_frame`).
+    /// `Some(e)` means the range has a known epoch but hasn't been deferred yet.
     deferred: Vec<DeferredFree>,
+    /// Ranges enqueued when free-range tokens drop once their epoch retires.
+    /// Drained by `begin_frame` via `drain_pending_frees`.
+    pending_frees: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
     /// Bytes currently live (allocated minus freed-and-retired).
     live_bytes: u64,
     /// Peak `live_bytes` observed across the lifetime of this allocator (diagnostic).
@@ -708,25 +820,49 @@ impl HeapTransientAllocator {
             watermark: 0,
             free_list: BTreeMap::new(),
             deferred: Vec::new(),
+            pending_frees: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             live_bytes: 0,
             peak_live_bytes: 0,
         })
     }
 
-    /// Move any deferred frees whose epochs have retired into the free list.
-    /// Entries with `epoch = None` are pending the current frame's timeline
-    /// (not yet stamped by `end_frame`) and are skipped.
-    fn drain_retired(&mut self, progress: TimelineValue) {
-        let mut i = 0;
-        while i < self.deferred.len() {
-            if let Some(ep) = self.deferred[i].epoch {
-                if progress >= ep {
-                    let d = self.deferred.swap_remove(i);
-                    self.insert_free(d.offset, d.size);
-                    continue;
-                }
+    /// Move any freed ranges that the VramAllocator ring has already released into the free list.
+    /// Called at the start of `begin_frame`.
+    fn drain_pending_frees(&mut self) {
+        let ranges: Vec<(u64, u64)> =
+            std::mem::take(&mut *self.pending_frees.lock().expect("pending_frees poisoned"));
+        for (offset, size) in ranges {
+            self.insert_free(offset, size);
+        }
+    }
+
+    /// For any `deferred` frees that have a known epoch, create deferred free-range tokens and
+    /// call `device.defer_release`. Called from `begin_frame` (for `Some(epoch)` frees that
+    /// arrived after the last `end_frame`) and from `end_frame` (after stamping `None` frees).
+    fn flush_deferred_to_vram(&mut self, device: &Device) {
+        if self.deferred.is_empty() {
+            return;
+        }
+        // Partition: entries with known epochs go to defer_release, None-epoch entries stay.
+        let mut to_defer: std::collections::BTreeMap<u64, Vec<(u64, u64)>> =
+            std::collections::BTreeMap::new();
+        let mut remaining = Vec::new();
+        for d in self.deferred.drain(..) {
+            if let Some(ep) = d.epoch {
+                to_defer.entry(ep).or_default().push((d.offset, d.size));
+            } else {
+                remaining.push(d);
             }
-            i += 1;
+        }
+        self.deferred = remaining;
+        for (epoch, ranges) in to_defer {
+            let token = FreeRangeToken {
+                pending_frees: std::sync::Arc::clone(&self.pending_frees),
+                ranges,
+            };
+            let mut payload = crate::vram_allocator::DeferredPayload::new();
+            payload.push(token);
+            device.defer_release(epoch, payload);
         }
     }
 
@@ -834,8 +970,11 @@ impl HeapTransientAllocator {
 
 impl TransientAllocator for HeapTransientAllocator {
     fn begin_frame(&mut self, device: &Device, _hint_size: u64) -> Result<()> {
-        let progress = device.gpu_progress();
-        self.drain_retired(progress);
+        // Flush any deferred frees with known epochs (e.g., from post-end_frame free calls).
+        self.flush_deferred_to_vram(device);
+        // Process any ranges whose tokens have been dropped by the VramAllocator ring.
+        device.flush_deferred_deletions();
+        self.drain_pending_frees();
         self.compact_watermark();
         Ok(())
     }
@@ -895,7 +1034,7 @@ impl TransientAllocator for HeapTransientAllocator {
         });
     }
 
-    fn end_frame(&mut self, epoch: TimelineValue) {
+    fn end_frame(&mut self, device: &Device, epoch: TimelineValue) {
         // Stamp any mid-frame frees (epoch=None) with this frame's timeline so
         // they become eligible for reuse only after the GPU retires this frame.
         for d in &mut self.deferred {
@@ -903,6 +1042,8 @@ impl TransientAllocator for HeapTransientAllocator {
                 d.epoch = Some(epoch);
             }
         }
+        // Convert all deferred frees to VramAllocator-tracked tokens.
+        self.flush_deferred_to_vram(device);
     }
 
     fn capacity(&self) -> u64 {
@@ -921,6 +1062,9 @@ impl TransientAllocator for HeapTransientAllocator {
         self.watermark = 0;
         self.free_list.clear();
         self.deferred.clear();
+        if let Ok(mut pending) = self.pending_frees.lock() {
+            pending.clear();
+        }
         self.live_bytes = 0;
     }
 }
@@ -1119,7 +1263,7 @@ mod tests {
         );
 
         // Stamp with epoch=1 via end_frame.
-        alloc.end_frame(1);
+        alloc.end_frame(&device, 1);
 
         // Still not available — GPU progress is 0, epoch is 1.
         alloc.begin_frame(&device, 0).unwrap();
@@ -1196,5 +1340,123 @@ mod tests {
         let v1 = alloc.alloc(&device, 2048, Some(4)).unwrap();
         assert!(alloc.capacity() >= 2048);
         assert_eq!(v1.size(), 2048);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for defer_release-driven reclamation (#150)
+    // -----------------------------------------------------------------------
+
+    fn small_config() -> TransientAllocatorConfig {
+        TransientAllocatorConfig {
+            initial_size: 4 * 1024,
+            expected_max: 16 * 1024,
+            min_region_size: 4 * 1024,
+            max_regions: 3,
+            alignment: 256,
+            flags: crate::types::BufferFlags::empty(),
+        }
+    }
+
+    #[test]
+    fn epoch_regions_defer_release_transitions_to_empty() {
+        // After end_frame, regions should be in DeferredReclaim state.
+        // After flush_deferred_deletions + begin_frame, they should be Empty.
+        let device = test_device();
+        let mut a = EpochRegionsAllocator::new(&device, small_config()).expect("create");
+
+        a.begin_frame(&device, 0).expect("begin 1");
+        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
+        let graph = crate::task_graph::TaskGraph::new();
+        let tv = device.submit(&graph).expect("submit");
+
+        a.end_frame(&device, tv);
+        // Regions are now DeferredReclaim, not Empty.
+        assert!(
+            a.retired_count() >= 1,
+            "active region should be DeferredReclaim"
+        );
+        assert_eq!(
+            a.empty_count(),
+            0,
+            "no Empty regions immediately after end_frame"
+        );
+
+        // Wait for the GPU to retire, then flush — this fires the RegionReclaimToken.
+        device.wait_until(tv).expect("wait");
+        device.flush_deferred_deletions();
+
+        // begin_frame drains pending_resets → regions become Empty.
+        a.begin_frame(&device, 0).expect("begin 2");
+        assert_eq!(
+            a.retired_count(),
+            0,
+            "DeferredReclaim should be gone after flush+begin"
+        );
+    }
+
+    #[test]
+    fn heap_transient_free_range_token_fires_via_vram_reclaim() {
+        // After end_frame, freed ranges should be returned to the free list via
+        // FreeRangeToken (through flush_deferred_deletions + begin_frame).
+        let device = test_device();
+        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+        let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        let offset = v1.offset();
+        let graph = crate::task_graph::TaskGraph::new();
+        let tv = device.submit(&graph).expect("submit");
+
+        // Free with known epoch.
+        alloc.free(offset, 1024, Some(tv));
+        alloc.end_frame(&device, tv);
+
+        // Wait and flush to fire the FreeRangeToken.
+        device.wait_until(tv).expect("wait");
+        device.flush_deferred_deletions();
+
+        alloc.begin_frame(&device, 0).unwrap();
+        // Now the range should be back in the free list and reusable.
+        let v2 = alloc
+            .alloc(&device, 1024, Some(4))
+            .expect("alloc after reclaim");
+        assert_eq!(
+            v2.offset(),
+            offset,
+            "freed range should be reused after VramAllocator reclaim"
+        );
+    }
+
+    #[test]
+    fn bump_reset_token_fires_non_blockingly() {
+        // After end_frame issues a ResetToken, flush_deferred_deletions should
+        // fire it so begin_frame can reset without blocking wait_until.
+        let device = test_device();
+        let mut a = BumpResetAllocator::new(&device, small_config()).expect("create");
+
+        a.begin_frame(&device, 0).expect("begin 1");
+        let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
+        let graph = crate::task_graph::TaskGraph::new();
+        let tv = device.submit(&graph).expect("submit");
+
+        a.end_frame(&device, tv);
+        // reset_ready is now false.
+        assert!(
+            !a.reset_ready.load(std::sync::atomic::Ordering::Acquire),
+            "reset_ready should be false after end_frame"
+        );
+
+        // Wait and flush to fire the ResetToken.
+        device.wait_until(tv).expect("wait");
+        device.flush_deferred_deletions();
+
+        // reset_ready should be true now (token fired).
+        assert!(
+            a.reset_ready.load(std::sync::atomic::Ordering::Acquire),
+            "reset_ready should be true after flush_deferred_deletions"
+        );
+
+        // begin_frame should not need to wait again (fast path).
+        a.begin_frame(&device, 0).expect("begin 2 should not block");
     }
 }
