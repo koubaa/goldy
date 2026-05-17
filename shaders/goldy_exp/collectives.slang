@@ -96,3 +96,46 @@ public uint workgroup_upper_bound<let LG_N : int>(
     }
     return ix;
 }
+
+/// Inclusive prefix sum (additive monoid on uint) across `WG_SIZE_PARAM` threads using
+/// wave intrinsics plus a tiny exclusive-prefix pass over per-wave totals on thread 0.
+///
+/// Requires `[numthreads(WG_SIZE_PARAM, 1, 1)]` (or equivalent dense mapping), subgroup
+/// wave ops (SM6 / Vulkan subgroup arithmetic / Metal SIMD-groups), and
+/// `WG_SIZE_PARAM % WaveGetLaneCount() == 0`.
+///
+/// `scratch_wave_totals` must hold at least `WG_SIZE_PARAM / min_subgroup_size` entries;
+/// sizes <=32 cover `WG_SIZE_PARAM == 256` for subgroup sizes down to 8.
+///
+[ForceInline]
+public uint workgroup_inclusive_scan_wave_uint_sum<let WG_SIZE_PARAM : int>(
+    uint val,
+    uint local_ix,
+    groupshared uint scratch_wave_totals[32]
+) {
+    uint lc = WaveGetLaneCount();
+    uint nw = WG_SIZE_PARAM / lc;
+    uint wave_ix = local_ix / lc;
+
+    uint inclusive_in_wave = WavePrefixSum(val) + val;
+    uint wave_total = WaveActiveSum(val);
+
+    if (WaveIsFirstLane())
+        scratch_wave_totals[wave_ix] = wave_total;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (local_ix == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = scratch_wave_totals[i];
+            scratch_wave_totals[i] = run;
+            run += s;
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    uint exclusive_between_waves = scratch_wave_totals[wave_ix];
+    return exclusive_between_waves + inclusive_in_wave;
+}

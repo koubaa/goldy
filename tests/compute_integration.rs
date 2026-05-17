@@ -2841,3 +2841,318 @@ fn test_regular_buffer_write_then_copy() {
         "regular buffer path produced wrong data"
     );
 }
+
+// ─── collectives: GPU execution tests ────────────────────────────────────────
+//
+// Each test runs a small compute shader that exercises one collective from
+// `goldy_exp/collectives.slang` and reads the output back to the CPU to verify
+// that the GPU-side arithmetic is correct.  These are distinct from the
+// compile-only `test_collectives_compiles` test in `src/shaders.rs`: that test
+// only ensures the DXIL/SPIRV/Metal codegen succeeds, while these tests catch
+// wrong *values* (e.g. the cross-module [ForceInline] + groupshared bug that
+// caused `workgroup_inclusive_scan_wave_uint_sum` to silently produce zeroes).
+
+/// `workgroup_inclusive_scan_wave_uint_sum<64>`, uniform input (all threads
+/// contribute 1).  Expected output[i] = i + 1 (triangular sum of ones).
+const WAVE_SCAN_64_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[32];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    OUT[ix] = workgroup_inclusive_scan_wave_uint_sum<64>(1u, ix, sh_scratch);
+}
+"#;
+
+/// `workgroup_inclusive_scan_wave_uint_sum<64>`, ramp input (thread i
+/// contributes i+1).  Expected output[i] = T(i+1) = (i+1)*(i+2)/2.
+const WAVE_SCAN_64_RAMP: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[32];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    OUT[ix] = workgroup_inclusive_scan_wave_uint_sum<64>(ix + 1u, ix, sh_scratch);
+}
+"#;
+
+/// `workgroup_inclusive_scan_wave_uint_sum<256>`, uniform input.
+/// Regression test for the production WG_SIZE used in ekrano's coarse shader.
+/// Expected output[i] = i + 1.
+const WAVE_SCAN_256_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[32];
+[goldy_compute]
+[numthreads(256, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    OUT[ix] = workgroup_inclusive_scan_wave_uint_sum<256>(1u, ix, sh_scratch);
+}
+"#;
+
+/// `workgroup_reduce` of all-ones over 64 threads.
+/// Thread 0's accumulated value must equal 64.
+const REDUCE_64_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[64];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    OUT[ix] = workgroup_reduce(1u, ix, sh_scratch);
+}
+"#;
+
+/// `workgroup_inclusive_scan` (IMonoid, uint under addition) of all-ones
+/// over 64 threads.  Expected output[i] = i + 1.
+const INCLUSIVE_SCAN_64_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[64];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    OUT[ix] = workgroup_inclusive_scan(1u, ix, sh_scratch);
+}
+"#;
+
+/// `workgroup_broadcast` of the constant 42 over 64 threads.
+/// All output[i] must equal 42.
+const BROADCAST_64: &str = r#"
+import goldy_exp;
+groupshared uint sh_slot[1];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    OUT[ix] = workgroup_broadcast(42u, ix, sh_slot);
+}
+"#;
+
+/// `workgroup_upper_bound` with prefix_sums[i] = i+1 over 64 threads.
+/// upper_bound(k) in {1,2,...,64} = k for all k in [0, 63].
+const UPPER_BOUND_64: &str = r#"
+import goldy_exp;
+groupshared uint sh_ps[64];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    sh_ps[ix] = ix + 1u; // build linear prefix-sum: [1, 2, 3, ..., 64]
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = workgroup_upper_bound<6>(ix, sh_ps);
+}
+"#;
+
+#[test]
+fn test_wave_inclusive_scan_uniform_64() {
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_UNIFORM)
+        .expect("compile WAVE_SCAN_64_UNIFORM");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 64 * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            i as u32 + 1,
+            "wave_scan_uniform_64[{i}]: expected {} got {val}",
+            i + 1
+        );
+    }
+}
+
+#[test]
+fn test_wave_inclusive_scan_ramp_64() {
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP)
+        .expect("compile WAVE_SCAN_64_RAMP");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 64 * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    // Expected: triangular numbers T(1)=1, T(2)=3, T(3)=6, ... T(k)=k*(k+1)/2
+    for (i, &val) in result.iter().enumerate() {
+        let k = (i + 1) as u32;
+        let expected = k * (k + 1) / 2;
+        assert_eq!(
+            val, expected,
+            "wave_scan_ramp_64[{i}]: expected {expected} got {val}"
+        );
+    }
+}
+
+#[test]
+fn test_wave_inclusive_scan_uniform_256() {
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_256_UNIFORM)
+        .expect("compile WAVE_SCAN_256_UNIFORM");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let out = Buffer::new(&device, 256 * 4, DataAccess::Scattered).expect("output buffer");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 256 * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            i as u32 + 1,
+            "wave_scan_uniform_256[{i}]: expected {} got {val}",
+            i + 1
+        );
+    }
+}
+
+#[test]
+fn test_workgroup_reduce_uint_correct() {
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, REDUCE_64_UNIFORM)
+        .expect("compile REDUCE_64_UNIFORM");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 64 * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    // Thread 0 accumulates the total (64 ones = 64); other threads hold partial sums.
+    assert_eq!(
+        result[0], 64,
+        "workgroup_reduce: thread 0 must hold total 64, got {}",
+        result[0]
+    );
+}
+
+#[test]
+fn test_workgroup_inclusive_scan_uint_correct() {
+    let device = make_device();
+    let shader = ShaderModule::from_slang(&device, INCLUSIVE_SCAN_64_UNIFORM)
+        .expect("compile INCLUSIVE_SCAN_64_UNIFORM");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 64 * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            i as u32 + 1,
+            "workgroup_inclusive_scan[{i}]: expected {} got {val}",
+            i + 1
+        );
+    }
+}
+
+#[test]
+fn test_workgroup_broadcast_correct() {
+    let device = make_device();
+    let shader =
+        ShaderModule::from_slang(&device, BROADCAST_64).expect("compile BROADCAST_64");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 64 * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, 42, "workgroup_broadcast[{i}]: expected 42 got {val}");
+    }
+}
+
+#[test]
+fn test_workgroup_upper_bound_linear() {
+    let device = make_device();
+    let shader =
+        ShaderModule::from_slang(&device, UPPER_BOUND_64).expect("compile UPPER_BOUND_64");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let mut encoder = ComputeEncoder::new();
+    {
+        let mut pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&out]);
+        pass.dispatch(1, 1, 1);
+    }
+    encoder.dispatch(&device).expect("dispatch");
+
+    let mut raw = vec![0u8; 64 * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    // prefix_sums = [1, 2, ..., 64]; upper_bound(k) = k for k in [0, 63].
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            i as u32,
+            "workgroup_upper_bound[{i}]: expected {i} got {val}"
+        );
+    }
+}

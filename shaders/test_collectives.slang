@@ -137,6 +137,7 @@ groupshared Bic        sh_bic[WG_SIZE];
 groupshared Bbox2D     sh_bbox[WG_SIZE];
 groupshared uint       sh_uint[WG_SIZE];
 groupshared uint       sh_broadcast[1];
+groupshared uint       sh_wave_scratch[32]; // for workgroup_inclusive_scan_wave_uint_sum
 
 [goldy_compute]
 [numthreads(256, 1, 1)]
@@ -189,6 +190,11 @@ void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     TagMonoid from_scanner = PathTagScanner.map(0x01010101u);
     DrawMonoid from_draw_scanner = DrawTagScanner.map(DRAWTAG_FILL_COLOR);
 
+    // --- workgroup_inclusive_scan_wave_uint_sum ---
+    // Each thread contributes ix+1.  For thread 0 the inclusive sum equals 1.
+    uint wave_sum = ix + 1;
+    wave_sum = workgroup_inclusive_scan_wave_uint_sum<256>(wave_sum, ix, sh_wave_scratch);
+
     if (ix == 0) {
         OUT[0] = t.trans_ix;
         OUT[1] = d.path_ix;
@@ -202,5 +208,6 @@ void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
         OUT[9] = mapped_draw.path_ix;
         OUT[10] = from_scanner.path_ix;
         OUT[11] = from_draw_scanner.clip_ix;
+        OUT[12] = wave_sum; // inclusive sum for thread 0 = 1
     }
 }
