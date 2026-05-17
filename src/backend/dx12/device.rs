@@ -250,16 +250,42 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         sig
     };
 
-    // Non-shader-visible CBV/SRV/UAV heap for ClearUnorderedAccessViewUint
-    let cpu_clear_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
-        Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-        NumDescriptors: 1,
-        Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
-        NodeMask: 0,
+    // Zero-filled UPLOAD-heap buffer used as the source for CopyBufferRegion clears.
+    // UPLOAD heaps are zero-initialized by the D3D12 runtime; no explicit memset needed.
+    // Size matches UPLOAD_CHUNK_SIZE in buffer.rs so any single chunk fits in one copy.
+    let zero_buffer_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: super::buffer::ZERO_BUFFER_SIZE,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN,
+        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
     };
-    let cpu_clear_heap: ID3D12DescriptorHeap =
-        unsafe { device.CreateDescriptorHeap(&cpu_clear_heap_desc) }
-            .context("Failed to create CPU clear heap")?;
+    let zero_heap_props = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_UPLOAD,
+        ..Default::default()
+    };
+    let mut zero_buffer_opt: Option<ID3D12Resource> = None;
+    unsafe {
+        device.CreateCommittedResource(
+            &zero_heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &zero_buffer_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            None,
+            &mut zero_buffer_opt,
+        )
+    }
+    .context("Failed to create zero buffer")?;
+    let zero_buffer =
+        zero_buffer_opt.context("CreateCommittedResource returned null for zero buffer")?;
 
     // Create fence
     let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
@@ -276,8 +302,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         fence_value: 0,
     }];
 
-    let mut resource_registry = types::ResourceRegistry::new();
-    let scratch_clear_uav_offset = resource_registry.alloc_cbv_srv_uav_slot();
+    let resource_registry = types::ResourceRegistry::new();
 
     let (graphics_pso_blobs, compute_pso_blobs) = dirs::cache_dir().map_or_else(
         || (HashMap::new(), HashMap::new()),
@@ -317,8 +342,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             bindless_root_signature,
             compute_dispatch_indirect_signature,
             resource_registry,
-            cpu_clear_heap,
-            scratch_clear_uav_offset,
+            zero_buffer,
             deletion_queue: super::types::DeletionQueue::new(),
             graphics_pso_blobs,
             compute_pso_blobs,

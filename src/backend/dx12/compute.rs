@@ -647,16 +647,50 @@ pub(super) fn submit(
                             .devices
                             .get(&device_handle)
                             .context("ClearBuffer: invalid device")?;
-                        // Storage buffer (DEFAULT heap): GPU-side UAV clear (no staging needed)
-                        super::buffer::uav_clear(
-                            logical_device,
-                            buf_state,
-                            &command_list,
-                            *offset,
-                            clear_size,
-                        )?;
-                        pending_sync.0 |= D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW.0;
-                        pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
+                        // Zero-fill via CopyBufferRegion from the device's zero buffer.
+                        // Mirror the WriteBuffer pattern: pre-copy barrier, chunked copy, then
+                        // track pending_sync/pending_access so the wave-boundary ResourceBarrier
+                        // uses the correct SyncBefore/AccessBefore.
+                        let zero = logical_device.zero_buffer.clone();
+                        let buf_resource = buf_state.resource.clone();
+                        if use_global_buffer_barriers {
+                            let pre = D3D12_GLOBAL_BARRIER {
+                                SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                                SyncAfter: D3D12_BARRIER_SYNC_COPY,
+                                AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                AccessAfter: D3D12_BARRIER_ACCESS_COPY_DEST,
+                            };
+                            unsafe { barriers::barrier_globals(&command_list7, &[pre]) };
+                        } else {
+                            let mut b_to_copy = [barriers::buffer_barrier_full(
+                                &buf_resource,
+                                D3D12_BARRIER_SYNC_ALL,
+                                D3D12_BARRIER_SYNC_COPY,
+                                D3D12_BARRIER_ACCESS_COMMON,
+                                D3D12_BARRIER_ACCESS_COPY_DEST,
+                            )];
+                            unsafe {
+                                barriers::barrier_buffers(&command_list7, &b_to_copy);
+                                barriers::drop_buffer_barriers(&mut b_to_copy);
+                            }
+                        }
+                        let mut cleared = 0u64;
+                        while cleared < clear_size {
+                            let this_chunk =
+                                (clear_size - cleared).min(super::buffer::ZERO_BUFFER_SIZE);
+                            unsafe {
+                                command_list.CopyBufferRegion(
+                                    &buf_resource,
+                                    *offset + cleared,
+                                    &zero,
+                                    0,
+                                    this_chunk,
+                                );
+                            }
+                            cleared += this_chunk;
+                        }
+                        pending_sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
+                        pending_access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
                     } else {
                         // UPLOAD heap buffer: CPU-accessible, just memset
                         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -1289,15 +1323,46 @@ pub(super) fn submit_graph(
                                 .devices
                                 .get(&device_handle)
                                 .context("ClearBuffer: invalid device")?;
-                            super::buffer::uav_clear(
-                                logical_device,
-                                buf_state,
-                                &command_list,
-                                *offset,
-                                clear_size,
-                            )?;
-                            pending_sync.0 |= D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW.0;
-                            pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
+                            let zero = logical_device.zero_buffer.clone();
+                            let buf_resource = buf_state.resource.clone();
+                            if use_global_buffer_barriers {
+                                let pre = D3D12_GLOBAL_BARRIER {
+                                    SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                                    SyncAfter: D3D12_BARRIER_SYNC_COPY,
+                                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                    AccessAfter: D3D12_BARRIER_ACCESS_COPY_DEST,
+                                };
+                                unsafe { barriers::barrier_globals(&command_list7, &[pre]) };
+                            } else {
+                                let mut b_to_copy = [barriers::buffer_barrier_full(
+                                    &buf_resource,
+                                    D3D12_BARRIER_SYNC_ALL,
+                                    D3D12_BARRIER_SYNC_COPY,
+                                    D3D12_BARRIER_ACCESS_COMMON,
+                                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                                )];
+                                unsafe {
+                                    barriers::barrier_buffers(&command_list7, &b_to_copy);
+                                    barriers::drop_buffer_barriers(&mut b_to_copy);
+                                }
+                            }
+                            let mut cleared = 0u64;
+                            while cleared < clear_size {
+                                let this_chunk =
+                                    (clear_size - cleared).min(super::buffer::ZERO_BUFFER_SIZE);
+                                unsafe {
+                                    command_list.CopyBufferRegion(
+                                        &buf_resource,
+                                        *offset + cleared,
+                                        &zero,
+                                        0,
+                                        this_chunk,
+                                    );
+                                }
+                                cleared += this_chunk;
+                            }
+                            pending_sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
+                            pending_access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
                         } else {
                             let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
                             let no_read = D3D12_RANGE { Begin: 0, End: 0 };

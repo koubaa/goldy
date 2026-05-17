@@ -122,7 +122,7 @@ impl ResourceRegistry {
     }
 
     /// Allocate a raw descriptor slot not tied to any resource handle.
-    /// Used for permanent device-lifetime slots (e.g. `scratch_clear_uav_offset`).
+    /// Used for permanent device-lifetime slots that need a reserved CBV/SRV/UAV index.
     pub fn alloc_cbv_srv_uav_slot(&mut self) -> u32 {
         self.cbv_srv_uav.alloc()
     }
@@ -409,13 +409,13 @@ pub(crate) struct LogicalDevice {
     /// Pool of command allocators for non-blocking compute submission.
     /// Slots can be reused when fence signals completion.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
-    /// Non-shader-visible CBV/SRV/UAV heap for ClearUnorderedAccessViewUint.
-    /// DX12 requires a CPU descriptor from a non-shader-visible heap for UAV clears.
-    pub cpu_clear_heap: Direct3D12::ID3D12DescriptorHeap,
-    /// Reserved shader-visible descriptor slot for structured buffer clears.
-    /// Used to hold a temporary R32_UINT UAV so the GPU-side descriptor matches
-    /// the clear format at execution time (not just at recording time).
-    pub scratch_clear_uav_offset: u32,
+    /// Device-lifetime zero-filled UPLOAD-heap buffer used as the source for
+    /// `CopyBufferRegion` clears. One buffer per device; clears of any size are
+    /// handled by chunking `CopyBufferRegion` calls. Using a copy instead of
+    /// `ClearUnorderedAccessViewUint` avoids the shared-descriptor aliasing hazard
+    /// that caused silent corruption on WARP when multiple buffers were cleared in
+    /// the same wave (all clears rewrote the same single-slot descriptor heap).
+    pub zero_buffer: Direct3D12::ID3D12Resource,
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
     pub deletion_queue: DeletionQueue,
