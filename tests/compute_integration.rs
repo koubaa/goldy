@@ -2980,8 +2980,8 @@ fn test_wave_inclusive_scan_uniform_64() {
 #[test]
 fn test_wave_inclusive_scan_ramp_64() {
     let device = make_device();
-    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP)
-        .expect("compile WAVE_SCAN_64_RAMP");
+    let shader =
+        ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP).expect("compile WAVE_SCAN_64_RAMP");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
@@ -3043,8 +3043,8 @@ fn test_wave_inclusive_scan_uniform_256() {
 #[test]
 fn test_workgroup_reduce_uint_correct() {
     let device = make_device();
-    let shader = ShaderModule::from_slang(&device, REDUCE_64_UNIFORM)
-        .expect("compile REDUCE_64_UNIFORM");
+    let shader =
+        ShaderModule::from_slang(&device, REDUCE_64_UNIFORM).expect("compile REDUCE_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
@@ -3103,8 +3103,7 @@ fn test_workgroup_inclusive_scan_uint_correct() {
 #[test]
 fn test_workgroup_broadcast_correct() {
     let device = make_device();
-    let shader =
-        ShaderModule::from_slang(&device, BROADCAST_64).expect("compile BROADCAST_64");
+    let shader = ShaderModule::from_slang(&device, BROADCAST_64).expect("compile BROADCAST_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
@@ -3129,8 +3128,7 @@ fn test_workgroup_broadcast_correct() {
 #[test]
 fn test_workgroup_upper_bound_linear() {
     let device = make_device();
-    let shader =
-        ShaderModule::from_slang(&device, UPPER_BOUND_64).expect("compile UPPER_BOUND_64");
+    let shader = ShaderModule::from_slang(&device, UPPER_BOUND_64).expect("compile UPPER_BOUND_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
@@ -3150,8 +3148,7 @@ fn test_workgroup_upper_bound_linear() {
     // prefix_sums = [1, 2, ..., 64]; upper_bound(k) = k for k in [0, 63].
     for (i, &val) in result.iter().enumerate() {
         assert_eq!(
-            val,
-            i as u32,
+            val, i as u32,
             "workgroup_upper_bound[{i}]: expected {i} got {val}"
         );
     }
