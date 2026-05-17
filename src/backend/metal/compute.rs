@@ -213,9 +213,14 @@ pub(super) fn record_commands_to_buffer(
     macro_rules! ensure_blit {
         () => {
             end_compute!();
-            if guard.blit.is_none() {
-                guard.blit = Some(command_buffer.new_blit_command_encoder());
-            }
+            // End any active blit encoder before opening a new one. Metal does not
+            // guarantee ordering between commands within the same blit encoder (e.g.
+            // fill_buffer and copy_from_buffer targeting the same buffer may execute
+            // in any order). Ending and reopening creates a new encoder boundary which
+            // Metal serializes, so each ClearBuffer/WriteBuffer command executes in
+            // strictly program order relative to every other blit command.
+            end_blit!();
+            guard.blit = Some(command_buffer.new_blit_command_encoder());
         };
     }
 

@@ -1259,6 +1259,21 @@ pub(super) fn submit_graph(
                                 *offset,
                                 clear_size,
                             )?;
+                            // ClearUnorderedAccessViewUint runs in CLEAR_UNORDERED_ACCESS_VIEW
+                            // sync scope, not COMPUTE_SHADING. Without this barrier the
+                            // TaskGraph-inserted ResourceBarrier (SyncBefore=COMPUTE_SHADING)
+                            // does not cover the clear, and subsequent dispatches may read
+                            // stale data. Mirror the same barrier present in `submit`.
+                            let g = D3D12_GLOBAL_BARRIER {
+                                SyncBefore: D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW,
+                                SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                                AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                AccessAfter: D3D12_BARRIER_ACCESS(
+                                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                        | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                                ),
+                            };
+                            unsafe { barriers::barrier_globals(&command_list7, &[g]) };
                         } else {
                             let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
                             let no_read = D3D12_RANGE { Begin: 0, End: 0 };
