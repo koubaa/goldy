@@ -246,8 +246,7 @@ impl Frame {
             self.resolve_and_compile_transient_buffers(graph, tex_handles)?
         } else {
             // Transient textures only — lower the IR and compile.
-            let resolved_ir =
-                TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
+            let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
             TaskGraph::compile_ir_to_gpu_commands(&resolved_ir)
         };
 
@@ -284,7 +283,8 @@ impl Frame {
 
         // Lazily create or grow the placement heap (same logic as Device::submit).
         if heap_guard.is_none() {
-            let cap = (256 * 1024 * 1024u64).max(alloc_size * crate::device::Device::DEFAULT_PIPELINE_DEPTH);
+            let cap = (256 * 1024 * 1024u64)
+                .max(alloc_size * crate::device::Device::DEFAULT_PIPELINE_DEPTH);
             *heap_guard = Some(
                 PlacementHeap::with_capacity(&self._device, cap)
                     .context("failed to create device placement heap")?,
@@ -333,7 +333,8 @@ impl Frame {
             graph.transient_specs(),
             base_offset,
         );
-        let mut resolved_ir = graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
+        let mut resolved_ir =
+            graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
 
         // Also lower transient textures if present.
         if !tex_handles.is_empty() {
@@ -380,10 +381,7 @@ impl Frame {
         }
         // Defer any keepalive resources (e.g. transient textures from submit_compute)
         // until the GPU retires this frame's timeline.
-        let keepalive = std::mem::replace(
-            &mut *self.keepalive.lock().unwrap(),
-            DeferredPayload::new(),
-        );
+        let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
         if !keepalive.is_empty() {
             self._device.defer_release(tv, keepalive);
         }

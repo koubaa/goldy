@@ -400,9 +400,7 @@ mod tests {
 
         let offset = heap.acquire(4 * 1024 * 1024).unwrap();
         let buf = heap.buffer();
-        let view = buf
-            .create_view(offset, 1024, Some(4))
-            .expect("create_view");
+        let view = buf.create_view(offset, 1024, Some(4)).expect("create_view");
 
         let epoch: u64 = 1;
         heap.stamp_and_defer_views(epoch, vec![view], &device);
@@ -414,6 +412,10 @@ mod tests {
 
         // The region has no views attached to it — PlacementHeap ring entries are
         // now pure ring-space trackers (no view ownership).
-        assert_eq!(heap.in_flight_count(), 0, "no in-flight entries after reclaim");
+        assert_eq!(
+            heap.in_flight_count(),
+            0,
+            "no in-flight entries after reclaim"
+        );
     }
 }

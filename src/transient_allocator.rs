@@ -255,7 +255,7 @@ impl Drop for ResetToken {
 /// for debugging, but it serializes the CPU and the GPU — the CPU cannot begin recording
 /// frame N+1 until frame N's GPU work is done.
 ///
-/// When a [`ResetToken`] fires via the VramAllocator ring (`Device::flush_deferred_deletions`),
+/// When the deferred reset token fires via the VramAllocator ring (`Device::flush_deferred_deletions`),
 /// `begin_frame` can reset the pool non-blockingly. Otherwise it falls back to `wait_until`.
 ///
 /// Equivalent to a per-thread arena allocator with synchronous reset.
@@ -263,7 +263,7 @@ pub struct BumpResetAllocator {
     pool: BufferPool,
     last_epoch: Option<TimelineValue>,
     expected_max: u64,
-    /// Set to `true` by [`ResetToken::drop`] once `gpu_progress >= last_epoch`.
+    /// Set to `true` once the deferred reset token is dropped after `gpu_progress >= last_epoch`.
     /// Reset to `false` in `end_frame` when a new token is issued.
     reset_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -386,7 +386,7 @@ enum RegionState {
     /// The allocator treats these conservatively: they cannot be reclaimed until an epoch
     /// is supplied, but they do not count as Active so the next `begin_frame` can proceed.
     Pending,
-    /// Reclamation has been deferred to the VramAllocator ring via a [`RegionReclaimToken`].
+    /// Reclamation has been deferred to the VramAllocator ring via a reclaim token.
     /// The token's Drop impl adds the region index to `pending_resets`; `begin_frame` then
     /// applies the reset. The epoch is retained for the safety-valve wait path.
     DeferredReclaim { epoch: TimelineValue },
@@ -441,7 +441,7 @@ pub struct EpochRegionsAllocator {
     /// Indices of regions in `Active` state, in the order they were activated this frame.
     /// On `end_frame`, every index here is moved to `DeferredReclaim`.
     active: VecDeque<usize>,
-    /// Region indices enqueued by [`RegionReclaimToken::drop`] once the VramAllocator ring
+    /// Region indices enqueued when a reclaim token is dropped once the VramAllocator ring
     /// has retired their epoch. Drained at the start of `begin_frame`.
     pending_resets: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
 }
@@ -479,13 +479,12 @@ impl EpochRegionsAllocator {
         })
     }
 
-    /// Drain any region indices enqueued by [`RegionReclaimToken::drop`] and reset them.
+    /// Drain any region indices enqueued when reclaim tokens drop and reset them.
     ///
     /// Called at the start of `begin_frame` after `device.flush_deferred_deletions()`.
     fn drain_pending_resets(&mut self) {
-        let indices: Vec<usize> = std::mem::take(
-            &mut *self.pending_resets.lock().expect("pending_resets poisoned"),
-        );
+        let indices: Vec<usize> =
+            std::mem::take(&mut *self.pending_resets.lock().expect("pending_resets poisoned"));
         for idx in indices {
             if matches!(self.regions[idx].state, RegionState::DeferredReclaim { .. }) {
                 self.regions[idx].pool.reset();
@@ -797,7 +796,7 @@ pub struct HeapTransientAllocator {
     /// `None` epoch means the epoch is not yet known (assigned in `end_frame`).
     /// `Some(e)` means the range has a known epoch but hasn't been deferred yet.
     deferred: Vec<DeferredFree>,
-    /// Ranges enqueued by [`FreeRangeToken::drop`] once their epoch retires.
+    /// Ranges enqueued when free-range tokens drop once their epoch retires.
     /// Drained by `begin_frame` via `drain_pending_frees`.
     pending_frees: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
     /// Bytes currently live (allocated minus freed-and-retired).
@@ -830,15 +829,14 @@ impl HeapTransientAllocator {
     /// Move any freed ranges that the VramAllocator ring has already released into the free list.
     /// Called at the start of `begin_frame`.
     fn drain_pending_frees(&mut self) {
-        let ranges: Vec<(u64, u64)> = std::mem::take(
-            &mut *self.pending_frees.lock().expect("pending_frees poisoned"),
-        );
+        let ranges: Vec<(u64, u64)> =
+            std::mem::take(&mut *self.pending_frees.lock().expect("pending_frees poisoned"));
         for (offset, size) in ranges {
             self.insert_free(offset, size);
         }
     }
 
-    /// For any `deferred` frees that have a known epoch, create [`FreeRangeToken`]s and
+    /// For any `deferred` frees that have a known epoch, create deferred free-range tokens and
     /// call `device.defer_release`. Called from `begin_frame` (for `Some(epoch)` frees that
     /// arrived after the last `end_frame`) and from `end_frame` (after stamping `None` frees).
     fn flush_deferred_to_vram(&mut self, device: &Device) {
@@ -1373,8 +1371,15 @@ mod tests {
 
         a.end_frame(&device, tv);
         // Regions are now DeferredReclaim, not Empty.
-        assert!(a.retired_count() >= 1, "active region should be DeferredReclaim");
-        assert_eq!(a.empty_count(), 0, "no Empty regions immediately after end_frame");
+        assert!(
+            a.retired_count() >= 1,
+            "active region should be DeferredReclaim"
+        );
+        assert_eq!(
+            a.empty_count(),
+            0,
+            "no Empty regions immediately after end_frame"
+        );
 
         // Wait for the GPU to retire, then flush — this fires the RegionReclaimToken.
         device.wait_until(tv).expect("wait");
@@ -1382,7 +1387,11 @@ mod tests {
 
         // begin_frame drains pending_resets → regions become Empty.
         a.begin_frame(&device, 0).expect("begin 2");
-        assert_eq!(a.retired_count(), 0, "DeferredReclaim should be gone after flush+begin");
+        assert_eq!(
+            a.retired_count(),
+            0,
+            "DeferredReclaim should be gone after flush+begin"
+        );
     }
 
     #[test]
@@ -1408,7 +1417,9 @@ mod tests {
 
         alloc.begin_frame(&device, 0).unwrap();
         // Now the range should be back in the free list and reusable.
-        let v2 = alloc.alloc(&device, 1024, Some(4)).expect("alloc after reclaim");
+        let v2 = alloc
+            .alloc(&device, 1024, Some(4))
+            .expect("alloc after reclaim");
         assert_eq!(
             v2.offset(),
             offset,
