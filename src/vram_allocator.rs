@@ -213,7 +213,7 @@ pub trait VramAllocator: Send + Sync {
     /// The allocator holds all resources in the payload alive until a subsequent call to
     /// [`reclaim`](Self::reclaim) observes `gpu_progress >= epoch`, at which point the
     /// payload is dropped. Entries are expected to arrive roughly in epoch order; calling
-    /// [`reclaim`] drains from the front.
+    /// [`reclaim`](Self::reclaim) drains from the front.
     ///
     /// Custom allocators that manage their own memory (e.g. PTX slab allocators) should
     /// override this to integrate with their internal reclamation pipeline.
