@@ -54,7 +54,7 @@ frame.submit_compute(&graph)?;
 frame.present()?;
 ```
 
-`submit_compute` compiles the task graph into a command stream and records it into the frame's command buffer. Presentation happens when you call `present()` — the compute shader has already written the pixels.
+`submit_compute` resolves any transient resources (buffers, textures), compiles the task graph into a command stream, and records it into the frame's command buffer. Presentation happens when you call `present()` — the compute shader has already written the pixels.
 
 ## The compute shader
 

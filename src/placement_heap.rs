@@ -3,7 +3,8 @@
 //! A [`PlacementHeap`] owns a single large GPU [`Buffer`] and carves frame-sized
 //! regions from it using a ring allocator. Each frame acquires a contiguous region,
 //! creates [`BufferView`]s at graph-colored offsets within that region, and releases
-//! the region once the GPU retires past its timeline epoch.
+//! the region once the GPU retires past its timeline epoch. View lifetimes are tracked
+//! via [`Device::defer_release`] rather than the ring itself.
 //!
 //! This eliminates per-frame `Buffer::new` overhead: in steady state the backing
 //! buffer is allocated once and reused across all frames. Only lightweight
@@ -13,6 +14,7 @@ use crate::buffer::{Buffer, BufferView};
 use crate::device::Device;
 use crate::timeline::TimelineValue;
 use crate::types::{BufferFlags, DataAccess};
+use crate::vram_allocator::DeferredPayload;
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
 
@@ -41,8 +43,10 @@ pub struct PlacementHeapStats {
 /// - Frame N+1 occupies `[offset_{N+1}, ...)`
 /// - When Frame N retires, its region becomes available for future frames
 ///
-/// Views can be attached to the most recently acquired region via [`Self::attach_views`].
-/// When a region is reclaimed, its views are dropped, freeing their bindless slots.
+/// View lifetimes are managed via [`Device::defer_release`] rather than the ring
+/// itself: callers pass views to [`Self::stamp_and_defer_views`] (standalone path)
+/// or to the [`Frame`](crate::surface::Frame) keepalive (surface path). The ring
+/// tracks only byte-range allocation and timeline values.
 pub struct PlacementHeap {
     buffer: Buffer,
     page_size: u64,
@@ -58,8 +62,6 @@ struct RingEntry {
     /// Rounded-up size (page-aligned).
     size: u64,
     timeline: Option<TimelineValue>,
-    /// Views carved from this region; dropped on reclaim to free bindless slots.
-    views: Vec<BufferView>,
 }
 
 impl PlacementHeap {
@@ -179,31 +181,43 @@ impl PlacementHeap {
         }
     }
 
-    /// Stamp the most recently acquired (unstamped) region with a timeline value.
-    pub fn stamp(&mut self, timeline: TimelineValue) {
+    /// Stamp the most recently acquired region with a timeline value and immediately
+    /// defer `views` to the device's VramAllocator ring.
+    ///
+    /// The views will be dropped when `device.flush_deferred_deletions()` observes
+    /// `gpu_progress >= timeline`, freeing their bindless slots at the right time.
+    /// This is the standalone-submit path; the surface path defers views via
+    /// `Frame::keepalive` instead.
+    pub fn stamp_and_defer_views(
+        &mut self,
+        timeline: TimelineValue,
+        views: Vec<BufferView>,
+        device: &Device,
+    ) {
         if let Some(entry) = self.regions.back_mut() {
             if entry.timeline.is_none() {
                 entry.timeline = Some(timeline);
             }
         }
+        if !views.is_empty() {
+            let mut payload = DeferredPayload::new();
+            for view in views {
+                payload.push(view);
+            }
+            device.defer_release(timeline, payload);
+        }
     }
 
-    /// Stamp all unstamped regions with the given timeline (for surface-present path).
+    /// Stamp all unstamped regions with the given timeline (for the surface-present path).
+    ///
+    /// Views for these regions are already deferred via the frame's keepalive payload
+    /// (see `Frame::resolve_and_compile_transient_buffers`). This method only updates
+    /// the ring's timeline tracking so that `reclaim` can free ring space correctly.
     pub fn stamp_all_pending(&mut self, timeline: TimelineValue) {
         for entry in &mut self.regions {
             if entry.timeline.is_none() {
                 entry.timeline = Some(timeline);
             }
-        }
-    }
-
-    /// Attach views to the most recently acquired region.
-    ///
-    /// These views will be dropped when the region is reclaimed, ensuring
-    /// their bindless slots are freed at the right time.
-    pub fn attach_views(&mut self, views: Vec<BufferView>) {
-        if let Some(entry) = self.regions.back_mut() {
-            entry.views = views;
         }
     }
 
@@ -258,8 +272,18 @@ impl PlacementHeap {
             base_offset: offset,
             size,
             timeline: None,
-            views: Vec::new(),
         });
+    }
+
+    /// Stamp the most recently acquired region without deferring any views.
+    /// Used in tests and in contexts where views were already deferred by the caller.
+    #[cfg(test)]
+    pub(crate) fn stamp(&mut self, timeline: TimelineValue) {
+        if let Some(entry) = self.regions.back_mut() {
+            if entry.timeline.is_none() {
+                entry.timeline = Some(timeline);
+            }
+        }
     }
 }
 
@@ -364,5 +388,32 @@ mod tests {
 
         let count = heap.reclaim(5);
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn stamp_and_defer_views_defers_via_vram_allocator() {
+        // Verify that stamp_and_defer_views registers a DeferredPayload so that
+        // views are dropped when the VramAllocator ring processes them, not by
+        // PlacementHeap reclaim (which no longer holds views).
+        let device = test_device();
+        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024 * 1024).unwrap();
+
+        let offset = heap.acquire(4 * 1024 * 1024).unwrap();
+        let buf = heap.buffer();
+        let view = buf
+            .create_view(offset, 1024, Some(4))
+            .expect("create_view");
+
+        let epoch: u64 = 1;
+        heap.stamp_and_defer_views(epoch, vec![view], &device);
+
+        // PlacementHeap reclaim should free ring space (returns 1) because the region
+        // is stamped. Views are now managed by the VramAllocator, not the PlacementHeap.
+        let freed = heap.reclaim(epoch);
+        assert_eq!(freed, 1, "ring space should be reclaimed by PlacementHeap");
+
+        // The region has no views attached to it — PlacementHeap ring entries are
+        // now pure ring-space trackers (no view ownership).
+        assert_eq!(heap.in_flight_count(), 0, "no in-flight entries after reclaim");
     }
 }

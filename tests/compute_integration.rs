@@ -2412,7 +2412,7 @@ fn transient_allocator_smoke_all_strategies() {
         // Submit empty work to advance the timeline.
         let tv = ComputeEncoder::new().submit(&device).expect("submit");
         drop(view);
-        a.end_frame(tv);
+        a.end_frame(&device, tv);
         // Next frame: should not panic, and BumpReset should wait for tv internally.
         a.begin_frame(&device, 0).expect("begin frame 2");
         let _v2 = a.alloc(&device, 256, Some(4)).expect("alloc frame 2");
@@ -2453,7 +2453,7 @@ fn bump_reset_blocks_on_prev_epoch() {
     a.begin_frame(&device, 0).expect("begin");
     let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
     let tv = ComputeEncoder::new().submit(&device).expect("submit");
-    a.end_frame(tv);
+    a.end_frame(&device, tv);
 
     // begin_frame should wait for `tv` if it hasn't completed. After it returns,
     // gpu_progress must be at least tv.
@@ -2491,7 +2491,7 @@ fn epoch_regions_spills_when_active_full() {
     );
 
     let tv = ComputeEncoder::new().submit(&device).expect("submit");
-    a.end_frame(tv);
+    a.end_frame(&device, tv);
     // After end_frame all active should be retired.
     assert_eq!(a.retired_count(), after, "all active regions must retire");
     assert_eq!(a.empty_count(), 0);
@@ -2508,7 +2508,7 @@ fn epoch_regions_reclaims_after_gpu_catches_up() {
     a.begin_frame(&device, 0).expect("begin 1");
     let _v = a.alloc(&device, 2048, Some(4)).expect("alloc");
     let tv = ComputeEncoder::new().submit(&device).expect("submit");
-    a.end_frame(tv);
+    a.end_frame(&device, tv);
     assert!(a.retired_count() >= 1);
     assert_eq!(a.empty_count(), 0);
 
@@ -2538,7 +2538,7 @@ fn epoch_regions_respects_max_regions_cap() {
         a.begin_frame(&device, 0).expect("begin");
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
         let tv = ComputeEncoder::new().submit(&device).expect("submit");
-        a.end_frame(tv);
+        a.end_frame(&device, tv);
         device.wait_until(tv).expect("wait");
         assert!(
             a.region_count() <= cfg.max_regions,
@@ -2564,7 +2564,7 @@ fn transient_allocator_clear_resets_state() {
         a.begin_frame(&device, 0).expect("begin");
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
         let tv = ComputeEncoder::new().submit(&device).expect("submit");
-        a.end_frame(tv);
+        a.end_frame(&device, tv);
         device.wait_until(tv).expect("wait");
         a.clear();
         // After clear, used_this_frame should be zero and we can begin a new frame.
@@ -2598,14 +2598,14 @@ fn epoch_regions_deferred_end_frame_does_not_leak() {
         // On odd frames, simulate delayed end_frame arriving (from note_frame_presented).
         // On even frames, let it carry over.
         if i % 2 == 1 {
-            a.end_frame(tv);
+            a.end_frame(&device, tv);
             device.wait_until(tv).expect("wait");
         }
     }
 
     // Final end_frame so everything can be reclaimed.
     let tv = ComputeEncoder::new().submit(&device).expect("submit");
-    a.end_frame(tv);
+    a.end_frame(&device, tv);
     device.wait_until(tv).expect("wait");
 
     // All regions should be reclaimable. Region count must be bounded by max_regions.
@@ -2678,7 +2678,7 @@ fn epoch_regions_pending_promoted_to_retired_on_end_frame() {
     assert_eq!(a.active_count(), 1, "frame 2 should have one Active region");
 
     // Deferred end_frame for frame 1 arrives.
-    a.end_frame(tv1);
+    a.end_frame(&device, tv1);
     assert_eq!(
         a.pending_count(),
         0,

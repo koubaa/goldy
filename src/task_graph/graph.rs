@@ -334,7 +334,7 @@ impl TaskGraph {
     /// Produce a new `TaskGraph` with all transient buffer specs cleared and
     /// the IR fully resolved (no `TransientBuffer` resource ids remain).
     /// The returned graph can be submitted via `compile_commands` or
-    /// `Frame::submit_compute` without triggering the transient assert.
+    /// `Frame::submit_compute`.
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn into_resolved(&self, resolved_ir: GraphIR) -> TaskGraph {
         TaskGraph {
@@ -534,7 +534,7 @@ impl TaskGraph {
         Ok((id_to_color, color_keys))
     }
 
-    fn lower_transient_textures(
+    pub(crate) fn lower_transient_textures(
         ir: &GraphIR,
         handles: &HashMap<u32, TextureHandle>,
     ) -> Result<GraphIR> {
@@ -573,7 +573,7 @@ impl TaskGraph {
     }
 
     /// True if the graph contains at least one transient buffer (graph-colored).
-    pub fn has_transient_buffers(&self) -> bool {
+    pub(crate) fn has_transient_buffers(&self) -> bool {
         !self.transient_specs.is_empty()
     }
 
@@ -806,6 +806,11 @@ impl TaskGraph {
         self.ir.nodes.is_empty()
     }
 
+    /// Access the raw IR for internal use (e.g. transient lowering from outside the task_graph module).
+    pub(crate) fn ir(&self) -> &GraphIR {
+        &self.ir
+    }
+
     /// Compile the graph into a flat command stream.
     ///
     /// Runs the dependency analyzer, schedules waves, inserts `ResourceBarrier`
@@ -830,6 +835,18 @@ impl TaskGraph {
         let edges = analysis::build_edges(&self.ir);
         let schedule = analysis::schedule_waves(&self.ir, &edges);
         analysis::emit_commands(&self.ir, &schedule)
+    }
+
+    /// Compile a pre-lowered [`GraphIR`] into a flat GPU command stream.
+    ///
+    /// Unlike [`Self::compile_commands`], this operates directly on a resolved IR that
+    /// contains no transient specs — callers are responsible for lowering transients first.
+    /// Used by `Frame::submit_compute` to compile the resolved IR after placement-heap
+    /// allocation without going through the transient-guarded public path.
+    pub(crate) fn compile_ir_to_gpu_commands(ir: &GraphIR) -> Vec<crate::backend::GpuCommand> {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        analysis::emit_commands(ir, &schedule)
     }
 
     /// Like [`Self::compile_commands`] but allows graphs that include render-pass nodes.
