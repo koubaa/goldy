@@ -633,7 +633,11 @@ impl Device {
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`flush_deferred_deletions`]: Self::flush_deferred_deletions
-    pub fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
+    pub fn defer_release(
+        &self,
+        epoch: TimelineValue,
+        payload: crate::vram_allocator::DeferredPayload,
+    ) {
         self.inner.vram_allocator.defer_release(epoch, payload);
     }
 
@@ -1109,7 +1113,10 @@ mod tests {
 
         // flush_deferred_deletions with current gpu_progress (tv) should not reclaim tv+100.
         device.flush_deferred_deletions();
-        assert!(weak.upgrade().is_some(), "resource should still be alive after flush at tv");
+        assert!(
+            weak.upgrade().is_some(),
+            "resource should still be alive after flush at tv"
+        );
     }
 
     #[test]
@@ -1127,7 +1134,10 @@ mod tests {
         // After advancing GPU to tv and flushing, resource should be dropped.
         device.wait_until(tv).unwrap();
         device.flush_deferred_deletions();
-        assert!(weak.upgrade().is_none(), "resource should be dropped after flush at epoch");
+        assert!(
+            weak.upgrade().is_none(),
+            "resource should be dropped after flush at epoch"
+        );
     }
 
     #[test]
@@ -1145,7 +1155,10 @@ mod tests {
 
         // Dropping the device should drain all deferred resources.
         drop(device);
-        assert!(weak.upgrade().is_none(), "device drop should drain deferred resources");
+        assert!(
+            weak.upgrade().is_none(),
+            "device drop should drain deferred resources"
+        );
     }
 
     #[test]

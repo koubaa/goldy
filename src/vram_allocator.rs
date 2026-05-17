@@ -644,7 +644,10 @@ mod tests {
 
         // gpu_progress=5 — should reclaim and drop.
         assert_eq!(alloc.reclaim(5), 1);
-        assert!(weak.upgrade().is_none(), "resource should have been dropped");
+        assert!(
+            weak.upgrade().is_none(),
+            "resource should have been dropped"
+        );
     }
 
     #[test]
@@ -671,7 +674,10 @@ mod tests {
 
         // Reclaim the rest.
         assert_eq!(alloc.reclaim(10), 1);
-        assert!(weak_late.upgrade().is_none(), "epoch=10 should now be dropped");
+        assert!(
+            weak_late.upgrade().is_none(),
+            "epoch=10 should now be dropped"
+        );
     }
 
     #[test]
