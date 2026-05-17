@@ -761,4 +761,8 @@ pub(super) struct Dx12State {
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-device upload belts for `GpuCommand::WriteBuffer`.
     pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
+    /// Set to `true` when a TDR / device-removal is detected (fence completed with `u64::MAX`
+    /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
+    /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
+    pub device_removed: std::sync::atomic::AtomicBool,
 }

@@ -153,6 +153,12 @@ impl GpuBackend for MetalBackend {
         device::is_valid(&self.state, device)
     }
 
+    fn is_device_lost(&self, _device: DeviceHandle) -> bool {
+        self.state
+            .device_lost
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn create_buffer(
         &mut self,
         device: DeviceHandle,

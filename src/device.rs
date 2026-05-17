@@ -25,6 +25,7 @@
 //! multi-queue support for parallel command submission if needed.
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
+use crate::error::GoldyError;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::task_graph::TaskGraph;
@@ -566,16 +567,50 @@ impl Device {
         self.inner.high_water_timeline.load(Ordering::Relaxed)
     }
 
-    /// Block until the device timeline reaches at least `value`.
-    pub fn wait_until(&self, value: TimelineValue) -> Result<()> {
-        let mut backend = self.inner.backend.lock().unwrap();
-        backend.wait_until(self.inner.handle, value)
+    /// Returns `true` if the device has been permanently lost.
+    ///
+    /// After this returns `true`, all further submit / wait calls will fail with
+    /// [`GoldyError::DeviceLost`]. The device should be dropped and re-created.
+    pub fn is_device_lost(&self) -> bool {
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .is_device_lost(self.inner.handle)
     }
 
-    /// Like [`wait_until`](Self::wait_until) but returns `Ok(false)` on timeout.
-    pub fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<bool> {
+    /// Map a backend [`anyhow::Error`] to the appropriate [`GoldyError`] variant.
+    fn classify(&self, e: anyhow::Error) -> GoldyError {
+        if self.is_device_lost() {
+            return GoldyError::DeviceLost;
+        }
+        GoldyError::Backend(e)
+    }
+
+    /// Block until the device timeline reaches at least `value`.
+    pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
         let mut backend = self.inner.backend.lock().unwrap();
-        backend.wait_until_timeout(self.inner.handle, value, timeout_ms)
+        backend.wait_until(self.inner.handle, value).map_err(|e| {
+            drop(backend);
+            self.classify(e)
+        })
+    }
+
+    /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
+    pub fn wait_until_timeout(
+        &self,
+        value: TimelineValue,
+        timeout_ms: u32,
+    ) -> Result<(), GoldyError> {
+        let mut backend = self.inner.backend.lock().unwrap();
+        match backend.wait_until_timeout(self.inner.handle, value, timeout_ms) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(GoldyError::SubmitTimeout),
+            Err(e) => {
+                drop(backend);
+                Err(self.classify(e))
+            }
+        }
     }
 
     /// Number of bindless descriptor slots still available for allocation in
@@ -672,20 +707,29 @@ impl Device {
     /// by the device. The heap is lazily created on first use and reused across
     /// submissions — callers never need to manage transient buffer backing
     /// storage, view creation, or bindless index patching.
-    pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue> {
+    pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue, GoldyError> {
         if !graph.has_transient_resources() {
             let mut backend = self.inner.backend.lock().unwrap();
-            let tv = graph.submit_with_backend(self, backend.as_mut(), None, &HashMap::new())?;
+            let tv = graph
+                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new())
+                .map_err(|e| {
+                    drop(backend);
+                    self.classify(e)
+                })?;
             self.inner
                 .high_water_timeline
                 .fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
         }
 
-        let (_tex_keepalive, tex_handles) = graph.allocate_transient_textures(self)?;
+        let (_tex_keepalive, tex_handles) = graph
+            .allocate_transient_textures(self)
+            .map_err(|e| self.classify(e))?;
 
         if graph.has_transient_buffers() {
-            let tv = self.submit_with_placement_heap(graph, &tex_handles)?;
+            let tv = self
+                .submit_with_placement_heap(graph, &tex_handles)
+                .map_err(|e| self.classify(e))?;
             self.inner
                 .high_water_timeline
                 .fetch_max(tv, Ordering::Relaxed);
@@ -693,7 +737,12 @@ impl Device {
         }
 
         let mut backend = self.inner.backend.lock().unwrap();
-        let tv = graph.submit_with_backend(self, backend.as_mut(), None, &tex_handles)?;
+        let tv = graph
+            .submit_with_backend(self, backend.as_mut(), None, &tex_handles)
+            .map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })?;
         self.inner
             .high_water_timeline
             .fetch_max(tv, Ordering::Relaxed);
@@ -800,7 +849,7 @@ impl Device {
     }
 
     /// Submit a task graph and block until it completes.
-    pub fn dispatch(&self, graph: &TaskGraph) -> Result<()> {
+    pub fn dispatch(&self, graph: &TaskGraph) -> Result<(), GoldyError> {
         let v = self.submit(graph)?;
         self.wait_until(v)
     }
@@ -1055,8 +1104,11 @@ impl Drop for DeviceInner {
         );
         // Wait for all submitted GPU work to complete. This covers any in-flight work not
         // covered by the placement-heap wait (e.g. non-transient submits held by callers).
+        // Skip the wait if the device is already lost: the hardware cannot make progress
+        // and backends handle per-object teardown ordering inside destroy_device.
         let high_water = self.high_water_timeline.load(Ordering::Relaxed);
-        if high_water > 0 {
+        let already_lost = self.backend.lock().unwrap().is_device_lost(self.handle);
+        if high_water > 0 && !already_lost {
             let mut backend = self.backend.lock().unwrap();
             let _ = backend.wait_until(self.handle, high_water);
         }

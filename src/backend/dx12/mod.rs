@@ -334,6 +334,7 @@ impl Dx12Backend {
             free_dsv_offsets: Vec::new(),
             slang_compiler,
             staging_belts: HashMap::new(),
+            device_removed: std::sync::atomic::AtomicBool::new(false),
         };
 
         Ok(Self { state })
@@ -497,6 +498,12 @@ impl GpuBackend for Dx12Backend {
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {
         self.state.devices.contains_key(&device)
+    }
+
+    fn is_device_lost(&self, _device: DeviceHandle) -> bool {
+        self.state
+            .device_removed
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn create_buffer(
@@ -821,6 +828,18 @@ impl GpuBackend for Dx12Backend {
             .fence
             .clone();
         utils::wait_for_fence(&fence, value)?;
+        // Detect TDR: device removal signals all fences with u64::MAX.
+        let completed = unsafe { fence.GetCompletedValue() };
+        if completed == u64::MAX {
+            self.state
+                .device_removed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(ld) = self.state.devices.get(&device_handle) {
+                let reason = unsafe { ld.device.GetDeviceRemovedReason() };
+                anyhow::bail!("GPU device removed (TDR): {:?}", reason);
+            }
+            anyhow::bail!("GPU device removed (TDR)");
+        }
         if let Some(dev) = self.state.devices.get_mut(&device_handle) {
             dev.process_deletion_queue();
         }
@@ -842,6 +861,18 @@ impl GpuBackend for Dx12Backend {
             .clone();
         let ok = utils::wait_for_fence_timeout(&fence, value, timeout_ms)?;
         if ok {
+            // Detect TDR: device removal signals all fences with u64::MAX.
+            let completed = unsafe { fence.GetCompletedValue() };
+            if completed == u64::MAX {
+                self.state
+                    .device_removed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(ld) = self.state.devices.get(&device_handle) {
+                    let reason = unsafe { ld.device.GetDeviceRemovedReason() };
+                    anyhow::bail!("GPU device removed (TDR): {:?}", reason);
+                }
+                anyhow::bail!("GPU device removed (TDR)");
+            }
             if let Some(dev) = self.state.devices.get_mut(&device_handle) {
                 dev.process_deletion_queue();
             }

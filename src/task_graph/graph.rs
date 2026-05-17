@@ -13,6 +13,7 @@ use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
 use crate::encoder::CommandEncoder;
+use crate::error::GoldyError;
 use crate::render_target::RenderTarget;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
@@ -789,12 +790,12 @@ impl TaskGraph {
 
     /// Analyze the graph and submit all tasks with optimal barriers.
     /// Returns the device [`TimelineValue`] to pass to [`Device::wait_until`].
-    pub fn submit(&self, device: &Device) -> Result<TimelineValue> {
+    pub fn submit(&self, device: &Device) -> Result<TimelineValue, GoldyError> {
         device.submit(self)
     }
 
     /// Analyze the graph, submit, and block until complete.
-    pub fn dispatch(&self, device: &Device) -> Result<()> {
+    pub fn dispatch(&self, device: &Device) -> Result<(), GoldyError> {
         device.dispatch(self)
     }
 
