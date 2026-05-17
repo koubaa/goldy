@@ -70,9 +70,9 @@ pub(super) fn init_storage_texture_uav_layout(
     let b = barriers::texture_barrier_full(
         resource,
         D3D12_BARRIER_SYNC_NONE,
-        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+        D3D12_BARRIER_SYNC_NONE,
         D3D12_BARRIER_ACCESS_NO_ACCESS,
-        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        D3D12_BARRIER_ACCESS_NO_ACCESS,
         last_layout,
         D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
     );

@@ -448,13 +448,6 @@ pub(super) fn resize(
         .context("resize_buffer: command list")?;
         let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
-        unsafe {
-            cmd.SetDescriptorHeaps(&[
-                Some(device.cbv_srv_uav_heap.clone()),
-                Some(device.sampler_heap.clone()),
-            ]);
-        }
-
         if need_copy {
             let mut b_src = [barriers::buffer_barrier_full(
                 &old_resource,
@@ -481,49 +474,49 @@ pub(super) fn resize(
 
         if need_tail_clear {
             let tail_len = new_size - old.size;
-            let mut b_to_uav = [if need_copy {
-                barriers::buffer_barrier_full(
+            // If we just copied old content, new_resource is already in COPY_DEST.
+            // Otherwise transition it from COMMON.
+            if !need_copy {
+                let mut b_to_copy = [barriers::buffer_barrier_full(
                     &new_resource,
+                    D3D12_BARRIER_SYNC_ALL,
                     D3D12_BARRIER_SYNC_COPY,
-                    D3D12_BARRIER_SYNC_ALL,
-                    D3D12_BARRIER_ACCESS_COPY_DEST,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                )
-            } else {
-                barriers::buffer_barrier_full(
-                    &new_resource,
-                    D3D12_BARRIER_SYNC_ALL,
-                    D3D12_BARRIER_SYNC_ALL,
                     D3D12_BARRIER_ACCESS_COMMON,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                )
-            }];
-            unsafe {
-                barriers::barrier_buffers(&cmd7, &b_to_uav);
-                barriers::drop_buffer_barriers(&mut b_to_uav);
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                )];
+                unsafe {
+                    barriers::barrier_buffers(&cmd7, &b_to_copy);
+                    barriers::drop_buffer_barriers(&mut b_to_copy);
+                }
             }
-            let tmp_state = BufferState {
-                device_handle,
-                resource: new_resource.clone(),
-                size: new_size,
-                allocation_size: new_size,
-                bindless_offset: None,
-                bindless_srv_offset: None,
-                is_storage: true,
-                upload_buffer: None,
-                element_stride: old.element_stride,
-                is_view: false,
-                coherent_readback: None,
-                coherent_readback_mapped: None,
-                flags: old.flags,
-                transient_placed: false,
-                parent_for_view: None,
-                view_byte_offset: None,
-                is_reserved: false,
-                tile_byte_size: 0,
-                reserved_tiles: Vec::new(),
-            };
-            uav_clear(device, &tmp_state, &cmd, old.size, tail_len)?;
+            // Zero-fill the tail via chunked CopyBufferRegion from the device's zero buffer.
+            let zero = &device.zero_buffer;
+            let mut tail_written = 0u64;
+            while tail_written < tail_len {
+                let this_chunk = (tail_len - tail_written).min(ZERO_BUFFER_SIZE);
+                unsafe {
+                    cmd.CopyBufferRegion(
+                        &new_resource,
+                        old.size + tail_written,
+                        zero,
+                        0,
+                        this_chunk,
+                    );
+                }
+                tail_written += this_chunk;
+            }
+            // Transition back to COMMON so the resource can be used as UAV by subsequent work.
+            let mut b_to_common = [barriers::buffer_barrier_full(
+                &new_resource,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_ACCESS_COMMON,
+            )];
+            unsafe {
+                barriers::barrier_buffers(&cmd7, &b_to_common);
+                barriers::drop_buffer_barriers(&mut b_to_common);
+            }
         }
 
         unsafe { cmd.Close() }.context("resize_buffer: Close")?;
@@ -1548,6 +1541,10 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 /// Large uploads are split into chunks of this size to avoid massive staging allocations.
 const UPLOAD_CHUNK_SIZE: u64 = 16 * 1024 * 1024; // 16 MB
 
+/// Size of the per-device zero-filled UPLOAD-heap buffer used as the source for
+/// `CopyBufferRegion` clears. Matches `UPLOAD_CHUNK_SIZE` so any single chunk fits.
+pub(super) const ZERO_BUFFER_SIZE: u64 = UPLOAD_CHUNK_SIZE;
+
 /// Ensure the upload (staging) buffer exists for a DEFAULT-heap storage buffer.
 ///
 /// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
@@ -2102,102 +2099,9 @@ pub(super) fn read_to_cpu(
     Ok(())
 }
 
-/// GPU-side zero fill using ClearUnorderedAccessViewUint.
-///
-/// Always creates a R32_UINT UAV (stride=0) so ClearUnorderedAccessViewUint works
-/// regardless of the buffer's native structured stride. The UAV is created in both
-/// the shader-visible heap (GPU handle) and the non-shader-visible cpu_clear_heap
-/// (CPU handle), as required by the D3D12 API.
-pub(super) fn uav_clear(
-    device: &super::types::LogicalDevice,
-    buffer: &BufferState,
-    command_list: &ID3D12GraphicsCommandList,
-    offset: u64,
-    clear_size: u64,
-) -> Result<()> {
-    let scratch = device.scratch_clear_uav_offset;
-    let num_u32s = (buffer.size / 4) as u32;
-
-    let raw_uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-        Format: DXGI_FORMAT_R32_UINT,
-        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
-        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-            Buffer: D3D12_BUFFER_UAV {
-                FirstElement: 0,
-                NumElements: num_u32s,
-                StructureByteStride: 0,
-                CounterOffsetInBytes: 0,
-                Flags: D3D12_BUFFER_UAV_FLAG_NONE,
-            },
-        },
-    };
-
-    let scratch_cpu = unsafe {
-        let mut h = device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (scratch * device.cbv_srv_uav_descriptor_size) as usize;
-        h
-    };
-    unsafe {
-        device.device.CreateUnorderedAccessView(
-            &buffer.resource,
-            None,
-            Some(&raw_uav_desc),
-            scratch_cpu,
-        );
-    }
-
-    let gpu_handle = unsafe {
-        let mut h = device.cbv_srv_uav_heap.GetGPUDescriptorHandleForHeapStart();
-        h.ptr += (scratch as u64) * (device.cbv_srv_uav_descriptor_size as u64);
-        h
-    };
-
-    let cpu_handle = unsafe { device.cpu_clear_heap.GetCPUDescriptorHandleForHeapStart() };
-    unsafe {
-        device.device.CreateUnorderedAccessView(
-            &buffer.resource,
-            None,
-            Some(&raw_uav_desc),
-            cpu_handle,
-        );
-    }
-
-    if offset == 0 && clear_size == buffer.size {
-        unsafe {
-            command_list.ClearUnorderedAccessViewUint(
-                gpu_handle,
-                cpu_handle,
-                &buffer.resource,
-                &[0u32; 4],
-                &[],
-            );
-        }
-    } else {
-        let first_element = offset / 4;
-        let num_elements = clear_size / 4;
-        let rect = windows::Win32::Foundation::RECT {
-            left: first_element as i32,
-            top: 0,
-            right: (first_element + num_elements) as i32,
-            bottom: 1,
-        };
-        unsafe {
-            command_list.ClearUnorderedAccessViewUint(
-                gpu_handle,
-                cpu_handle,
-                &buffer.resource,
-                &[0u32; 4],
-                &[rect],
-            );
-        }
-    }
-
-    Ok(())
-}
-
 /// Fill buffer region with zeros (standalone, synchronous version).
 ///
-/// For DEFAULT heap buffers (storage), uses ClearUnorderedAccessViewUint (no staging needed).
+/// For DEFAULT heap buffers (storage), uses CopyBufferRegion from the device's zero buffer.
 /// For UPLOAD heap buffers (uniform), zeroes directly via Map.
 pub(super) fn clear(
     state: &mut Dx12State,
@@ -2221,7 +2125,9 @@ pub(super) fn clear(
     }
 
     if buffer.is_storage {
-        // DEFAULT heap storage buffer: use ClearUnorderedAccessViewUint (GPU-side, no staging)
+        // DEFAULT heap storage buffer: zero-fill via CopyBufferRegion from the device's
+        // zero buffer. Unlike ClearUnorderedAccessViewUint, CopyBufferRegion has no
+        // per-device shared-descriptor aliasing hazard.
         let device = state
             .devices
             .get(&device_handle)
@@ -2243,16 +2149,44 @@ pub(super) fn clear(
             )
         }
         .context("Failed to create command list")?;
+        let cmd_list7: ID3D12GraphicsCommandList7 =
+            cmd_list.cast().context("ID3D12GraphicsCommandList7")?;
 
-        // Bind descriptor heaps (required for ClearUnorderedAccessViewUint)
+        let buf_resource = buffer.resource.clone();
+        let zero = device.zero_buffer.clone();
+
+        let mut b_to_copy = [barriers::buffer_barrier_full(
+            &buf_resource,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_ACCESS_COMMON,
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+        )];
         unsafe {
-            cmd_list.SetDescriptorHeaps(&[
-                Some(device.cbv_srv_uav_heap.clone()),
-                Some(device.sampler_heap.clone()),
-            ]);
+            barriers::barrier_buffers(&cmd_list7, &b_to_copy);
+            barriers::drop_buffer_barriers(&mut b_to_copy);
         }
 
-        uav_clear(device, buffer, &cmd_list, offset, clear_size)?;
+        let mut written = 0u64;
+        while written < clear_size {
+            let this_chunk = (clear_size - written).min(ZERO_BUFFER_SIZE);
+            unsafe {
+                cmd_list.CopyBufferRegion(&buf_resource, offset + written, &zero, 0, this_chunk);
+            }
+            written += this_chunk;
+        }
+
+        let mut b_to_common = [barriers::buffer_barrier_full(
+            &buf_resource,
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+            D3D12_BARRIER_ACCESS_COMMON,
+        )];
+        unsafe {
+            barriers::barrier_buffers(&cmd_list7, &b_to_common);
+            barriers::drop_buffer_barriers(&mut b_to_common);
+        }
 
         unsafe { cmd_list.Close() }.context("Failed to close command list")?;
 
@@ -2268,7 +2202,7 @@ pub(super) fn clear(
 
         let removed_reason = unsafe { device.device.GetDeviceRemovedReason() };
         if removed_reason.is_err() {
-            anyhow::bail!("Device removed during UAV clear: {:?}", removed_reason);
+            anyhow::bail!("Device removed during buffer clear: {:?}", removed_reason);
         }
 
         if let Some(dev) = state.devices.get_mut(&device_handle) {

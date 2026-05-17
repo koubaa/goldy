@@ -180,6 +180,13 @@ pub(super) fn record_commands_to_buffer(
     };
     let mut current_pipeline: Option<&ComputePipelineState> = None;
 
+    // Set to true once any GPU command (blit or compute) has been recorded
+    // into the current command buffer. The WriteBuffer CPU memcpy fast path
+    // must be skipped when this is true, because prior recorded commands
+    // (e.g. ClearBuffer fill_buffer) haven't executed yet and would overwrite
+    // the memcpy result when the command buffer is later committed.
+    let mut has_recorded_gpu_work = false;
+
     macro_rules! end_compute {
         () => {
             if let Some(enc) = guard.compute.take() {
@@ -207,15 +214,22 @@ pub(super) fn record_commands_to_buffer(
                 }
                 guard.compute = Some(enc);
             }
+            has_recorded_gpu_work = true;
         };
     }
 
     macro_rules! ensure_blit {
         () => {
             end_compute!();
-            if guard.blit.is_none() {
-                guard.blit = Some(command_buffer.new_blit_command_encoder());
-            }
+            // End any active blit encoder before opening a new one. Metal does not
+            // guarantee ordering between commands within the same blit encoder (e.g.
+            // fill_buffer and copy_from_buffer targeting the same buffer may execute
+            // in any order). Ending and reopening creates a new encoder boundary which
+            // Metal serializes, so each ClearBuffer/WriteBuffer command executes in
+            // strictly program order relative to every other blit command.
+            end_blit!();
+            guard.blit = Some(command_buffer.new_blit_command_encoder());
+            has_recorded_gpu_work = true;
         };
     }
 
@@ -257,16 +271,18 @@ pub(super) fn record_commands_to_buffer(
                     *offset + data.len() as u64 <= buf_state.size,
                     "WriteBuffer: write exceeds buffer bounds"
                 );
-                // Direct CPU memcpy is safe only when no previously-committed GPU
-                // work is still in flight: if the GPU has already signaled past the
-                // last committed timeline, all reads from this buffer are complete.
-                // Otherwise we fall through to the staged blit path to avoid a race.
+                // Direct CPU memcpy is safe only when (a) no previously-committed GPU
+                // work is still in flight AND (b) no GPU commands have been recorded
+                // into the current command buffer. Condition (b) is critical: a prior
+                // ClearBuffer fill_buffer is recorded but hasn't executed; a CPU memcpy
+                // here would be overwritten when the command buffer commits.
                 const SMALL_WRITE_THRESHOLD: usize = 4096;
                 let gpu_idle = logical_device
                     .last_committed_timeline
                     .map(|last| logical_device.timeline_event.as_ref().signaled_value() >= last)
                     .unwrap_or(true);
                 if gpu_idle
+                    && !has_recorded_gpu_work
                     && !buf_state
                         .flags
                         .contains(crate::types::BufferFlags::GPU_ONLY)
