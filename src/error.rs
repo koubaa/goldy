@@ -1,7 +1,7 @@
 /// Typed error variants for the goldy public API.
 ///
-/// Returned by [`Device::submit`], [`Device::dispatch`], [`Device::wait_until`],
-/// and [`Device::wait_until_timeout`] so callers can distinguish recoverable
+/// Returned by [`crate::Device::submit`], [`crate::Device::dispatch`], [`crate::Device::wait_until`],
+/// and [`crate::Device::wait_until_timeout`] so callers can distinguish recoverable
 /// conditions (timeout) from permanent ones (device loss) without string-matching.
 #[derive(Debug, thiserror::Error)]
 pub enum GoldyError {
@@ -22,7 +22,7 @@ pub enum GoldyError {
 
     /// A fence or timeline wait exceeded the requested timeout.
     ///
-    /// Returned by [`Device::wait_until_timeout`] when the GPU has not
+    /// Returned by [`crate::Device::wait_until_timeout`] when the GPU has not
     /// reached the target [`TimelineValue`](crate::TimelineValue) within
     /// the specified `timeout_ms`. The device itself is still healthy.
     #[error("GPU submit timed out")]
