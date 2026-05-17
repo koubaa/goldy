@@ -85,6 +85,50 @@ pub(crate) fn env_disable_reserved_buffers() -> bool {
 
 static DEBUG_LAYER_INIT: Once = Once::new();
 
+/// The D3D12 debug layer raises SEH exception 0x87D when it detects API
+/// violations. Without a handler, the default behaviour terminates the process
+/// with exit code 2173 (= 0x87D). This filter catches the exception so that
+/// the debug layer message is surfaced through the info queue instead.
+pub(super) fn install_debug_layer_exception_handler() {
+    const D3D12_DEBUG_LAYER_EXCEPTION: u32 = 0x87D;
+
+    static HANDLER_INIT: Once = Once::new();
+    HANDLER_INIT.call_once(|| {
+        extern "system" {
+            fn SetUnhandledExceptionFilter(
+                filter: Option<unsafe extern "system" fn(*mut std::ffi::c_void) -> i32>,
+            ) -> Option<unsafe extern "system" fn(*mut std::ffi::c_void) -> i32>;
+        }
+
+        unsafe extern "system" fn d3d12_exception_filter(info: *mut std::ffi::c_void) -> i32 {
+            #[repr(C)]
+            struct ExceptionRecord {
+                exception_code: u32,
+                _rest: [usize; 5],
+            }
+            #[repr(C)]
+            struct ExceptionPointers {
+                exception_record: *mut ExceptionRecord,
+                _context_record: *mut std::ffi::c_void,
+            }
+            let ptrs = info as *const ExceptionPointers;
+            let code = if !ptrs.is_null() && !(*ptrs).exception_record.is_null() {
+                (*(*ptrs).exception_record).exception_code
+            } else {
+                0
+            };
+            if code == D3D12_DEBUG_LAYER_EXCEPTION {
+                -1 // EXCEPTION_CONTINUE_EXECUTION
+            } else {
+                0 // EXCEPTION_CONTINUE_SEARCH
+            }
+        }
+        unsafe {
+            SetUnhandledExceptionFilter(Some(d3d12_exception_filter));
+        }
+    });
+}
+
 /// Shared DX12 backend singleton.
 ///
 /// The D3D12 debug layer tracks all objects process-wide and is not thread-safe
@@ -95,7 +139,11 @@ static SHARED_DX12: OnceLock<Arc<Mutex<Box<dyn super::GpuBackend>>>> = OnceLock:
 
 /// True when the D3D12 debug layer will be enabled (debug build or GOLDY_DX12_DEBUG=1).
 /// Used to decide between singleton (debug) vs per-instance (release) backend.
-fn is_debug_mode() -> bool {
+///
+/// Tests that create multiple D3D12 devices should serialize under a lock when
+/// this returns `true` — the debug layer validates resources process-wide and
+/// is not safe under concurrent device lifetimes.
+pub fn is_debug_mode() -> bool {
     let no_debug = std::env::var("GOLDY_DX12_NO_DEBUG").is_ok_and(|v| v == "1" || v == "true");
     !no_debug
         && (cfg!(debug_assertions)

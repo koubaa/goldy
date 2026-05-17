@@ -71,6 +71,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let device = device.context("D3D12CreateDevice returned null")?;
     let device = device_with_enhanced_barriers(device)?;
 
+    super::install_debug_layer_exception_handler();
+
     let mut d3d12_options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
     unsafe {
         device
@@ -266,10 +268,12 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
-    // Initialize compute allocator pool with the primary allocator
+    let compute_initial_allocator: ID3D12CommandAllocator =
+        unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+            .context("Failed to create compute command allocator")?;
     let compute_allocator_pool = vec![types::ComputeAllocatorSlot {
-        allocator: command_allocator.clone(),
-        fence_value: 0, // Not yet used; GetCompletedValue() >= 0 so slot is free
+        allocator: compute_initial_allocator,
+        fence_value: 0,
     }];
 
     let mut resource_registry = types::ResourceRegistry::new();
