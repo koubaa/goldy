@@ -624,6 +624,21 @@ pub(super) fn submit(
                             *offset,
                             clear_size,
                         )?;
+                        // ClearUnorderedAccessViewUint is a CLEAR_UNORDERED_ACCESS_VIEW
+                        // operation, not COMPUTE_SHADING. The TaskGraph-inserted
+                        // ResourceBarrier uses SyncBefore=COMPUTE_SHADING, which does not
+                        // cover the clear. Insert an explicit barrier here so that any
+                        // subsequent compute shader correctly observes the zeroed data.
+                        let g = D3D12_GLOBAL_BARRIER {
+                            SyncBefore: D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW,
+                            SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            AccessAfter: D3D12_BARRIER_ACCESS(
+                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+                                    | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
+                            ),
+                        };
+                        unsafe { barriers::barrier_globals(&command_list7, &[g]) };
                     } else {
                         // UPLOAD heap buffer: CPU-accessible, just memset
                         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
