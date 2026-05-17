@@ -2766,7 +2766,7 @@ fn test_transient_buffer_write_then_copy() {
 
     graph
         .node("copy_out", &copy_pipeline)
-        .bind_transient_buffer(tid, NodeAccess::Read)
+        .bind_transient_buffer(tid, NodeAccess::ReadWrite)
         .bind_buffer(&output, NodeAccess::Write)
         .bind_resources_raw_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
