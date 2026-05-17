@@ -40,6 +40,7 @@ pub mod placement_heap;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
+pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};

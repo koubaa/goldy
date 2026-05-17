@@ -60,10 +60,63 @@
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::texture::Texture;
+use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::Result;
+use std::any::Any;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+
+// -----------------------------------------------------------------------
+// DeferredPayload
+// -----------------------------------------------------------------------
+
+/// A type-erased bundle of GPU resources to be held alive until a GPU timeline epoch retires.
+///
+/// Passed to [`VramAllocator::defer_release`] to register resources for deferred dropping.
+/// The allocator holds the payload until [`VramAllocator::reclaim`] determines that the
+/// associated epoch has been reached, then drops all resources in the payload.
+///
+/// # Example
+///
+/// ```no_run
+/// # use goldy::vram_allocator::DeferredPayload;
+/// # use goldy::buffer::Buffer;
+/// # fn example(buf: Buffer, view: goldy::buffer::BufferView) {
+/// let mut payload = DeferredPayload::new();
+/// payload.push(buf).push(view);
+/// # }
+/// ```
+pub struct DeferredPayload(pub(crate) Vec<Box<dyn Any + Send>>);
+
+impl DeferredPayload {
+    /// Create an empty payload.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Add a resource to this payload. Returns `&mut Self` for chaining.
+    pub fn push<T: Send + 'static>(&mut self, resource: T) -> &mut Self {
+        self.0.push(Box::new(resource));
+        self
+    }
+
+    /// Returns `true` if no resources have been added.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Number of resources in this payload.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Default for DeferredPayload {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // -----------------------------------------------------------------------
 // Trait
@@ -153,6 +206,39 @@ pub trait VramAllocator: Send + Sync {
 
     /// Strategy identifier for diagnostics and tracing.
     fn name(&self) -> &'static str;
+
+    /// Register `payload` for deferred dropping after GPU timeline `epoch` retires.
+    ///
+    /// The allocator holds all resources in the payload alive until a subsequent call to
+    /// [`reclaim`](Self::reclaim) observes `gpu_progress >= epoch`, at which point the
+    /// payload is dropped. Entries are expected to arrive roughly in epoch order; calling
+    /// [`reclaim`] drains from the front.
+    ///
+    /// Custom allocators that manage their own memory (e.g. PTX slab allocators) should
+    /// override this to integrate with their internal reclamation pipeline.
+    ///
+    /// The default implementation is a no-op: payloads are dropped immediately.
+    fn defer_release(&self, _epoch: TimelineValue, _payload: DeferredPayload) {}
+
+    /// Reclaim all deferred payloads whose epoch is `<= gpu_progress`, dropping them.
+    ///
+    /// Returns the number of entries reclaimed. Typically called from
+    /// [`Device::flush_deferred_deletions`](crate::device::Device::flush_deferred_deletions)
+    /// at frame boundaries.
+    ///
+    /// The default implementation is a no-op and returns 0.
+    fn reclaim(&self, _gpu_progress: TimelineValue) -> usize {
+        0
+    }
+
+    /// Drop all deferred payloads unconditionally, regardless of their epoch.
+    ///
+    /// Called by the device on shutdown, after waiting for the high-water timeline,
+    /// to ensure nothing leaks across `destroy_device`. Also callable by consumers
+    /// that know the GPU is idle and want to eagerly reclaim memory.
+    ///
+    /// The default implementation is a no-op.
+    fn drain(&self) {}
 }
 
 // -----------------------------------------------------------------------
