@@ -568,7 +568,8 @@ impl TaskGraph {
         Ok(GraphIR { nodes })
     }
 
-    pub(crate) fn has_transient_resources(&self) -> bool {
+    /// True if the graph has any transient resources (buffers and/or textures).
+    pub fn has_transient_resources(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
     }
 
