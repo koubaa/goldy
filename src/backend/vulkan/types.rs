@@ -886,4 +886,3 @@ pub(super) struct VulkanState {
     /// (one submit may register multiple buffers at the same timeline point).
     pub timeline_cmd_buffers: HashMap<u64, Vec<(DeviceHandle, vk::CommandBuffer)>>,
 }
-
