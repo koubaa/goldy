@@ -363,6 +363,16 @@ pub trait GpuBackend: Send + Sync {
     fn destroy_device(&mut self, device: DeviceHandle);
     fn is_device_valid(&self, device: DeviceHandle) -> bool;
 
+    /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
+    ///
+    /// Backends set this flag atomically when they detect device loss so that
+    /// [`Device::is_device_lost`](crate::Device::is_device_lost) can be polled from the
+    /// render loop without acquiring any lock. The default returns `false` for
+    /// backends that have not yet wired up the flag.
+    fn is_device_lost(&self, _device: DeviceHandle) -> bool {
+        false
+    }
+
     // Buffer management
     fn create_buffer(
         &mut self,

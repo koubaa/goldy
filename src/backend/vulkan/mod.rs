@@ -255,6 +255,7 @@ impl VulkanBackend {
             compute_texture_staging_pool: HashMap::new(),
             staging_belts: HashMap::new(),
             timeline_cmd_buffers: HashMap::new(),
+            device_lost: std::sync::atomic::AtomicBool::new(false),
         };
 
         Ok(Self { state })
@@ -297,6 +298,12 @@ impl GpuBackend for VulkanBackend {
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {
         device::is_valid(&self.state, device)
+    }
+
+    fn is_device_lost(&self, _device: DeviceHandle) -> bool {
+        self.state
+            .device_lost
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn create_buffer(
@@ -1029,7 +1036,14 @@ impl GpuBackend for VulkanBackend {
         let wait = vk::SemaphoreWaitInfo::default()
             .semaphores(std::slice::from_ref(&sem))
             .values(std::slice::from_ref(&value));
-        unsafe { dev.wait_semaphores(&wait, u64::MAX) }.context("wait_semaphores failed")?;
+        if let Err(e) = unsafe { dev.wait_semaphores(&wait, u64::MAX) } {
+            if e == vk::Result::ERROR_DEVICE_LOST {
+                self.state
+                    .device_lost
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return Err(anyhow::anyhow!("wait_semaphores: {:?}", e));
+        }
         compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
             let drained = ld.deletion_queue.drain_up_to(value);
@@ -1069,7 +1083,14 @@ impl GpuBackend for VulkanBackend {
                 Ok(true)
             }
             Err(vk::Result::TIMEOUT) => Ok(false),
-            Err(e) => Err(anyhow::anyhow!("wait_semaphores: {:?}", e)),
+            Err(e) => {
+                if e == vk::Result::ERROR_DEVICE_LOST {
+                    self.state
+                        .device_lost
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(anyhow::anyhow!("wait_semaphores: {:?}", e))
+            }
         }
     }
 

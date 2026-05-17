@@ -885,4 +885,7 @@ pub(super) struct VulkanState {
     /// Command buffers to free once the device timeline reaches the given value
     /// (one submit may register multiple buffers at the same timeline point).
     pub timeline_cmd_buffers: HashMap<u64, Vec<(DeviceHandle, vk::CommandBuffer)>>,
+    /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
+    /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
+    pub device_lost: std::sync::atomic::AtomicBool,
 }
