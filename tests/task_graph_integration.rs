@@ -613,10 +613,7 @@ fn stress_clear_write_dispatch_chain() {
     let result = readback_u32(&device, &out, N);
     for (i, &val) in result.iter().enumerate() {
         let expected = known_data[i];
-        assert_eq!(
-            val, expected,
-            "element {i}: expected {expected}, got {val}"
-        );
+        assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
     }
 }
 
@@ -737,8 +734,7 @@ void cs_main(Scattered<uint> args, ThreadId id) {
 "#;
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
-    let write_args_shader =
-        ShaderModule::from_slang(&device, write_args_shader_src).unwrap();
+    let write_args_shader = ShaderModule::from_slang(&device, write_args_shader_src).unwrap();
     let write_args_pipe = ComputePipeline::new(&device, &write_args_shader).unwrap();
 
     const N: usize = 256;
