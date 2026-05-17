@@ -607,9 +607,47 @@ impl Device {
     /// consumers that drop buffers between those points (e.g. during a
     /// non-blocking frame drain) can call this to reclaim slots immediately
     /// rather than waiting for the next internal call.
+    ///
+    /// Also reclaims any [`DeferredPayload`]s registered via [`defer_release`] whose
+    /// epoch has been reached.
+    ///
+    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
+    /// [`defer_release`]: Self::defer_release
     pub fn flush_deferred_deletions(&self) {
         let mut backend = self.inner.backend.lock().unwrap();
         backend.flush_deferred_deletions(self.inner.handle);
+        let progress = backend.gpu_progress(self.inner.handle);
+        drop(backend);
+        self.inner.vram_allocator.reclaim(progress);
+    }
+
+    /// Register a [`DeferredPayload`] for deferred dropping after GPU timeline `epoch` retires.
+    ///
+    /// The device's [`VramAllocator`] holds the payload alive until a subsequent call to
+    /// [`flush_deferred_deletions`] or device [`Drop`] observes `gpu_progress >= epoch`, at
+    /// which point all resources in the payload are dropped.
+    ///
+    /// This is a lower-level primitive. Prefer [`GpuGuard`](crate::gpu_guard::GpuGuard) for
+    /// ergonomic RAII-based resource lifetime management.
+    ///
+    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    /// [`flush_deferred_deletions`]: Self::flush_deferred_deletions
+    pub fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
+        self.inner.vram_allocator.defer_release(epoch, payload);
+    }
+
+    /// Convenience wrapper around [`defer_release`]: defer a single resource until `epoch` retires.
+    ///
+    /// Wraps `resource` in a [`DeferredPayload`] and forwards to the device's [`VramAllocator`].
+    ///
+    /// [`defer_release`]: Self::defer_release
+    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    pub fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
+        let mut payload = crate::vram_allocator::DeferredPayload::new();
+        payload.push(resource);
+        self.inner.vram_allocator.defer_release(epoch, payload);
     }
 
     #[doc(hidden)]
@@ -1007,12 +1045,15 @@ impl Drop for DeviceInner {
             "Destroying GPU device"
         );
         // Wait for all submitted GPU work to complete. This covers any in-flight work not
-        // covered by the placement-heap wait below (e.g. non-transient submits held by callers).
+        // covered by the placement-heap wait (e.g. non-transient submits held by callers).
         let high_water = self.high_water_timeline.load(Ordering::Relaxed);
         if high_water > 0 {
             let mut backend = self.backend.lock().unwrap();
             let _ = backend.wait_until(self.handle, high_water);
         }
+        // Drop all deferred payloads. The GPU has completed all submitted work (high-water
+        // wait above), so it is safe to release any resources that were deferred.
+        self.vram_allocator.drain();
         // Drop the placement heap (and its views/buffer) while the device is still alive.
         // The heap's in-flight work is already covered by the high-water wait above.
         if let Ok(mut heap_guard) = self.placement_heap.lock() {
@@ -1051,6 +1092,60 @@ mod tests {
         let tv2 = device.submit(&graph).unwrap();
         assert!(tv2 > tv);
         assert_eq!(device.high_water_timeline(), tv2);
+    }
+
+    #[test]
+    fn defer_until_resources_are_not_dropped_before_epoch() {
+        use crate::task_graph::TaskGraph;
+        let device = test_device();
+        let graph = TaskGraph::new();
+        let tv = device.submit(&graph).unwrap();
+
+        let alive = std::sync::Arc::new(99u32);
+        let weak = std::sync::Arc::downgrade(&alive);
+
+        // Defer with a far-future epoch — resource must not drop yet.
+        device.defer_until(tv + 100, alive);
+
+        // flush_deferred_deletions with current gpu_progress (tv) should not reclaim tv+100.
+        device.flush_deferred_deletions();
+        assert!(weak.upgrade().is_some(), "resource should still be alive after flush at tv");
+    }
+
+    #[test]
+    fn defer_until_resources_dropped_after_flush_at_epoch() {
+        use crate::task_graph::TaskGraph;
+        let device = test_device();
+        let graph = TaskGraph::new();
+        let tv = device.submit(&graph).unwrap();
+
+        let alive = std::sync::Arc::new(42u32);
+        let weak = std::sync::Arc::downgrade(&alive);
+
+        device.defer_until(tv, alive);
+
+        // After advancing GPU to tv and flushing, resource should be dropped.
+        device.wait_until(tv).unwrap();
+        device.flush_deferred_deletions();
+        assert!(weak.upgrade().is_none(), "resource should be dropped after flush at epoch");
+    }
+
+    #[test]
+    fn defer_release_drops_all_on_device_drop() {
+        use crate::task_graph::TaskGraph;
+        let device = test_device();
+        let graph = TaskGraph::new();
+        let tv = device.submit(&graph).unwrap();
+
+        let alive = std::sync::Arc::new(7u32);
+        let weak = std::sync::Arc::downgrade(&alive);
+
+        // Defer with a far-future epoch so normal flush won't reclaim it.
+        device.defer_until(tv + 9999, alive);
+
+        // Dropping the device should drain all deferred resources.
+        drop(device);
+        assert!(weak.upgrade().is_none(), "device drop should drain deferred resources");
     }
 
     #[test]
