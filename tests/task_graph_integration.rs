@@ -472,3 +472,364 @@ fn write_then_dispatch_reads_uploaded_data() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// GPU synchronization stress tests
+//
+// These tests target the same barrier scenarios that cause `many_bins_test`
+// flakiness in ekrano issue #26. They isolate specific patterns at the goldy
+// layer to narrow down which GPU sync path is broken.
+//
+// Each test should be run in a tight loop (e.g. 100x) to detect intermittent
+// failures:
+//   cargo test -p goldy --test task_graph_integration <name> -- --nocapture
+// ---------------------------------------------------------------------------
+
+/// Stress: clear a large buffer then verify every element is zero.
+///
+/// Uses 16K u32 elements (64 KiB) dispatched across 256 workgroups of 64 threads.
+/// This is the minimal repro shape for the `ClearBuffer → compute dispatch`
+/// barrier path. If the post-clear barrier is missing, some workgroups may read
+/// stale (nonzero) data.
+#[test]
+fn stress_clear_then_dispatch_large() {
+    let device = make_device();
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+
+    const N: usize = 16384;
+    let nonzero: Vec<u32> = (1..=N as u32).collect();
+    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
+    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+
+    let buf_idx = buf.bindless_index().unwrap();
+    let out_idx = out.bindless_index().unwrap();
+
+    let mut graph = TaskGraph::new();
+    graph.clear_buffer(&buf, 0, (N * 4) as u64);
+    graph
+        .node("copy", &copy_pipe)
+        .bind_buffer(&buf, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .dispatch((N / 64) as u32, 1, 1);
+
+    graph.dispatch(&device).unwrap();
+
+    let result = readback_u32(&device, &out, N);
+    let nonzero_count = result.iter().filter(|&&v| v != 0).count();
+    assert_eq!(
+        nonzero_count, 0,
+        "expected all zeros after clear, but {nonzero_count}/{N} elements were nonzero"
+    );
+}
+
+/// Stress: many clears + many dispatches reading the cleared buffers in one graph.
+///
+/// Mimics Ekrano's pattern of clearing multiple pool buffers then dispatching
+/// shaders that read them all. If any clear → dispatch barrier is missing,
+/// some dispatches may read stale data.
+#[test]
+fn stress_many_clears_many_dispatches() {
+    let device = make_device();
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+
+    const N: usize = 1024;
+    const NUM_BUFS: usize = 8;
+
+    let mut srcs = Vec::new();
+    let mut outs = Vec::new();
+    for _ in 0..NUM_BUFS {
+        let nonzero: Vec<u32> = (1..=N as u32).collect();
+        srcs.push(Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap());
+        outs.push(Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap());
+    }
+
+    let mut graph = TaskGraph::new();
+    for src in &srcs {
+        graph.clear_buffer(src, 0, (N * 4) as u64);
+    }
+    for (src, out) in srcs.iter().zip(outs.iter()) {
+        let src_idx = src.bindless_index().unwrap();
+        let out_idx = out.bindless_index().unwrap();
+        graph
+            .node("copy", &copy_pipe)
+            .bind_buffer(src, NodeAccess::Read)
+            .bind_buffer(out, NodeAccess::Write)
+            .bind_resources_raw_slice(&[src_idx, out_idx])
+            .dispatch((N / 64) as u32, 1, 1);
+    }
+
+    graph.dispatch(&device).unwrap();
+
+    for (i, out) in outs.iter().enumerate() {
+        let result = readback_u32(&device, out, N);
+        let nonzero_count = result.iter().filter(|&&v| v != 0).count();
+        assert_eq!(
+            nonzero_count, 0,
+            "buffer {i}: expected all zeros, but {nonzero_count}/{N} elements were nonzero"
+        );
+    }
+}
+
+/// Stress: clear → write → dispatch chain, exercising both clear and write barriers.
+///
+/// Buffer is first filled with nonzero data, then cleared to zero, then
+/// overwritten with known data via write_buffer, then a dispatch copies it out.
+/// Exercises Clear→Write (WAW) and Write→Dispatch (RAW) barrier insertion.
+#[test]
+fn stress_clear_write_dispatch_chain() {
+    let device = make_device();
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+
+    const N: usize = 1024;
+    let nonzero: Vec<u32> = (1..=N as u32).collect();
+    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
+    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+
+    let buf_idx = buf.bindless_index().unwrap();
+    let out_idx = out.bindless_index().unwrap();
+
+    let known_data: Vec<u32> = (0..N as u32).map(|i| i * 7 + 42).collect();
+    let data_bytes: Vec<u8> = bytemuck::cast_slice(&known_data).to_vec();
+
+    let mut graph = TaskGraph::new();
+    graph.clear_buffer(&buf, 0, (N * 4) as u64);
+    graph.write_buffer(&buf, 0, data_bytes);
+    graph
+        .node("copy", &copy_pipe)
+        .bind_buffer(&buf, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .dispatch((N / 64) as u32, 1, 1);
+
+    graph.dispatch(&device).unwrap();
+
+    let result = readback_u32(&device, &out, N);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = known_data[i];
+        assert_eq!(
+            val, expected,
+            "element {i}: expected {expected}, got {val}"
+        );
+    }
+}
+
+/// Stress: two-phase submission — submit one graph, then submit a second graph
+/// that reads the output of the first.
+///
+/// Tests inter-submission synchronization (tail barrier correctness).
+/// Mimics Ekrano's coarse→fine two-phase rendering where flush_mid_frame
+/// submits the coarse graph and then the fine graph reads its output.
+#[test]
+fn stress_two_phase_submission() {
+    let device = make_device();
+
+    let double_shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap();
+    let add_shader = ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap();
+    let double_pipe = ComputePipeline::new(&device, &double_shader).unwrap();
+    let add_pipe = ComputePipeline::new(&device, &add_shader).unwrap();
+
+    const N: usize = 4096;
+    let input: Vec<u32> = (0..N as u32).collect();
+    let buf = Buffer::with_data(&device, &input, DataAccess::Scattered).unwrap();
+    let buf_idx = buf.bindless_index().unwrap();
+
+    // Phase 1: double in-place. Use a tmp buffer since DOUBLE_SHADER reads
+    // from one buffer and writes to another.
+    let tmp = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+    let tmp_idx = tmp.bindless_index().unwrap();
+
+    {
+        let mut graph = TaskGraph::new();
+        graph
+            .node("double", &double_pipe)
+            .bind_buffer(&buf, NodeAccess::Read)
+            .bind_buffer(&tmp, NodeAccess::Write)
+            .bind_resources_raw_slice(&[buf_idx, tmp_idx])
+            .dispatch((N / 64) as u32, 1, 1);
+        let tv = graph.submit(&device).unwrap();
+        device.wait_until(tv).unwrap();
+    }
+
+    // Phase 2: add 10 to the doubled values.
+    {
+        let mut graph = TaskGraph::new();
+        graph
+            .node("add_ten", &add_pipe)
+            .bind_buffer(&tmp, NodeAccess::ReadWrite)
+            .bind_resources_raw_slice(&[tmp_idx])
+            .dispatch((N / 64) as u32, 1, 1);
+        graph.dispatch(&device).unwrap();
+    }
+
+    let result = readback_u32(&device, &tmp, N);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = (i as u32) * 2 + 10;
+        assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
+    }
+}
+
+/// Stress: rapid back-to-back submissions without waiting.
+///
+/// Submit N graphs in quick succession, each depending on the previous one's
+/// output, using only `submit` (non-blocking). Wait only at the end.
+/// This stresses the queue fence synchronization path.
+#[test]
+fn stress_rapid_submissions() {
+    let device = make_device();
+
+    let add_shader = ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap();
+    let add_pipe = ComputePipeline::new(&device, &add_shader).unwrap();
+
+    const N: usize = 256;
+    let zeros: Vec<u32> = vec![0; N];
+    let buf = Buffer::with_data(&device, &zeros, DataAccess::Scattered).unwrap();
+    let idx = buf.bindless_index().unwrap();
+
+    const ROUNDS: u32 = 20;
+    let mut last_tv = None;
+    for _ in 0..ROUNDS {
+        let mut graph = TaskGraph::new();
+        graph
+            .node("add_ten", &add_pipe)
+            .bind_buffer(&buf, NodeAccess::ReadWrite)
+            .bind_resources_raw_slice(&[idx])
+            .dispatch((N / 64) as u32, 1, 1);
+        last_tv = Some(graph.submit(&device).unwrap());
+    }
+
+    device.wait_until(last_tv.unwrap()).unwrap();
+
+    let result = readback_u32(&device, &buf, N);
+    let expected = ROUNDS * 10;
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
+    }
+}
+
+/// Stress: clear large buffer with indirect dispatch reading it.
+///
+/// Exercises the ClearBuffer → DispatchIndirect path. The indirect argument
+/// buffer is written by one dispatch, then a second dispatch is launched
+/// indirectly. The cleared data buffer must be fully zero when the indirect
+/// dispatch reads it.
+#[test]
+fn stress_clear_then_indirect_dispatch() {
+    let device = make_device();
+
+    // Shader that writes dispatch args: (N/64, 1, 1) at offset 0
+    let write_args_shader_src = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> args, ThreadId id) {
+    args[0] = 4;  // 256/64 workgroups
+    args[1] = 1;
+    args[2] = 1;
+}
+"#;
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+    let write_args_shader =
+        ShaderModule::from_slang(&device, write_args_shader_src).unwrap();
+    let write_args_pipe = ComputePipeline::new(&device, &write_args_shader).unwrap();
+
+    const N: usize = 256;
+
+    let nonzero: Vec<u32> = (1..=N as u32).collect();
+    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
+    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+    let args = Buffer::new(&device, 12, DataAccess::Scattered).unwrap();
+
+    let buf_idx = buf.bindless_index().unwrap();
+    let out_idx = out.bindless_index().unwrap();
+    let args_idx = args.bindless_index().unwrap();
+
+    let mut graph = TaskGraph::new();
+    graph.clear_buffer(&buf, 0, (N * 4) as u64);
+    graph
+        .node("write_args", &write_args_pipe)
+        .bind_buffer(&args, NodeAccess::Write)
+        .bind_resources_raw_slice(&[args_idx])
+        .dispatch(1, 1, 1);
+    graph
+        .node("copy_indirect", &copy_pipe)
+        .bind_buffer(&buf, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_buffer(&args, NodeAccess::Read)
+        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .dispatch_indirect(&args, 0);
+
+    graph.dispatch(&device).unwrap();
+
+    let result = readback_u32(&device, &out, N);
+    let nonzero_count = result.iter().filter(|&&v| v != 0).count();
+    assert_eq!(
+        nonzero_count, 0,
+        "expected all zeros after clear + indirect dispatch, but {nonzero_count}/{N} were nonzero"
+    );
+}
+
+/// Stress: write → dispatch → write → dispatch chain.
+///
+/// Two write_buffer nodes each followed by a dispatch that reads the buffer,
+/// all in one graph. The second write overwrites what the first dispatch read.
+/// Tests WAW and RAW barrier insertion in sequence.
+#[test]
+fn stress_alternating_write_dispatch() {
+    let device = make_device();
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+
+    const N: usize = 256;
+
+    let buf = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+    let out1 = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+    let out2 = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+
+    let buf_idx = buf.bindless_index().unwrap();
+    let out1_idx = out1.bindless_index().unwrap();
+    let out2_idx = out2.bindless_index().unwrap();
+
+    let data1: Vec<u32> = (0..N as u32).map(|i| i + 100).collect();
+    let data2: Vec<u32> = (0..N as u32).map(|i| i + 200).collect();
+    let bytes1: Vec<u8> = bytemuck::cast_slice(&data1).to_vec();
+    let bytes2: Vec<u8> = bytemuck::cast_slice(&data2).to_vec();
+
+    let mut graph = TaskGraph::new();
+    // Phase 1: write data1 → copy to out1
+    graph.write_buffer(&buf, 0, bytes1);
+    graph
+        .node("copy1", &copy_pipe)
+        .bind_buffer(&buf, NodeAccess::Read)
+        .bind_buffer(&out1, NodeAccess::Write)
+        .bind_resources_raw_slice(&[buf_idx, out1_idx])
+        .dispatch((N / 64) as u32, 1, 1);
+    // Phase 2: write data2 (overwrites buf) → copy to out2
+    graph.write_buffer(&buf, 0, bytes2);
+    graph
+        .node("copy2", &copy_pipe)
+        .bind_buffer(&buf, NodeAccess::Read)
+        .bind_buffer(&out2, NodeAccess::Write)
+        .bind_resources_raw_slice(&[buf_idx, out2_idx])
+        .dispatch((N / 64) as u32, 1, 1);
+
+    graph.dispatch(&device).unwrap();
+
+    let result1 = readback_u32(&device, &out1, N);
+    for (i, &val) in result1.iter().enumerate() {
+        assert_eq!(val, data1[i], "out1[{i}]: expected {}, got {val}", data1[i]);
+    }
+    let result2 = readback_u32(&device, &out2, N);
+    for (i, &val) in result2.iter().enumerate() {
+        assert_eq!(val, data2[i], "out2[{i}]: expected {}, got {val}", data2[i]);
+    }
+}
