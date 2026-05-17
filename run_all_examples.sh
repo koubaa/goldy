@@ -48,7 +48,7 @@ for i in "${!EXAMPLES[@]}"; do
     echo "========================================"
 
     start_ns=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
-    output=$(cargo run --example "$name" 2>&1) || true
+    output=$(cargo run --example "$name" --features examples 2>&1) || true
     end_ns=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
 
     echo "$output"

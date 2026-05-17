@@ -11,6 +11,7 @@ description = "Goldy - Modern Graphics Library"
 repository = "https://github.com/koubaa/goldy"
 keywords = ["gpu", "graphics", "vulkan", "rendering"]
 categories = ["graphics", "rendering"]
+autoexamples = false
 
 # Allow unexpected_cfgs for objc crate's deprecated cargo-clippy cfg checks
 [lints.rust]
@@ -79,20 +80,9 @@ block = { version = "0.1", optional = true }
 [dev-dependencies]
 tempfile = "3"
 
-# PNG output for examples / integration tests that save images
-image = "0.25"
-
 # FLIP perceptual image comparison for screenshot tests
 nv-flip = "0.1"
 png = "0.18"
-
-# Tracing subscriber for examples
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Windowing for interactive examples
-winit = "0.30"
-
-zstd = "0.13"
 
 [features]
 # Default enables all platform-appropriate backends
@@ -105,82 +95,103 @@ metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:f
 update-screenshots = ["dep:image"]
 # Structured instrumentation with named observation points (zero-cost when disabled)
 instrumentation = ["dep:tracing-subscriber"]
+# Interactive `examples/*.rs` (winit); avoids compiling winit for tests / lib-only builds
+examples = ["dep:winit"]
 
 [[example]]
 name = "triangle"
 path = "examples/triangle.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "digital_clock"
 path = "examples/digital_clock.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "gradient"
 path = "examples/gradient.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "plasma"
 path = "examples/plasma.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "starfield"
 path = "examples/starfield.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "mandelbrot"
 path = "examples/mandelbrot.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "bouncing_lines"
 path = "examples/bouncing_lines.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "spinning_cube"
 path = "examples/spinning_cube.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "metaballs"
 path = "examples/metaballs.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "checkerboard"
 path = "examples/checkerboard.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "instancing"
 path = "examples/instancing.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "particles"
 path = "examples/particles.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "waveform"
 path = "examples/waveform.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "tunnel"
 path = "examples/tunnel.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "multi_window"
 path = "examples/multi_window.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "compute_particles"
 path = "examples/compute_particles.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "game_of_life"
 path = "examples/game_of_life.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "depth_quads"
 path = "examples/depth_quads.rs"
+required-features = ["examples"]
 
 [[example]]
 name = "compute_to_surface"
 path = "examples/compute_to_surface.rs"
+required-features = ["examples"]
 
 [[bin]]
 name = "update-screenshots"

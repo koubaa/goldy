@@ -8,11 +8,15 @@ repository = "https://github.com/koubaa/goldy"
 keywords = ["gpu", "graphics", "ffi", "c-bindings"]
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# `rlib` is required for Rust integration tests / examples; C interop uses cdylib/staticlib.
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 # Core goldy library - default-features = false allows feature passthrough
 goldy = { path = "..", default-features = false }
+
+# Windowing for in-tree Rust examples (optional; see `examples` feature)
+winit = { version = "0.30", optional = true }
 
 # Error handling
 anyhow = "1.0"
@@ -26,6 +30,9 @@ once_cell = "1.19"
 # Raw window handles for surface creation
 raw-window-handle = "0.6"
 
+[dev-dependencies]
+bytemuck = { version = "1.21", features = ["derive"] }
+
 [build-dependencies]
 # C header generation
 cbindgen = "0.29"
@@ -37,3 +44,15 @@ default = ["vulkan", "dx12", "metal"]
 vulkan = ["goldy/vulkan"]
 dx12 = ["goldy/dx12"]
 metal = ["goldy/metal"]
+# Interactive Rust examples (`ffi/examples/`); enables winit on this crate and goldy
+examples = ["dep:winit", "goldy/examples"]
+
+[[example]]
+name = "triangle"
+path = "examples/triangle.rs"
+required-features = ["examples"]
+
+[[example]]
+name = "compute_simple"
+path = "examples/compute_simple.rs"
+required-features = ["examples"]
