@@ -60,10 +60,64 @@
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::texture::Texture;
+use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::Result;
+use std::any::Any;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// -----------------------------------------------------------------------
+// DeferredPayload
+// -----------------------------------------------------------------------
+
+/// A type-erased bundle of GPU resources to be held alive until a GPU timeline epoch retires.
+///
+/// Passed to [`VramAllocator::defer_release`] to register resources for deferred dropping.
+/// The allocator holds the payload until [`VramAllocator::reclaim`] determines that the
+/// associated epoch has been reached, then drops all resources in the payload.
+///
+/// # Example
+///
+/// ```no_run
+/// # use goldy::vram_allocator::DeferredPayload;
+/// # use goldy::buffer::Buffer;
+/// # fn example(buf: Buffer, view: goldy::buffer::BufferView) {
+/// let mut payload = DeferredPayload::new();
+/// payload.push(buf).push(view);
+/// # }
+/// ```
+pub struct DeferredPayload(pub(crate) Vec<Box<dyn Any + Send>>);
+
+impl DeferredPayload {
+    /// Create an empty payload.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Add a resource to this payload. Returns `&mut Self` for chaining.
+    pub fn push<T: Send + 'static>(&mut self, resource: T) -> &mut Self {
+        self.0.push(Box::new(resource));
+        self
+    }
+
+    /// Returns `true` if no resources have been added.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Number of resources in this payload.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Default for DeferredPayload {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // -----------------------------------------------------------------------
 // Trait
@@ -153,6 +207,39 @@ pub trait VramAllocator: Send + Sync {
 
     /// Strategy identifier for diagnostics and tracing.
     fn name(&self) -> &'static str;
+
+    /// Register `payload` for deferred dropping after GPU timeline `epoch` retires.
+    ///
+    /// The allocator holds all resources in the payload alive until a subsequent call to
+    /// [`reclaim`](Self::reclaim) observes `gpu_progress >= epoch`, at which point the
+    /// payload is dropped. Entries are expected to arrive roughly in epoch order; calling
+    /// [`reclaim`](Self::reclaim) drains from the front.
+    ///
+    /// Custom allocators that manage their own memory (e.g. PTX slab allocators) should
+    /// override this to integrate with their internal reclamation pipeline.
+    ///
+    /// The default implementation is a no-op: payloads are dropped immediately.
+    fn defer_release(&self, _epoch: TimelineValue, _payload: DeferredPayload) {}
+
+    /// Reclaim all deferred payloads whose epoch is `<= gpu_progress`, dropping them.
+    ///
+    /// Returns the number of entries reclaimed. Typically called from
+    /// [`Device::flush_deferred_deletions`](crate::device::Device::flush_deferred_deletions)
+    /// at frame boundaries.
+    ///
+    /// The default implementation is a no-op and returns 0.
+    fn reclaim(&self, _gpu_progress: TimelineValue) -> usize {
+        0
+    }
+
+    /// Drop all deferred payloads unconditionally, regardless of their epoch.
+    ///
+    /// Called by the device on shutdown, after waiting for the high-water timeline,
+    /// to ensure nothing leaks across `destroy_device`. Also callable by consumers
+    /// that know the GPU is idle and want to eagerly reclaim memory.
+    ///
+    /// The default implementation is a no-op.
+    fn drain(&self) {}
 }
 
 // -----------------------------------------------------------------------
@@ -162,12 +249,56 @@ pub trait VramAllocator: Send + Sync {
 /// The default allocator: delegates directly to [`Buffer::new`] / [`Texture::new`]
 /// with no tracking, budgeting, or overhead.
 ///
-/// Installed automatically when a [`Device`] is created.
-pub struct DefaultVramAllocator;
+/// Installed automatically when a [`Device`] is created. Implements the full
+/// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::reclaim`],
+/// and [`VramAllocator::drain`].
+pub struct DefaultVramAllocator {
+    deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
+}
+
+impl DefaultVramAllocator {
+    /// Create a new default allocator.
+    pub fn new() -> Self {
+        Self {
+            deferred: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+impl Default for DefaultVramAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl VramAllocator for DefaultVramAllocator {
     fn name(&self) -> &'static str {
         "default"
+    }
+
+    fn defer_release(&self, epoch: TimelineValue, payload: DeferredPayload) {
+        if payload.is_empty() {
+            return;
+        }
+        self.deferred.lock().unwrap().push_back((epoch, payload));
+    }
+
+    fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
+        let mut ring = self.deferred.lock().unwrap();
+        let mut count = 0;
+        while let Some((epoch, _)) = ring.front() {
+            if *epoch <= gpu_progress {
+                ring.pop_front();
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
+    }
+
+    fn drain(&self) {
+        self.deferred.lock().unwrap().clear();
     }
 }
 
@@ -187,7 +318,7 @@ impl VramAllocator for DefaultVramAllocator {
 /// # use std::sync::Arc;
 /// // Track all allocations with a 512 MB budget:
 /// let allocator = TrackingVramAllocator::with_budget(
-///     Arc::new(DefaultVramAllocator),
+///     Arc::new(DefaultVramAllocator::new()),
 ///     512 * 1024 * 1024,
 /// );
 /// ```
@@ -314,6 +445,18 @@ impl VramAllocator for TrackingVramAllocator {
     fn name(&self) -> &'static str {
         "tracking"
     }
+
+    fn defer_release(&self, epoch: TimelineValue, payload: DeferredPayload) {
+        self.inner.defer_release(epoch, payload);
+    }
+
+    fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
+        self.inner.reclaim(gpu_progress)
+    }
+
+    fn drain(&self) {
+        self.inner.drain();
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -348,7 +491,7 @@ mod tests {
     #[test]
     fn default_allocator_creates_buffer() {
         let device = test_device();
-        let alloc = DefaultVramAllocator;
+        let alloc = DefaultVramAllocator::new();
         let buf = alloc
             .alloc_buffer(
                 &device,
@@ -364,7 +507,7 @@ mod tests {
     #[test]
     fn default_allocator_creates_texture() {
         let device = test_device();
-        let alloc = DefaultVramAllocator;
+        let alloc = DefaultVramAllocator::new();
         let tex = alloc
             .alloc_texture(
                 &device,
@@ -382,7 +525,7 @@ mod tests {
     #[test]
     fn tracking_allocator_tracks_bytes() {
         let device = test_device();
-        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator));
+        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
 
         assert_eq!(alloc.allocated_bytes(), 0);
 
@@ -406,7 +549,7 @@ mod tests {
     #[test]
     fn tracking_allocator_budget_enforcement() {
         let device = test_device();
-        let alloc = TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator), 8192);
+        let alloc = TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator::new()), 8192);
 
         let _buf = alloc
             .alloc_buffer(
@@ -431,7 +574,7 @@ mod tests {
     #[test]
     fn tracking_allocator_texture_tracking() {
         let device = test_device();
-        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator));
+        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
 
         let tex = alloc
             .alloc_texture(
@@ -457,5 +600,149 @@ mod tests {
         assert_eq!(bytesize(1024), "1.0 KiB");
         assert_eq!(bytesize(1024 * 1024), "1.0 MiB");
         assert_eq!(bytesize(1024 * 1024 * 1024), "1.0 GiB");
+    }
+
+    // -----------------------------------------------------------------------
+    // DeferredPayload tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deferred_payload_push_and_len() {
+        let mut p = DeferredPayload::new();
+        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
+        p.push(42u32).push("hello");
+        assert!(!p.is_empty());
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn deferred_payload_default_is_empty() {
+        let p = DeferredPayload::default();
+        assert!(p.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // DefaultVramAllocator deferred ring tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_allocator_reclaim_drops_retired_entries() {
+        let alloc = DefaultVramAllocator::new();
+
+        // Track drops via an Arc.
+        let alive = Arc::new(());
+        let weak = Arc::downgrade(&alive);
+
+        let mut p = DeferredPayload::new();
+        p.push(alive);
+        alloc.defer_release(5, p);
+
+        // epoch=5, gpu_progress=4 — should NOT reclaim yet.
+        assert_eq!(alloc.reclaim(4), 0);
+        assert!(weak.upgrade().is_some(), "resource should still be alive");
+
+        // gpu_progress=5 — should reclaim and drop.
+        assert_eq!(alloc.reclaim(5), 1);
+        assert!(
+            weak.upgrade().is_none(),
+            "resource should have been dropped"
+        );
+    }
+
+    #[test]
+    fn default_allocator_reclaim_preserves_future_entries() {
+        let alloc = DefaultVramAllocator::new();
+
+        let alive_early = Arc::new(1u32);
+        let weak_early = Arc::downgrade(&alive_early);
+        let alive_late = Arc::new(2u32);
+        let weak_late = Arc::downgrade(&alive_late);
+
+        let mut p1 = DeferredPayload::new();
+        p1.push(alive_early);
+        alloc.defer_release(2, p1);
+
+        let mut p2 = DeferredPayload::new();
+        p2.push(alive_late);
+        alloc.defer_release(10, p2);
+
+        // Reclaim only up to epoch 2.
+        assert_eq!(alloc.reclaim(2), 1);
+        assert!(weak_early.upgrade().is_none(), "epoch=2 should be dropped");
+        assert!(weak_late.upgrade().is_some(), "epoch=10 should survive");
+
+        // Reclaim the rest.
+        assert_eq!(alloc.reclaim(10), 1);
+        assert!(
+            weak_late.upgrade().is_none(),
+            "epoch=10 should now be dropped"
+        );
+    }
+
+    #[test]
+    fn default_allocator_drain_drops_all() {
+        let alloc = DefaultVramAllocator::new();
+
+        let alive = Arc::new(99u32);
+        let weak = Arc::downgrade(&alive);
+
+        let mut p = DeferredPayload::new();
+        p.push(alive);
+        alloc.defer_release(9999, p);
+
+        // drain() should drop everything regardless of epoch.
+        alloc.drain();
+        assert!(weak.upgrade().is_none(), "drain should drop all resources");
+    }
+
+    #[test]
+    fn default_allocator_empty_payload_skipped() {
+        let alloc = DefaultVramAllocator::new();
+        // Deferring an empty payload should not add an entry.
+        alloc.defer_release(1, DeferredPayload::new());
+        // reclaim returns 0 (nothing was added).
+        assert_eq!(alloc.reclaim(100), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // TrackingVramAllocator deferred delegation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tracking_allocator_delegates_defer_and_reclaim() {
+        let inner = Arc::new(DefaultVramAllocator::new());
+        let tracking = TrackingVramAllocator::new(inner.clone());
+
+        let alive = Arc::new(7u32);
+        let weak = Arc::downgrade(&alive);
+
+        let mut p = DeferredPayload::new();
+        p.push(alive);
+        tracking.defer_release(3, p);
+
+        // Not yet retired.
+        assert_eq!(tracking.reclaim(2), 0);
+        assert!(weak.upgrade().is_some());
+
+        // Retired.
+        assert_eq!(tracking.reclaim(3), 1);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn tracking_allocator_delegates_drain() {
+        let inner = Arc::new(DefaultVramAllocator::new());
+        let tracking = TrackingVramAllocator::new(inner.clone());
+
+        let alive = Arc::new(8u32);
+        let weak = Arc::downgrade(&alive);
+
+        let mut p = DeferredPayload::new();
+        p.push(alive);
+        tracking.defer_release(9999, p);
+
+        tracking.drain();
+        assert!(weak.upgrade().is_none());
     }
 }

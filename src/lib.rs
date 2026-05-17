@@ -35,11 +35,14 @@ pub mod slang;
 pub mod validation_env;
 
 // Structured instrumentation for debugging and profiling
+pub mod gpu_guard;
 pub mod instrumentation;
 pub mod placement_heap;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
+pub use gpu_guard::GpuGuard;
+pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
