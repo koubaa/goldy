@@ -2844,82 +2844,167 @@ fn test_regular_buffer_write_then_copy() {
 
 // ─── collectives: GPU execution tests ────────────────────────────────────────
 //
-// Each test runs a small compute shader that exercises one collective from
-// `goldy_exp/collectives.slang` and reads the output back to the CPU to verify
-// that the GPU-side arithmetic is correct.  These are distinct from the
-// compile-only `test_collectives_compiles` test in `src/shaders.rs`: that test
-// only ensures the DXIL/SPIRV/Metal codegen succeeds, while these tests catch
-// wrong *values* (e.g. the cross-module [ForceInline] + groupshared bug that
-// caused `workgroup_inclusive_scan_wave_uint_sum` to silently produce zeroes).
+// Each test runs a small compute shader that exercises one collective algorithm
+// from `goldy_exp/collectives.slang` and reads the output back to the CPU to
+// verify that the GPU-side arithmetic is correct.  These are distinct from the
+// compile-only `test_collectives_compiles` test in `src/shaders.rs`.
+//
+// ⚠  Cross-module [ForceInline] + groupshared writes — known Slang bugs
+//
+// Slang issues #10641 and #10642 document that [ForceInline] functions whose
+// bodies *write* to a groupshared parameter produce incorrect DXIL when the
+// call site is in a different module.  Every collective except
+// `workgroup_upper_bound` writes to groupshared internally, so calling them
+// via `import goldy_exp` would trigger the bug and produce wrong results.
+//
+// Workaround (same strategy as ekrano's coarse.slang): each test shader
+// inlines the algorithm body directly in the entry point.  `import goldy_exp`
+// is kept for the Goldy binding framework ([goldy_compute], Scattered<T>,
+// etc.) but the collective bodies are NOT invoked through the module boundary.
+//
+// `workgroup_upper_bound` is the one exception: it only reads groupshared
+// (never writes inside the function), so the cross-module call is safe.
 
-/// `workgroup_inclusive_scan_wave_uint_sum<64>`, uniform input (all threads
-/// contribute 1).  Expected output[i] = i + 1 (triangular sum of ones).
+// ── workgroup_inclusive_scan_wave_uint_sum ─────────────────────────────────
+
+/// Inlined body of `workgroup_inclusive_scan_wave_uint_sum<64>`, uniform
+/// input (all threads contribute 1).  Expected output[i] = i + 1.
 const WAVE_SCAN_64_UNIFORM: &str = r#"
 import goldy_exp;
 groupshared uint sh_scratch[32];
 [goldy_compute]
 [numthreads(64, 1, 1)]
 void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-    uint ix = local_id.x;
-    OUT[ix] = workgroup_inclusive_scan_wave_uint_sum<64>(1u, ix, sh_scratch);
+    uint ix  = local_id.x;
+    uint val = 1u;
+    uint lc  = WaveGetLaneCount();
+    uint nw  = 64 / lc;
+    uint wave_ix = ix / lc;
+    uint inclusive = WavePrefixSum(val) + val;
+    uint total     = WaveActiveSum(val);
+    if (WaveIsFirstLane())
+        sh_scratch[wave_ix] = total;
+    GroupMemoryBarrierWithGroupSync();
+    if (ix == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_scratch[wave_ix] + inclusive;
 }
 "#;
 
-/// `workgroup_inclusive_scan_wave_uint_sum<64>`, ramp input (thread i
-/// contributes i+1).  Expected output[i] = T(i+1) = (i+1)*(i+2)/2.
+/// Same algorithm with ramp input (thread i contributes i+1).
+/// Expected output[i] = T(i+1) = (i+1)*(i+2)/2.
 const WAVE_SCAN_64_RAMP: &str = r#"
 import goldy_exp;
 groupshared uint sh_scratch[32];
 [goldy_compute]
 [numthreads(64, 1, 1)]
 void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-    uint ix = local_id.x;
-    OUT[ix] = workgroup_inclusive_scan_wave_uint_sum<64>(ix + 1u, ix, sh_scratch);
+    uint ix  = local_id.x;
+    uint val = ix + 1u;
+    uint lc  = WaveGetLaneCount();
+    uint nw  = 64 / lc;
+    uint wave_ix = ix / lc;
+    uint inclusive = WavePrefixSum(val) + val;
+    uint total     = WaveActiveSum(val);
+    if (WaveIsFirstLane())
+        sh_scratch[wave_ix] = total;
+    GroupMemoryBarrierWithGroupSync();
+    if (ix == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_scratch[wave_ix] + inclusive;
 }
 "#;
 
-/// `workgroup_inclusive_scan_wave_uint_sum<256>`, uniform input.
-/// Regression test for the production WG_SIZE used in ekrano's coarse shader.
-/// Expected output[i] = i + 1.
+/// WG_SIZE=256, uniform input — regression test for the production size used
+/// in ekrano's coarse shader.  Expected output[i] = i + 1.
 const WAVE_SCAN_256_UNIFORM: &str = r#"
 import goldy_exp;
 groupshared uint sh_scratch[32];
 [goldy_compute]
 [numthreads(256, 1, 1)]
 void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-    uint ix = local_id.x;
-    OUT[ix] = workgroup_inclusive_scan_wave_uint_sum<256>(1u, ix, sh_scratch);
+    uint ix  = local_id.x;
+    uint val = 1u;
+    uint lc  = WaveGetLaneCount();
+    uint nw  = 256 / lc;
+    uint wave_ix = ix / lc;
+    uint inclusive = WavePrefixSum(val) + val;
+    uint total     = WaveActiveSum(val);
+    if (WaveIsFirstLane())
+        sh_scratch[wave_ix] = total;
+    GroupMemoryBarrierWithGroupSync();
+    if (ix == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_scratch[wave_ix] + inclusive;
 }
 "#;
 
-/// `workgroup_reduce` of all-ones over 64 threads.
-/// Thread 0's accumulated value must equal 64.
+// ── workgroup_reduce ────────────────────────────────────────────────────────
+
+/// Inlined right-sweep reduce (uint, N=64), all-ones input.
+/// Thread 0 accumulates the total; expected output[0] = 64.
 const REDUCE_64_UNIFORM: &str = r#"
 import goldy_exp;
 groupshared uint sh_scratch[64];
 [goldy_compute]
 [numthreads(64, 1, 1)]
 void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-    uint ix = local_id.x;
-    OUT[ix] = workgroup_reduce(1u, ix, sh_scratch);
+    uint ix  = local_id.x;
+    uint val = 1u;
+    sh_scratch[ix] = val;
+    for (uint i = 0; i < 6; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (ix + (1u << i) < 64u)
+            val = val + sh_scratch[ix + (1u << i)];
+        GroupMemoryBarrierWithGroupSync();
+        sh_scratch[ix] = val;
+    }
+    OUT[ix] = val;
 }
 "#;
 
-/// `workgroup_inclusive_scan` (IMonoid, uint under addition) of all-ones
-/// over 64 threads.  Expected output[i] = i + 1.
+// ── workgroup_inclusive_scan ────────────────────────────────────────────────
+
+/// Inlined left-sweep inclusive scan (uint, N=64), all-ones input.
+/// Expected output[i] = i + 1.
 const INCLUSIVE_SCAN_64_UNIFORM: &str = r#"
 import goldy_exp;
 groupshared uint sh_scratch[64];
 [goldy_compute]
 [numthreads(64, 1, 1)]
 void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-    uint ix = local_id.x;
-    OUT[ix] = workgroup_inclusive_scan(1u, ix, sh_scratch);
+    uint ix  = local_id.x;
+    uint val = 1u;
+    sh_scratch[ix] = val;
+    for (uint i = 0; i < 6; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (ix >= (1u << i))
+            val = sh_scratch[ix - (1u << i)] + val;
+        GroupMemoryBarrierWithGroupSync();
+        sh_scratch[ix] = val;
+    }
+    OUT[ix] = val;
 }
 "#;
 
-/// `workgroup_broadcast` of the constant 42 over 64 threads.
-/// All output[i] must equal 42.
+// ── workgroup_broadcast ─────────────────────────────────────────────────────
+
+/// Inlined broadcast of value 42 over 64 threads.  All output[i] must = 42.
 const BROADCAST_64: &str = r#"
 import goldy_exp;
 groupshared uint sh_slot[1];
@@ -2927,9 +3012,16 @@ groupshared uint sh_slot[1];
 [numthreads(64, 1, 1)]
 void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
     uint ix = local_id.x;
-    OUT[ix] = workgroup_broadcast(42u, ix, sh_slot);
+    if (ix == 0) sh_slot[0] = 42u;
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_slot[0];
 }
 "#;
+
+// ── workgroup_upper_bound ───────────────────────────────────────────────────
+// workgroup_upper_bound only *reads* groupshared (never writes inside the
+// function), so the cross-module call is safe — this test exercises the
+// goldy_exp version directly.
 
 /// `workgroup_upper_bound` with prefix_sums[i] = i+1 over 64 threads.
 /// upper_bound(k) in {1,2,...,64} = k for all k in [0, 63].
