@@ -152,7 +152,7 @@ Possible future strategies:
 | Type | Scope | Lifecycle |
 |------|-------|-----------|
 | `BufferPool` | Manual sub-allocation from one buffer | Caller manages reset timing |
-| `BufferPoolRing` | N-deep ring of `BufferPool`s | Fixed rotation, no epoch awareness |
+| `FrameOrchestrator<T>` | Frame-slot ring with typed cleanup payloads | Epoch-aware, depth-capped, callback-driven |
 | `TexturePool` | Acquire/release cache for textures | Keyed recycling, no sub-allocation |
 | **`TransientAllocator`** | **Pluggable per-frame bump allocation** | **Epoch-aware, strategy-selectable** |
 

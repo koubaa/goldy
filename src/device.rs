@@ -711,7 +711,7 @@ impl Device {
         if !graph.has_transient_resources() {
             let mut backend = self.inner.backend.lock().unwrap();
             let tv = graph
-                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new())
+                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), true)
                 .map_err(|e| {
                     drop(backend);
                     self.classify(e)
@@ -728,7 +728,7 @@ impl Device {
 
         if graph.has_transient_buffers() {
             let tv = self
-                .submit_with_placement_heap(graph, &tex_handles)
+                .submit_with_placement_heap(graph, &tex_handles, true)
                 .map_err(|e| self.classify(e))?;
             self.inner
                 .high_water_timeline
@@ -738,7 +738,58 @@ impl Device {
 
         let mut backend = self.inner.backend.lock().unwrap();
         let tv = graph
-            .submit_with_backend(self, backend.as_mut(), None, &tex_handles)
+            .submit_with_backend(self, backend.as_mut(), None, &tex_handles, true)
+            .map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })?;
+        self.inner
+            .high_water_timeline
+            .fetch_max(tv, Ordering::Relaxed);
+        Ok(tv)
+    }
+
+    /// Like [`Self::submit`] but does **not** block the CPU until transient-buffer or
+    /// transient-texture GPU work completes after the submission.
+    ///
+    /// Use this only when building a pipelined frame loop that records multiple
+    /// consecutive graphs (for example [`FrameOrchestrator::flush`](crate::FrameOrchestrator::flush)) or when the
+    /// caller tracks completion via [`TimelineValue`] / [`Self::gpu_progress`].
+    ///
+    /// [`Self::submit`] still waits on transient resources — that path remains the
+    /// safe default for one-shot submission.
+    pub fn submit_pipelined(&self, graph: &TaskGraph) -> Result<TimelineValue, GoldyError> {
+        if !graph.has_transient_resources() {
+            let mut backend = self.inner.backend.lock().unwrap();
+            let tv = graph
+                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), false)
+                .map_err(|e| {
+                    drop(backend);
+                    self.classify(e)
+                })?;
+            self.inner
+                .high_water_timeline
+                .fetch_max(tv, Ordering::Relaxed);
+            return Ok(tv);
+        }
+
+        let (_tex_keepalive, tex_handles) = graph
+            .allocate_transient_textures(self)
+            .map_err(|e| self.classify(e))?;
+
+        if graph.has_transient_buffers() {
+            let tv = self
+                .submit_with_placement_heap(graph, &tex_handles, false)
+                .map_err(|e| self.classify(e))?;
+            self.inner
+                .high_water_timeline
+                .fetch_max(tv, Ordering::Relaxed);
+            return Ok(tv);
+        }
+
+        let mut backend = self.inner.backend.lock().unwrap();
+        let tv = graph
+            .submit_with_backend(self, backend.as_mut(), None, &tex_handles, false)
             .map_err(|e| {
                 drop(backend);
                 self.classify(e)
@@ -763,6 +814,7 @@ impl Device {
         &self,
         graph: &TaskGraph,
         tex_handles: &HashMap<u32, backend::TextureHandle>,
+        wait_for_transient_completion: bool,
     ) -> Result<TimelineValue> {
         let (total_size, base_align, layout) = graph.transient_heap_size_and_layout()?;
 
@@ -836,7 +888,13 @@ impl Device {
         drop(heap_guard);
 
         let mut backend = self.inner.backend.lock().unwrap();
-        let tv = resolved_graph.submit_with_backend(self, backend.as_mut(), None, tex_handles)?;
+        let tv = resolved_graph.submit_with_backend(
+            self,
+            backend.as_mut(),
+            None,
+            tex_handles,
+            wait_for_transient_completion,
+        )?;
         drop(backend);
 
         // Stamp the ring entry and immediately defer views to VramAllocator.

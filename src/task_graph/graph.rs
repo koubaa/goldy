@@ -91,8 +91,10 @@ impl TaskGraph {
     /// The backing memory is a single device buffer allocated for the duration of
     /// [`crate::Device::submit`]. Transients whose live ranges (in the compiled wave
     /// schedule) do not overlap may alias within that heap to reduce allocation size.
-    /// Graphs using transients **block until the submit completes** so the staging
-    /// heap can be freed.
+    /// Graphs using transients **block until the submit completes** when using
+    /// [`crate::Device::submit`] (so the CPU does not record overlapping standalone graphs that
+    /// reuse the same placement-heap protocol). For pipelined multi-submit frames, use
+    /// [`crate::Device::submit_pipelined`] or the surface path / [`crate::FrameOrchestrator`].
     pub fn transient_buffer(&mut self, size: u64) -> TransientId {
         self.transient_buffer_with_stride(size, 4)
     }
@@ -111,8 +113,9 @@ impl TaskGraph {
     /// Register a transient texture (same dimensions and format) for this graph.
     ///
     /// Non-overlapping wave lifetimes may alias onto one backing texture; see
-    /// [`Self::transient_buffer`] for scheduling behavior. Submits **wait until
-    /// completion** when transients are used.
+    /// [`Self::transient_buffer`] for scheduling behavior. [`crate::Device::submit`]
+    /// waits until completion when transients are used; use [`crate::Device::submit_pipelined`]
+    /// for overlapping submissions in a managed frame loop.
     pub fn transient_texture(
         &mut self,
         width: u32,
@@ -149,6 +152,7 @@ impl TaskGraph {
         backend: &mut dyn GpuBackend,
         transient_buffer_ranges: Option<&HashMap<u32, (BufferHandle, u64, u64)>>,
         transient_texture_handles: &HashMap<u32, TextureHandle>,
+        wait_for_transient_completion: bool,
     ) -> Result<TimelineValue> {
         if !self.transient_texture_specs.is_empty() {
             for s in &self.transient_texture_specs {
@@ -178,7 +182,7 @@ impl TaskGraph {
         }
 
         let tv = Self::submit_resolved_ir(device, backend, &ir)?;
-        if self.needs_transient_gpu_wait() {
+        if wait_for_transient_completion && self.needs_transient_gpu_wait() {
             backend.wait_until(device.inner.handle, tv)?;
         }
         Ok(tv)
