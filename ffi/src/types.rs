@@ -166,6 +166,7 @@ impl From<goldy::DataAccess> for GoldyDataAccess {
 ///
 /// - `Interpolated`: Hardware filtering between neighbors (texture units).
 /// - `Direct`: Direct 2D/3D indexing, no filtering, read/write.
+/// - `DirectInterpolated`: Both storage (UAV) and sampled (SRV) access on the same texture.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoldySpatialAccess {
@@ -173,6 +174,8 @@ pub enum GoldySpatialAccess {
     Interpolated = 0,
     /// Direct 2D/3D indexing, no filtering (RWTexture2D).
     Direct = 1,
+    /// Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
+    DirectInterpolated = 2,
 }
 
 impl From<GoldySpatialAccess> for goldy::SpatialAccess {
@@ -180,6 +183,7 @@ impl From<GoldySpatialAccess> for goldy::SpatialAccess {
         match a {
             GoldySpatialAccess::Interpolated => goldy::SpatialAccess::Interpolated,
             GoldySpatialAccess::Direct => goldy::SpatialAccess::Direct,
+            GoldySpatialAccess::DirectInterpolated => goldy::SpatialAccess::DirectInterpolated,
         }
     }
 }
@@ -189,6 +193,7 @@ impl From<goldy::SpatialAccess> for GoldySpatialAccess {
         match a {
             goldy::SpatialAccess::Interpolated => GoldySpatialAccess::Interpolated,
             goldy::SpatialAccess::Direct => GoldySpatialAccess::Direct,
+            goldy::SpatialAccess::DirectInterpolated => GoldySpatialAccess::DirectInterpolated,
         }
     }
 }
