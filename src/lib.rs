@@ -19,6 +19,7 @@ pub mod device;
 pub mod encoder;
 pub mod error;
 pub mod examples;
+pub mod frame_orchestrator;
 pub mod pipeline;
 pub mod render_target;
 pub mod sampler;
@@ -43,6 +44,7 @@ pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
 pub use error::GoldyError;
+pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use vram_allocator::DeferredPayload;
 
