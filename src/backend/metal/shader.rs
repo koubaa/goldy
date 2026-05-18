@@ -570,3 +570,424 @@ pub(super) fn destroy(
 ) {
     shaders.remove(&shader_handle);
 }
+
+// ============================================================================
+// Unit tests for MSL patching functions
+// ============================================================================
+//
+// All patch functions are pure `&str -> String` transforms, so tests need no
+// GPU device — just synthetic MSL strings derived from real Slang output.
+// Snippets omit struct bodies and unrelated boilerplate; the patchers only
+// inspect specific substrings and line-level patterns.
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        patch_compute_msl, patch_compute_msl_entry_point_params, patch_msl_threadgroup_copies,
+        patch_vertex_msl_entry_point_params, patch_vertex_stage_in_pointer,
+    };
+
+    // ── patch_vertex_stage_in_pointer ────────────────────────────────────────
+
+    /// Bindless vertex shader: Slang emits [[stage_in]] on a `thread*` pointer
+    /// in the internal dispatch function (vs_main_0).  That occurrence must be
+    /// stripped; the legitimate [[stage_in]] on the real [[vertex]] entry point
+    /// must be preserved.
+    #[test]
+    fn stage_in_stripped_from_internal_thread_pointer_fn() {
+        // Mirrors the real Slang output for a [goldy_vertex] shader.
+        // The first [[stage_in]] appears on the vs_main_0 line which also has thread*.
+        let msl = concat!(
+            "StaticVarying_0 vs_main_0(",
+            "const StaticVertexIn_0 thread* _pt0_0 [[stage_in]], ",
+            "KernelContext_0 thread* kernelContext_4)\n",
+            "{\n    return _pt0_0;\n}\n",
+            "[[vertex]] vs_main_Result_0 vs_main(",
+            "vertexInput_0 _S19 [[stage_in]], ",
+            "GoldyBindlessResources_default_0 constant* gGoldy_1 [[buffer(0)]], ",
+            "EntryPointParams_0 constant* _goldy_ep [[buffer(1)]])\n",
+            "{\n    return _S19;\n}\n",
+        );
+
+        let out = patch_vertex_stage_in_pointer(msl);
+
+        // Internal fn: [[stage_in]] removed, pointer type kept intact.
+        assert!(
+            out.contains("thread* _pt0_0,"),
+            "thread pointer parameter should remain without [[stage_in]]"
+        );
+        assert!(
+            !out.contains("_pt0_0 [[stage_in]]"),
+            "[[stage_in]] must be stripped from the thread* pointer parameter"
+        );
+
+        // Real entry point: [[stage_in]] preserved.
+        assert!(
+            out.contains("_S19 [[stage_in]]"),
+            "[[stage_in]] on the real vertex entry point must not be touched"
+        );
+    }
+
+    /// Simple vertex shader (no bindless, no KernelContext): the only helper
+    /// function uses `thread*` for passing the input by pointer, but that line
+    /// does NOT carry [[stage_in]].  The real entry point's [[stage_in]] on a
+    /// value-type parameter must survive unchanged.
+    ///
+    /// This is the exact case that broke `render_target_integration` tests when
+    /// the patch used a file-global `thread*` search instead of a line-scoped one.
+    #[test]
+    fn stage_in_preserved_when_thread_star_only_in_helper_fn() {
+        // The helper carries `thread*` but no [[stage_in]] on its signature line.
+        // The entry point has [[stage_in]] on a value type — must not be touched.
+        let msl = concat!(
+            "VertexOutput_0 _goldy_user_vs_main_0(const VertexInput_0 thread* input_0)\n",
+            "{\n    return *input_0;\n}\n",
+            "[[vertex]] vs_main_Result_0 vs_main(vertexInput_0 _S1 [[stage_in]])\n",
+            "{\n    return _S1;\n}\n",
+        );
+
+        let out = patch_vertex_stage_in_pointer(msl);
+
+        assert_eq!(
+            out, msl,
+            "MSL must be unchanged when [[stage_in]] is only on a value-type entry point"
+        );
+    }
+
+    /// No [[stage_in]] anywhere: patch must be a no-op.
+    #[test]
+    fn stage_in_noop_when_absent() {
+        let msl = "[[kernel]] void cs_main(device uint* buf [[buffer(0)]])\n{\n}\n";
+        let out = patch_vertex_stage_in_pointer(msl);
+        assert_eq!(
+            out, msl,
+            "MSL without [[stage_in]] must pass through unchanged"
+        );
+    }
+
+    // ── patch_vertex_msl_entry_point_params ──────────────────────────────────
+
+    /// Slang bug present: vertex shader has EntryPointParams_0 inside
+    /// KernelContext_0 but the entry point exposes only [[buffer(0)]].
+    /// The patch must inject [[buffer(1)]] into the signature and wire the
+    /// entryPointParams_0 field in the body.
+    #[test]
+    fn vertex_ep_params_injected_when_buffer1_missing() {
+        let msl = concat!(
+            "struct EntryPointParams_0 { uint _bw0_0; };\n",
+            "struct KernelContext_0 {\n",
+            "    GoldyBindlessResources_default_0 constant* gGoldy_0;\n",
+            "    EntryPointParams_0 constant* entryPointParams_0;\n",
+            "};\n",
+            "[[vertex]] vs_main_Result_0 vs_main(",
+            "vertexInput_0 _S19 [[stage_in]], ",
+            "GoldyBindlessResources_default_0 constant* gGoldy_1 [[buffer(0)]])\n",
+            "{\n",
+            "    KernelContext_0 kernelContext_5;\n",
+            "    (&kernelContext_5)->gGoldy_0 = gGoldy_1;\n",
+            "    return _S19;\n",
+            "}\n",
+        );
+
+        let out = patch_vertex_msl_entry_point_params(msl);
+
+        assert!(
+            out.contains("EntryPointParams_0 constant* _goldy_ep [[buffer(1)]])"),
+            "[[buffer(1)]] parameter must be injected into the entry-point signature"
+        );
+        assert!(
+            out.contains("(&kernelContext_5)->entryPointParams_0 = _goldy_ep;"),
+            "entryPointParams_0 field must be wired to _goldy_ep in the entry-point body"
+        );
+        // Original [[buffer(0)]] binding must still be present.
+        assert!(
+            out.contains("[[buffer(0)]]"),
+            "[[buffer(0)]] binding must remain after the patch"
+        );
+    }
+
+    /// Already patched (both markers present): must be a no-op.
+    #[test]
+    fn vertex_ep_params_noop_when_already_correct() {
+        let msl = concat!(
+            "struct EntryPointParams_0 { uint _bw0_0; };\n",
+            "[[vertex]] vs_main_Result_0 vs_main(",
+            "vertexInput_0 _S19 [[stage_in]], ",
+            "GoldyBindlessResources_default_0 constant* gGoldy_1 [[buffer(0)]], ",
+            "EntryPointParams_0 constant* _goldy_ep [[buffer(1)]])\n",
+            "{\n    return _S19;\n}\n",
+        );
+
+        let out = patch_vertex_msl_entry_point_params(msl);
+        assert_eq!(
+            out, msl,
+            "MSL with correct [[buffer(1)]] must pass through unchanged"
+        );
+    }
+
+    /// No EntryPointParams_0 at all (simple shader): must be a no-op.
+    #[test]
+    fn vertex_ep_params_noop_when_no_entry_point_params() {
+        let msl = concat!(
+            "[[vertex]] vs_main_Result_0 vs_main(vertexInput_0 _S1 [[stage_in]])\n",
+            "{\n    return _S1;\n}\n",
+        );
+
+        let out = patch_vertex_msl_entry_point_params(msl);
+        assert_eq!(
+            out, msl,
+            "MSL without EntryPointParams_0 must pass through unchanged"
+        );
+    }
+
+    /// Fragment shader: Slang correctly emits [[buffer(1)]] for fragment stages,
+    /// so the patch must recognise this and leave the MSL unchanged.
+    #[test]
+    fn vertex_ep_params_noop_for_correctly_bound_fragment_shader() {
+        let msl = concat!(
+            "struct EntryPointParams_0 { uint _bw0_0; };\n",
+            "[[fragment]] pixelOutput_0 fs_main(",
+            "pixelInput_0 _S11 [[stage_in]], ",
+            "GoldyBindlessResources_default_0 constant* gGoldy_1 [[buffer(0)]], ",
+            "EntryPointParams_0 constant* entryPointParams_1 [[buffer(1)]])\n",
+            "{\n    return _S11;\n}\n",
+        );
+
+        let out = patch_vertex_msl_entry_point_params(msl);
+        assert_eq!(
+            out, msl,
+            "Fragment shader with correct [[buffer(1)]] must pass through unchanged"
+        );
+    }
+
+    // ── patch_compute_msl_entry_point_params ─────────────────────────────────
+
+    /// Slang Bug A: EntryPointParams_0 emitted as a bare value parameter
+    /// (no `constant*`, no `[[buffer(1)]]`).  The patch must:
+    ///   1. Fix the signature to `constant* VAR [[buffer(1)]])`.
+    ///   2. Rewrite member accesses from `VAR.field` to `VAR->field`.
+    ///   3. Rewrite the struct-copy assignment `= VAR;` to `= *VAR;`.
+    #[test]
+    fn compute_ep_params_patched_when_missing_constant_ptr() {
+        // The KernelContext struct is intentionally omitted: it would contain
+        // `EntryPointParams_0 constant*` which would trip the no-op guard.
+        // Only the kernel signature (where the bug manifests) and usage sites
+        // are needed to exercise the patch.
+        let msl = concat!(
+            "struct EntryPointParams_0 { uint _bw0_0; };\n",
+            "[[kernel]] void cs_main(\n",
+            "    device uint* buf [[buffer(0)]],\n",
+            "    EntryPointParams_0 epVar0)\n",
+            "{\n",
+            "    uint v = epVar0._bw0_0;\n",
+            "    uint w = epVar0._bw0_0;\n",
+            "    KernelContext_0 kc2 = epVar0;\n",
+            "}\n",
+        );
+
+        let out = patch_compute_msl_entry_point_params(msl);
+
+        // Signature: bare value param replaced with constant pointer + [[buffer(1)]].
+        assert!(
+            out.contains("EntryPointParams_0 constant* epVar0 [[buffer(1)]])"),
+            "entry-point parameter must be fixed to `constant* epVar0 [[buffer(1)]]`"
+        );
+        // Member access: `.field` → `->field`.
+        assert!(
+            out.contains("epVar0->_bw0_0"),
+            "member access must be rewritten from . to ->"
+        );
+        // Struct-copy assignment: `= epVar0;` → `= *epVar0;`.
+        assert!(
+            out.contains("= *epVar0;"),
+            "struct-copy assignment must be rewritten to dereference the pointer"
+        );
+    }
+
+    /// `EntryPointParams_0 constant*` already present: no-op.
+    #[test]
+    fn compute_ep_params_noop_when_already_correct() {
+        let msl = concat!(
+            "struct EntryPointParams_0 { uint _bw0_0; };\n",
+            "[[kernel]] void cs_main(\n",
+            "    device uint* buf [[buffer(0)]],\n",
+            "    EntryPointParams_0 constant* epVar0 [[buffer(1)]])\n",
+            "{\n}\n",
+        );
+
+        let out = patch_compute_msl_entry_point_params(msl);
+        assert_eq!(
+            out, msl,
+            "MSL with correct constant* must pass through unchanged"
+        );
+    }
+
+    /// No EntryPointParams_0 at all: no-op.
+    #[test]
+    fn compute_ep_params_noop_when_absent() {
+        let msl = concat!(
+            "[[kernel]] void cs_main(device uint* buf [[buffer(0)]])\n",
+            "{\n    buf[0] = 42;\n}\n",
+        );
+
+        let out = patch_compute_msl_entry_point_params(msl);
+        assert_eq!(
+            out, msl,
+            "MSL without EntryPointParams_0 must pass through unchanged"
+        );
+    }
+
+    // ── patch_msl_threadgroup_copies ─────────────────────────────────────────
+
+    /// Pattern 1a: explicit `thread array<...>` copy from a KernelContext field.
+    /// Must become a `threadgroup array<...>&` reference.
+    #[test]
+    fn threadgroup_copies_explicit_thread_patched() {
+        let msl = concat!(
+            "[[kernel]] void cs_main()\n",
+            "{\n",
+            "    thread array<uint, int(64)> scratch = *kernelContext_0->shared_data;\n",
+            "    scratch[0] = 1;\n",
+            "}\n",
+        );
+
+        let out = patch_msl_threadgroup_copies(msl);
+
+        assert!(
+            out.contains("threadgroup array<uint, int(64)>& scratch"),
+            "explicit thread copy must become a threadgroup reference"
+        );
+        assert!(
+            !out.contains("thread array<uint"),
+            "thread address space must be replaced by threadgroup"
+        );
+    }
+
+    /// Pattern 1b: implicit thread qualifier (bare `array<...>` with no explicit
+    /// address space) copied from a KernelContext field.
+    /// Must become a `threadgroup array<...>&` reference.
+    #[test]
+    fn threadgroup_copies_implicit_thread_patched() {
+        let msl = concat!(
+            "[[kernel]] void cs_main()\n",
+            "{\n",
+            "    array<uint, int(64)> scratch = *kernelContext_0->shared_data;\n",
+            "    scratch[0] = 1;\n",
+            "}\n",
+        );
+
+        let out = patch_msl_threadgroup_copies(msl);
+
+        assert!(
+            out.contains("threadgroup array<uint, int(64)>& scratch"),
+            "implicit thread copy must become a threadgroup reference"
+        );
+    }
+
+    /// Pattern 2: secondary copy of a variable that was already made a threadgroup
+    /// reference by Pattern 1.  The secondary copy must also be patched.
+    #[test]
+    fn threadgroup_copies_secondary_copy_also_patched() {
+        let msl = concat!(
+            "[[kernel]] void cs_main()\n",
+            "{\n",
+            // Pattern 1: scratch becomes a threadgroup ref.
+            "    thread array<uint, int(64)> scratch = *kernelContext_0->shared_data;\n",
+            // Pattern 2: local is a thread copy of scratch (already a tg ref).
+            "    thread array<uint, int(64)> local = scratch;\n",
+            "    local[0] = 1;\n",
+            "}\n",
+        );
+
+        let out = patch_msl_threadgroup_copies(msl);
+
+        // Both scratch and local must be threadgroup references.
+        assert!(
+            out.contains("threadgroup array<uint, int(64)>& scratch"),
+            "pattern-1 variable must become a threadgroup reference"
+        );
+        assert!(
+            out.contains("threadgroup array<uint, int(64)>& local"),
+            "pattern-2 copy of a tg-ref variable must also become a threadgroup reference"
+        );
+        assert!(
+            !out.contains("thread array<uint"),
+            "no thread array copies must remain after patching"
+        );
+    }
+
+    /// No `= *kernelContext` pattern present: must be a no-op.
+    #[test]
+    fn threadgroup_copies_noop_when_no_kernelcontext_copy() {
+        let msl = concat!(
+            "[[kernel]] void cs_main()\n",
+            "{\n",
+            "    thread uint x = 0;\n",
+            "    x = 1;\n",
+            "}\n",
+        );
+
+        let out = patch_msl_threadgroup_copies(msl);
+        assert_eq!(
+            out, msl,
+            "MSL without kernelContext copies must pass through unchanged"
+        );
+    }
+
+    // ── patch_compute_msl (orchestrator) ─────────────────────────────────────
+
+    /// Both Bug A (missing EntryPointParams constant*) and Bug B (thread array
+    /// copy from kernelContext) are present.  A single call to the orchestrator
+    /// must fix both.
+    #[test]
+    fn patch_compute_msl_fixes_both_bugs() {
+        // KernelContext struct definition omitted for the same reason as
+        // `compute_ep_params_patched_when_missing_constant_ptr`: it would
+        // contain `EntryPointParams_0 constant*` and trigger the no-op guard.
+        let msl = concat!(
+            "struct EntryPointParams_0 { uint _bw0_0; };\n",
+            "[[kernel]] void cs_main(\n",
+            "    device uint* buf [[buffer(0)]],\n",
+            "    EntryPointParams_0 epVar0)\n",
+            "{\n",
+            "    thread array<uint, int(32)> scratch = *kernelContext_0->shared_data;\n",
+            "    buf[0] = epVar0._bw0_0 + scratch[0];\n",
+            "}\n",
+        );
+
+        let out = patch_compute_msl(msl);
+
+        // Bug A fixed.
+        assert!(
+            out.contains("EntryPointParams_0 constant* epVar0 [[buffer(1)]])"),
+            "Bug A: entry-point parameter must be fixed to constant*"
+        );
+        assert!(
+            out.contains("epVar0->_bw0_0"),
+            "Bug A: member access must be rewritten to ->"
+        );
+
+        // Bug B fixed.
+        assert!(
+            out.contains("threadgroup array<uint, int(32)>& scratch"),
+            "Bug B: thread array copy must become a threadgroup reference"
+        );
+    }
+
+    /// Neither bug is present: orchestrator must be a no-op.
+    #[test]
+    fn patch_compute_msl_noop_when_clean() {
+        let msl = concat!(
+            "[[kernel]] void cs_main(device uint* buf [[buffer(0)]])\n",
+            "{\n",
+            "    buf[0] = 42;\n",
+            "}\n",
+        );
+
+        let out = patch_compute_msl(msl);
+        assert_eq!(
+            out, msl,
+            "clean MSL must pass through the orchestrator unchanged"
+        );
+    }
+}
