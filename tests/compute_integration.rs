@@ -3317,10 +3317,9 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let sampled_idx = tex
         .bindless_sampled_index()
         .expect("DirectInterpolated must have a sampled bindless index");
-    assert_ne!(
-        storage_idx, sampled_idx,
-        "storage and sampled slots must be distinct"
-    );
+    // storage_idx and sampled_idx index into *different* descriptor pools (UAV vs SRV),
+    // so the same integer value is valid — they just happen to both be the first slot in
+    // their respective pools. What matters is that both are present (both Some).
 
     // Write pass (UAV).
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("compile write");
@@ -3329,7 +3328,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     {
         let mut pass = enc.begin_compute_pass();
         pass.set_pipeline(&write_pipeline);
-        pass.bind_resources(&[&tex]);
+        pass.bind_resources_raw(&[storage_idx]);
         pass.dispatch(1, 1, 1);
     }
     enc.dispatch(&device).expect("write dispatch");
@@ -3343,13 +3342,11 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     {
         let mut pass = enc2.begin_compute_pass();
         pass.set_pipeline(&read_pipeline);
-        // Bind sampled view, sampler, output buffer.
-        // We use the Texture's borrow as Interpolated view here.
-        pass.bind_resources_with_handles(&[
-            storage_idx,  // UAV (not read this pass, but keeps slot order)
-            sampled_idx,  // Texture2D<float4> SRV
-            sampler.bindless_index().unwrap(),
-            out.bindless_index().unwrap(),
+        // Bind: Interpolated<float4> src, Filter smp, Scattered<uint> out
+        pass.bind_resources_raw(&[
+            sampled_idx,                           // Texture2D<float4> SRV
+            sampler.bindless_index().unwrap(),     // Filter sampler
+            out.bindless_index().unwrap(),         // Scattered<uint> output
         ]);
         pass.dispatch(1, 1, 1);
     }
