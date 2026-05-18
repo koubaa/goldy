@@ -28,8 +28,11 @@ use mtl::{
     SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
-/// Maximum size of the argument buffer (supports up to 16K resources)
-pub const ARGUMENT_BUFFER_SIZE: u64 = 16 * 1024 * 8; // 8 bytes per resource ID
+/// Maximum size of the argument buffer.
+/// 5 categories × 4096 slots × 8 bytes per resource ID = 163840 bytes.
+/// Categories: storageBuffers(0..4K), uniformBuffers(4K..8K), textures(8K..12K),
+///             storageImages(12K..16K), samplers(16K..20K).
+pub const ARGUMENT_BUFFER_SIZE: u64 = 20 * 1024 * 8; // 5 × MAX_RESOURCES_PER_CATEGORY × 8
 
 /// Buffer slot for resource binding indices in shaders.
 /// Slang assigns uniform entry-point params to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
