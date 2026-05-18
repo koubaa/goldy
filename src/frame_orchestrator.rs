@@ -81,6 +81,16 @@ impl<T> FrameOrchestrator<T> {
         self.open.is_some()
     }
 
+    /// Discard the currently open frame without pushing a cleanup slot.
+    ///
+    /// Call this when a `run_frame` error makes it impossible to call `end_frame_standalone` or
+    /// `end_frame_for_surface`. Leaves the ring intact so subsequent frames can begin normally.
+    pub fn abort_frame(&mut self, handle: FrameHandle) {
+        if self.open == Some(handle) {
+            self.open = None;
+        }
+    }
+
     /// Non-blocking drain of slots whose GPU timeline has completed, plus mandatory pops when the
     /// ring is deeper than [`Self::max_depth`]. Same ordering rules as a manual cleanup deque.
     pub fn reclaim<E, F>(&mut self, mut retire: F) -> Result<(), GoldyError>
