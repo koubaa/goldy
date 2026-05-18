@@ -2927,9 +2927,13 @@ void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
 
 /// WG_SIZE=256, uniform input — regression test for the production size used
 /// in ekrano's coarse shader.  Expected output[i] = i + 1.
+///
+/// sh_scratch must hold one entry per wave.  SM6.0 mandates WaveGetLaneCount()
+/// >= 4, giving at most 256/4 = 64 waves, so [64] is the safe minimum.
+/// ([32] overflows on WARP where WaveGetLaneCount() == 4.)
 const WAVE_SCAN_256_UNIFORM: &str = r#"
 import goldy_exp;
-groupshared uint sh_scratch[32];
+groupshared uint sh_scratch[64];
 [goldy_compute]
 [numthreads(256, 1, 1)]
 void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
