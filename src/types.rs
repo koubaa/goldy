@@ -231,6 +231,9 @@ impl From<SpatialAccess> for BindlessCategory {
         match access {
             SpatialAccess::Interpolated => BindlessCategory::Texture,
             SpatialAccess::Direct => BindlessCategory::StorageImage,
+            // Primary slot for DirectInterpolated is the storage (UAV) handle.
+            // The secondary sampled (SRV) handle is obtained via Texture::bindless_sampled_index().
+            SpatialAccess::DirectInterpolated => BindlessCategory::StorageImage,
         }
     }
 }
@@ -301,6 +304,9 @@ pub struct SurfaceConfig {
 ///
 /// - `Interpolated`: Hardware filtering between neighbors (texture units).
 /// - `Direct`: Direct 2D/3D indexing without filtering, read/write.
+/// - `DirectInterpolated`: Both storage (UAV) and sampled (SRV) access on the same texture.
+///   Suitable for filter layers that are written by one pass and read with hardware bilinear
+///   by the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SpatialAccess {
     /// Hardware filtering between neighbors (texture units).
@@ -310,6 +316,13 @@ pub enum SpatialAccess {
     /// Direct 2D/3D indexing, no filtering, read/write.
     /// Maps to storage images (RWTexture2D in shaders).
     Direct,
+    /// Both UAV (storage/write via `DirectSpatial`) and SRV (sampled/read via `Interpolated`)
+    /// access on the same underlying texture resource.
+    ///
+    /// The primary bindless handle (returned by [`crate::Texture::bindless_index`]) is the
+    /// storage slot; the secondary sampled handle is returned by
+    /// [`crate::Texture::bindless_sampled_index`].
+    DirectInterpolated,
 }
 
 bitflags! {

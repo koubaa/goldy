@@ -145,11 +145,14 @@ typedef enum GoldyFilterMode {
 //
 // - `Interpolated`: Hardware filtering between neighbors (texture units).
 // - `Direct`: Direct 2D/3D indexing, no filtering, read/write.
+// - `DirectInterpolated`: Both storage (UAV) and sampled (SRV) access on the same texture.
 typedef enum GoldySpatialAccess {
     // Hardware filtering between neighbors (Texture2D with sampler).
     GOLDY_SPATIAL_ACCESS_INTERPOLATED = 0,
     // Direct 2D/3D indexing, no filtering (RWTexture2D).
     GOLDY_SPATIAL_ACCESS_DIRECT = 1,
+    // Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
+    GOLDY_SPATIAL_ACCESS_DIRECT_INTERPOLATED = 2,
 } GoldySpatialAccess;
 
 // Opaque handle to a Goldy Buffer.

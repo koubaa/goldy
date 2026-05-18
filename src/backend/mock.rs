@@ -113,6 +113,9 @@ struct MockTexture {
     format: TextureFormat,
     data: Vec<u8>,
     bindless_index: u32,
+    /// For `SpatialAccess::DirectInterpolated`, a second bindless index in the
+    /// sampled-texture pool. `None` for all other access modes.
+    sampled_bindless_index: Option<u32>,
 }
 
 #[allow(dead_code)]
@@ -749,6 +752,7 @@ impl GpuBackend for MockBackend {
                 format,
                 data: vec![0; (width * height * format.bytes_per_pixel()) as usize],
                 bindless_index,
+                sampled_bindless_index: None,
             },
         );
 
@@ -796,7 +800,7 @@ impl GpuBackend for MockBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        _access: SpatialAccess,
+        access: SpatialAccess,
         _flags: TextureFlags,
     ) -> Result<TextureHandle> {
         if !self.devices.contains_key(&device) {
@@ -809,6 +813,15 @@ impl GpuBackend for MockBackend {
         let bindless_index = self.next_bindless_index;
         self.next_bindless_index += 1;
 
+        // For DirectInterpolated, allocate a second slot for the sampled-texture pool.
+        let sampled_bindless_index = if matches!(access, SpatialAccess::DirectInterpolated) {
+            let idx = self.next_bindless_index;
+            self.next_bindless_index += 1;
+            Some(idx)
+        } else {
+            None
+        };
+
         let size = (width * height * format.bytes_per_pixel()) as usize;
         self.textures.insert(
             handle,
@@ -819,6 +832,7 @@ impl GpuBackend for MockBackend {
                 format,
                 data: vec![0u8; size],
                 bindless_index,
+                sampled_bindless_index,
             },
         );
 
@@ -932,6 +946,12 @@ impl GpuBackend for MockBackend {
 
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32> {
         self.textures.get(&texture).map(|t| t.bindless_index)
+    }
+
+    fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32> {
+        self.textures
+            .get(&texture)
+            .and_then(|t| t.sampled_bindless_index)
     }
 
     // Sampler management

@@ -1001,6 +1001,10 @@ impl GpuBackend for Dx12Backend {
         texture::bindless_index(&self.state, texture_handle)
     }
 
+    fn texture_bindless_sampled_index(&self, texture_handle: TextureHandle) -> Option<u32> {
+        texture::bindless_sampled_index(&self.state, texture_handle)
+    }
+
     fn create_sampler(
         &mut self,
         device_handle: DeviceHandle,

@@ -1890,6 +1890,7 @@ fn register_surface_texture(
             staging_buffer: None,
             staging_memory: None,
             bindless_index: Some(bindless_index),
+            sampled_bindless_index: None,
             current_layout: vk::ImageLayout::GENERAL,
             transient_heap_suballoc: false,
         },

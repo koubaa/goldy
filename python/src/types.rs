@@ -172,6 +172,7 @@ impl From<goldy::DataAccess> for PyDataAccess {
 /// Describes how the texture will be accessed, which determines hardware optimization strategies:
 /// - INTERPOLATED: Hardware filtering between neighbors (texture units).
 /// - DIRECT: Direct 2D/3D indexing, no filtering, read/write.
+/// - DIRECT_INTERPOLATED: Both storage (UAV) and sampled (SRV) access on the same texture.
 #[pyclass(name = "SpatialAccess", module = "goldy", eq, eq_int)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PySpatialAccess {
@@ -180,6 +181,8 @@ pub enum PySpatialAccess {
     INTERPOLATED = 0,
     /// Direct 2D/3D indexing, no filtering (RWTexture2D).
     DIRECT = 1,
+    /// Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
+    DIRECT_INTERPOLATED = 2,
 }
 
 impl From<PySpatialAccess> for goldy::SpatialAccess {
@@ -187,6 +190,7 @@ impl From<PySpatialAccess> for goldy::SpatialAccess {
         match access {
             PySpatialAccess::INTERPOLATED => goldy::SpatialAccess::Interpolated,
             PySpatialAccess::DIRECT => goldy::SpatialAccess::Direct,
+            PySpatialAccess::DIRECT_INTERPOLATED => goldy::SpatialAccess::DirectInterpolated,
         }
     }
 }
@@ -196,6 +200,7 @@ impl From<goldy::SpatialAccess> for PySpatialAccess {
         match access {
             goldy::SpatialAccess::Interpolated => PySpatialAccess::INTERPOLATED,
             goldy::SpatialAccess::Direct => PySpatialAccess::DIRECT,
+            goldy::SpatialAccess::DirectInterpolated => PySpatialAccess::DIRECT_INTERPOLATED,
         }
     }
 }

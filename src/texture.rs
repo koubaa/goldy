@@ -286,6 +286,23 @@ impl Texture {
         self.access
     }
 
+    /// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture (SRV)
+    /// bindless index that can be used with hardware filtering (`.Sample()` calls).
+    ///
+    /// Returns `None` for textures that were not created with `DirectInterpolated` access.
+    pub fn bindless_sampled_index(&self) -> Option<u32> {
+        let backend = self.backend.lock().unwrap();
+        backend.texture_bindless_sampled_index(self.handle)
+    }
+
+    /// For `SpatialAccess::DirectInterpolated` textures, return the typed sampled-texture
+    /// bindless handle (`BindlessCategory::Texture`).
+    ///
+    /// Returns `None` for textures that were not created with `DirectInterpolated` access.
+    pub fn bindless_sampled_handle(&self) -> Option<BindlessHandle> {
+        self.bindless_sampled_index()
+            .map(|i| BindlessHandle::new(BindlessCategory::Texture, i))
+    }
     /// Creation flags ([`TextureFlags`]) used when this texture was allocated.
     ///
     /// Views from [`Self::borrow`] keep the parent's flags. Non-owning textures

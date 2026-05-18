@@ -600,6 +600,10 @@ pub trait GpuBackend: Send + Sync {
     /// Returns None if the texture is not registered.
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
 
+    /// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture-pool
+    /// (SRV) bindless index.  Returns `None` for textures without a secondary SRV slot.
+    fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32>;
+
     // Sampler management
     fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc)
         -> Result<SamplerHandle>;

@@ -638,6 +638,7 @@ fn register_surface_texture(
             format,
             texture: texture_owned,
             arg_buffer_index: bindless_slot,
+            sampled_arg_buffer_index: None,
             is_storage_image: true,
             slot_owned_externally: true,
             is_heap_allocated: false,

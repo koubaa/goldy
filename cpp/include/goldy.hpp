@@ -130,6 +130,8 @@ enum class SpatialAccess {
     Interpolated = 0,
     /// Direct 2D/3D indexing, no filtering (RWTexture2D).
     Direct = 1,
+    /// Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
+    DirectInterpolated = 2,
 };
 
 /**
@@ -877,6 +879,7 @@ private:
  * Textures hold image data on the GPU with a specific spatial access pattern:
  * - SpatialAccess::Interpolated: Hardware filtering between neighbors (Texture2D with sampler)
  * - SpatialAccess::Direct: Direct 2D indexing, no filtering (RWTexture2D)
+ * - SpatialAccess::DirectInterpolated: Both storage (UAV) and sampled (SRV) access
  */
 class Texture {
 public:

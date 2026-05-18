@@ -110,6 +110,13 @@ impl ResourceRegistry {
         offset
     }
 
+    /// Register a secondary SRV descriptor for a texture (used by `DirectInterpolated`).
+    /// Unlike `register_texture`, this one doesn't overwrite the primary SRV slot; the
+    /// slot is returned directly and the caller stores it in `sampled_bindless_offset`.
+    pub fn register_texture_srv(&mut self, _handle: TextureHandle) -> u32 {
+        self.cbv_srv_uav.alloc()
+    }
+
     pub fn register_sampler(&mut self, handle: SamplerHandle) -> u32 {
         let offset = self.sampler.alloc();
         self.sampler_offsets.insert(handle, offset);
@@ -651,8 +658,11 @@ pub(crate) struct TextureState {
     pub resource: Direct3D12::ID3D12Resource,
     /// SRV descriptor offset in CBV/SRV/UAV heap
     pub srv_offset: u32,
-    /// Bindless descriptor heap offset (same as srv_offset when bindless is enabled)
+    /// Bindless descriptor heap offset (same as srv_offset when bindless is enabled).
+    /// For `DirectInterpolated` textures this is the UAV (storage-image) slot.
     pub bindless_offset: Option<u32>,
+    /// For `SpatialAccess::DirectInterpolated` textures, the SRV (sampled-texture) slot.
+    pub sampled_bindless_offset: Option<u32>,
     /// Last known layout for enhanced texture barriers (replaces legacy `current_state`).
     pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
     /// Whether this texture was created with UAV access (SpatialAccess::Direct).

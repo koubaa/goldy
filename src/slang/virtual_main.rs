@@ -599,13 +599,33 @@ fn parse_entry(
 // Parameter parsing
 // ---------------------------------------------------------------------------
 
+/// Strip `//`-to-end-of-line comments from each line, preserving newlines so that
+/// multi-line parameter lists stay structurally intact for `#ifdef` handling.
+fn strip_line_comments(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            if let Some(idx) = line.find("//") {
+                &line[..idx]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Parse a comma-separated parameter list, handling nested `<...>` brackets.
+///
+/// Inline `//` comments are stripped first — without this, trailing comments on
+/// parameter lines become part of the next parameter's type string, producing
+/// invalid generated code that causes Slang ICEs.
 fn parse_params(params_str: &str) -> Vec<Param> {
+    let cleaned = strip_line_comments(params_str);
     let mut params = Vec::new();
     let mut current = String::new();
     let mut depth: i32 = 0;
 
-    for ch in params_str.chars() {
+    for ch in cleaned.chars() {
         match ch {
             '<' | '(' | '[' => {
                 depth += 1;
@@ -1655,6 +1675,26 @@ mod tests {
     fn parse_empty_params() {
         let params = parse_params("");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn parse_params_strips_inline_comments() {
+        let input = "BufRO<FilterUniform> uniforms_buf,\n\
+                      Interpolated<float4> src_sampled, // SRV slot: hardware-sampled reads\n\
+                      DirectSpatial<float4> src,        // UAV slot\n\
+                      DirectSpatial<float4> dst,\n\
+                      Filter linear_clamp,              // linear sampler\n\
+                      ThreadId gid";
+        let params = parse_params(input);
+        assert_eq!(params.len(), 6, "expected 6 params, got: {params:?}");
+        assert_eq!(params[0].ty, "BufRO<FilterUniform>");
+        assert_eq!(params[0].name, "uniforms_buf");
+        assert_eq!(params[1].ty, "Interpolated<float4>");
+        assert_eq!(params[1].name, "src_sampled");
+        assert_eq!(params[2].ty, "DirectSpatial<float4>");
+        assert_eq!(params[2].name, "src");
+        assert_eq!(params[4].ty, "Filter");
+        assert_eq!(params[4].name, "linear_clamp");
     }
 
     // -----------------------------------------------------------------------

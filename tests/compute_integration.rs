@@ -3249,3 +3249,126 @@ fn test_workgroup_upper_bound_linear() {
         );
     }
 }
+
+/// Round-trip test for `SpatialAccess::DirectInterpolated`:
+/// 1. Write a known pattern into the texture via UAV (storage image) in a compute pass.
+/// 2. Read it back via SRV (sampled image) using hardware bilinear (at texel centres, so
+///    the result should be exact) in a second compute pass.
+/// 3. Assert that the round-tripped values match the original.
+///
+/// This validates that both the storage and sampled bindless slots point to the same
+/// underlying resource on all supported backends.
+#[test]
+fn texture_dual_view_round_trip() {
+    const W: u32 = 4;
+    const H: u32 = 4;
+    const N: usize = (W * H) as usize;
+
+    /// Write pass: fill a DirectSpatial (UAV) texture with known RGBA values.
+    const WRITE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(4, 4, 1)]
+void cs_main(DirectSpatial<float4> dst, ThreadId id) {
+    uint x = id.x;
+    uint y = id.y;
+    // Encode pixel coordinates as (x/255, y/255, 0, 1)
+    dst[uint2(x, y)] = float4(float(x) / 255.0, float(y) / 255.0, 0.0, 1.0);
+}
+"#;
+
+    /// Read pass: sample the Interpolated (SRV) view at texel centres and write to a buffer.
+    const READ_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(4, 4, 1)]
+void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId id) {
+    uint x = id.x;
+    uint y = id.y;
+    float2 uv = (float2(x, y) + 0.5) / float2(4.0, 4.0);
+    float4 v = src.Sample(smp, uv);
+    // Pack 8-bit rgba into a single uint.
+    uint r = uint(v.x * 255.0 + 0.5);
+    uint g = uint(v.y * 255.0 + 0.5);
+    uint b = uint(v.z * 255.0 + 0.5);
+    uint a = uint(v.w * 255.0 + 0.5);
+    out[y * 4 + x] = r | (g << 8) | (b << 16) | (a << 24);
+}
+"#;
+
+    let device = make_device();
+
+    // Check that the device supports DirectInterpolated (all backends should).
+    let tex = Texture::new(
+        &device,
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        SpatialAccess::DirectInterpolated,
+        TextureFlags::empty(),
+    )
+    .expect("create DirectInterpolated texture");
+
+    let storage_idx = tex
+        .bindless_index()
+        .expect("DirectInterpolated must have a storage bindless index");
+    let sampled_idx = tex
+        .bindless_sampled_index()
+        .expect("DirectInterpolated must have a sampled bindless index");
+    // storage_idx and sampled_idx index into *different* descriptor pools (UAV vs SRV),
+    // so the same integer value is valid — they just happen to both be the first slot in
+    // their respective pools. What matters is that both are present (both Some).
+
+    // Write pass (UAV).
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("compile write");
+    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
+    let mut enc = ComputeEncoder::new();
+    {
+        let mut pass = enc.begin_compute_pass();
+        pass.set_pipeline(&write_pipeline);
+        pass.bind_resources_raw(&[storage_idx]);
+        pass.dispatch(1, 1, 1);
+    }
+    enc.dispatch(&device).expect("write dispatch");
+
+    // Read pass (SRV + sampler).
+    let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
+    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).expect("out buffer");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
+    let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
+    let mut enc2 = ComputeEncoder::new();
+    {
+        let mut pass = enc2.begin_compute_pass();
+        pass.set_pipeline(&read_pipeline);
+        // Bind: Interpolated<float4> src, Filter smp, Scattered<uint> out
+        pass.bind_resources_raw(&[
+            sampled_idx,                       // Texture2D<float4> SRV
+            sampler.bindless_index().unwrap(), // Filter sampler
+            out.bindless_index().unwrap(),     // Scattered<uint> output
+        ]);
+        pass.dispatch(1, 1, 1);
+    }
+    enc2.dispatch(&device).expect("read dispatch");
+
+    let mut raw = vec![0u8; N * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    for y in 0..H as usize {
+        for x in 0..W as usize {
+            let expected_r = x as u8;
+            let expected_g = y as u8;
+            let packed = result[y * W as usize + x];
+            let r = (packed & 0xFF) as u8;
+            let g = ((packed >> 8) & 0xFF) as u8;
+            let b = ((packed >> 16) & 0xFF) as u8;
+            let a = ((packed >> 24) & 0xFF) as u8;
+            assert_eq!(r, expected_r, "r mismatch at ({x},{y})");
+            assert_eq!(g, expected_g, "g mismatch at ({x},{y})");
+            assert_eq!(b, 0, "b mismatch at ({x},{y})");
+            assert_eq!(a, 255, "a mismatch at ({x},{y})");
+        }
+    }
+}
