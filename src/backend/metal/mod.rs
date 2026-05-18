@@ -469,6 +469,10 @@ impl GpuBackend for MetalBackend {
         texture::bindless_index(&self.state, texture)
     }
 
+    fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32> {
+        texture::bindless_sampled_index(&self.state, texture)
+    }
+
     fn create_sampler(
         &mut self,
         device: DeviceHandle,

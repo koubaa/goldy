@@ -117,7 +117,8 @@ pub(super) fn create(
     access: SpatialAccess,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
-    let is_storage = matches!(access, SpatialAccess::Direct);
+    let is_storage = matches!(access, SpatialAccess::Direct | SpatialAccess::DirectInterpolated);
+    let is_dual_access = matches!(access, SpatialAccess::DirectInterpolated);
 
     let logical_device = state
         .devices
@@ -245,6 +246,46 @@ pub(super) fn create(
         Some(srv_offset)
     };
 
+    // For DirectInterpolated, additionally register a sampled SRV slot.
+    let sampled_bindless_offset = if is_dual_access {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let srv2_offset = logical_device
+            .resource_registry
+            .register_texture_srv(handle);
+        let srv2_cpu_handle = unsafe {
+            let mut cpu_handle = logical_device
+                .cbv_srv_uav_heap
+                .GetCPUDescriptorHandleForHeapStart();
+            cpu_handle.ptr +=
+                (srv2_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle
+        };
+        let srv2_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format_to_dxgi(format),
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_SRV {
+                    MostDetailedMip: 0,
+                    MipLevels: 1,
+                    PlaneSlice: 0,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        };
+        unsafe {
+            logical_device
+                .device
+                .CreateShaderResourceView(&resource, Some(&srv2_desc), srv2_cpu_handle);
+        }
+        Some(srv2_offset)
+    } else {
+        None
+    };
+
     let last_layout = if is_storage {
         init_storage_texture_uav_layout(state, device_handle, &resource)?
     } else {
@@ -261,6 +302,7 @@ pub(super) fn create(
             resource,
             srv_offset,
             bindless_offset,
+            sampled_bindless_offset,
             last_layout,
             is_storage,
             transient_placed: false,
@@ -1031,4 +1073,15 @@ pub(super) fn bindless_index(state: &Dx12State, texture_handle: TextureHandle) -
         .textures
         .get(&texture_handle)
         .and_then(|t| t.bindless_offset)
+}
+
+/// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
+pub(super) fn bindless_sampled_index(
+    state: &Dx12State,
+    texture_handle: TextureHandle,
+) -> Option<u32> {
+    state
+        .textures
+        .get(&texture_handle)
+        .and_then(|t| t.sampled_bindless_offset)
 }

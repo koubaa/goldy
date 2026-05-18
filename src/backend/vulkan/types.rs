@@ -497,8 +497,11 @@ pub(crate) struct TextureState {
     /// Staging buffer for texture uploads
     pub staging_buffer: Option<vk::Buffer>,
     pub staging_memory: Option<vk::DeviceMemory>,
-    /// Index in the global bindless descriptor set (if bindless enabled)
+    /// Index in the global bindless descriptor set (if bindless enabled).
+    /// For `DirectInterpolated` textures this is the storage-image (UAV) slot.
     pub bindless_index: Option<u32>,
+    /// For `SpatialAccess::DirectInterpolated` textures, the sampled-texture (SRV) slot.
+    pub sampled_bindless_index: Option<u32>,
     /// Current image layout (for subregion writes / transitions)
     pub current_layout: vk::ImageLayout,
     /// Sub-allocated from a transient heap; `memory` is shared with the heap.

@@ -47,6 +47,11 @@ pub(super) fn create(
             // on every subsequent frame.
             mtl_usage |= MTLTextureUsage::ShaderWrite | MTLTextureUsage::ShaderRead;
         }
+        SpatialAccess::DirectInterpolated => {
+            // Dual-access: writable as a storage image (UAV) and readable via
+            // hardware sampling (SRV). Needs ShaderRead | ShaderWrite.
+            mtl_usage |= MTLTextureUsage::ShaderWrite | MTLTextureUsage::ShaderRead;
+        }
     }
     if flags.contains(TextureFlags::RENDER_TARGET) {
         mtl_usage |= MTLTextureUsage::RenderTarget;
@@ -59,7 +64,7 @@ pub(super) fn create(
         .allocate(&descriptor)
         .context("Metal texture heap is full — all overflow heaps exhausted")?;
 
-    let is_storage_image = matches!(access, SpatialAccess::Direct);
+    let is_storage_image = matches!(access, SpatialAccess::Direct | SpatialAccess::DirectInterpolated);
     let (arg_buffer_index, encoding_index) = if is_storage_image {
         let local = logical_device
             .resource_registry
@@ -68,6 +73,22 @@ pub(super) fn create(
     } else {
         let local = logical_device.resource_registry.register_texture(handle);
         (local, ResourceRegistry::texture_global_index(local))
+    };
+
+    // For DirectInterpolated, additionally register in the sampled-texture pool.
+    let sampled_arg_buffer_index = if matches!(access, SpatialAccess::DirectInterpolated) {
+        let local = logical_device.resource_registry.register_texture(handle);
+        let global = ResourceRegistry::texture_global_index(local);
+        let enc = &logical_device.texture_encoder;
+        let encoded_length = enc.encoded_length();
+        let offset = (global as u64) * encoded_length;
+        if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
+            enc.set_argument_buffer(&logical_device.argument_buffer, offset);
+            enc.set_texture(0, &texture);
+        }
+        Some(local)
+    } else {
+        None
     };
     tracing::debug!(
         "Allocated texture {} from heap at bindless local={} global={} storage_image={}",
@@ -107,6 +128,7 @@ pub(super) fn create(
             format,
             texture,
             arg_buffer_index,
+            sampled_arg_buffer_index,
             is_storage_image,
             slot_owned_externally: false,
             is_heap_allocated: true,
@@ -320,4 +342,16 @@ pub(super) fn bindless_index(state: &MetalState, texture_handle: TextureHandle) 
         .textures
         .get(&texture_handle)
         .map(|t| t.arg_buffer_index)
+}
+
+/// Return the LOCAL sampled-texture-pool index for a `DirectInterpolated` texture.
+/// Returns `None` for textures that don't have a secondary sampled-SRV slot.
+pub(super) fn bindless_sampled_index(
+    state: &MetalState,
+    texture_handle: TextureHandle,
+) -> Option<u32> {
+    state
+        .textures
+        .get(&texture_handle)
+        .and_then(|t| t.sampled_arg_buffer_index)
 }

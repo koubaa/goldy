@@ -1004,6 +1004,9 @@ pub(crate) struct TextureState {
     /// texture was registered in (`storageImages[]` when `is_storage_image`,
     /// otherwise `textures[]`).
     pub arg_buffer_index: u32,
+    /// For `SpatialAccess::DirectInterpolated` textures, the LOCAL index in the
+    /// sampled-texture pool (separate from the storage-image `arg_buffer_index`).
+    pub sampled_arg_buffer_index: Option<u32>,
     /// Which bindless region the `arg_buffer_index` belongs to; needed at
     /// destroy time to release the slot back to the correct free list.
     pub is_storage_image: bool,

@@ -59,6 +59,9 @@ pub(super) fn create(
         SpatialAccess::Direct => {
             vk_usage |= vk::ImageUsageFlags::STORAGE;
         }
+        SpatialAccess::DirectInterpolated => {
+            vk_usage |= vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
+        }
     }
 
     // Apply additional flags
@@ -127,7 +130,8 @@ pub(super) fn create(
     let handle = *next_texture_handle;
     *next_texture_handle += 1;
 
-    let is_storage_image = matches!(access, SpatialAccess::Direct);
+    let is_storage_image = matches!(access, SpatialAccess::Direct | SpatialAccess::DirectInterpolated);
+    let is_dual_access = matches!(access, SpatialAccess::DirectInterpolated);
 
     let bindless_index = {
         let logical_device = devices.get_mut(&device_handle).unwrap();
@@ -183,6 +187,37 @@ pub(super) fn create(
         Some(index)
     };
 
+    // For DirectInterpolated, also register a sampled-texture (SRV) slot.
+    let sampled_bindless_index = if is_dual_access {
+        let logical_device = devices.get_mut(&device_handle).unwrap();
+        // Register in the sampled pool (is_storage_image = false).
+        let index = logical_device
+            .resource_registry
+            .register_texture(handle, false);
+
+        if let Some(descriptor_set) = bindless_descriptor_set {
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::GENERAL);
+
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(types::bindless_bindings::SAMPLED_IMAGES)
+                .dst_array_element(index)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(std::slice::from_ref(&image_info));
+
+            unsafe {
+                logical_device
+                    .device
+                    .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+            }
+        }
+        Some(index)
+    } else {
+        None
+    };
+
     let initial_layout = if is_storage_image {
         let logical_device = devices.get(&device_handle).unwrap();
         transition_image_layout(
@@ -195,7 +230,6 @@ pub(super) fn create(
     } else {
         vk::ImageLayout::UNDEFINED
     };
-
     textures.insert(
         handle,
         TextureState {
@@ -209,6 +243,7 @@ pub(super) fn create(
             staging_buffer: None,
             staging_memory: None,
             bindless_index,
+            sampled_bindless_index,
             current_layout: initial_layout,
             transient_heap_suballoc: false,
         },
@@ -1371,4 +1406,14 @@ pub(super) fn bindless_index(
     texture_handle: TextureHandle,
 ) -> Option<u32> {
     textures.get(&texture_handle).and_then(|t| t.bindless_index)
+}
+
+/// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
+pub(super) fn bindless_sampled_index(
+    textures: &HashMap<TextureHandle, TextureState>,
+    texture_handle: TextureHandle,
+) -> Option<u32> {
+    textures
+        .get(&texture_handle)
+        .and_then(|t| t.sampled_bindless_index)
 }
