@@ -94,52 +94,6 @@ pool.remaining();        // bytes available
 pool.backing_buffer();   // reference to the underlying Buffer
 ```
 
-## BufferPoolRing
-
-`BufferPoolRing` is a fixed-size ring of `BufferPool`s for double- (or N-) buffered rendering. Each frame advances to the next slot, and the pool that was active N frames ago is safe to reset because its GPU work has completed.
-
-### Usage
-
-```rust
-use goldy::BufferPoolRing;
-
-let mut ring = BufferPoolRing::<2>::new(); // double-buffered
-
-// Each frame:
-ring.advance();
-ring.prepare(&device, needed_bytes)?;
-
-if ring.take_clear_flag() {
-    // New backing buffer was allocated — zero-fill it
-    let pool = ring.current_mut().unwrap();
-    pool.backing_buffer().clear(&device, 0, pool.capacity())?;
-}
-
-let pool = ring.current_mut().unwrap();
-let view = pool.alloc::<[f32; 4]>(256)?;
-```
-
-### How It Works
-
-1. **`advance()`** — rotates to the next pool slot (call once at frame start)
-2. **`prepare(device, size)`** — ensures the current slot has at least `size` bytes. Resets the pool if large enough, or allocates a new one if not. Sets a clear flag when a new allocation occurs.
-3. **`take_clear_flag()`** — returns `true` exactly once after `prepare` allocates a new backing buffer. Issue a `clear_buffer` for the backing when this fires.
-4. **`current_mut()`** / **`current()`** — access the current frame's pool
-
-### Bounded Prepare
-
-`prepare_bounded` adds an optional upper bound. If the current pool exceeds `max_size`, it is reallocated at `size`, enabling hysteresis-based shrinking:
-
-```rust
-ring.prepare_bounded(&device, needed_size, Some(max_size))?;
-```
-
-### Cleanup
-
-```rust
-ring.clear(); // drop all pools and reset state
-```
-
 ## TexturePool
 
 `TexturePool` caches released textures for reuse, avoiding repeated GPU allocation and deallocation. This is particularly valuable on DX12 where texture allocation involves descriptor heap management.
@@ -201,7 +155,7 @@ pool.clear(); // drop all pooled textures, free GPU memory
 | Scenario | Recommendation |
 |----------|---------------|
 | Many small storage buffers with similar lifetime | `BufferPool` — one allocation, many views |
-| Per-frame uniform/storage data that changes every frame | `BufferPoolRing` — ring-buffered pools, safe reset each frame |
+| Per-frame uniform/storage data that changes every frame | `BufferPool` reset inside a `FrameOrchestrator` retirement callback — epoch-safe, no manual ring |
 | Transient render targets or compute textures | `TexturePool` — acquire/release cycle avoids allocation churn |
 | Long-lived buffers (mesh data, static textures) | Individual `Buffer` / `Texture` — pooling adds no benefit |
 | Uniform buffer updated once at startup | Individual `Buffer` — no per-frame reuse needed |
@@ -225,19 +179,27 @@ let indices = pool.alloc_with_data(&index_data)?;
 
 ### Per-Frame Dynamic Data
 
-Use `BufferPoolRing` for data that changes every frame:
+For data that changes every frame, keep a `BufferPool` per frame slot and reset it in the `FrameOrchestrator` retirement callback — the orchestrator guarantees the GPU has finished before the callback fires:
 
 ```rust
-let mut ring = BufferPoolRing::<2>::new();
+struct FrameData {
+    pool: BufferPool,
+}
 
-// In the render loop:
-ring.advance();
-ring.prepare(&device, frame_data_size)?;
+let mut orch: FrameOrchestrator<FrameData> = FrameOrchestrator::new(&device, 3);
 
-let pool = ring.current_mut().unwrap();
-let uniforms = pool.alloc_with_data(&[camera_data])?;
-let instances = pool.alloc_with_data(&instance_transforms)?;
+// Each frame:
+let handle = orch.begin_frame(|_dev, retired| {
+    retired.data.pool.reset(); // safe: GPU epoch has passed
+    Ok(())
+})?;
+
+let mut frame_data = /* get or create pool for this slot */;
+let uniforms = frame_data.pool.alloc_with_data(&[camera_data])?;
+let instances = frame_data.pool.alloc_with_data(&instance_transforms)?;
 ```
+
+See [Pipelined Frames](../compute/pipelined-frames.md) for the full `FrameOrchestrator` API.
 
 ### Transient Compute Textures
 

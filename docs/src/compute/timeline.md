@@ -94,7 +94,21 @@ let result: Vec<f32> = buffer.read_data(0)?;
 
 ### Multi-frame pipelining
 
-Overlap CPU frame N+1 preparation with GPU frame N execution:
+For production renderers, use [`FrameOrchestrator`](./pipelined-frames.md). It manages the in-flight slot ring, depth cap, retirement callbacks, and surface-path timeline patching with no boilerplate:
+
+```rust
+let mut orch: FrameOrchestrator<MyCleanup> = FrameOrchestrator::new(&device, 3);
+
+loop {
+    let handle = orch.begin_frame(|dev, retired| my_cleanup(dev, retired))?;
+    // ... record and submit ...
+    orch.end_frame_standalone(handle, graph, None, cleanup)?;
+}
+
+orch.drain_all(|dev, retired| my_cleanup(dev, retired))?;
+```
+
+When you only need a one-off overlap without full frame management, the raw `TimelineValue` pattern works:
 
 ```rust
 let mut pending: Option<TimelineValue> = None;

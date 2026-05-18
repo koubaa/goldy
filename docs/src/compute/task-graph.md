@@ -178,7 +178,9 @@ graph.node("render", &pipeline)
     .dispatch(wg_x, wg_y, 1);
 ```
 
-When transients are used, the graph **blocks until the GPU completes** so the staging heap can be freed. The scheduler uses wave-interval analysis to determine which transients can alias: if two transient buffers are never live in the same wave, they share the same backing memory.
+The scheduler uses wave-interval analysis to determine which transients can alias: if two transient buffers are never live in the same wave, they share the same backing memory.
+
+By default, `Device::submit` blocks the CPU until the GPU finishes so the placement heap region is immediately reclaimable. When the graph is submitted as part of a pipelined frame via `Device::submit_pipelined`, the CPU does **not** block — the region stays in flight until the returned `TimelineValue` advances. See [Pipelined Frames](./pipelined-frames.md) for the `FrameOrchestrator` API that manages this automatically.
 
 ## Per-resource barriers on Metal
 
