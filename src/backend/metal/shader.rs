@@ -9,6 +9,235 @@ use anyhow::{Context, Result};
 use mtl::{Device as MTLDevice, Library};
 use std::collections::HashMap;
 
+/// Patch compute-shader MSL to fix two Slang codegen bugs that surface on Metal:
+///
+/// **Bug A** — missing `constant*` / `[[buffer(1)]]` on `EntryPointParams_0`.
+/// When wave intrinsics (`WaveGetLaneCount` etc.) are combined with a cross-module
+/// `[ForceInline]` function that takes a fixed-size `groupshared` parameter, Slang
+/// omits the `constant*` address-space qualifier and `[[buffer(1)]]` attribute from
+/// the `EntryPointParams_0` kernel argument.  The ill-formed MSL signature is:
+///
+/// ```text
+/// [[kernel]] void cs_main(..., EntryPointParams_0 entryPointParamsN)
+/// ```
+///
+/// The patch restores the correct form:
+///
+/// ```text
+/// [[kernel]] void cs_main(..., EntryPointParams_0 constant* entryPointParamsN [[buffer(1)]])
+/// ```
+///
+/// and updates every member access (`VARNAME.FIELD`) to pointer syntax
+/// (`VARNAME->FIELD`) plus the struct-copy assignment to a dereference
+/// (`= VARNAME;` → `= *VARNAME;`).
+///
+/// **Bug B** — threadgroup array copied into thread-local storage.
+/// Cross-module `[ForceInline]` functions that receive a `groupshared` array
+/// parameter generate a per-thread copy of the array:
+///
+/// ```text
+/// thread array<TYPE, int(N)> VAR = *kernelContext_M->FIELD;
+/// ```
+///
+/// This means every write goes to the calling thread's private stack, so
+/// cross-thread communication through the scratch buffer silently produces
+/// wrong values (barriers have nothing to synchronise).  The patch replaces
+/// the copy with a `threadgroup` reference:
+///
+/// ```text
+/// threadgroup array<TYPE, int(N)>& VAR = *kernelContext_M->FIELD;
+/// ```
+pub(super) fn patch_compute_msl(msl: &str) -> String {
+    let s = patch_compute_msl_entry_point_params(msl);
+    patch_msl_threadgroup_copies(&s)
+}
+
+/// Fix Bug A: restore the `constant*` qualifier and `[[buffer(1)]]` attribute for
+/// `EntryPointParams_0` when Slang omits them in compute-shader kernels.
+fn patch_compute_msl_entry_point_params(msl: &str) -> String {
+    if !msl.contains("EntryPointParams_0") || msl.contains("EntryPointParams_0 constant*") {
+        return msl.to_string();
+    }
+    // Locate the ill-formed kernel parameter `EntryPointParams_0 VARNAME)`.
+    // The struct definition ends with `\n{` (no space) and the KernelContext member
+    // ends with `;`, so only the kernel-signature occurrence ends with `)`.
+    const EP_NEEDLE: &str = "EntryPointParams_0 ";
+    let mut search_from = 0usize;
+    let var_name = loop {
+        let rel = match msl[search_from..].find(EP_NEEDLE) {
+            Some(p) => p,
+            None => return msl.to_string(),
+        };
+        let abs = search_from + rel;
+        let after = &msl[abs + EP_NEEDLE.len()..];
+        let var_end = after
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(after.len());
+        let var = &after[..var_end];
+        if !var.is_empty() && after[var_end..].starts_with(')') {
+            break var.to_string();
+        }
+        search_from = abs + EP_NEEDLE.len() + 1;
+    };
+
+    // Step 1: fix the kernel-signature parameter.
+    let old_param = format!("{}{}{}", EP_NEEDLE, var_name, ")");
+    let new_param = format!("{}constant* {} [[buffer(1)]])", EP_NEEDLE, var_name);
+    let mut s = msl.replacen(&old_param, &new_param, 1);
+
+    // Step 2: change member-access syntax from `.FIELD` to `->FIELD`.
+    let dot = format!("{}.", var_name);
+    let arrow = format!("{}->", var_name);
+    s = s.replace(&dot, &arrow);
+
+    // Step 3: the struct-copy assignment must dereference the now-pointer parameter.
+    let assign = format!("= {};", var_name);
+    let deref = format!("= *{};", var_name);
+    s = s.replace(&assign, &deref);
+
+    s
+}
+
+/// Fix Bug B: replace per-thread copies of `threadgroup` arrays with references.
+///
+/// Two patterns appear depending on the collective function:
+///
+/// **Pattern 1** — explicit or implicit thread copy directly from a KernelContext field:
+/// ```text
+///     thread array<TYPE, int(N)> VAR = *kernelContext_M->FIELD;  // explicit thread
+///           array<TYPE, int(N)> VAR = *kernelContext_M->FIELD;   // implicit thread
+/// ```
+///
+/// **Pattern 2** — a secondary copy of the Pattern-1 variable (e.g. inside a loop body):
+/// ```text
+///     thread array<TYPE, int(N)> VAR2 = VAR1;
+/// ```
+/// where `VAR1` was already fixed to a `threadgroup&` reference above.
+///
+/// Both are replaced with `threadgroup` references so that reads/writes go to the
+/// actual shared threadgroup memory rather than a per-thread stack copy.
+fn patch_msl_threadgroup_copies(msl: &str) -> String {
+    if !msl.contains("= *kernelContext") {
+        return msl.to_string();
+    }
+    // Track variable names that have been turned into threadgroup references so
+    // that Pattern-2 copies of them can be caught in the same single pass.
+    let mut tg_ref_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut result = String::with_capacity(msl.len() + 128);
+    for line in msl.lines() {
+        let trimmed = line.trim_start();
+
+        // Pattern 1a — explicit `thread array<` from KernelContext.
+        let is_p1_explicit =
+            trimmed.starts_with("thread array<") && line.contains("= *kernelContext");
+        // Pattern 1b — implicit thread (`array<` with no qualifier) from KernelContext.
+        let is_p1_implicit = !trimmed.starts_with("thread")
+            && trimmed.starts_with("array<")
+            && line.contains("= *kernelContext");
+        // Pattern 2 — explicit `thread array<` copying a known threadgroup-ref variable.
+        let is_p2 = trimmed.starts_with("thread array<")
+            && !line.contains("= *kernelContext")
+            && line.find(" = ").map_or(false, |eq| {
+                let rhs = line[eq + 3..].trim_end_matches(';').trim();
+                tg_ref_vars.contains(rhs)
+            });
+
+        let patched = if is_p1_explicit || is_p1_implicit || is_p2 {
+            // Normalise: ensure the line starts with `thread array<` for uniform handling.
+            let s = if is_p1_implicit {
+                let arr_pos = line.find("array<").unwrap();
+                format!("{}thread {}", &line[..arr_pos], &line[arr_pos..])
+            } else {
+                line.to_string()
+            };
+            // Change address space: `thread` → `threadgroup`.
+            let s = s.replacen("thread array<", "threadgroup array<", 1);
+            // Insert `&` after the closing `>` of the array type to make it a reference.
+            // `rfind("> ")` unambiguously finds the type-closer because `->` in the RHS
+            // never has a space after `>`.
+            if let (Some(gt), Some(eq)) = (s.rfind("> "), s.find(" = ")) {
+                if gt < eq {
+                    let mut out = String::with_capacity(s.len() + 1);
+                    out.push_str(&s[..gt + 1]);
+                    out.push('&');
+                    out.push_str(&s[gt + 1..]);
+                    // Record the variable so downstream Pattern-2 copies are also fixed.
+                    let after_gt = &s[gt + 2..]; // skip `> `
+                    if let Some(end) = after_gt.find(|c: char| !c.is_alphanumeric() && c != '_') {
+                        let var = &after_gt[..end];
+                        if !var.is_empty() {
+                            tg_ref_vars.insert(var.to_string());
+                        }
+                    }
+                    out
+                } else {
+                    s
+                }
+            } else {
+                s
+            }
+        } else {
+            line.to_string()
+        };
+        result.push_str(&patched);
+        result.push('\n');
+    }
+    if !msl.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+/// Fix the Slang bug where an internal dispatch function emits `[[stage_in]]` on a
+/// `thread*` pointer parameter instead of a value parameter.
+///
+/// For shaders compiled with `[goldy_vertex]` Slang generates two function signatures:
+///
+/// 1. An internal wrapper, e.g.:
+///    ```text
+///    StaticVarying_0 vs_main_0(const StaticVertexIn_0 thread* _pt0_0 [[stage_in]], ...)
+///    ```
+///    Here `[[stage_in]]` is on a **pointer** — Metal rejects this.
+///
+/// 2. The real entry point:
+///    ```text
+///    [[vertex]] vs_main_Result_0 vs_main(StaticVertexIn_0 _S1 [[stage_in]], ...)
+///    ```
+///    Here `[[stage_in]]` is on a **value type** — this is correct.
+///
+/// The fix: only strip `[[stage_in]]` when the same line also contains `thread*`
+/// (i.e., the invalid pointer case).  Using the entire file prefix as the search
+/// context (the original implementation) incorrectly fires on simple vertex shaders
+/// where `thread*` appears in an unrelated helper function above the entry point.
+pub(super) fn patch_vertex_stage_in_pointer(msl: &str) -> String {
+    const STAGE_IN: &str = "[[stage_in]]";
+
+    let Some(si_pos) = msl.find(STAGE_IN) else {
+        return msl.to_string();
+    };
+
+    // Determine the line that contains this [[stage_in]] occurrence.
+    let line_start = msl[..si_pos].rfind('\n').map_or(0, |p| p + 1);
+    let line_end = msl[si_pos..].find('\n').map_or(msl.len(), |p| si_pos + p);
+    let line = &msl[line_start..line_end];
+
+    // Only strip when the [[stage_in]] is on a thread-pointer parameter.
+    // A legitimate entry-point [[stage_in]] is always on a value type (no `*` on that line).
+    if !line.contains("thread*") {
+        return msl.to_string();
+    }
+
+    let before = &msl[..si_pos];
+    let prefix_end = before.trim_end().len();
+    let si_end = si_pos + STAGE_IN.len();
+
+    let mut result = String::with_capacity(msl.len());
+    result.push_str(&msl[..prefix_end]);
+    result.push_str(&msl[si_end..]);
+    result
+}
+
 /// Patch vertex-shader MSL to inject the missing EntryPointParams [[buffer(1)]] binding.
 ///
 /// Slang's Metal backend generates `EntryPointParams_0` inside `KernelContext_0` for
@@ -130,12 +359,29 @@ fn compile_stage_with_reflection(
         .context("Failed to get MSL source")?
         .to_string();
 
-    // Apply vertex-shader patch for missing EntryPointParams [[buffer(1)]] binding.
+    // Apply stage-specific MSL patches for known Slang codegen bugs.
     let msl_source = if desc.stage == SlangStage::Vertex {
         let patched = patch_vertex_msl_entry_point_params(&raw_msl);
         if patched != raw_msl {
             tracing::debug!(
                 "Applied vertex EntryPointParams [[buffer(1)]] patch for {}",
+                desc.entry_point
+            );
+        }
+        let patched2 = patch_vertex_stage_in_pointer(&patched);
+        if patched2 != patched {
+            tracing::debug!(
+                "Applied vertex [[stage_in]] pointer-to-value patch for {}",
+                desc.entry_point
+            );
+        }
+        patched2
+    } else if desc.stage == SlangStage::Compute {
+        // Fix cross-module [ForceInline] + groupshared bugs (see patch_compute_msl).
+        let patched = patch_compute_msl(&raw_msl);
+        if patched != raw_msl {
+            tracing::debug!(
+                "Applied compute MSL patches (EntryPointParams / threadgroup copy) for {}",
                 desc.entry_point
             );
         }
