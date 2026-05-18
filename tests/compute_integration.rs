@@ -3344,9 +3344,9 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         pass.set_pipeline(&read_pipeline);
         // Bind: Interpolated<float4> src, Filter smp, Scattered<uint> out
         pass.bind_resources_raw(&[
-            sampled_idx,                           // Texture2D<float4> SRV
-            sampler.bindless_index().unwrap(),     // Filter sampler
-            out.bindless_index().unwrap(),         // Scattered<uint> output
+            sampled_idx,                       // Texture2D<float4> SRV
+            sampler.bindless_index().unwrap(), // Filter sampler
+            out.bindless_index().unwrap(),     // Scattered<uint> output
         ]);
         pass.dispatch(1, 1, 1);
     }

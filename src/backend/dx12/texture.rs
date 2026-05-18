@@ -117,7 +117,10 @@ pub(super) fn create(
     access: SpatialAccess,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
-    let is_storage = matches!(access, SpatialAccess::Direct | SpatialAccess::DirectInterpolated);
+    let is_storage = matches!(
+        access,
+        SpatialAccess::Direct | SpatialAccess::DirectInterpolated
+    );
     let is_dual_access = matches!(access, SpatialAccess::DirectInterpolated);
 
     let logical_device = state
@@ -259,8 +262,7 @@ pub(super) fn create(
             let mut cpu_handle = logical_device
                 .cbv_srv_uav_heap
                 .GetCPUDescriptorHandleForHeapStart();
-            cpu_handle.ptr +=
-                (srv2_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+            cpu_handle.ptr += (srv2_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
             cpu_handle
         };
         let srv2_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
@@ -277,9 +279,11 @@ pub(super) fn create(
             },
         };
         unsafe {
-            logical_device
-                .device
-                .CreateShaderResourceView(&resource, Some(&srv2_desc), srv2_cpu_handle);
+            logical_device.device.CreateShaderResourceView(
+                &resource,
+                Some(&srv2_desc),
+                srv2_cpu_handle,
+            );
         }
         Some(srv2_offset)
     } else {

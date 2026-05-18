@@ -949,7 +949,9 @@ impl GpuBackend for MockBackend {
     }
 
     fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32> {
-        self.textures.get(&texture).and_then(|t| t.sampled_bindless_index)
+        self.textures
+            .get(&texture)
+            .and_then(|t| t.sampled_bindless_index)
     }
 
     // Sampler management

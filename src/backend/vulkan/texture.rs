@@ -130,7 +130,10 @@ pub(super) fn create(
     let handle = *next_texture_handle;
     *next_texture_handle += 1;
 
-    let is_storage_image = matches!(access, SpatialAccess::Direct | SpatialAccess::DirectInterpolated);
+    let is_storage_image = matches!(
+        access,
+        SpatialAccess::Direct | SpatialAccess::DirectInterpolated
+    );
     let is_dual_access = matches!(access, SpatialAccess::DirectInterpolated);
 
     let bindless_index = {

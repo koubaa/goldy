@@ -64,7 +64,10 @@ pub(super) fn create(
         .allocate(&descriptor)
         .context("Metal texture heap is full — all overflow heaps exhausted")?;
 
-    let is_storage_image = matches!(access, SpatialAccess::Direct | SpatialAccess::DirectInterpolated);
+    let is_storage_image = matches!(
+        access,
+        SpatialAccess::Direct | SpatialAccess::DirectInterpolated
+    );
     let (arg_buffer_index, encoding_index) = if is_storage_image {
         let local = logical_device
             .resource_registry
