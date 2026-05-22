@@ -1114,6 +1114,27 @@ impl GpuBackend for VulkanBackend {
         compute::submit_graph(&mut self.state, device, commands)
     }
 
+    fn submit_graph_and_retain(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+        key: u64,
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit_graph_and_retain(&mut self.state, device, commands, key)
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        device: DeviceHandle,
+        key: u64,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        compute::try_resubmit_retained(&mut self.state, device, key)
+    }
+
+    fn evict_retained(&mut self, device: DeviceHandle, key: u64) {
+        compute::evict_retained(&mut self.state, device, key);
+    }
+
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
         let surf = self
             .state

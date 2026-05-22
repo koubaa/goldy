@@ -9,6 +9,8 @@ use crate::encoder::CommandEncoder;
 use crate::task_graph::TaskGraph;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
+use crate::tracy_frame_mark;
+use crate::tracy_zone;
 use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
 use crate::vram_allocator::DeferredPayload;
 use anyhow::{Context, Result};
@@ -107,6 +109,7 @@ impl Surface {
 
     /// Begin the next frame (acquire swapchain image and open the frame bracket).
     pub fn begin(&self) -> Result<Frame> {
+        let _tz = tracy_zone!("surface.begin");
         let (token, texture_handle, w, h, format) = {
             let mut backend = self.backend.lock().unwrap();
             let (tok, th) = backend.begin_frame(self.handle)?;
@@ -232,7 +235,8 @@ impl Frame {
     /// automatically using the device-owned placement heap. The caller does not need
     /// to call [`Device::submit`](crate::Device::submit) for graphs with transients;
     /// this method handles the full resolution transparently.
-    pub fn submit_compute(&self, graph: &TaskGraph) -> Result<()> {
+    pub fn submit_compute(&self, graph: &mut TaskGraph) -> Result<()> {
+        let _tz = tracy_zone!("frame.submit_compute");
         if !graph.has_transient_resources() {
             let commands = graph.compile_commands();
             let mut backend = self.backend.lock().unwrap();
@@ -362,6 +366,7 @@ impl Frame {
     }
 
     fn do_present(&mut self) -> Result<TimelineValue> {
+        let _tz = tracy_zone!("frame.present");
         if self.presented {
             let backend = self.backend.lock().unwrap();
             return Ok(backend.gpu_progress(self.device_handle));
@@ -373,6 +378,7 @@ impl Frame {
             let mut backend = self.backend.lock().unwrap();
             backend.end_frame(token)?
         };
+        tracy_frame_mark!();
         // Stamp any pending placement heap regions with the present timeline.
         if let Ok(mut heap_guard) = self._device.inner.placement_heap.lock() {
             if let Some(ref mut heap) = *heap_guard {

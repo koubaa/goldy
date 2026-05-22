@@ -33,12 +33,8 @@ pub mod mock;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 
-/// Shared primitives reused across Vulkan, DX12, and Metal backends.
-#[cfg(any(
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos")
-))]
+/// Shared primitives reused across Vulkan, DX12, and Metal backends, and by
+/// task-graph command emission (e.g. `DispatchBatch` argument packing).
 pub(crate) mod shared;
 
 use crate::types::{
@@ -283,12 +279,18 @@ pub enum GpuCommand {
     BindResourcesTyped { handles: Vec<BindlessHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
+        /// Debug label from [`crate::task_graph::TaskGraph::node`] when emitted by the analyzer.
+        label: Option<&'static str>,
         workgroups_x: u32,
         workgroups_y: u32,
         workgroups_z: u32,
     },
     /// Indirect dispatch: workgroup counts read from buffer at offset (3× u32: x, y, z).
-    DispatchIndirect { buffer: BufferHandle, offset: u64 },
+    DispatchIndirect {
+        label: Option<&'static str>,
+        buffer: BufferHandle,
+        offset: u64,
+    },
     /// Fill a buffer region with zeros. Batched into the same command stream as dispatches.
     ClearBuffer {
         buffer: BufferHandle,
@@ -322,6 +324,29 @@ pub enum GpuCommand {
         width: u32,
         height: u32,
         data: Arc<[u8]>,
+    },
+    /// Copy the entire contents of `src` texture into `dst`.
+    ///
+    /// Both textures must have compatible formats and identical dimensions.
+    /// The backend inserts appropriate layout transitions and memory barriers.
+    CopyTexture {
+        src: TextureHandle,
+        dst: TextureHandle,
+    },
+    /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
+    ///
+    /// Each entry packs `[PushLayout bytes | wg_x u32 | wg_y u32 | wg_z u32]` into
+    /// `arg_data` (`DISPATCH_BATCH_STRIDE` bytes per entry).  The backend records a
+    /// single `ExecuteIndirect` on DX12 or iterates on Vulkan/Metal.
+    ///
+    /// Only emitted by `emit_commands` when consecutive same-pipeline dispatches
+    /// are detected within a wave.  Falls back to individual `Dispatch` commands
+    /// if no grouping is possible.
+    DispatchBatch {
+        label: Option<&'static str>,
+        /// Pre-filled argument data: `count` entries of `DISPATCH_BATCH_STRIDE` bytes each.
+        arg_data: Arc<[u8]>,
+        count: u32,
     },
     /// Memory barrier between compute dispatches.
     /// Ensures all prior shader writes are visible to subsequent reads.
@@ -714,6 +739,44 @@ pub trait GpuBackend: Send + Sync {
         }
         Ok(last_tv)
     }
+
+    /// Submit commands and retain the closed command list for potential reuse on the next
+    /// cache-hit frame.
+    ///
+    /// When `key` matches the key passed on the previous call AND the GPU resources
+    /// referenced by those commands have stable bindless handles, callers may call
+    /// [`Self::try_resubmit_retained`] instead of re-recording.
+    ///
+    /// The DX12 backend implements this by keeping the closed `ID3D12GraphicsCommandList`
+    /// alive (without `Reset`) and re-executing it via `ExecuteCommandLists`.  Other
+    /// backends default to a normal [`Self::submit_graph`] (safe fallback, no caching).
+    fn submit_graph_and_retain(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+        key: u64,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let _ = key;
+        self.submit_graph(device, commands)
+    }
+
+    /// Re-execute a previously retained command list without re-recording.
+    ///
+    /// Returns `Ok(Some(tv))` if the retained list for `key` was found and resubmitted.
+    /// Returns `Ok(None)` if no matching retained list exists (caller should fall back to
+    /// a full [`Self::submit_graph_and_retain`]).  Returns `Err` on a backend error.
+    fn try_resubmit_retained(
+        &mut self,
+        device: DeviceHandle,
+        key: u64,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        let _ = (device, key);
+        Ok(None)
+    }
+
+    /// Drop the retained command list associated with `key`, marking its allocator slot
+    /// as available for re-use.  No-op if no retained list exists.
+    fn evict_retained(&mut self, _device: DeviceHandle, _key: u64) {}
 
     /// Acquire the next swapchain image and begin a frame bracket.
     fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)>;

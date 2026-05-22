@@ -26,7 +26,6 @@ use goldy::{TransientAllocatorStrategy, TransientAllocatorConfig};
 let strategy = TransientAllocatorStrategy::EpochRegions;
 let mut allocator = strategy.create(&device, TransientAllocatorConfig {
     initial_size: 4 * 1024 * 1024,
-    expected_max: 64 * 1024 * 1024,
     min_region_size: 4 * 1024 * 1024,
     max_regions: 4,
     alignment: 256,
@@ -115,8 +114,7 @@ The closest CPU-side analogue is epoch-based reclamation (EBR), the same pattern
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `initial_size` | 64 KiB | Backing storage allocated on first frame |
-| `expected_max` | 16 MiB | Capacity hint for backends that pre-reserve virtual address range (e.g. Metal placement heaps) |
+| `initial_size` | 64 KiB | Backing storage allocated on first frame. The allocator grows reactively and auto-shrinks after warmup. |
 | `min_region_size` | 4 MiB | Minimum bytes per region for `EpochRegions`. Smaller = finer reclamation granularity, more regions. |
 | `max_regions` | 3 | Pipeline depth cap for `EpochRegions`. `BumpReset` ignores this. |
 | `alignment` | 256 | Sub-allocation alignment (must be power of two). 256 covers all known `minStorageBufferOffsetAlignment` values. |

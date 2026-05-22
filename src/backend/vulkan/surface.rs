@@ -462,6 +462,7 @@ pub(super) fn acquire(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
 ) -> Result<SwapchainImageHandle> {
+    let _tz = crate::tracy_zone!("vk.surface.acquire");
     // Clean up any previously acquired surface texture that wasn't presented
     if let Some(surface_state) = state.surfaces.get(&surface_handle) {
         if let Some(tex_handle) = surface_state.current_texture_handle {
@@ -493,6 +494,7 @@ pub(super) fn acquire(
         .unwrap_or(0);
 
     let wait_result = {
+        let _wz = crate::tracy_zone!("vk.surface.wait_fence");
         let logical_device = state
             .devices
             .get(&device_handle)
@@ -551,6 +553,7 @@ pub(super) fn acquire(
 
     // Process deferred deletions: GPU timeline has reached `completed` after frame-fence wait.
     {
+        let _dz = crate::tracy_zone!("vk.surface.deferred_deletions");
         let logical_device = state
             .devices
             .get_mut(&device_handle)
@@ -708,12 +711,15 @@ pub(super) fn acquire(
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(std::slice::from_ref(&prep_cmd))
                 .signal_semaphores(&signal_semaphores);
-            let prep_submit_result = unsafe {
-                logical_device.device.queue_submit(
-                    logical_device.queue,
-                    std::slice::from_ref(&prep_submit),
-                    vk::Fence::null(),
-                )
+            let prep_submit_result = {
+                let _ps = crate::tracy_zone!("vk.surface.prep_submit");
+                unsafe {
+                    logical_device.device.queue_submit(
+                        logical_device.queue,
+                        std::slice::from_ref(&prep_submit),
+                        vk::Fence::null(),
+                    )
+                }
             };
             if let Err(e) = &prep_submit_result {
                 tracing::warn!(
@@ -1154,6 +1160,7 @@ pub(super) fn present(
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
 ) -> Result<crate::timeline::TimelineValue> {
+    let _tz = crate::tracy_zone!("vk.surface.present");
     // Take the surface texture handle but do NOT unregister yet — the deferred
     // compute CBs (and the render CB in the graphics path) reference the
     // VkImageView + bindless descriptor.  Vulkan requires the image view to
@@ -1314,12 +1321,15 @@ pub(super) fn present(
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let submit_result = unsafe {
-            submit_ld.device.queue_submit2(
-                submit_ld.queue,
-                std::slice::from_ref(&submit2),
-                in_flight_fence_present,
-            )
+        let submit_result = {
+            let _sz = crate::tracy_zone!("vk.present.queue_submit2");
+            unsafe {
+                submit_ld.device.queue_submit2(
+                    submit_ld.queue,
+                    std::slice::from_ref(&submit2),
+                    in_flight_fence_present,
+                )
+            }
         };
         if let Err(e) = submit_result {
             tracing::warn!(
@@ -1390,7 +1400,10 @@ pub(super) fn present(
         .swapchains(&swapchains)
         .image_indices(&image_indices);
 
-    let result = unsafe { swapchain_loader.queue_present(present_ld.queue, &present_info) };
+    let result = {
+        let _pz = crate::tracy_zone!("vk.present.queue_present");
+        unsafe { swapchain_loader.queue_present(present_ld.queue, &present_info) }
+    };
     // `queue_present` returns Ok on SUCCESS and SUBOPTIMAL_KHR; Err on real failures.
     let mark_image_presented = result.is_ok();
     if let Err(e) = &result {

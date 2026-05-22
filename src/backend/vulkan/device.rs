@@ -413,6 +413,14 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             timeline_semaphore,
             timeline_next: 1,
             pipeline_cache,
+            vk_timestamp_compute_and_graphics: physical_device
+                .properties
+                .limits
+                .timestamp_compute_and_graphics
+                != 0,
+            vk_timestamp_period_ns: physical_device.properties.limits.timestamp_period,
+            free_cmd_buffers: Vec::new(),
+            retained_compute_cb: None,
         },
     );
 

@@ -527,12 +527,11 @@ pub(super) fn stage_texture_upload_region(
 pub(super) fn record_staged_texture_upload(
     command_list: &ID3D12GraphicsCommandList,
     command_list7: &ID3D12GraphicsCommandList7,
-    state: &mut Dx12State,
+    textures: &mut std::collections::HashMap<TextureHandle, TextureState>,
     upload: &StagedTextureUpload,
 ) -> Result<()> {
     let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
-    let texture = state
-        .textures
+    let texture = textures
         .get(&upload.texture_handle)
         .context("record_staged_texture_upload: invalid texture")?;
     let layout_before = upload.layout_before;
@@ -591,7 +590,7 @@ pub(super) fn record_staged_texture_upload(
     unsafe { barriers::barrier_textures(command_list7, &b_to_shader) };
     unsafe { barriers::drop_texture_barriers(&mut b_to_shader) };
 
-    if let Some(tex) = state.textures.get_mut(&upload.texture_handle) {
+    if let Some(tex) = textures.get_mut(&upload.texture_handle) {
         tex.last_layout = after_layout;
     }
     Ok(())

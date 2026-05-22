@@ -37,7 +37,7 @@ impl NodeAccess {
 }
 
 /// A single resource binding within a task node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResourceBinding {
     /// Graph IR only; not exposed publicly so [`super::ResourceId`] can stay crate-private.
     pub(crate) resource: ResourceId,
@@ -94,6 +94,15 @@ pub enum NodeKind {
         height: u32,
         data: Arc<[u8]>,
     },
+    /// Copy the full contents of one texture into another.
+    ///
+    /// Both textures must have compatible formats and identical dimensions.
+    /// `src` must have [`crate::types::TextureFlags::COPY_SRC`] and
+    /// `dst` must have [`crate::types::TextureFlags::COPY_DST`].
+    CopyTexture {
+        src: TextureHandle,
+        dst: TextureHandle,
+    },
     /// Offscreen render pass targeting a [`crate::RenderTarget`].
     ///
     /// Declare all buffers and textures read by draw commands via
@@ -108,7 +117,6 @@ pub enum NodeKind {
 /// A single node in the task graph.
 #[derive(Debug, Clone)]
 pub struct TaskNode {
-    #[allow(dead_code)]
     pub label: &'static str,
     /// Resource access declarations used by the dependency analyzer.
     pub bindings: Vec<ResourceBinding>,
