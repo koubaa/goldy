@@ -9,9 +9,168 @@ use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
 use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
 use crate::backend::{GpuCommand, GraphCommand};
 use crate::timeline::TimelineValue;
+use crate::tracy_zone;
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
+
+#[derive(Debug)]
+struct Dx12GpuProfileResources {
+    heap: ID3D12QueryHeap,
+    readback: ID3D12Resource,
+    query_count: u32,
+    dispatch_labels: Vec<Option<&'static str>>,
+}
+
+fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&'static str>>) {
+    let mut labels = Vec::new();
+    for c in commands {
+        match c {
+            GpuCommand::Dispatch { label, .. }
+            | GpuCommand::DispatchIndirect { label, .. }
+            | GpuCommand::DispatchBatch { label, .. } => {
+                labels.push(*label);
+            }
+            _ => {}
+        }
+    }
+    let n = labels.len();
+    (n, labels)
+}
+
+fn dx12_collect_dispatch_labels_graph(
+    commands: &[GraphCommand],
+) -> (usize, Vec<Option<&'static str>>) {
+    let mut labels = Vec::new();
+    for gc in commands {
+        if let GraphCommand::Compute(
+            GpuCommand::Dispatch { label, .. }
+            | GpuCommand::DispatchIndirect { label, .. }
+            | GpuCommand::DispatchBatch { label, .. },
+        ) = gc
+        {
+            labels.push(*label);
+        }
+    }
+    let n = labels.len();
+    (n, labels)
+}
+
+fn dx12_try_create_gpu_profile(
+    device: &ID3D12Device10,
+    dispatch_count: usize,
+    dispatch_labels: Vec<Option<&'static str>>,
+) -> Result<Option<Dx12GpuProfileResources>> {
+    if !crate::gpu_profiler::gpu_profile_enabled() {
+        return Ok(None);
+    }
+    debug_assert_eq!(dispatch_labels.len(), dispatch_count);
+    let query_count = 2u32.saturating_add((dispatch_count as u32).saturating_mul(2));
+
+    let heap_desc = D3D12_QUERY_HEAP_DESC {
+        Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
+        Count: query_count,
+        NodeMask: 0,
+    };
+    let mut heap_opt: Option<ID3D12QueryHeap> = None;
+    unsafe { device.CreateQueryHeap(&heap_desc, &mut heap_opt) }
+        .context("CreateQueryHeap for GOLDY_GPU_PROFILE")?;
+    let heap = heap_opt.context("CreateQueryHeap returned null")?;
+
+    let data_bytes = (query_count as u64).saturating_mul(8);
+    let aligned_width = data_bytes.max(256).next_multiple_of(256);
+
+    let buffer_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: aligned_width,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let heap_props = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_READBACK,
+        ..Default::default()
+    };
+    let mut readback_opt: Option<ID3D12Resource> = None;
+    unsafe {
+        device.CreateCommittedResource(
+            &heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &buffer_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut readback_opt,
+        )
+    }
+    .context("CreateCommittedResource readback for GOLDY_GPU_PROFILE")?;
+    let readback = readback_opt.context("readback resource null")?;
+
+    Ok(Some(Dx12GpuProfileResources {
+        heap,
+        readback,
+        query_count,
+        dispatch_labels,
+    }))
+}
+
+fn dx12_decode_duration_ns(start: u64, end: u64, freq: u64) -> u64 {
+    if freq == 0 {
+        return 0;
+    }
+    let delta = end.wrapping_sub(start);
+    ((delta as f64 / freq as f64) * 1e9) as u64
+}
+
+fn dx12_finish_gpu_profile(
+    logical_device: &types::LogicalDevice,
+    fence_value: u64,
+    profile: Dx12GpuProfileResources,
+) -> Result<()> {
+    use crate::gpu_profiler::{self, DispatchGpuNs};
+    super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
+
+    let freq = unsafe { logical_device.command_queue.GetTimestampFrequency() }
+        .context("GetTimestampFrequency")?;
+
+    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+    unsafe { profile.readback.Map(0, Some(&no_read), Some(&mut mapped)) }
+        .context("Map gpu profile readback")?;
+
+    let vals: Vec<u64> = unsafe {
+        std::slice::from_raw_parts(mapped as *const u64, profile.query_count as usize).to_vec()
+    };
+
+    unsafe {
+        profile.readback.Unmap(0, None);
+    }
+
+    let cb_ns = dx12_decode_duration_ns(vals[0], vals[1], freq);
+    gpu_profiler::log_cb_timing("dx12", fence_value, cb_ns as f64 / 1_000_000.0);
+
+    let n = profile.dispatch_labels.len();
+    if n > 0 {
+        let mut dispatches = Vec::with_capacity(n);
+        for i in 0..n {
+            let si = 2 + 2 * i;
+            let ns = dx12_decode_duration_ns(vals[si], vals[si + 1], freq);
+            let label = profile.dispatch_labels[i].unwrap_or("dispatch");
+            dispatches.push(DispatchGpuNs { label, gpu_ns: ns });
+        }
+        gpu_profiler::log_dispatch_timings("dx12", fence_value, &dispatches);
+    }
+
+    Ok(())
+}
 
 /// Drain any pending debug-layer messages for this device into a single
 /// human-readable string. Returns `None` when the device has no
@@ -191,21 +350,41 @@ pub(super) fn submit(
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
-    let (allocator, fence_value, slot_idx) = {
+    let _tz = tracy_zone!("dx12.submit");
+    let (command_list, fence_value, slot_idx) = {
         let logical_device = state
             .devices
             .get_mut(&device_handle)
             .context("Invalid device handle")?;
 
-        // Find a free slot (allocator whose work has completed) or create a new one
         let fence = &logical_device.fence;
         let completed = unsafe { fence.GetCompletedValue() };
         let pool = &mut logical_device.compute_allocator_pool;
-        let slot_idx = pool.iter().position(|s| completed >= s.fence_value);
-        let (allocator, slot_idx) = if let Some(idx) = slot_idx {
+        // Skip retained slots — their allocator must not be reset until evict_retained is called.
+        let slot_idx = pool
+            .iter()
+            .position(|s| completed >= s.fence_value && !s.retained);
+        let (cmd_list, slot_idx) = if let Some(idx) = slot_idx {
             let slot = &mut pool[idx];
             unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
-            (slot.allocator.clone(), idx)
+            let list = if let Some(ref existing) = slot.command_list {
+                unsafe { existing.Reset(&slot.allocator, None) }
+                    .context("Failed to reset command list")?;
+                existing.clone()
+            } else {
+                let new_list: ID3D12GraphicsCommandList = unsafe {
+                    logical_device.device.CreateCommandList(
+                        0,
+                        D3D12_COMMAND_LIST_TYPE_DIRECT,
+                        &slot.allocator,
+                        None,
+                    )
+                }
+                .context("Failed to create command list")?;
+                slot.command_list = Some(new_list.clone());
+                new_list
+            };
+            (list, idx)
         } else {
             let new_allocator: ID3D12CommandAllocator = unsafe {
                 logical_device
@@ -213,16 +392,26 @@ pub(super) fn submit(
                     .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
             }
             .context("Failed to create command allocator")?;
+            let new_list: ID3D12GraphicsCommandList = unsafe {
+                logical_device.device.CreateCommandList(
+                    0,
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    &new_allocator,
+                    None,
+                )
+            }
+            .context("Failed to create command list")?;
             pool.push(ComputeAllocatorSlot {
-                allocator: new_allocator.clone(),
+                allocator: new_allocator,
                 fence_value: 0,
+                command_list: Some(new_list.clone()),
+                retained: false,
             });
-            unsafe { new_allocator.Reset() }.context("Failed to reset new command allocator")?;
-            (new_allocator, pool.len() - 1)
+            (new_list, pool.len() - 1)
         };
         let token = logical_device.fence_value;
         logical_device.fence_value += 1;
-        (allocator, token, slot_idx)
+        (cmd_list, token, slot_idx)
     };
 
     let (fence_clone, use_global_buffer_barriers) = {
@@ -232,107 +421,133 @@ pub(super) fn submit(
             .context("Invalid device handle")?;
         (dev.fence.clone(), dev.adapter_id == super::WARP_ADAPTER_ID)
     };
-    state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .reclaim(&fence_clone)?;
+
+    // Detect host uploads up-front so we can skip the staging-belt reclaim and
+    // the WriteBuffer pre-pass when this submit has no host→GPU traffic.
+    let has_upload = commands.iter().any(|c| {
+        matches!(
+            c,
+            GpuCommand::WriteBuffer { .. }
+                | GpuCommand::WriteTexture { .. }
+                | GpuCommand::WriteTextureRegion { .. }
+        )
+    });
+    if has_upload {
+        state
+            .staging_belts
+            .entry(device_handle)
+            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+            .reclaim(&fence_clone)?;
+    }
 
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
 
-    // Create command list (allocator is owned, no borrow of state)
-    let command_list: ID3D12GraphicsCommandList = {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-        unsafe {
-            logical_device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &allocator,
-                None,
-            )
-        }
-        .context("Failed to create command list")?
-    };
     let command_list7: ID3D12GraphicsCommandList7 = command_list
         .cast()
         .context("ID3D12GraphicsCommandList7 required")?;
 
     // Pre-pass: memcpy into staging belt chunks for DEVICE_LOCAL WriteBuffer uploads.
-    for command in commands {
-        if let GpuCommand::WriteBuffer {
-            buffer: buf_handle,
-            data,
-            ..
-        } = command
-        {
-            let buf = state
-                .buffers
-                .get(buf_handle)
-                .context("WriteBuffer pre-pass: invalid handle")?;
-            if buf.is_storage {
-                let buf_dev = buf.device_handle;
-                let ld = state
-                    .devices
-                    .get(&buf_dev)
-                    .context("WriteBuffer pre-pass: device missing")?;
-                let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
-                    staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                });
-                let (res, off) = belt_entry.write(ld, data)?;
-                belt_slices.push((res, off));
+    if has_upload {
+        for command in commands {
+            if let GpuCommand::WriteBuffer {
+                buffer: buf_handle,
+                data,
+                ..
+            } = command
+            {
+                let buf = state
+                    .buffers
+                    .get(buf_handle)
+                    .context("WriteBuffer pre-pass: invalid handle")?;
+                if buf.is_storage {
+                    let buf_dev = buf.device_handle;
+                    let ld = state
+                        .devices
+                        .get(&buf_dev)
+                        .context("WriteBuffer pre-pass: device missing")?;
+                    let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
+                        staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
+                    });
+                    let (res, off) = belt_entry.write(ld, data)?;
+                    belt_slices.push((res, off));
+                }
             }
         }
     }
 
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
-    for command in commands {
-        match command {
-            GpuCommand::WriteTexture {
-                texture,
-                data,
-                width,
-                height,
-            } => {
-                staged_texture_uploads.push(super::texture::stage_texture_upload_full(
-                    state, *texture, data, *width, *height,
-                )?);
+    if has_upload {
+        for command in commands {
+            match command {
+                GpuCommand::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
+                    staged_texture_uploads.push(super::texture::stage_texture_upload_full(
+                        state, *texture, data, *width, *height,
+                    )?);
+                }
+                GpuCommand::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
+                    staged_texture_uploads.push(super::texture::stage_texture_upload_region(
+                        state, *texture, *x, *y, *width, *height, data,
+                    )?);
+                }
+                _ => {}
             }
-            GpuCommand::WriteTextureRegion {
-                texture,
-                x,
-                y,
-                width,
-                height,
-                data,
-            } => {
-                staged_texture_uploads.push(super::texture::stage_texture_upload_region(
-                    state, *texture, *x, *y, *width, *height, data,
-                )?);
-            }
-            _ => {}
         }
     }
 
-    {
-        let logical_device = state
+    let mut dx_dispatch_idx = 0u32;
+    let mut dx_gpu_profile = {
+        let logical_device_ref = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
 
+        let (dispatch_count, dispatch_labels) = dx12_collect_dispatch_labels(commands);
+        let dx_gpu_profile = match dx12_try_create_gpu_profile(
+            &logical_device_ref.device,
+            dispatch_count,
+            dispatch_labels,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("GOLDY_GPU_PROFILE: DX12 timestamp heap creation failed: {e}");
+                None
+            }
+        };
+
         unsafe {
             command_list.SetDescriptorHeaps(&[
-                Some(logical_device.cbv_srv_uav_heap.clone()),
-                Some(logical_device.sampler_heap.clone()),
+                Some(logical_device_ref.cbv_srv_uav_heap.clone()),
+                Some(logical_device_ref.sampler_heap.clone()),
             ]);
         }
-    }
+
+        if let Some(ref prof) = dx_gpu_profile {
+            unsafe {
+                command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            }
+        }
+
+        dx_gpu_profile
+    };
 
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
     let mut current_compute_pipeline: Option<super::ComputePipelineHandle> = None;
+
+    let pipelines = &state.compute_pipelines;
+    let bufs = &state.buffers;
 
     // Track which GPU sync scopes and access types have been used since the
     // last wave-boundary barrier. The ResourceBarrier handler uses these to
@@ -345,8 +560,9 @@ pub(super) fn submit(
     for command in commands {
         match command {
             GpuCommand::SetPipeline(handle) => {
+                let _tz = tracy_zone!("dx12.set_pipeline");
                 current_compute_pipeline = Some(*handle);
-                if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
+                if let Some(pipeline_state) = pipelines.get(handle) {
                     unsafe {
                         command_list.SetComputeRootSignature(&pipeline_state.root_signature);
                         command_list.SetPipelineState(&pipeline_state.pipeline_state);
@@ -355,13 +571,12 @@ pub(super) fn submit(
             }
             GpuCommand::BindResources { buffers } => {
                 if crate::slang::layout_validation_enabled() {
-                    if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|h| state.compute_pipelines.get(&h))
+                    if let Some(pipeline) = current_compute_pipeline.and_then(|h| pipelines.get(&h))
                     {
                         if !pipeline.binding_element_strides.is_empty() {
                             let actual: Vec<Option<u32>> = buffers
                                 .iter()
-                                .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
+                                .map(|h| bufs.get(h).and_then(|b| b.element_stride))
                                 .collect();
                             crate::backend::validate_binding_strides(
                                 &actual,
@@ -375,11 +590,7 @@ pub(super) fn submit(
                 shared::fill_bindless(
                     &mut layout,
                     buffers.iter().map(|h| {
-                        let offset = state
-                            .buffers
-                            .get(h)
-                            .and_then(|b| b.bindless_offset)
-                            .unwrap_or(0);
+                        let offset = bufs.get(h).and_then(|b| b.bindless_offset).unwrap_or(0);
                         tracing::trace!(
                             "Compute BindResources: buffer {} -> UAV offset {}",
                             h,
@@ -419,9 +630,7 @@ pub(super) fn submit(
             GpuCommand::BindResourcesTyped {
                 handles: typed_handles,
             } => {
-                if let Some(pipeline) =
-                    current_compute_pipeline.and_then(|h| state.compute_pipelines.get(&h))
-                {
+                if let Some(pipeline) = current_compute_pipeline.and_then(|h| pipelines.get(&h)) {
                     crate::backend::validate_typed_push_constants(
                         typed_handles,
                         &pipeline.push_constant_categories,
@@ -440,17 +649,37 @@ pub(super) fn submit(
                 }
             }
             GpuCommand::Dispatch {
+                label: _,
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
             } => {
+                let _tz = tracy_zone!("dx12.dispatch");
+                if let Some(ref prof) = dx_gpu_profile {
+                    let base = 2u32 + dx_dispatch_idx * 2;
+                    unsafe {
+                        command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base);
+                    }
+                }
                 unsafe {
                     command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
                 }
+                if let Some(ref prof) = dx_gpu_profile {
+                    let base = 2u32 + dx_dispatch_idx * 2;
+                    unsafe {
+                        command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base + 1);
+                    }
+                }
+                dx_dispatch_idx += 1;
                 pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
                 pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
             }
-            GpuCommand::DispatchIndirect { buffer, offset } => {
+            GpuCommand::DispatchIndirect {
+                buffer,
+                offset,
+                label: _,
+            } => {
+                let _tz = tracy_zone!("dx12.dispatch_indirect");
                 let logical_device = state
                     .devices
                     .get(&device_handle)
@@ -484,6 +713,13 @@ pub(super) fn submit(
                     unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
                 }
 
+                if let Some(ref prof) = dx_gpu_profile {
+                    let base = 2u32 + dx_dispatch_idx * 2;
+                    unsafe {
+                        command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base);
+                    }
+                }
+
                 unsafe {
                     command_list.ExecuteIndirect(
                         signature,
@@ -494,6 +730,14 @@ pub(super) fn submit(
                         0,
                     );
                 }
+
+                if let Some(ref prof) = dx_gpu_profile {
+                    let base = 2u32 + dx_dispatch_idx * 2;
+                    unsafe {
+                        command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base + 1);
+                    }
+                }
+                dx_dispatch_idx += 1;
 
                 if use_global_buffer_barriers {
                     let g = D3D12_GLOBAL_BARRIER {
@@ -517,7 +761,122 @@ pub(super) fn submit(
                 pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
                 pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
             }
+            GpuCommand::DispatchBatch {
+                label: _,
+                arg_data,
+                count,
+            } => {
+                let _tz = tracy_zone!("dx12.dispatch_batch");
+                let logical_device = state
+                    .devices
+                    .get(&device_handle)
+                    .context("DispatchBatch: invalid device")?;
+
+                if let Some(batch_sig) = logical_device.compute_batch_dispatch_signature.clone() {
+                    // Fast path: allocate an UPLOAD-heap buffer, copy arg_data into it,
+                    // then record a single ExecuteIndirect call.
+                    let buf_size = arg_data.len() as u64;
+                    let arg_buf_desc = D3D12_RESOURCE_DESC {
+                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                        Alignment: 0,
+                        Width: buf_size,
+                        Height: 1,
+                        DepthOrArraySize: 1,
+                        MipLevels: 1,
+                        Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN,
+                        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0,
+                        },
+                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                        Flags: D3D12_RESOURCE_FLAG_NONE,
+                    };
+                    let upload_heap = D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_UPLOAD,
+                        ..Default::default()
+                    };
+                    let mut arg_resource: Option<ID3D12Resource> = None;
+                    unsafe {
+                        logical_device.device.CreateCommittedResource(
+                            &upload_heap,
+                            D3D12_HEAP_FLAG_NONE,
+                            &arg_buf_desc,
+                            D3D12_RESOURCE_STATE_GENERIC_READ,
+                            None,
+                            &mut arg_resource,
+                        )
+                    }
+                    .context("DispatchBatch: failed to create arg buffer")?;
+                    let arg_resource =
+                        arg_resource.context("DispatchBatch: arg_resource is None")?;
+
+                    // CPU-map, write arg data, unmap.
+                    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                    unsafe {
+                        arg_resource
+                            .Map(0, Some(&no_read), Some(&mut mapped))
+                            .context("DispatchBatch: failed to map arg buffer")?;
+                        std::ptr::copy_nonoverlapping(
+                            arg_data.as_ptr(),
+                            mapped as *mut u8,
+                            arg_data.len(),
+                        );
+                        let written = D3D12_RANGE {
+                            Begin: 0,
+                            End: arg_data.len(),
+                        };
+                        arg_resource.Unmap(0, Some(&written));
+                    }
+
+                    // Record ExecuteIndirect.
+                    unsafe {
+                        command_list.ExecuteIndirect(&batch_sig, *count, &arg_resource, 0, None, 0);
+                    }
+
+                    // Defer destruction of arg_resource until the GPU is done.
+                    let fence_val = logical_device.fence_value.saturating_sub(1);
+                    let dev = state
+                        .devices
+                        .get_mut(&device_handle)
+                        .context("DispatchBatch: device gone")?;
+                    dev.deletion_queue.queue(
+                        fence_val,
+                        super::types::PendingDeletion::StandaloneResource(arg_resource),
+                    );
+                } else {
+                    // Fallback: iterate over entries and emit individual SetComputeRoot32BitConstants + Dispatch.
+                    use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
+                    let stride = DISPATCH_BATCH_STRIDE;
+                    let push_size = std::mem::size_of::<PushLayout>();
+                    for i in 0..*count as usize {
+                        let base = i * stride;
+                        let layout_bytes = &arg_data[base..base + push_size];
+                        let wg_off = base + push_size;
+                        let wg_x =
+                            u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
+                        let wg_y = u32::from_ne_bytes(
+                            arg_data[wg_off + 4..wg_off + 8].try_into().unwrap(),
+                        );
+                        let wg_z = u32::from_ne_bytes(
+                            arg_data[wg_off + 8..wg_off + 12].try_into().unwrap(),
+                        );
+                        unsafe {
+                            command_list.SetComputeRoot32BitConstants(
+                                0,
+                                (push_size / 4) as u32,
+                                layout_bytes.as_ptr() as *const _,
+                                0,
+                            );
+                            command_list.Dispatch(wg_x, wg_y, wg_z);
+                        }
+                    }
+                }
+                pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
+                pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
+            }
             GpuCommand::Barrier => {
+                let _tz = tracy_zone!("dx12.barrier");
                 let sync_before = if pending_sync.0 != 0 {
                     pending_sync
                 } else {
@@ -545,6 +904,7 @@ pub(super) fn submit(
                 buffers: buf_handles,
                 textures: tex_handles,
             } => {
+                let _tz = tracy_zone!("dx12.resource_barrier");
                 let sync_before = if pending_sync.0 != 0 {
                     pending_sync
                 } else {
@@ -575,7 +935,7 @@ pub(super) fn submit(
                 } else {
                     let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
                         .iter()
-                        .filter_map(|h| state.buffers.get(h))
+                        .filter_map(|h| bufs.get(h))
                         .map(|bs| {
                             barriers::buffer_barrier_full(
                                 &bs.resource,
@@ -632,6 +992,7 @@ pub(super) fn submit(
                 offset,
                 size,
             } => {
+                let _tz = tracy_zone!("dx12.clear_buffer");
                 let buf_state = state
                     .buffers
                     .get(buffer)
@@ -717,6 +1078,7 @@ pub(super) fn submit(
                 offset,
                 data,
             } => {
+                let _tz = tracy_zone!("dx12.write_buffer");
                 let buf_state = state
                     .buffers
                     .get(buf_handle)
@@ -746,7 +1108,7 @@ pub(super) fn submit(
                     belt_idx += 1;
                     let upload_src = belt_entry.0.clone();
                     let upload_off = belt_entry.1;
-                    let buf_state = state.buffers.get(buf_handle).unwrap();
+                    let buf_state = bufs.get(buf_handle).unwrap();
 
                     if use_global_buffer_barriers {
                         let pre = D3D12_GLOBAL_BARRIER {
@@ -790,6 +1152,7 @@ pub(super) fn submit(
                 }
             }
             GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                let _tz = tracy_zone!("dx12.write_texture");
                 let upload = staged_texture_uploads
                     .get(texture_upload_idx)
                     .context("WriteTexture: staged upload missing (internal)")?;
@@ -797,9 +1160,107 @@ pub(super) fn submit(
                 super::texture::record_staged_texture_upload(
                     &command_list,
                     &command_list7,
-                    state,
+                    &mut state.textures,
                     upload,
                 )?;
+            }
+            GpuCommand::CopyTexture { src, dst } => {
+                let _tz = tracy_zone!("dx12.copy_texture");
+                let (src_res, src_layout) = {
+                    let ts = state
+                        .textures
+                        .get(src)
+                        .context("CopyTexture: src texture not found")?;
+                    (ts.resource.clone(), ts.last_layout)
+                };
+                let (dst_res, dst_layout) = {
+                    let ts = state
+                        .textures
+                        .get(dst)
+                        .context("CopyTexture: dst texture not found")?;
+                    (ts.resource.clone(), ts.last_layout)
+                };
+
+                let sync_before = if pending_sync.0 != 0 {
+                    pending_sync
+                } else {
+                    D3D12_BARRIER_SYNC_COMPUTE_SHADING
+                };
+                let src_access_before = if src_layout
+                    == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+                    || src_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+                {
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
+                } else {
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE
+                };
+                let dst_access_before = if dst_layout
+                    == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+                    || dst_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+                {
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
+                } else {
+                    D3D12_BARRIER_ACCESS_NO_ACCESS
+                };
+
+                let mut pre_barriers = vec![
+                    barriers::texture_barrier_full(
+                        &src_res,
+                        sync_before,
+                        D3D12_BARRIER_SYNC_COPY,
+                        src_access_before,
+                        D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                        src_layout,
+                        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                    ),
+                    barriers::texture_barrier_full(
+                        &dst_res,
+                        sync_before,
+                        D3D12_BARRIER_SYNC_COPY,
+                        dst_access_before,
+                        D3D12_BARRIER_ACCESS_COPY_DEST,
+                        dst_layout,
+                        D3D12_BARRIER_LAYOUT_COPY_DEST,
+                    ),
+                ];
+                unsafe { barriers::barrier_textures(&command_list7, &pre_barriers) };
+                unsafe { barriers::drop_texture_barriers(&mut pre_barriers) };
+
+                unsafe { command_list.CopyResource(&dst_res, &src_res) };
+
+                let post_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
+                let mut post_barriers = vec![
+                    barriers::texture_barrier_full(
+                        &src_res,
+                        D3D12_BARRIER_SYNC_COPY,
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                        post_layout,
+                    ),
+                    barriers::texture_barrier_full(
+                        &dst_res,
+                        D3D12_BARRIER_SYNC_COPY,
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        D3D12_BARRIER_ACCESS_COPY_DEST,
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                        D3D12_BARRIER_LAYOUT_COPY_DEST,
+                        post_layout,
+                    ),
+                ];
+                unsafe { barriers::barrier_textures(&command_list7, &post_barriers) };
+                unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
+
+                if let Some(ts) = state.textures.get_mut(src) {
+                    ts.last_layout = post_layout;
+                }
+                if let Some(ts) = state.textures.get_mut(dst) {
+                    ts.last_layout = post_layout;
+                }
+
+                pending_sync = D3D12_BARRIER_SYNC(0);
+                pending_access = D3D12_BARRIER_ACCESS(0);
             }
         }
     }
@@ -825,6 +1286,20 @@ pub(super) fn submit(
     };
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
+    if let Some(ref prof) = dx_gpu_profile {
+        unsafe {
+            command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+            command_list.ResolveQueryData(
+                &prof.heap,
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                0,
+                prof.query_count,
+                &prof.readback,
+                0,
+            );
+        }
+    }
+
     // Close and execute
     if let Err(e) = unsafe { command_list.Close() } {
         let diag = state
@@ -842,19 +1317,27 @@ pub(super) fn submit(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = state.devices.get(&device_handle).unwrap();
-    unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+    {
+        let _tz = tracy_zone!("dx12.execute_and_signal");
+        unsafe {
+            logical_device
+                .command_queue
+                .ExecuteCommandLists(&[Some(cmd_list)]);
+        }
+
+        unsafe {
+            logical_device
+                .command_queue
+                .Signal(&logical_device.fence, fence_value)
+        }
+        .context("Failed to signal fence")?;
     }
 
-    // Signal fence with the token we reserved
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
+    if let Some(prof) = dx_gpu_profile.take() {
+        if let Err(e) = dx12_finish_gpu_profile(logical_device, fence_value, prof) {
+            tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
+        }
     }
-    .context("Failed to signal fence")?;
 
     // Update the slot's fence_value so we know when it can be reused
     if let Some(dev) = state.devices.get_mut(&device_handle) {
@@ -897,13 +1380,20 @@ pub(super) fn submit(
 /// everything into one `ID3D12GraphicsCommandList7` and performing a single
 /// `ExecuteCommandLists` + `Signal(fence)` at the end.
 #[allow(clippy::too_many_lines)]
+/// Core submit implementation.
+///
+/// When `retain_key` is `Some(k)`, the closed command list is stored in
+/// `LogicalDevice::retained_graph` keyed by `k` for future zero-cost re-execution
+/// via [`try_resubmit_retained`].  Any previously retained graph is evicted first.
 pub(super) fn submit_graph(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     commands: &[GraphCommand],
+    retain_key: Option<u64>,
 ) -> Result<TimelineValue> {
-    // --- Allocator + fence value reservation (same as `submit`) ---
-    let (allocator, fence_value, slot_idx) = {
+    let _tz = tracy_zone!("dx12.submit_graph");
+    // --- Allocator + command list + fence value reservation ---
+    let (command_list, fence_value, slot_idx) = {
         let logical_device = state
             .devices
             .get_mut(&device_handle)
@@ -912,11 +1402,31 @@ pub(super) fn submit_graph(
         let fence = &logical_device.fence;
         let completed = unsafe { fence.GetCompletedValue() };
         let pool = &mut logical_device.compute_allocator_pool;
-        let slot_idx = pool.iter().position(|s| completed >= s.fence_value);
-        let (allocator, slot_idx) = if let Some(idx) = slot_idx {
+        // Skip retained slots — their allocator must not be reset until evict_retained is called.
+        let slot_idx = pool
+            .iter()
+            .position(|s| completed >= s.fence_value && !s.retained);
+        let (cmd_list, slot_idx) = if let Some(idx) = slot_idx {
             let slot = &mut pool[idx];
             unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
-            (slot.allocator.clone(), idx)
+            let list = if let Some(ref existing) = slot.command_list {
+                unsafe { existing.Reset(&slot.allocator, None) }
+                    .context("Failed to reset command list")?;
+                existing.clone()
+            } else {
+                let new_list: ID3D12GraphicsCommandList = unsafe {
+                    logical_device.device.CreateCommandList(
+                        0,
+                        D3D12_COMMAND_LIST_TYPE_DIRECT,
+                        &slot.allocator,
+                        None,
+                    )
+                }
+                .context("Failed to create command list")?;
+                slot.command_list = Some(new_list.clone());
+                new_list
+            };
+            (list, idx)
         } else {
             let new_allocator: ID3D12CommandAllocator = unsafe {
                 logical_device
@@ -924,16 +1434,26 @@ pub(super) fn submit_graph(
                     .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
             }
             .context("Failed to create command allocator")?;
+            let new_list: ID3D12GraphicsCommandList = unsafe {
+                logical_device.device.CreateCommandList(
+                    0,
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    &new_allocator,
+                    None,
+                )
+            }
+            .context("Failed to create command list")?;
             pool.push(ComputeAllocatorSlot {
-                allocator: new_allocator.clone(),
+                allocator: new_allocator,
                 fence_value: 0,
+                command_list: Some(new_list.clone()),
+                retained: false,
             });
-            unsafe { new_allocator.Reset() }.context("Failed to reset new command allocator")?;
-            (new_allocator, pool.len() - 1)
+            (new_list, pool.len() - 1)
         };
         let token = logical_device.fence_value;
         logical_device.fence_value += 1;
-        (allocator, token, slot_idx)
+        (cmd_list, token, slot_idx)
     };
 
     // --- Staging belt reclaim ---
@@ -944,106 +1464,133 @@ pub(super) fn submit_graph(
             .context("Invalid device handle")?;
         (dev.fence.clone(), dev.adapter_id == super::WARP_ADAPTER_ID)
     };
-    state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .reclaim(&fence_clone)?;
+
+    // Detect host uploads up-front; skip belt reclaim and pre-pass when none.
+    let has_upload = commands.iter().any(|c| {
+        matches!(
+            c,
+            GraphCommand::Compute(
+                GpuCommand::WriteBuffer { .. }
+                    | GpuCommand::WriteTexture { .. }
+                    | GpuCommand::WriteTextureRegion { .. }
+            )
+        )
+    });
+    if has_upload {
+        state
+            .staging_belts
+            .entry(device_handle)
+            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
+            .reclaim(&fence_clone)?;
+    }
 
     // --- Pre-pass: stage WriteBuffer data for compute segments ---
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
 
-    for graph_cmd in commands {
-        if let GraphCommand::Compute(gpu_cmd) = graph_cmd {
-            match gpu_cmd {
-                GpuCommand::WriteBuffer {
-                    buffer: buf_handle,
-                    data,
-                    ..
-                } => {
-                    let buf = state
-                        .buffers
-                        .get(buf_handle)
-                        .context("WriteBuffer pre-pass: invalid handle")?;
-                    if buf.is_storage {
-                        let buf_dev = buf.device_handle;
-                        let ld = state
-                            .devices
-                            .get(&buf_dev)
-                            .context("WriteBuffer pre-pass: device missing")?;
-                        let belt_entry = state.staging_belts.entry(buf_dev).or_insert_with(|| {
-                            staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                        });
-                        let (res, off) = belt_entry.write(ld, data)?;
-                        belt_slices.push((res, off));
+    if has_upload {
+        for graph_cmd in commands {
+            if let GraphCommand::Compute(gpu_cmd) = graph_cmd {
+                match gpu_cmd {
+                    GpuCommand::WriteBuffer {
+                        buffer: buf_handle,
+                        data,
+                        ..
+                    } => {
+                        let buf = state
+                            .buffers
+                            .get(buf_handle)
+                            .context("WriteBuffer pre-pass: invalid handle")?;
+                        if buf.is_storage {
+                            let buf_dev = buf.device_handle;
+                            let ld = state
+                                .devices
+                                .get(&buf_dev)
+                                .context("WriteBuffer pre-pass: device missing")?;
+                            let belt_entry =
+                                state.staging_belts.entry(buf_dev).or_insert_with(|| {
+                                    staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
+                                });
+                            let (res, off) = belt_entry.write(ld, data)?;
+                            belt_slices.push((res, off));
+                        }
                     }
+                    GpuCommand::WriteTexture {
+                        texture,
+                        data,
+                        width,
+                        height,
+                    } => {
+                        staged_texture_uploads.push(super::texture::stage_texture_upload_full(
+                            state, *texture, data, *width, *height,
+                        )?);
+                    }
+                    GpuCommand::WriteTextureRegion {
+                        texture,
+                        x,
+                        y,
+                        width,
+                        height,
+                        data,
+                    } => {
+                        staged_texture_uploads.push(super::texture::stage_texture_upload_region(
+                            state, *texture, *x, *y, *width, *height, data,
+                        )?);
+                    }
+                    _ => {}
                 }
-                GpuCommand::WriteTexture {
-                    texture,
-                    data,
-                    width,
-                    height,
-                } => {
-                    staged_texture_uploads.push(super::texture::stage_texture_upload_full(
-                        state, *texture, data, *width, *height,
-                    )?);
-                }
-                GpuCommand::WriteTextureRegion {
-                    texture,
-                    x,
-                    y,
-                    width,
-                    height,
-                    data,
-                } => {
-                    staged_texture_uploads.push(super::texture::stage_texture_upload_region(
-                        state, *texture, *x, *y, *width, *height, data,
-                    )?);
-                }
-                _ => {}
             }
         }
     }
 
-    // --- Create command list ---
-    let command_list: ID3D12GraphicsCommandList = {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-        unsafe {
-            logical_device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &allocator,
-                None,
-            )
-        }
-        .context("Failed to create command list")?
-    };
     let command_list7: ID3D12GraphicsCommandList7 = command_list
         .cast()
         .context("ID3D12GraphicsCommandList7 required")?;
 
-    {
-        let logical_device = state
+    let mut dx_dispatch_idx = 0u32;
+    let mut dx_gpu_profile = {
+        let logical_device_ref = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
+
+        let (dispatch_count, dispatch_labels) = dx12_collect_dispatch_labels_graph(commands);
+        let dx_gpu_profile = match dx12_try_create_gpu_profile(
+            &logical_device_ref.device,
+            dispatch_count,
+            dispatch_labels,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("GOLDY_GPU_PROFILE: DX12 timestamp heap creation failed: {e}");
+                None
+            }
+        };
+
         unsafe {
             command_list.SetDescriptorHeaps(&[
-                Some(logical_device.cbv_srv_uav_heap.clone()),
-                Some(logical_device.sampler_heap.clone()),
+                Some(logical_device_ref.cbv_srv_uav_heap.clone()),
+                Some(logical_device_ref.sampler_heap.clone()),
             ]);
         }
-    }
+
+        if let Some(ref prof) = dx_gpu_profile {
+            unsafe {
+                command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            }
+        }
+
+        dx_gpu_profile
+    };
 
     // --- Walk GraphCommands ---
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
     let mut current_compute_pipeline: Option<super::ComputePipelineHandle> = None;
     let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
+
+    let pipelines = &state.compute_pipelines;
+    let bufs = &state.buffers;
 
     let mut pending_sync = D3D12_BARRIER_SYNC(0);
     let mut pending_access = D3D12_BARRIER_ACCESS(0);
@@ -1052,8 +1599,9 @@ pub(super) fn submit_graph(
         match graph_cmd {
             GraphCommand::Compute(gpu_cmd) => match gpu_cmd {
                 GpuCommand::SetPipeline(handle) => {
+                    let _tz = tracy_zone!("dx12.set_pipeline");
                     current_compute_pipeline = Some(*handle);
-                    if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
+                    if let Some(pipeline_state) = pipelines.get(handle) {
                         unsafe {
                             command_list.SetComputeRootSignature(&pipeline_state.root_signature);
                             command_list.SetPipelineState(&pipeline_state.pipeline_state);
@@ -1064,13 +1612,9 @@ pub(super) fn submit_graph(
                     let mut layout = types::PushLayout::default();
                     shared::fill_bindless(
                         &mut layout,
-                        buffers.iter().map(|h| {
-                            state
-                                .buffers
-                                .get(h)
-                                .and_then(|b| b.bindless_offset)
-                                .unwrap_or(0)
-                        }),
+                        buffers
+                            .iter()
+                            .map(|h| bufs.get(h).and_then(|b| b.bindless_offset).unwrap_or(0)),
                     );
                     unsafe {
                         command_list.SetComputeRoot32BitConstants(
@@ -1099,8 +1643,7 @@ pub(super) fn submit_graph(
                 GpuCommand::BindResourcesTyped {
                     handles: typed_handles,
                 } => {
-                    if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|h| state.compute_pipelines.get(&h))
+                    if let Some(pipeline) = current_compute_pipeline.and_then(|h| pipelines.get(&h))
                     {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
@@ -1120,17 +1663,37 @@ pub(super) fn submit_graph(
                     }
                 }
                 GpuCommand::Dispatch {
+                    label: _,
                     workgroups_x,
                     workgroups_y,
                     workgroups_z,
                 } => {
+                    let _tz = tracy_zone!("dx12.dispatch");
+                    if let Some(ref prof) = dx_gpu_profile {
+                        let base = 2u32 + dx_dispatch_idx * 2;
+                        unsafe {
+                            command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base);
+                        }
+                    }
                     unsafe {
                         command_list.Dispatch(*workgroups_x, *workgroups_y, *workgroups_z);
                     }
+                    if let Some(ref prof) = dx_gpu_profile {
+                        let base = 2u32 + dx_dispatch_idx * 2;
+                        unsafe {
+                            command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base + 1);
+                        }
+                    }
+                    dx_dispatch_idx += 1;
                     pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
                     pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
                 }
-                GpuCommand::DispatchIndirect { buffer, offset } => {
+                GpuCommand::DispatchIndirect {
+                    buffer,
+                    offset,
+                    label: _,
+                } => {
+                    let _tz = tracy_zone!("dx12.dispatch_indirect");
                     let logical_device = state
                         .devices
                         .get(&device_handle)
@@ -1164,6 +1727,13 @@ pub(super) fn submit_graph(
                         unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
                     }
 
+                    if let Some(ref prof) = dx_gpu_profile {
+                        let base = 2u32 + dx_dispatch_idx * 2;
+                        unsafe {
+                            command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base);
+                        }
+                    }
+
                     unsafe {
                         command_list.ExecuteIndirect(
                             signature,
@@ -1174,6 +1744,14 @@ pub(super) fn submit_graph(
                             0,
                         );
                     }
+
+                    if let Some(ref prof) = dx_gpu_profile {
+                        let base = 2u32 + dx_dispatch_idx * 2;
+                        unsafe {
+                            command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base + 1);
+                        }
+                    }
+                    dx_dispatch_idx += 1;
 
                     if use_global_buffer_barriers {
                         let g = D3D12_GLOBAL_BARRIER {
@@ -1197,7 +1775,128 @@ pub(super) fn submit_graph(
                     pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
                     pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
                 }
+                GpuCommand::DispatchBatch {
+                    label: _,
+                    arg_data,
+                    count,
+                } => {
+                    let _tz = tracy_zone!("dx12.dispatch_batch");
+                    let logical_device = state
+                        .devices
+                        .get(&device_handle)
+                        .context("DispatchBatch(graph): invalid device")?;
+
+                    if let Some(batch_sig) = logical_device.compute_batch_dispatch_signature.clone()
+                    {
+                        let buf_size = arg_data.len() as u64;
+                        let arg_buf_desc = D3D12_RESOURCE_DESC {
+                            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                            Alignment: 0,
+                            Width: buf_size,
+                            Height: 1,
+                            DepthOrArraySize: 1,
+                            MipLevels: 1,
+                            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN,
+                            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                                Count: 1,
+                                Quality: 0,
+                            },
+                            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                            Flags: D3D12_RESOURCE_FLAG_NONE,
+                        };
+                        let upload_heap = D3D12_HEAP_PROPERTIES {
+                            Type: D3D12_HEAP_TYPE_UPLOAD,
+                            ..Default::default()
+                        };
+                        let mut arg_resource: Option<ID3D12Resource> = None;
+                        unsafe {
+                            logical_device.device.CreateCommittedResource(
+                                &upload_heap,
+                                D3D12_HEAP_FLAG_NONE,
+                                &arg_buf_desc,
+                                D3D12_RESOURCE_STATE_GENERIC_READ,
+                                None,
+                                &mut arg_resource,
+                            )
+                        }
+                        .context("DispatchBatch(graph): failed to create arg buffer")?;
+                        let arg_resource =
+                            arg_resource.context("DispatchBatch(graph): arg_resource is None")?;
+                        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+                        let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+                        unsafe {
+                            arg_resource
+                                .Map(0, Some(&no_read), Some(&mut mapped))
+                                .context("DispatchBatch(graph): map failed")?;
+                            std::ptr::copy_nonoverlapping(
+                                arg_data.as_ptr(),
+                                mapped as *mut u8,
+                                arg_data.len(),
+                            );
+                            let written = D3D12_RANGE {
+                                Begin: 0,
+                                End: arg_data.len(),
+                            };
+                            arg_resource.Unmap(0, Some(&written));
+                        }
+                        unsafe {
+                            command_list.ExecuteIndirect(
+                                &batch_sig,
+                                *count,
+                                &arg_resource,
+                                0,
+                                None,
+                                0,
+                            );
+                        }
+                        let fence_val = {
+                            let dev = state
+                                .devices
+                                .get(&device_handle)
+                                .context("DispatchBatch(graph): device gone")?;
+                            dev.fence_value.saturating_sub(1)
+                        };
+                        let dev = state
+                            .devices
+                            .get_mut(&device_handle)
+                            .context("DispatchBatch(graph): device gone")?;
+                        dev.deletion_queue.queue(
+                            fence_val,
+                            super::types::PendingDeletion::StandaloneResource(arg_resource),
+                        );
+                    } else {
+                        use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
+                        let stride = DISPATCH_BATCH_STRIDE;
+                        let push_size = std::mem::size_of::<PushLayout>();
+                        for i in 0..*count as usize {
+                            let base = i * stride;
+                            let layout_bytes = &arg_data[base..base + push_size];
+                            let wg_off = base + push_size;
+                            let wg_x = u32::from_ne_bytes(
+                                arg_data[wg_off..wg_off + 4].try_into().unwrap(),
+                            );
+                            let wg_y = u32::from_ne_bytes(
+                                arg_data[wg_off + 4..wg_off + 8].try_into().unwrap(),
+                            );
+                            let wg_z = u32::from_ne_bytes(
+                                arg_data[wg_off + 8..wg_off + 12].try_into().unwrap(),
+                            );
+                            unsafe {
+                                command_list.SetComputeRoot32BitConstants(
+                                    0,
+                                    (push_size / 4) as u32,
+                                    layout_bytes.as_ptr() as *const _,
+                                    0,
+                                );
+                                command_list.Dispatch(wg_x, wg_y, wg_z);
+                            }
+                        }
+                    }
+                    pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
+                    pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
+                }
                 GpuCommand::Barrier => {
+                    let _tz = tracy_zone!("dx12.barrier");
                     let sync_before = if pending_sync.0 != 0 {
                         pending_sync
                     } else {
@@ -1225,6 +1924,7 @@ pub(super) fn submit_graph(
                     buffers: buf_handles,
                     textures: tex_handles,
                 } => {
+                    let _tz = tracy_zone!("dx12.resource_barrier");
                     let sync_before = if pending_sync.0 != 0 {
                         pending_sync
                     } else {
@@ -1251,7 +1951,7 @@ pub(super) fn submit_graph(
                     } else {
                         let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
                             .iter()
-                            .filter_map(|h| state.buffers.get(h))
+                            .filter_map(|h| bufs.get(h))
                             .map(|bs| {
                                 barriers::buffer_barrier_full(
                                     &bs.resource,
@@ -1308,6 +2008,7 @@ pub(super) fn submit_graph(
                     offset,
                     size,
                 } => {
+                    let _tz = tracy_zone!("dx12.clear_buffer");
                     let buf_state = state
                         .buffers
                         .get(buffer)
@@ -1388,6 +2089,7 @@ pub(super) fn submit_graph(
                     offset,
                     data,
                 } => {
+                    let _tz = tracy_zone!("dx12.write_buffer");
                     let buf_state = state
                         .buffers
                         .get(buf_handle)
@@ -1416,7 +2118,7 @@ pub(super) fn submit_graph(
                         belt_idx += 1;
                         let upload_src = belt_entry.0.clone();
                         let upload_off = belt_entry.1;
-                        let buf_state = state.buffers.get(buf_handle).unwrap();
+                        let buf_state = bufs.get(buf_handle).unwrap();
 
                         if use_global_buffer_barriers {
                             let pre = D3D12_GLOBAL_BARRIER {
@@ -1460,6 +2162,7 @@ pub(super) fn submit_graph(
                     }
                 }
                 GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                    let _tz = tracy_zone!("dx12.write_texture");
                     let upload = staged_texture_uploads
                         .get(texture_upload_idx)
                         .context("WriteTexture: staged upload missing (internal)")?;
@@ -1467,15 +2170,114 @@ pub(super) fn submit_graph(
                     super::texture::record_staged_texture_upload(
                         &command_list,
                         &command_list7,
-                        state,
+                        &mut state.textures,
                         upload,
                     )?;
+                }
+                GpuCommand::CopyTexture { src, dst } => {
+                    let _tz = tracy_zone!("dx12.copy_texture");
+                    let (src_res, src_layout) = {
+                        let ts = state
+                            .textures
+                            .get(src)
+                            .context("CopyTexture: src texture not found")?;
+                        (ts.resource.clone(), ts.last_layout)
+                    };
+                    let (dst_res, dst_layout) = {
+                        let ts = state
+                            .textures
+                            .get(dst)
+                            .context("CopyTexture: dst texture not found")?;
+                        (ts.resource.clone(), ts.last_layout)
+                    };
+
+                    let sync_before = if pending_sync.0 != 0 {
+                        pending_sync
+                    } else {
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING
+                    };
+                    let src_access_before = if src_layout
+                        == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+                        || src_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+                    {
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
+                    } else {
+                        D3D12_BARRIER_ACCESS_SHADER_RESOURCE
+                    };
+                    let dst_access_before = if dst_layout
+                        == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+                        || dst_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+                    {
+                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
+                    } else {
+                        D3D12_BARRIER_ACCESS_NO_ACCESS
+                    };
+
+                    let mut pre_barriers = vec![
+                        barriers::texture_barrier_full(
+                            &src_res,
+                            sync_before,
+                            D3D12_BARRIER_SYNC_COPY,
+                            src_access_before,
+                            D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                            src_layout,
+                            D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                        ),
+                        barriers::texture_barrier_full(
+                            &dst_res,
+                            sync_before,
+                            D3D12_BARRIER_SYNC_COPY,
+                            dst_access_before,
+                            D3D12_BARRIER_ACCESS_COPY_DEST,
+                            dst_layout,
+                            D3D12_BARRIER_LAYOUT_COPY_DEST,
+                        ),
+                    ];
+                    unsafe { barriers::barrier_textures(&command_list7, &pre_barriers) };
+                    unsafe { barriers::drop_texture_barriers(&mut pre_barriers) };
+
+                    unsafe { command_list.CopyResource(&dst_res, &src_res) };
+
+                    let post_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
+                    let mut post_barriers = vec![
+                        barriers::texture_barrier_full(
+                            &src_res,
+                            D3D12_BARRIER_SYNC_COPY,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                            post_layout,
+                        ),
+                        barriers::texture_barrier_full(
+                            &dst_res,
+                            D3D12_BARRIER_SYNC_COPY,
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                            D3D12_BARRIER_ACCESS_COPY_DEST,
+                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                            D3D12_BARRIER_LAYOUT_COPY_DEST,
+                            post_layout,
+                        ),
+                    ];
+                    unsafe { barriers::barrier_textures(&command_list7, &post_barriers) };
+                    unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
+
+                    if let Some(ts) = state.textures.get_mut(src) {
+                        ts.last_layout = post_layout;
+                    }
+                    if let Some(ts) = state.textures.get_mut(dst) {
+                        ts.last_layout = post_layout;
+                    }
+
+                    pending_sync = D3D12_BARRIER_SYNC(0);
+                    pending_access = D3D12_BARRIER_ACCESS(0);
                 }
             },
             GraphCommand::Render {
                 target,
                 commands: render_cmds,
             } => {
+                let _tz = tracy_zone!("dx12.render_pass");
                 // Flush compute/copy writes before the render pass
                 let compute_to_render = D3D12_GLOBAL_BARRIER {
                     SyncBefore: D3D12_BARRIER_SYNC(
@@ -1544,6 +2346,20 @@ pub(super) fn submit_graph(
     };
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
+    if let Some(ref prof) = dx_gpu_profile {
+        unsafe {
+            command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+            command_list.ResolveQueryData(
+                &prof.heap,
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                0,
+                prof.query_count,
+                &prof.readback,
+                0,
+            );
+        }
+    }
+
     // --- Close + execute + signal ---
     if let Err(e) = unsafe { command_list.Close() } {
         let diag = state
@@ -1561,22 +2377,53 @@ pub(super) fn submit_graph(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = state.devices.get(&device_handle).unwrap();
-    unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+    {
+        let _tz = tracy_zone!("dx12.execute_and_signal");
+        unsafe {
+            logical_device
+                .command_queue
+                .ExecuteCommandLists(&[Some(cmd_list)]);
+        }
+
+        unsafe {
+            logical_device
+                .command_queue
+                .Signal(&logical_device.fence, fence_value)
+        }
+        .context("Failed to signal fence")?;
     }
 
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
+    if let Some(prof) = dx_gpu_profile.take() {
+        if let Err(e) = dx12_finish_gpu_profile(logical_device, fence_value, prof) {
+            tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
+        }
     }
-    .context("Failed to signal fence")?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
         if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
+        }
+        // If the caller wants to retain this command list, store it for future re-execution.
+        if let Some(key) = retain_key {
+            // Evict any previously retained graph (mark its slot as available).
+            if let Some(old) = dev.retained_graph.take() {
+                if let Some(old_slot) = dev.compute_allocator_pool.get_mut(old.slot_idx) {
+                    old_slot.retained = false;
+                }
+            }
+            // Store the just-closed command list.  Cloning a COM interface is cheap (AddRef).
+            if let Some(cl) = dev
+                .compute_allocator_pool
+                .get(slot_idx)
+                .and_then(|s| s.command_list.clone())
+            {
+                dev.compute_allocator_pool[slot_idx].retained = true;
+                dev.retained_graph = Some(types::RetainedGraph {
+                    fingerprint: key,
+                    command_list: cl,
+                    slot_idx,
+                });
+            }
         }
         dev.process_deletion_queue();
     }
@@ -1607,6 +2454,80 @@ pub(super) fn submit_graph(
     }
 
     Ok(fence_value)
+}
+
+/// Re-execute a previously retained command list without re-recording.
+///
+/// Calls `ExecuteCommandLists` on the closed list stored by a prior
+/// `submit_graph(..., Some(key))` call, then signals the device fence.
+/// Returns `Ok(Some(tv))` on success, `Ok(None)` if no retained list matches `key`.
+pub(super) fn try_resubmit_retained(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    key: u64,
+) -> Result<Option<TimelineValue>> {
+    let retained = {
+        let dev = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        match dev.retained_graph.as_ref() {
+            Some(r) if r.fingerprint == key => Some((r.command_list.clone(), r.slot_idx)),
+            _ => None,
+        }
+    };
+
+    let Some((command_list, slot_idx)) = retained else {
+        return Ok(None);
+    };
+
+    let fence_value = {
+        let dev = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        let token = dev.fence_value;
+        dev.fence_value += 1;
+        token
+    };
+
+    let cmd_list: ID3D12CommandList = command_list
+        .cast()
+        .context("Failed to cast retained command list")?;
+
+    let dev = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?;
+    {
+        let _tz = tracy_zone!("dx12.resubmit_retained");
+        unsafe {
+            dev.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
+        }
+        unsafe { dev.command_queue.Signal(&dev.fence, fence_value) }
+            .context("Failed to signal fence after retained resubmit")?;
+    }
+
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        // Update the retained slot's fence_value so the GPU timeline stays accurate.
+        if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
+            slot.fence_value = fence_value;
+        }
+        dev.process_deletion_queue();
+    }
+
+    Ok(Some(fence_value))
+}
+
+/// Drop the retained command list for `key`, marking its pool slot as reusable.
+pub(super) fn evict_retained(state: &mut Dx12State, device_handle: DeviceHandle) {
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        if let Some(old) = dev.retained_graph.take() {
+            if let Some(slot) = dev.compute_allocator_pool.get_mut(old.slot_idx) {
+                slot.retained = false;
+            }
+        }
+    }
 }
 
 /// Check if the fence for the given token has signaled.

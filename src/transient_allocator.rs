@@ -64,9 +64,6 @@ use std::collections::{BTreeMap, VecDeque};
 pub struct TransientAllocatorConfig {
     /// Initial backing-storage size, in bytes. Allocators may grow beyond this on demand.
     pub initial_size: u64,
-    /// Hint for peak demand. Used by backends that support capacity reservation (e.g. Metal
-    /// placement heaps) to pre-reserve virtual address range and avoid mid-frame reallocations.
-    pub expected_max: u64,
     /// Minimum region size for region-based strategies (e.g. [`EpochRegionsAllocator`]). Ignored
     /// by non-regional strategies. Default 4 MiB; smaller values trade region overhead for
     /// finer-grained reclamation.
@@ -86,7 +83,6 @@ impl Default for TransientAllocatorConfig {
     fn default() -> Self {
         Self {
             initial_size: 64 * 1024,
-            expected_max: 16 * 1024 * 1024,
             min_region_size: 4 * 1024 * 1024,
             max_regions: 3,
             alignment: 256,
@@ -171,6 +167,15 @@ pub trait TransientAllocator: Send {
     /// The default implementation is a no-op — bump-style allocators that reclaim entire
     /// regions at once simply ignore per-view frees.
     fn free(&mut self, _offset: u64, _size: u64, _epoch: Option<TimelineValue>) {}
+
+    /// Release backing capacity that exceeds the observed peak working set.
+    ///
+    /// Implementations compact their free lists / watermarks and, where possible, downsize
+    /// the backing buffer or hint the backend that trailing pages are unused. Safe to call
+    /// at any time — live allocations are preserved.
+    ///
+    /// The default is a no-op; strategies that grow dynamically should override.
+    fn shrink_to_fit(&mut self) {}
 
     /// Optional emergency reset — drops all backing storage and forgets any in-flight epochs.
     /// Callers are responsible for ensuring no GPU work still references this allocator's
@@ -262,7 +267,6 @@ impl Drop for ResetToken {
 pub struct BumpResetAllocator {
     pool: BufferPool,
     last_epoch: Option<TimelineValue>,
-    expected_max: u64,
     /// Set to `true` once the deferred reset token is dropped after `gpu_progress >= last_epoch`.
     /// Reset to `false` in `end_frame` when a new token is issued.
     reset_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -271,17 +275,17 @@ pub struct BumpResetAllocator {
 impl BumpResetAllocator {
     /// Create a new allocator. Allocates initial backing immediately.
     pub fn new(device: &Device, config: TransientAllocatorConfig) -> Result<Self> {
+        let initial = config.initial_size.max(config.alignment);
         let pool = BufferPool::with_alignment_capacity_hint_and_flags(
             device,
-            config.initial_size.max(config.alignment),
-            config.expected_max.max(config.initial_size),
+            initial,
+            initial,
             config.alignment,
             config.flags,
         )?;
         Ok(Self {
             pool,
             last_epoch: None,
-            expected_max: config.expected_max,
             reset_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         })
     }
@@ -324,8 +328,7 @@ impl TransientAllocator for BumpResetAllocator {
             let target = used
                 .saturating_add(size)
                 .saturating_mul(2)
-                .max(self.pool.capacity().saturating_mul(2))
-                .max(self.expected_max);
+                .max(self.pool.capacity().saturating_mul(2));
             self.pool.resize(target)?;
         }
         self.pool.alloc_bytes(size, element_stride)
@@ -464,8 +467,8 @@ impl EpochRegionsAllocator {
         min_size: u64,
     ) -> Result<Region> {
         let size = config.min_region_size.max(min_size).max(config.alignment);
-        // Capacity hint is per-region, not the global expected_max. Each region only
-        // needs to handle its own share of per-frame demand, not the entire frame.
+        // Capacity hint equals the region size — each region only needs to handle
+        // its own share of per-frame demand, not the entire frame.
         let pool = BufferPool::with_alignment_capacity_hint_and_flags(
             device,
             size,
@@ -803,14 +806,17 @@ pub struct HeapTransientAllocator {
     live_bytes: u64,
     /// Peak `live_bytes` observed across the lifetime of this allocator (diagnostic).
     peak_live_bytes: u64,
+    /// Frame counter — used to defer `shrink_to_fit` until the pipeline has warmed up.
+    frame_count: u64,
 }
 
 impl HeapTransientAllocator {
     pub fn new(device: &Device, config: TransientAllocatorConfig) -> Result<Self> {
+        let initial = config.initial_size.max(config.alignment);
         let pool = BufferPool::with_alignment_capacity_hint_and_flags(
             device,
-            config.initial_size.max(config.alignment),
-            config.expected_max.max(config.initial_size),
+            initial,
+            initial,
             config.alignment,
             config.flags,
         )?;
@@ -823,6 +829,7 @@ impl HeapTransientAllocator {
             pending_frees: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             live_bytes: 0,
             peak_live_bytes: 0,
+            frame_count: 0,
         })
     }
 
@@ -953,10 +960,9 @@ impl HeapTransientAllocator {
 
     fn grow(&mut self, min_capacity: u64) -> Result<()> {
         let current = self.pool.capacity();
-        // Grow to at least min_capacity with 25% headroom. No hard cap: with pipelining
-        // the concurrent live set spans multiple frames, so the pool must be allowed to
-        // grow beyond the single-frame `expected_max`. The heap recycles freed ranges, so
-        // once the pipeline is full the capacity stabilises at the peak concurrent set.
+        // Grow to at least min_capacity with 25% headroom. The heap recycles freed ranges,
+        // so once the pipeline is full the capacity stabilises at the peak concurrent set.
+        // After warmup, `shrink_to_fit` trims any excess.
         let target = min_capacity.max(current + current / 4);
         self.pool.resize(target)
     }
@@ -968,14 +974,23 @@ impl HeapTransientAllocator {
     }
 }
 
+/// Frames to wait before the first auto-shrink. Lets the pipeline fill and the
+/// peak working set stabilise before we trim.
+const HEAP_WARMUP_FRAMES: u64 = 8;
+
 impl TransientAllocator for HeapTransientAllocator {
     fn begin_frame(&mut self, device: &Device, _hint_size: u64) -> Result<()> {
+        self.frame_count += 1;
         // Flush any deferred frees with known epochs (e.g., from post-end_frame free calls).
         self.flush_deferred_to_vram(device);
         // Process any ranges whose tokens have been dropped by the VramAllocator ring.
         device.flush_deferred_deletions();
         self.drain_pending_frees();
         self.compact_watermark();
+        // After warmup, auto-shrink if we over-grew during the first few frames.
+        if self.frame_count == HEAP_WARMUP_FRAMES {
+            self.shrink_to_fit();
+        }
         Ok(())
     }
 
@@ -1058,6 +1073,24 @@ impl TransientAllocator for HeapTransientAllocator {
         "heap"
     }
 
+    fn shrink_to_fit(&mut self) {
+        self.compact_watermark();
+        let target = self.watermark.max(self.peak_live_bytes);
+        if target > 0 && self.pool.capacity() > target * 2 {
+            let new_cap = target + target / 4; // 25 % headroom
+            if new_cap < self.pool.capacity() {
+                tracing::info!(
+                    capacity = self.pool.capacity(),
+                    watermark = self.watermark,
+                    peak_live = self.peak_live_bytes,
+                    new_cap,
+                    "HeapTransientAllocator: shrink_to_fit"
+                );
+                self.pool.hint_unused_above(new_cap);
+            }
+        }
+    }
+
     fn clear(&mut self) {
         self.watermark = 0;
         self.free_list.clear();
@@ -1066,6 +1099,7 @@ impl TransientAllocator for HeapTransientAllocator {
             pending.clear();
         }
         self.live_bytes = 0;
+        self.frame_count = 0;
     }
 }
 
@@ -1127,7 +1161,6 @@ mod tests {
         assert!(c.initial_size > 0);
         assert!(c.min_region_size > 0);
         assert!(c.max_regions > 0);
-        assert!(c.expected_max >= c.initial_size);
     }
 
     // ---------------------------------------------------------------
@@ -1144,7 +1177,6 @@ mod tests {
     fn heap_config() -> TransientAllocatorConfig {
         TransientAllocatorConfig {
             initial_size: 64 * 1024,
-            expected_max: 1024 * 1024,
             min_region_size: 64 * 1024,
             max_regions: 3,
             alignment: 256,
@@ -1329,7 +1361,6 @@ mod tests {
         let device = test_device();
         let config = TransientAllocatorConfig {
             initial_size: 1024,
-            expected_max: 1024,
             ..heap_config()
         };
         let mut alloc = HeapTransientAllocator::new(&device, config).unwrap();
@@ -1349,7 +1380,6 @@ mod tests {
     fn small_config() -> TransientAllocatorConfig {
         TransientAllocatorConfig {
             initial_size: 4 * 1024,
-            expected_max: 16 * 1024,
             min_region_size: 4 * 1024,
             max_regions: 3,
             alignment: 256,
@@ -1366,8 +1396,8 @@ mod tests {
 
         a.begin_frame(&device, 0).expect("begin 1");
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-        let graph = crate::task_graph::TaskGraph::new();
-        let tv = device.submit(&graph).expect("submit");
+        let mut graph = crate::task_graph::TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
         // Regions are now DeferredReclaim, not Empty.
@@ -1404,8 +1434,8 @@ mod tests {
         alloc.begin_frame(&device, 0).unwrap();
         let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         let offset = v1.offset();
-        let graph = crate::task_graph::TaskGraph::new();
-        let tv = device.submit(&graph).expect("submit");
+        let mut graph = crate::task_graph::TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
 
         // Free with known epoch.
         alloc.free(offset, 1024, Some(tv));
@@ -1436,8 +1466,8 @@ mod tests {
 
         a.begin_frame(&device, 0).expect("begin 1");
         let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
-        let graph = crate::task_graph::TaskGraph::new();
-        let tv = device.submit(&graph).expect("submit");
+        let mut graph = crate::task_graph::TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
         // reset_ready is now false.

@@ -250,6 +250,54 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         sig
     };
 
+    // Command signature for batched dispatch: push-constants + dispatch per entry.
+    // Requires the bindless root signature so that INDIRECT_ARGUMENT_TYPE_CONSTANT
+    // can reference root parameter 0.
+    let compute_batch_dispatch_signature = if let Some(ref root_sig) = bindless_root_signature {
+        use crate::backend::shared::TOTAL_PUSH_BYTES;
+        let arg_descs = [
+            D3D12_INDIRECT_ARGUMENT_DESC {
+                Type: D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT,
+                Anonymous: D3D12_INDIRECT_ARGUMENT_DESC_0 {
+                    Constant: D3D12_INDIRECT_ARGUMENT_DESC_0_1 {
+                        RootParameterIndex: 0,
+                        DestOffsetIn32BitValues: 0,
+                        Num32BitValuesToSet: (TOTAL_PUSH_BYTES / 4) as u32,
+                    },
+                },
+            },
+            D3D12_INDIRECT_ARGUMENT_DESC {
+                Type: D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+                Anonymous: unsafe { std::mem::zeroed() },
+            },
+        ];
+        let stride = (TOTAL_PUSH_BYTES + 3 * 4) as u32; // PushLayout + [wg_x, wg_y, wg_z]
+        let cmd_sig_desc = D3D12_COMMAND_SIGNATURE_DESC {
+            ByteStride: stride,
+            NumArgumentDescs: arg_descs.len() as u32,
+            pArgumentDescs: arg_descs.as_ptr(),
+            NodeMask: 0,
+        };
+        let mut sig: Option<ID3D12CommandSignature> = None;
+        let result = unsafe {
+            device.CreateCommandSignature(
+                &cmd_sig_desc,
+                root_sig, // must match all pipelines using this signature
+                &mut sig,
+            )
+        };
+        if let Err(e) = result {
+            tracing::warn!("Failed to create batch dispatch command signature: {e}; DispatchBatch will use per-dispatch fallback");
+            None
+        } else {
+            tracing::debug!("Created batch dispatch command signature (stride={stride}B)");
+            sig
+        }
+    } else {
+        tracing::warn!("No bindless root signature; DispatchBatch batch path unavailable");
+        None
+    };
+
     // Zero-filled UPLOAD-heap buffer used as the source for CopyBufferRegion clears.
     // UPLOAD heaps are zero-initialized by the D3D12 runtime; no explicit memset needed.
     // Size matches UPLOAD_CHUNK_SIZE in buffer.rs so any single chunk fits in one copy.
@@ -300,6 +348,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let compute_allocator_pool = vec![types::ComputeAllocatorSlot {
         allocator: compute_initial_allocator,
         fence_value: 0,
+        command_list: None,
+        retained: false,
     }];
 
     let resource_registry = types::ResourceRegistry::new();
@@ -341,8 +391,10 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             },
             bindless_root_signature,
             compute_dispatch_indirect_signature,
+            compute_batch_dispatch_signature,
             resource_registry,
             zero_buffer,
+            retained_graph: None,
             deletion_queue: super::types::DeletionQueue::new(),
             graphics_pso_blobs,
             compute_pso_blobs,

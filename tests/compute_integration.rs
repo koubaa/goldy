@@ -2386,7 +2386,6 @@ use goldy::{
 fn small_config() -> TransientAllocatorConfig {
     TransientAllocatorConfig {
         initial_size: 4 * 1024,
-        expected_max: 64 * 1024,
         min_region_size: 4 * 1024,
         max_regions: 4,
         alignment: 256,

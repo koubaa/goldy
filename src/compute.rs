@@ -227,6 +227,7 @@ impl<'a> ComputePass<'a> {
     /// - `dispatch(256, 1, 1)` runs 256 * 64 = 16384 threads
     pub fn dispatch(&mut self, workgroups_x: u32, workgroups_y: u32, workgroups_z: u32) {
         self.encoder.commands.push(GpuCommand::Dispatch {
+            label: None,
             workgroups_x,
             workgroups_y,
             workgroups_z,
@@ -240,6 +241,7 @@ impl<'a> ComputePass<'a> {
     /// compute pass (e.g. a setup shader that writes the counts).
     pub fn dispatch_indirect(&mut self, buffer: &Buffer, offset: u64) {
         self.encoder.commands.push(GpuCommand::DispatchIndirect {
+            label: None,
             buffer: buffer.handle,
             offset,
         });
@@ -295,10 +297,12 @@ mod tests {
         assert_eq!(commands.len(), 1);
         match &commands[0] {
             GpuCommand::Dispatch {
+                label,
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
             } => {
+                assert!(label.is_none());
                 assert_eq!(*workgroups_x, 4);
                 assert_eq!(*workgroups_y, 2);
                 assert_eq!(*workgroups_z, 1);

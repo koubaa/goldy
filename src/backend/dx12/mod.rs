@@ -893,7 +893,28 @@ impl GpuBackend for Dx12Backend {
         device: DeviceHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, device, commands)
+        compute::submit_graph(&mut self.state, device, commands, None)
+    }
+
+    fn submit_graph_and_retain(
+        &mut self,
+        device: DeviceHandle,
+        commands: &[GraphCommand],
+        key: u64,
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit_graph(&mut self.state, device, commands, Some(key))
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        device: DeviceHandle,
+        key: u64,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        compute::try_resubmit_retained(&mut self.state, device, key)
+    }
+
+    fn evict_retained(&mut self, device: DeviceHandle, _key: u64) {
+        compute::evict_retained(&mut self.state, device);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {

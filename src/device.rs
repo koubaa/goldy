@@ -554,6 +554,7 @@ impl Device {
     /// Latest GPU completion counter on this device's timeline (`wait_until(value)` is valid once
     /// `gpu_progress() >= value`).
     pub fn gpu_progress(&self) -> TimelineValue {
+        let _tz = crate::tracy_zone!("device.gpu_progress");
         let backend = self.inner.backend.lock().unwrap();
         backend.gpu_progress(self.inner.handle)
     }
@@ -654,6 +655,7 @@ impl Device {
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
     pub fn flush_deferred_deletions(&self) {
+        let _tz = crate::tracy_zone!("device.flush_deferred_deletions");
         let mut backend = self.inner.backend.lock().unwrap();
         backend.flush_deferred_deletions(self.inner.handle);
         let progress = backend.gpu_progress(self.inner.handle);
@@ -707,7 +709,7 @@ impl Device {
     /// by the device. The heap is lazily created on first use and reused across
     /// submissions — callers never need to manage transient buffer backing
     /// storage, view creation, or bindless index patching.
-    pub fn submit(&self, graph: &TaskGraph) -> Result<TimelineValue, GoldyError> {
+    pub fn submit(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
         if !graph.has_transient_resources() {
             let mut backend = self.inner.backend.lock().unwrap();
             let tv = graph
@@ -758,7 +760,8 @@ impl Device {
     ///
     /// [`Self::submit`] still waits on transient resources — that path remains the
     /// safe default for one-shot submission.
-    pub fn submit_pipelined(&self, graph: &TaskGraph) -> Result<TimelineValue, GoldyError> {
+    pub fn submit_pipelined(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
+        let _tz = crate::tracy_zone!("device.submit_pipelined");
         if !graph.has_transient_resources() {
             let mut backend = self.inner.backend.lock().unwrap();
             let tv = graph
@@ -800,6 +803,57 @@ impl Device {
         Ok(tv)
     }
 
+    /// Submit a task graph and retain the closed command list for potential reuse.
+    ///
+    /// Works like [`Self::submit_pipelined`] but also stores the compiled command list
+    /// keyed by `key`.  Call [`Self::try_resubmit_retained`] on the next frame to
+    /// re-execute the same list without re-recording when the graph is unchanged.
+    ///
+    /// Graphs with transient resources are not eligible for retention (they use
+    /// placement-heap allocations that are recycled each frame); the call degrades
+    /// gracefully to a plain submit in that case.
+    pub fn submit_pipelined_and_retain(
+        &self,
+        graph: &mut TaskGraph,
+        key: u64,
+    ) -> Result<TimelineValue, GoldyError> {
+        if graph.has_transient_resources() {
+            // Transient-buffer graphs cannot be safely retained; fall back.
+            return self.submit_pipelined(graph);
+        }
+        let mut backend = self.inner.backend.lock().unwrap();
+        let tv = graph
+            .submit_with_backend_and_retain(self, backend.as_mut(), key)
+            .map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })?;
+        self.inner
+            .high_water_timeline
+            .fetch_max(tv, Ordering::Relaxed);
+        Ok(tv)
+    }
+
+    /// Re-execute a previously retained command list without re-recording.
+    ///
+    /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no matching retained list exists
+    /// (caller should fall back to a full submit-and-retain cycle).
+    pub fn try_resubmit_retained(&self, key: u64) -> Result<Option<TimelineValue>, GoldyError> {
+        let mut backend = self.inner.backend.lock().unwrap();
+        let result = backend
+            .try_resubmit_retained(self.inner.handle, key)
+            .map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })?;
+        if let Some(tv) = result {
+            self.inner
+                .high_water_timeline
+                .fetch_max(tv, Ordering::Relaxed);
+        }
+        Ok(result)
+    }
+
     /// Default pipeline depth for initial placement heap sizing.
     pub(crate) const DEFAULT_PIPELINE_DEPTH: u64 = 4;
 
@@ -812,7 +866,7 @@ impl Device {
     /// 5. Submit the resolved IR (views kept alive in the heap ring until GPU retires)
     fn submit_with_placement_heap(
         &self,
-        graph: &TaskGraph,
+        graph: &mut TaskGraph,
         tex_handles: &HashMap<u32, backend::TextureHandle>,
         wait_for_transient_completion: bool,
     ) -> Result<TimelineValue> {
@@ -882,7 +936,7 @@ impl Device {
         let resolved_ir = graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
 
         // Build a resolved graph (no transient specs) and submit.
-        let resolved_graph = graph.into_resolved(resolved_ir);
+        let mut resolved_graph = graph.into_resolved(resolved_ir);
 
         // Drop the heap lock before acquiring the backend lock for submission.
         drop(heap_guard);
@@ -907,7 +961,7 @@ impl Device {
     }
 
     /// Submit a task graph and block until it completes.
-    pub fn dispatch(&self, graph: &TaskGraph) -> Result<(), GoldyError> {
+    pub fn dispatch(&self, graph: &mut TaskGraph) -> Result<(), GoldyError> {
         let v = self.submit(graph)?;
         self.wait_until(v)
     }
@@ -1203,12 +1257,12 @@ mod tests {
         use crate::task_graph::TaskGraph;
         let device = test_device();
         assert_eq!(device.high_water_timeline(), 0);
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
         assert!(tv > 0);
         assert_eq!(device.high_water_timeline(), tv);
         // Second submit advances it further.
-        let tv2 = device.submit(&graph).unwrap();
+        let tv2 = device.submit(&mut graph).unwrap();
         assert!(tv2 > tv);
         assert_eq!(device.high_water_timeline(), tv2);
     }
@@ -1217,8 +1271,8 @@ mod tests {
     fn defer_until_resources_are_not_dropped_before_epoch() {
         use crate::task_graph::TaskGraph;
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(99u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -1238,8 +1292,8 @@ mod tests {
     fn defer_until_resources_dropped_after_flush_at_epoch() {
         use crate::task_graph::TaskGraph;
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(42u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -1259,8 +1313,8 @@ mod tests {
     fn defer_release_drops_all_on_device_drop() {
         use crate::task_graph::TaskGraph;
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(7u32);
         let weak = std::sync::Arc::downgrade(&alive);

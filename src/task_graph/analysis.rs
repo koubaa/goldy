@@ -23,12 +23,14 @@
 //!    Each [`NodeKind`] variant emits different commands.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::ir::{BarrierSet, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, Wave};
 // NodeAccess is used in the test module via `super::*`
 #[cfg(test)]
 use super::ir::NodeAccess;
 use super::ResourceId;
+use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand};
 use anyhow::Result;
 
@@ -455,48 +457,156 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
                         data: data.clone(),
                     });
                 }
+                NodeKind::CopyTexture { src, dst } => {
+                    commands.push(GpuCommand::CopyTexture {
+                        src: *src,
+                        dst: *dst,
+                    });
+                }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
             }
         }
 
-        for &idx in &wave.node_indices {
-            let node = &ir.nodes[idx];
-            match &node.kind {
-                NodeKind::Dispatch {
+        // Emit dispatch nodes, batching consecutive same-pipeline direct dispatches
+        // into a single `DispatchBatch` command that can be executed with
+        // `ExecuteIndirect` on DX12 (reducing per-dispatch CPU recording cost).
+        //
+        // Indirect dispatches (GPU-driven counts) are NOT batched because they
+        // already read counts from a GPU buffer; mixing them with the CPU arg
+        // buffer layout is not straightforward.
+        {
+            // Build a list of (pipeline, resource_slots, user_slots, dispatch) tuples
+            // for this wave's dispatch nodes, in order.
+            struct PendingDispatch<'n> {
+                label: &'static str,
+                pipeline: crate::backend::ComputePipelineHandle,
+                resource_slots: &'n Vec<u32>,
+                user_slots: &'n Vec<u32>,
+                x: u32,
+                y: u32,
+                z: u32,
+            }
+
+            // Collect all DIRECT dispatch nodes in this wave (excluding indirect).
+            let mut pending: Vec<PendingDispatch<'_>> = Vec::new();
+            let mut has_indirect = false;
+            for &idx in &wave.node_indices {
+                let node = &ir.nodes[idx];
+                if let NodeKind::Dispatch {
                     pipeline,
                     resource_slots,
                     user_slots,
-                    dispatch,
-                } => {
-                    commands.push(GpuCommand::SetPipeline(*pipeline));
-                    if !resource_slots.is_empty() || !user_slots.is_empty() {
-                        commands.push(GpuCommand::BindResourcesRaw {
-                            indices: resource_slots.clone(),
-                            user: user_slots.clone(),
+                    dispatch: super::ir::DispatchDim::Direct { x, y, z },
+                } = &node.kind
+                {
+                    pending.push(PendingDispatch {
+                        label: node.label,
+                        pipeline: *pipeline,
+                        resource_slots,
+                        user_slots,
+                        x: *x,
+                        y: *y,
+                        z: *z,
+                    });
+                } else if let NodeKind::Dispatch {
+                    dispatch: super::ir::DispatchDim::Indirect { .. },
+                    ..
+                } = &node.kind
+                {
+                    has_indirect = true;
+                }
+            }
+
+            // Emit indirect dispatches one by one (existing path).
+            if has_indirect {
+                for &idx in &wave.node_indices {
+                    let node = &ir.nodes[idx];
+                    if let NodeKind::Dispatch {
+                        pipeline,
+                        resource_slots,
+                        user_slots,
+                        dispatch: super::ir::DispatchDim::Indirect { buffer, offset },
+                    } = &node.kind
+                    {
+                        commands.push(GpuCommand::SetPipeline(*pipeline));
+                        if !resource_slots.is_empty() || !user_slots.is_empty() {
+                            commands.push(GpuCommand::BindResourcesRaw {
+                                indices: resource_slots.clone(),
+                                user: user_slots.clone(),
+                            });
+                        }
+                        commands.push(GpuCommand::DispatchIndirect {
+                            label: Some(node.label),
+                            buffer: *buffer,
+                            offset: *offset,
                         });
                     }
-                    match dispatch {
-                        super::ir::DispatchDim::Direct { x, y, z } => {
-                            commands.push(GpuCommand::Dispatch {
-                                workgroups_x: *x,
-                                workgroups_y: *y,
-                                workgroups_z: *z,
-                            });
-                        }
-                        super::ir::DispatchDim::Indirect { buffer, offset } => {
-                            commands.push(GpuCommand::DispatchIndirect {
-                                buffer: *buffer,
-                                offset: *offset,
-                            });
-                        }
+                }
+            }
+
+            // Emit direct dispatches, batching consecutive same-pipeline groups.
+            let mut i = 0;
+            while i < pending.len() {
+                let cur_pipeline = pending[i].pipeline;
+                // Find the run of dispatches sharing the same pipeline.
+                let run_end = pending[i..]
+                    .iter()
+                    .take_while(|d| d.pipeline == cur_pipeline)
+                    .count();
+                let run = &pending[i..i + run_end];
+
+                if run.len() > 1 {
+                    // Build the flat argument buffer: [PushLayout | wg_x | wg_y | wg_z] per entry.
+                    let mut arg_data: Vec<u8> =
+                        Vec::with_capacity(run.len() * DISPATCH_BATCH_STRIDE);
+                    for d in run {
+                        // Reconstruct PushLayout bytes from resource/user slots.
+                        let mut layout = crate::backend::shared::PushLayout::default();
+                        crate::backend::shared::fill_raw(
+                            &mut layout,
+                            d.resource_slots,
+                            d.user_slots,
+                        );
+                        arg_data.extend_from_slice(bytemuck::bytes_of(&layout));
+                        arg_data.extend_from_slice(&d.x.to_ne_bytes());
+                        arg_data.extend_from_slice(&d.y.to_ne_bytes());
+                        arg_data.extend_from_slice(&d.z.to_ne_bytes());
                     }
+                    commands.push(GpuCommand::SetPipeline(cur_pipeline));
+                    commands.push(GpuCommand::DispatchBatch {
+                        label: Some(run[0].label),
+                        arg_data: Arc::from(arg_data.as_slice()),
+                        count: run.len() as u32,
+                    });
+                } else {
+                    // Single dispatch — use existing per-dispatch path.
+                    let d = &run[0];
+                    commands.push(GpuCommand::SetPipeline(cur_pipeline));
+                    if !d.resource_slots.is_empty() || !d.user_slots.is_empty() {
+                        commands.push(GpuCommand::BindResourcesRaw {
+                            indices: d.resource_slots.clone(),
+                            user: d.user_slots.clone(),
+                        });
+                    }
+                    commands.push(GpuCommand::Dispatch {
+                        label: Some(d.label),
+                        workgroups_x: d.x,
+                        workgroups_y: d.y,
+                        workgroups_z: d.z,
+                    });
                 }
-                NodeKind::RenderPass { .. } => {
-                    panic!(
-                        "emit_commands: graph contains render_pass; use emit_graph_commands / TaskGraph::compile_graph_commands"
-                    );
-                }
-                _ => {}
+
+                i += run_end;
+            }
+        }
+
+        // Handle RenderPass nodes (not expected here — checked for completeness).
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            if let NodeKind::RenderPass { .. } = &node.kind {
+                panic!(
+                    "emit_commands: graph contains render_pass; use emit_graph_commands / TaskGraph::compile_graph_commands"
+                );
             }
         }
     }
@@ -572,6 +682,12 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         data: data.clone(),
                     }));
                 }
+                NodeKind::CopyTexture { src, dst } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::CopyTexture {
+                        src: *src,
+                        dst: *dst,
+                    }));
+                }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
             }
         }
@@ -596,6 +712,7 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                     match dispatch {
                         super::ir::DispatchDim::Direct { x, y, z } => {
                             commands.push(GraphCommand::Compute(GpuCommand::Dispatch {
+                                label: Some(node.label),
                                 workgroups_x: *x,
                                 workgroups_y: *y,
                                 workgroups_z: *z,
@@ -603,6 +720,7 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                         }
                         super::ir::DispatchDim::Indirect { buffer, offset } => {
                             commands.push(GraphCommand::Compute(GpuCommand::DispatchIndirect {
+                                label: Some(node.label),
                                 buffer: *buffer,
                                 offset: *offset,
                             }));
@@ -910,6 +1028,7 @@ mod tests {
             cmds[1],
             GpuCommand::Dispatch {
                 workgroups_x: 8,
+                label: Some("A"),
                 ..
             }
         ));
@@ -919,6 +1038,7 @@ mod tests {
             cmds[4],
             GpuCommand::Dispatch {
                 workgroups_x: 4,
+                label: Some("B"),
                 ..
             }
         ));
@@ -973,6 +1093,7 @@ mod tests {
             cmds[2],
             GpuCommand::Dispatch {
                 workgroups_x: 1,
+                label: Some("A"),
                 ..
             }
         ));

@@ -1828,6 +1828,7 @@ mod tests {
                 buffers: vec![buffer1, buffer2],
             },
             GpuCommand::Dispatch {
+                label: None,
                 workgroups_x: 8,
                 workgroups_y: 8,
                 workgroups_z: 1,
@@ -1860,6 +1861,7 @@ mod tests {
         let commands = vec![
             GraphCommand::Compute(GpuCommand::SetPipeline(0)),
             GraphCommand::Compute(GpuCommand::Dispatch {
+                label: None,
                 workgroups_x: 1,
                 workgroups_y: 1,
                 workgroups_z: 1,
@@ -1870,6 +1872,7 @@ mod tests {
             },
             GraphCommand::Compute(GpuCommand::SetPipeline(0)),
             GraphCommand::Compute(GpuCommand::Dispatch {
+                label: None,
                 workgroups_x: 1,
                 workgroups_y: 1,
                 workgroups_z: 1,

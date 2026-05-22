@@ -33,6 +33,7 @@ thiserror = "2.0"
 # Logging and instrumentation
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracy-client = { version = "0.18", default-features = false, optional = true }
 
 # Utilities
 bitflags = "2.6"
@@ -97,6 +98,9 @@ update-screenshots = ["dep:image"]
 instrumentation = ["dep:tracing-subscriber"]
 # Interactive `examples/*.rs` (winit); avoids compiling winit for tests / lib-only builds
 examples = ["dep:winit"]
+# Tracy profiler integration — connect the Tracy GUI for live CPU/GPU timeline profiling.
+# Zero-cost when disabled; when enabled, only collects when a profiler connects (on-demand).
+tracy = ["dep:tracy-client", "tracy-client/enable", "tracy-client/ondemand", "tracy-client/broadcast", "tracy-client/system-tracing", "tracy-client/context-switch-tracing"]
 
 [[example]]
 name = "triangle"

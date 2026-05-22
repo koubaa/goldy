@@ -333,6 +333,26 @@ pub(crate) struct LogicalDevice {
 
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
+
+    /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
+    pub vk_timestamp_compute_and_graphics: bool,
+    pub vk_timestamp_period_ns: f32,
+
+    /// Recycled command buffers available for reuse (avoids alloc/free per submit).
+    pub free_cmd_buffers: Vec<vk::CommandBuffer>,
+    /// Retained dispatch command buffer for resubmission without re-recording.
+    /// `None` until a `submit_graph_and_retain` call stores a completed CB here.
+    /// At `cleanup_depth=1` the CB is guaranteed to be in executable state at
+    /// the start of the next frame (GPU has completed it via `wait_until`).
+    pub retained_compute_cb: Option<RetainedVkCb>,
+}
+
+/// A Vulkan command buffer retained for resubmission.
+pub(crate) struct RetainedVkCb {
+    /// Opaque key used to detect staleness (binding fingerprint).
+    pub fingerprint: u64,
+    /// The retained `VkCommandBuffer` (in executable state when GPU has completed).
+    pub command_buffer: vk::CommandBuffer,
 }
 
 impl LogicalDevice {

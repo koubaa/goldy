@@ -9,8 +9,65 @@ use crate::error::GoldyError;
 use crate::surface::Frame;
 use crate::task_graph::TaskGraph;
 use crate::timeline::TimelineValue;
+use crate::tracy_frame_mark;
+use crate::tracy_zone;
 use anyhow::anyhow;
 use std::collections::VecDeque;
+
+/// Semantic hint for how the frame pipeline should be scheduled.
+///
+/// The application chooses based on its tolerance for input lag vs. desire for
+/// throughput. Goldy selects the optimal internal strategy (pipelining depth,
+/// buffer allocation, CB retention) accordingly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameStrategy {
+    /// Minimize latency. Frames are fully synchronous: the CPU blocks until the
+    /// GPU finishes each frame before starting the next. CPU recording overhead
+    /// is eliminated via command buffer retention when the binding structure is
+    /// stable across frames.
+    ///
+    /// Best for: interactive applications, games, live previews.
+    LowLatency,
+
+    /// Balanced throughput. Two frames overlap: the CPU records frame N+1 while
+    /// the GPU executes frame N. VRAM stays bounded via graph coloring across
+    /// staggered pipeline stages.
+    ///
+    /// Best for: applications that can tolerate one frame of input lag.
+    Balanced,
+
+    /// Maximum throughput. Deeply pipelined: the CPU is always recording ahead
+    /// of the GPU. Latency is highest but FPS ceiling is maximized.
+    ///
+    /// Best for: offline rendering, benchmarks, batch processing.
+    MaxThroughput {
+        /// Maximum number of frames allowed in-flight. Defaults to 3 if `None`.
+        max_frames_in_flight: Option<u32>,
+    },
+}
+
+impl FrameStrategy {
+    /// Derive the pipelining depth from the strategy.
+    pub fn depth(&self) -> usize {
+        match self {
+            FrameStrategy::LowLatency => 1,
+            FrameStrategy::Balanced => 2,
+            FrameStrategy::MaxThroughput {
+                max_frames_in_flight,
+            } => max_frames_in_flight.unwrap_or(3) as usize,
+        }
+    }
+
+    /// Whether transient-buffer graph coloring should be used for VRAM reuse.
+    ///
+    /// At depth=1 (LowLatency) all buffers are persistent — graph coloring adds
+    /// overhead with no benefit and prevents stable bindless indices needed for CB
+    /// retention. At depth>1 graph coloring aliases physical memory across
+    /// staggered pipeline stages.
+    pub fn use_graph_coloring(&self) -> bool {
+        self.depth() > 1
+    }
+}
 
 /// Token returned from [`FrameOrchestrator::begin_frame`]; must be passed to
 /// [`FrameOrchestrator::flush`], [`FrameOrchestrator::end_frame_standalone`], or
@@ -41,6 +98,7 @@ struct FrameSlot<T> {
 /// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
 pub struct FrameOrchestrator<T> {
     device: Device,
+    strategy: FrameStrategy,
     max_depth: usize,
     ring: VecDeque<FrameSlot<T>>,
     /// Monotonic id for the next [`FrameHandle`].
@@ -54,13 +112,41 @@ impl<T> FrameOrchestrator<T> {
     /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire (same role as
     /// `max_regions` on pooled transient allocators).
     pub fn new(device: &Device, max_depth: usize) -> Self {
+        let strategy = match max_depth {
+            0 | 1 => FrameStrategy::LowLatency,
+            2 => FrameStrategy::Balanced,
+            n => FrameStrategy::MaxThroughput {
+                max_frames_in_flight: Some(n as u32),
+            },
+        };
         Self {
             device: device.clone(),
+            strategy,
             max_depth: max_depth.max(1),
             ring: VecDeque::new(),
             next_id: 1,
             open: None,
         }
+    }
+
+    /// Create an orchestrator from a [`FrameStrategy`], which derives the
+    /// pipelining depth automatically.
+    pub fn with_strategy(device: &Device, strategy: FrameStrategy) -> Self {
+        let max_depth = strategy.depth();
+        Self {
+            device: device.clone(),
+            strategy,
+            max_depth,
+            ring: VecDeque::new(),
+            next_id: 1,
+            open: None,
+        }
+    }
+
+    /// The frame scheduling strategy configured at construction.
+    #[inline]
+    pub fn strategy(&self) -> FrameStrategy {
+        self.strategy
     }
 
     /// Maximum number of in-flight frame slots (configured at construction).
@@ -113,6 +199,7 @@ impl<T> FrameOrchestrator<T> {
         E: std::fmt::Display,
         F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
     {
+        let _tz = tracy_zone!("orchestrator.begin_frame");
         if self.open.is_some() {
             return Err(GoldyError::Backend(anyhow!(
                 "FrameOrchestrator::begin_frame: a frame is already open"
@@ -127,26 +214,29 @@ impl<T> FrameOrchestrator<T> {
 
     /// Mid-frame submit: dispatches the current graph and starts a fresh one.
     ///
-    /// Uses [`Device::submit_pipelined`] on standalone paths so transient-buffer regions can overlap
-    /// CPU recording with GPU execution across flushes.
+    /// Always uses [`Device::submit_pipelined`] so the GPU can begin executing the submitted
+    /// work (e.g. coarse rasterization) while the CPU continues recording subsequent work
+    /// (e.g. fine rasterization) into a new [`TaskGraph`].  This creates a real command-buffer
+    /// boundary on all backends, including windowed/surface frames where the fine pass and
+    /// present are submitted later via [`Self::end_frame_for_surface`].
+    ///
+    /// Because Metal (and Vulkan/DX12) execute command buffers on the same queue in submission
+    /// order, the fine command buffer automatically waits for the coarse one to complete —
+    /// no explicit fence is required.
     pub fn flush(
         &mut self,
         handle: FrameHandle,
         graph: &mut TaskGraph,
-        surface_frame: Option<&Frame>,
         last_timeline: &mut Option<TimelineValue>,
     ) -> Result<(), GoldyError> {
+        let _tz = tracy_zone!("orchestrator.flush");
         self.expect_open(handle)?;
         if graph.is_empty() {
             return Ok(());
         }
-        if let Some(frame) = surface_frame {
-            frame.submit_compute(graph).map_err(GoldyError::from)?;
-        } else {
-            let tv = self.device.submit_pipelined(graph)?;
-            *last_timeline = Some(tv);
-        }
-        *graph = TaskGraph::new();
+        let tv = self.device.submit_pipelined(graph)?;
+        *last_timeline = Some(tv);
+        graph.clear();
         Ok(())
     }
 
@@ -158,21 +248,23 @@ impl<T> FrameOrchestrator<T> {
     pub fn end_frame_standalone(
         &mut self,
         handle: FrameHandle,
-        graph: TaskGraph,
+        mut graph: TaskGraph,
         fallback_timeline: Option<TimelineValue>,
         cleanup: T,
     ) -> Result<TimelineValue, GoldyError> {
+        let _tz = tracy_zone!("orchestrator.end_frame_standalone");
         self.expect_open(handle)?;
         let tv = if graph.is_empty() {
             fallback_timeline.unwrap_or_else(|| self.device.gpu_progress())
         } else {
-            self.device.submit_pipelined(&graph)?
+            self.device.submit_pipelined(&mut graph)?
         };
         self.ring.push_back(FrameSlot {
             timeline: Some(tv),
             data: cleanup,
         });
         self.open = None;
+        tracy_frame_mark!();
         Ok(tv)
     }
 
@@ -181,10 +273,11 @@ impl<T> FrameOrchestrator<T> {
     pub fn end_frame_for_surface(
         &mut self,
         handle: FrameHandle,
-        graph: &TaskGraph,
+        graph: &mut TaskGraph,
         frame: &Frame,
         cleanup: T,
     ) -> Result<(), GoldyError> {
+        let _tz = tracy_zone!("orchestrator.end_frame_for_surface");
         self.expect_open(handle)?;
         if !graph.is_empty() {
             frame.submit_compute(graph).map_err(GoldyError::from)?;
@@ -256,7 +349,8 @@ impl<T> FrameOrchestrator<T> {
         E: std::fmt::Display,
         F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
     {
-        let progress = self.device.gpu_progress();
+        let _tz = tracy_zone!("orchestrator.drain_ring");
+        let mut progress = self.device.gpu_progress();
         while let Some(front) = self.ring.front() {
             let done = match front.timeline {
                 Some(tv) => progress >= tv,
@@ -266,19 +360,24 @@ impl<T> FrameOrchestrator<T> {
             if done || must_wait {
                 let slot = self.ring.pop_front().unwrap();
                 if let Some(tv) = slot.timeline {
-                    if self.device.gpu_progress() < tv && must_wait {
+                    if progress < tv && must_wait {
+                        let _wz = tracy_zone!("orchestrator.wait_gpu");
                         self.device.wait_until(tv)?;
+                        progress = tv;
                     }
                 }
                 let timeline = slot.timeline.unwrap_or(0);
-                retire(
-                    &self.device,
-                    RetiredFrame {
-                        timeline,
-                        data: slot.data,
-                    },
-                )
-                .map_err(|e| GoldyError::Backend(anyhow!("{e}")))?;
+                {
+                    let _rz = tracy_zone!("orchestrator.retire_cb");
+                    retire(
+                        &self.device,
+                        RetiredFrame {
+                            timeline,
+                            data: slot.data,
+                        },
+                    )
+                    .map_err(|e| GoldyError::Backend(anyhow!("{e}")))?;
+                }
             } else {
                 break;
             }

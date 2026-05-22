@@ -6,6 +6,7 @@ use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
 use crate::slang::SlangStage;
+use crate::tracy_zone;
 
 /// Fallback workgroup size used when a compute shader's `[numthreads]` annotation
 /// cannot be parsed. Matches the Metal/Slang default used elsewhere in the codebase.
@@ -103,11 +104,14 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 
 /// Begin a fresh compute encoder on the command buffer with heap and argument buffer bindings.
 ///
-/// Calls `use_resource` on every buffer and texture so Metal's hazard tracking
-/// can detect cross-encoder dependencies (e.g. compute→blit→compute). `use_heap`
-/// alone provides residency but NOT hazard tracking — without per-resource
+/// Calls `useResources:count:usage:` (batch form) on all device-owned buffers and textures
+/// so Metal's hazard tracking can detect cross-encoder dependencies (e.g. compute→blit→compute).
+/// `use_heap` alone provides residency but NOT hazard tracking — without per-resource
 /// declarations, Metal GPU Validation rejects dispatches that touch heap-resident
 /// resources via argument buffers.
+///
+/// Using the batched form reduces Objective-C msg_send overhead from O(N) per encoder open
+/// to O(1) regardless of how many resources the device owns.
 pub(super) fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
     state: &MetalState,
@@ -117,24 +121,43 @@ pub(super) fn begin_compute_encoder<'a>(
     let encoder = command_buffer.new_compute_command_encoder();
     logical_device.heap_allocator.use_heaps_for_compute(encoder);
     logical_device.texture_heap.use_heaps_for_compute(encoder);
+
+    // Collect resource refs by usage tier then call use_resources once per tier,
+    // replacing one ObjC msg_send per resource with at most three total.
+    // Safety: BufferRef/TextureRef are subclasses of Resource in the Metal ObjC
+    // hierarchy, so transmuting the reference type is sound (same pointer, same layout).
+    let mut rw_refs: Vec<&mtl::ResourceRef> = Vec::new();
+    let mut ro_refs: Vec<&mtl::ResourceRef> = Vec::new();
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == device_handle {
-            encoder.use_resource(
-                &buf_state.buffer,
-                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
-            );
+            let buf_ref: &mtl::BufferRef = &buf_state.buffer;
+            rw_refs.push(unsafe {
+                std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref)
+            });
         }
     }
     for tex_state in state.textures.values() {
         if tex_state.device_handle == device_handle {
-            let usage = if tex_state.is_storage_image {
-                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write
+            let tex_ref: &mtl::TextureRef = &tex_state.texture;
+            let res_ref =
+                unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) };
+            if tex_state.is_storage_image {
+                rw_refs.push(res_ref);
             } else {
-                mtl::MTLResourceUsage::Read
-            };
-            encoder.use_resource(&tex_state.texture, usage);
+                ro_refs.push(res_ref);
+            }
         }
     }
+    if !rw_refs.is_empty() {
+        encoder.use_resources(
+            &rw_refs,
+            mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
+        );
+    }
+    if !ro_refs.is_empty() {
+        encoder.use_resources(&ro_refs, mtl::MTLResourceUsage::Read);
+    }
+
     encoder.set_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder
 }
@@ -187,6 +210,15 @@ pub(super) fn record_commands_to_buffer(
     // the memcpy result when the command buffer is later committed.
     let mut has_recorded_gpu_work = false;
 
+    // Tracks which buffer/texture handles have been touched in the current blit
+    // encoder session. Metal does not guarantee ordering between two blit ops on
+    // the same resource within one encoder (e.g. fill_buffer → copy_from_buffer on
+    // the same buffer). We end+reopen the encoder only when the incoming command
+    // targets a handle already touched in this session; distinct-handle blit ops
+    // share the encoder and avoid the per-command encoder-open overhead.
+    let mut blit_touched_bufs: Vec<super::BufferHandle> = Vec::new();
+    let mut blit_touched_texs: Vec<super::TextureHandle> = Vec::new();
+
     macro_rules! end_compute {
         () => {
             if let Some(enc) = guard.compute.take() {
@@ -206,6 +238,8 @@ pub(super) fn record_commands_to_buffer(
     macro_rules! ensure_compute {
         () => {
             end_blit!();
+            blit_touched_bufs.clear();
+            blit_touched_texs.clear();
             if guard.compute.is_none() {
                 let enc =
                     begin_compute_encoder(command_buffer, state, logical_device, device_handle);
@@ -218,18 +252,37 @@ pub(super) fn record_commands_to_buffer(
         };
     }
 
-    macro_rules! ensure_blit {
+    /// Open a new blit encoder, clearing both touched-handle sets.
+    macro_rules! open_blit {
         () => {
             end_compute!();
-            // End any active blit encoder before opening a new one. Metal does not
-            // guarantee ordering between commands within the same blit encoder (e.g.
-            // fill_buffer and copy_from_buffer targeting the same buffer may execute
-            // in any order). Ending and reopening creates a new encoder boundary which
-            // Metal serializes, so each ClearBuffer/WriteBuffer command executes in
-            // strictly program order relative to every other blit command.
             end_blit!();
             guard.blit = Some(command_buffer.new_blit_command_encoder());
+            blit_touched_bufs.clear();
+            blit_touched_texs.clear();
             has_recorded_gpu_work = true;
+        };
+    }
+
+    /// Ensure a blit encoder is open, splitting only if `$buf` (a BufferHandle)
+    /// has already been written in the current encoder session.
+    macro_rules! ensure_blit_buf {
+        ($handle:expr) => {
+            if guard.blit.is_none() || blit_touched_bufs.contains(&$handle) {
+                open_blit!();
+            }
+            blit_touched_bufs.push($handle);
+        };
+    }
+
+    /// Ensure a blit encoder is open, splitting only if `$tex` (a TextureHandle)
+    /// has already been written in the current encoder session.
+    macro_rules! ensure_blit_tex {
+        ($handle:expr) => {
+            if guard.blit.is_none() || blit_touched_texs.contains(&$handle) {
+                open_blit!();
+            }
+            blit_touched_texs.push($handle);
         };
     }
 
@@ -250,7 +303,7 @@ pub(super) fn record_commands_to_buffer(
                     *size
                 };
                 if clear_size > 0 {
-                    ensure_blit!();
+                    ensure_blit_buf!(*buffer);
                     let range = mtl::NSRange::new(*offset, clear_size);
                     guard.blit.unwrap().fill_buffer(&buf_state.buffer, range, 0);
                 }
@@ -301,7 +354,7 @@ pub(super) fn record_commands_to_buffer(
                     }
                 }
 
-                ensure_blit!();
+                ensure_blit_buf!(*buf_handle);
                 let staging = logical_device.device.new_buffer_with_data(
                     data.as_ptr() as *const _,
                     data.len() as u64,
@@ -342,7 +395,7 @@ pub(super) fn record_commands_to_buffer(
                 if expected == 0 {
                     continue;
                 }
-                ensure_blit!();
+                ensure_blit_tex!(*tex_handle);
                 let staging = logical_device.device.new_buffer_with_data(
                     data.as_ptr() as *const _,
                     data.len() as u64,
@@ -393,7 +446,7 @@ pub(super) fn record_commands_to_buffer(
                 if expected == 0 {
                     continue;
                 }
-                ensure_blit!();
+                ensure_blit_tex!(*tex_handle);
                 let staging = logical_device.device.new_buffer_with_data(
                     data.as_ptr() as *const _,
                     data.len() as u64,
@@ -508,6 +561,7 @@ pub(super) fn record_commands_to_buffer(
                     );
             }
             GpuCommand::Dispatch {
+                label: _,
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -530,7 +584,61 @@ pub(super) fn record_commands_to_buffer(
                         .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
             }
-            GpuCommand::DispatchIndirect { buffer, offset } => {
+            GpuCommand::DispatchBatch {
+                label: _,
+                arg_data,
+                count,
+            } => {
+                ensure_compute!();
+                if let Some(pipeline) = current_pipeline {
+                    let push_size = std::mem::size_of::<PushLayout>();
+                    let stride = shared::DISPATCH_BATCH_STRIDE;
+                    let entry_count = *count as usize;
+                    let needed = entry_count
+                        .checked_mul(stride)
+                        .context("DispatchBatch: stride overflow")?;
+                    anyhow::ensure!(
+                        arg_data.len() >= needed,
+                        "DispatchBatch: arg_data len {} < {} entries × stride {}",
+                        arg_data.len(),
+                        entry_count,
+                        stride,
+                    );
+                    let threads_per_group = MTLSize {
+                        width: pipeline.workgroup_size[0] as u64,
+                        height: pipeline.workgroup_size[1] as u64,
+                        depth: pipeline.workgroup_size[2] as u64,
+                    };
+                    let enc = guard
+                        .compute
+                        .expect("encoder must be set after ensure_compute!()");
+                    for i in 0..entry_count {
+                        let base = i * stride;
+                        let layout_slice = &arg_data[base..base + push_size];
+                        enc.set_bytes(
+                            RESOURCE_SLOT_BUFFER,
+                            layout_slice.len() as u64,
+                            layout_slice.as_ptr() as *const _,
+                        );
+                        let wg_off = base + push_size;
+                        let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into()?);
+                        let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into()?);
+                        let wg_z =
+                            u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into()?);
+                        let threadgroups = MTLSize {
+                            width: wg_x as u64,
+                            height: wg_y as u64,
+                            depth: wg_z as u64,
+                        };
+                        enc.dispatch_thread_groups(threadgroups, threads_per_group);
+                    }
+                }
+            }
+            GpuCommand::DispatchIndirect {
+                label: _,
+                buffer,
+                offset,
+            } => {
                 ensure_compute!();
                 let buf_state = state
                     .buffers
@@ -546,6 +654,35 @@ pub(super) fn record_commands_to_buffer(
                     .compute
                     .expect("encoder must be set after ensure_compute!()")
                     .dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
+            }
+            GpuCommand::CopyTexture { src, dst } => {
+                ensure_blit_tex!(*src);
+                ensure_blit_tex!(*dst);
+                let src_state = state
+                    .textures
+                    .get(src)
+                    .context("CopyTexture: src texture not found")?;
+                let dst_state = state
+                    .textures
+                    .get(dst)
+                    .context("CopyTexture: dst texture not found")?;
+                let w = src_state.width as u64;
+                let h = src_state.height as u64;
+                guard.blit.unwrap().copy_from_texture(
+                    &src_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    MTLSize {
+                        width: w,
+                        height: h,
+                        depth: 1,
+                    },
+                    &dst_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                );
             }
             GpuCommand::Barrier => {
                 if let Some(enc) = guard.compute {
@@ -600,6 +737,7 @@ pub(super) fn submit(
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
+    let _tz = tracy_zone!("mtl.submit");
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
     }
@@ -650,6 +788,14 @@ pub(super) fn submit(
                 description
             );
         }
+        // Capture per-command-buffer GPU timestamps. `GPUStartTime` / `GPUEndTime`
+        // are only valid after completion, which is guaranteed here.
+        if crate::gpu_profiler::gpu_profile_enabled() {
+            let gpu_start: f64 = unsafe { objc::msg_send![cb, GPUStartTime] };
+            let gpu_end: f64 = unsafe { objc::msg_send![cb, GPUEndTime] };
+            let ms = (gpu_end - gpu_start) * 1000.0;
+            crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
+        }
         waiter.signal(signal_value);
     })
     .copy();
@@ -683,6 +829,7 @@ pub(super) fn submit_graph(
     device_handle: DeviceHandle,
     commands: &[super::super::GraphCommand],
 ) -> Result<TimelineValue> {
+    let _tz = tracy_zone!("mtl.submit_graph");
     use super::super::GraphCommand;
 
     if state.device_lost.load(Ordering::Relaxed) {
@@ -784,6 +931,14 @@ pub(super) fn submit_graph(
                 status,
                 description
             );
+        }
+        // Capture per-command-buffer GPU timestamps. `GPUStartTime` / `GPUEndTime`
+        // are only valid after completion, which is guaranteed here.
+        if crate::gpu_profiler::gpu_profile_enabled() {
+            let gpu_start: f64 = unsafe { objc::msg_send![cb, GPUStartTime] };
+            let gpu_end: f64 = unsafe { objc::msg_send![cb, GPUEndTime] };
+            let ms = (gpu_end - gpu_start) * 1000.0;
+            crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
         }
         waiter.signal(signal_value);
     })

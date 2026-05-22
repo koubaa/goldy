@@ -319,6 +319,26 @@ pub(crate) struct ComputeAllocatorSlot {
     pub allocator: Direct3D12::ID3D12CommandAllocator,
     /// Fence value when this slot was last used (for reuse detection)
     pub fence_value: u64,
+    /// Reusable command list (created on first use, then reset with allocator).
+    pub command_list: Option<Direct3D12::ID3D12GraphicsCommandList>,
+    /// When `true`, this slot holds a retained command list that must not be reset
+    /// until the caller explicitly releases it via `evict_retained`.
+    pub retained: bool,
+}
+
+/// A retained (closed but not reset) command list available for re-execution.
+///
+/// DX12 allows re-executing a closed command list via `ExecuteCommandLists`
+/// without calling `Reset`, as long as the backing allocator is not reset first.
+/// This enables zero-recording-cost re-submission for static scenes.
+pub(crate) struct RetainedGraph {
+    /// Scene fingerprint that uniquely identifies this command list's content.
+    pub fingerprint: u64,
+    /// The closed (but not reset) command list.  Cloned from the pool slot so both
+    /// the pool and this struct hold a reference-counted pointer to the same COM object.
+    pub command_list: Direct3D12::ID3D12GraphicsCommandList,
+    /// Index into `LogicalDevice::compute_allocator_pool` for the backing allocator slot.
+    pub slot_idx: usize,
 }
 
 /// Resource pending deferred deletion.
@@ -353,6 +373,10 @@ pub(crate) enum PendingDeletion {
         texture_handle: TextureHandle,
         resource: Direct3D12::ID3D12Resource,
     },
+    /// An ad-hoc GPU resource (e.g. a DispatchBatch argument buffer) that is not
+    /// tracked in any resource map.  Dropping it releases the COM reference and
+    /// frees the GPU memory once the fence is met.
+    StandaloneResource(Direct3D12::ID3D12Resource),
 }
 
 /// Deferred deletion queue for a DX12 device.
@@ -409,13 +433,20 @@ pub(crate) struct LogicalDevice {
     pub tile_heap_pool: Option<super::tiles::TileHeapPool>,
     /// Shared root signature for all bindless pipelines (graphics and compute)
     pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
-    /// Command signature for indirect compute dispatch (ExecuteIndirect)
+    /// Command signature for indirect compute dispatch (ExecuteIndirect, dispatch-only)
     pub compute_dispatch_indirect_signature: Option<Direct3D12::ID3D12CommandSignature>,
+    /// Command signature for batched dispatch: sets push constants then dispatches.
+    /// Each argument entry contains `[PushLayout (TOTAL_PUSH_BYTES)] [wg_x] [wg_y] [wg_z]`.
+    /// Requires the shared `bindless_root_signature` to be non-None.
+    pub compute_batch_dispatch_signature: Option<Direct3D12::ID3D12CommandSignature>,
     /// Registry tracking resource offsets in descriptor heaps
     pub resource_registry: ResourceRegistry,
     /// Pool of command allocators for non-blocking compute submission.
     /// Slots can be reused when fence signals completion.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
+    /// A single retained command list for zero-recording-cost re-submission.
+    /// `None` until a `submit_graph_and_retain` call stores a closed CL here.
+    pub retained_graph: Option<RetainedGraph>,
     /// Device-lifetime zero-filled UPLOAD-heap buffer used as the source for
     /// `CopyBufferRegion` clears. One buffer per device; clears of any size are
     /// handled by chunking `CopyBufferRegion` calls. Using a copy instead of
@@ -520,6 +551,9 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             resource,
         } => {
             ld.resource_registry.unregister_texture(texture_handle);
+            drop(resource);
+        }
+        PendingDeletion::StandaloneResource(resource) => {
             drop(resource);
         }
     }

@@ -15,8 +15,8 @@
 //! # use goldy::buffer::Buffer;
 //! # use goldy::task_graph::TaskGraph;
 //! # fn example(device: &Device, buf: Buffer) -> anyhow::Result<()> {
-//! let graph = TaskGraph::new(); // ... build your graph using buf ...
-//! let tv = device.submit(&graph)?;
+//! let mut graph = TaskGraph::new(); // ... build your graph using buf ...
+//! let tv = device.submit(&mut graph)?;
 //!
 //! let mut guard = GpuGuard::new(device, tv);
 //! guard.hold(buf); // buf is now safe: dropped only after tv retires
@@ -149,8 +149,8 @@ mod tests {
     #[test]
     fn gpu_guard_resources_not_dropped_before_epoch() {
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(99u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -172,8 +172,8 @@ mod tests {
     #[test]
     fn gpu_guard_resources_dropped_after_epoch_and_flush() {
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(42u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -197,8 +197,8 @@ mod tests {
         // one real submitted epoch (tv) and one far-future epoch (tv + 100) that hasn't
         // been submitted and therefore remains unretired after wait_until(tv).
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
         let tv_future = tv + 100;
 
         let alive_past = std::sync::Arc::new(1u32);
@@ -238,8 +238,8 @@ mod tests {
     #[test]
     fn gpu_guard_resources_cleaned_up_on_device_drop() {
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(7u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -260,8 +260,8 @@ mod tests {
     #[test]
     fn gpu_guard_hold_multiple_resource_types() {
         let device = test_device();
-        let graph = TaskGraph::new();
-        let tv = device.submit(&graph).unwrap();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).unwrap();
 
         // Allocate a real buffer and hold it in a guard.
         let buf = device

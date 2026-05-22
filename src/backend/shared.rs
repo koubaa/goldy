@@ -4,6 +4,16 @@
 //! `pub(super)` so that sibling modules (`vulkan/`, `dx12/`, `metal/`) can
 //! re-export them locally without leaking internal details to crate consumers.
 //!
+//! When only the mock backend is enabled, most items here are unused except
+//! push-layout helpers consumed by task-graph `DispatchBatch` emission.
+#![cfg_attr(
+    not(any(
+        feature = "vulkan",
+        all(feature = "dx12", target_os = "windows"),
+        all(feature = "metal", target_os = "macos"),
+    )),
+    allow(dead_code)
+)]
 
 use crate::slang::OwnedLayoutCheck;
 use crate::types::{
@@ -28,6 +38,10 @@ pub const MAX_BINDLESS_SLOTS: usize = 16;
 pub const MAX_USER_SLOTS: usize = 8;
 /// Total size of [`PushLayout`] in bytes (must match the Slang `PushLayout` struct).
 pub const TOTAL_PUSH_BYTES: usize = 128;
+/// Byte stride of one entry in a `DispatchBatch` argument buffer.
+///
+/// Layout per entry: `[PushLayout (TOTAL_PUSH_BYTES)] [wg_x u32] [wg_y u32] [wg_z u32]`
+pub const DISPATCH_BATCH_STRIDE: usize = TOTAL_PUSH_BYTES + 3 * 4;
 
 /// Packed 128-byte push-constant / root-constant / `set_bytes` layout shared by
 /// all three GPU backends.
@@ -241,8 +255,9 @@ impl<K: PartialOrd + Copy, V> DeferredQueue<K, V> {
     /// Drain all entries whose key is `<= threshold`, returning them as an
     /// owned `Vec`. Entries with keys above `threshold` are kept in the queue.
     pub fn drain_up_to(&mut self, threshold: K) -> Vec<V> {
-        // Partition in-place: move eligible entries to a temporary vec and
-        // put the rest back, avoiding a full allocation on every call.
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
         let mut i = 0;
         let mut eligible: Vec<V> = Vec::new();
         while i < self.pending.len() {

@@ -38,13 +38,19 @@ pub mod validation_env;
 
 // Structured instrumentation for debugging and profiling
 pub mod gpu_guard;
+pub mod gpu_profiler;
 pub mod instrumentation;
+pub mod tracy;
+
+#[cfg(feature = "tracy")]
+#[doc(hidden)]
+pub use tracy_client as _tracy_client;
 pub mod placement_heap;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
 pub use error::GoldyError;
-pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
+pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, FrameStrategy, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use vram_allocator::DeferredPayload;
 
