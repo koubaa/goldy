@@ -1018,21 +1018,24 @@ impl TaskGraph {
         &self.ir
     }
 
-    /// Compute a fingerprint of the graph's binding structure for schedule caching.
+    /// Compute a fingerprint of the graph's binding structure for **schedule caching only**.
     ///
-    /// Only hashes the dependency-relevant parts: node count and per-node
-    /// Compute a fingerprint of the current graph based on node bindings.
+    /// Hashes node count and per-node `ResourceBinding { resource_id, access }` pairs.
+    /// This is exactly what the wave scheduler needs: two graphs with the same binding
+    /// fingerprint produce the same wave schedule and emitted `GpuCommand` stream.
     ///
-    /// This captures pipeline handles, buffer bindless indices, and workgroup sizes
-    /// but NOT data payloads. Two graphs with the same binding fingerprint record
-    /// identical `VkCommandBuffer` contents and can be resubmitted interchangeably.
+    /// **Not suitable for CB retention.** It does not hash `NodeKind` fields (pipeline
+    /// handle, `resource_slots`, `user_slots`, dispatch dimensions). Two graphs with
+    /// identical bindings but different pipelines or dispatch sizes would share this
+    /// fingerprint but record different `VkCommandBuffer` contents. Use a separate
+    /// retention fingerprint (to be added) for that purpose.
     pub fn compute_binding_fingerprint(&self) -> u64 {
         Self::binding_fingerprint(&self.ir)
     }
 
-    /// `(resource_id, access)` pairs.  Data payloads (`WriteBuffer` bytes, dispatch
-    /// dimensions) are intentionally excluded — the schedule depends only on which
-    /// resources are read/written, not what values they carry.
+    /// Hashes `(resource_id, access)` pairs per node. Data payloads (`WriteBuffer`
+    /// bytes, dispatch dimensions) are intentionally excluded — the schedule depends
+    /// only on which resources are read/written, not what values they carry.
     fn binding_fingerprint(ir: &GraphIR) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         let mut h = DefaultHasher::new();
@@ -1082,6 +1085,8 @@ impl TaskGraph {
             Some(e) => e.fp != fp || e.commands.is_none(),
             None => true,
         };
+
+        tracing::trace!(target: "goldy::schedule_cache", hit = !needs_build, fp, "compute_commands");
 
         if !needs_build {
             // Hit: refresh upload `Arc<[u8]>` payloads from the current IR.

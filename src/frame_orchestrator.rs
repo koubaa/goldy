@@ -248,7 +248,7 @@ impl<T> FrameOrchestrator<T> {
     pub fn end_frame_standalone(
         &mut self,
         handle: FrameHandle,
-        mut graph: TaskGraph,
+        graph: &mut TaskGraph,
         fallback_timeline: Option<TimelineValue>,
         cleanup: T,
     ) -> Result<TimelineValue, GoldyError> {
@@ -257,7 +257,7 @@ impl<T> FrameOrchestrator<T> {
         let tv = if graph.is_empty() {
             fallback_timeline.unwrap_or_else(|| self.device.gpu_progress())
         } else {
-            self.device.submit_pipelined(&mut graph)?
+            self.device.submit_pipelined(graph)?
         };
         self.ring.push_back(FrameSlot {
             timeline: Some(tv),
