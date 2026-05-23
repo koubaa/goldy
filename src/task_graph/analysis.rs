@@ -29,7 +29,7 @@ use super::ir::{BarrierSet, CompiledSchedule, GraphIR, NodeKind, ResourceBinding
 // NodeAccess is used in the test module via `super::*`
 #[cfg(test)]
 use super::ir::NodeAccess;
-use super::ResourceId;
+use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand};
 use anyhow::Result;
@@ -177,6 +177,10 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
 }
 
 /// Wave index for each task node (same order as [`GraphIR::nodes`]).
+///
+/// Recomputes the full schedule from the IR. Prefer [`node_to_wave_map`] when
+/// a [`CompiledSchedule`] is already available to avoid redundant scheduling.
+#[cfg(test)]
 pub(crate) fn graph_node_waves(ir: &GraphIR) -> Result<Vec<u32>> {
     let n = ir.nodes.len();
     if n == 0 {
@@ -184,36 +188,43 @@ pub(crate) fn graph_node_waves(ir: &GraphIR) -> Result<Vec<u32>> {
     }
     let edges = build_edges(ir);
     let schedule = schedule_waves(ir, &edges);
-    let mut node_to_wave: Vec<Option<u32>> = vec![None; n];
+    Ok(node_to_wave_map(&schedule, n))
+}
+
+/// Derive the node-to-wave assignment from an already-computed [`CompiledSchedule`].
+///
+/// This is O(N) and avoids the full `build_edges` + `schedule_waves` pass that
+/// [`graph_node_waves`] performs. Use this whenever a `CompiledSchedule` is
+/// already in hand (e.g. from `TaskGraph::schedule_and_split_wave`).
+pub(crate) fn node_to_wave_map(schedule: &CompiledSchedule, n: usize) -> Vec<u32> {
+    let mut map = vec![0u32; n];
     for (w, wave) in schedule.waves.iter().enumerate() {
-        let w = u32::try_from(w).map_err(|_| anyhow::anyhow!("wave index overflow"))?;
         for &ni in &wave.node_indices {
-            node_to_wave[ni] = Some(w);
+            map[ni] = w as u32;
         }
     }
-    for (i, slot) in node_to_wave.iter().enumerate() {
-        if slot.is_none() {
-            anyhow::bail!("internal: task node {} was not assigned a wave", i);
-        }
-    }
-    Ok(node_to_wave.into_iter().map(|x| x.unwrap()).collect())
+    map
 }
 
 /// For each [`ResourceId::TransientBuffer`](super::ResourceId), the inclusive
 /// range of wave indices where that transient appears in node bindings.
 ///
+/// `node_waves[i]` is the wave index of IR node `i`. Use [`node_to_wave_map`]
+/// to derive this from a [`CompiledSchedule`] without re-running the scheduler.
+///
 /// Used to pack transient heap allocations: non-overlapping wave intervals may
 /// alias the same memory.
-pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
-    let n = ir.nodes.len();
-    if n == 0 {
+pub(crate) fn transient_wave_intervals(
+    ir: &GraphIR,
+    node_waves: &[u32],
+) -> Result<HashMap<u32, (u32, u32)>> {
+    if ir.nodes.is_empty() {
         return Ok(HashMap::new());
     }
-    let waves = graph_node_waves(ir)?;
     let mut first: HashMap<u32, u32> = HashMap::new();
     let mut last: HashMap<u32, u32> = HashMap::new();
     for (ni, node) in ir.nodes.iter().enumerate() {
-        let w = waves[ni];
+        let w = node_waves[ni];
         for b in &node.bindings {
             if let ResourceId::TransientBuffer(tid) = b.resource {
                 let id = tid.0;
@@ -234,16 +245,20 @@ pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32
 }
 
 /// For each [`ResourceId::TransientTexture`](super::ResourceId), inclusive wave range.
-pub(crate) fn transient_texture_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
-    let n = ir.nodes.len();
-    if n == 0 {
+///
+/// `node_waves[i]` is the wave index of IR node `i`. Use [`node_to_wave_map`]
+/// to derive this from a [`CompiledSchedule`] without re-running the scheduler.
+pub(crate) fn transient_texture_wave_intervals(
+    ir: &GraphIR,
+    node_waves: &[u32],
+) -> Result<HashMap<u32, (u32, u32)>> {
+    if ir.nodes.is_empty() {
         return Ok(HashMap::new());
     }
-    let waves = graph_node_waves(ir)?;
     let mut first: HashMap<u32, u32> = HashMap::new();
     let mut last: HashMap<u32, u32> = HashMap::new();
     for (ni, node) in ir.nodes.iter().enumerate() {
-        let w = waves[ni];
+        let w = node_waves[ni];
         for b in &node.bindings {
             if let ResourceId::TransientTexture(tid) = b.resource {
                 let id = tid.0;
@@ -348,6 +363,7 @@ fn compute_barriers(
     let wave_set: HashSet<usize> = wave_nodes.iter().copied().collect();
     let mut barrier_buffers: HashSet<BufferHandle> = HashSet::new();
     let mut barrier_textures: HashSet<TextureHandle> = HashSet::new();
+    let mut barrier_transients: HashSet<u32> = HashSet::new();
 
     // Any edge crossing into this wave means the conflicting resource needs a barrier.
     for &(from, to) in edges {
@@ -355,14 +371,17 @@ fn compute_barriers(
             for bi in &ir.nodes[from].bindings {
                 for bj in &ir.nodes[to].bindings {
                     if bindings_conflict(bi, bj) {
-                        // Collapse sub-range to parent for backend barrier commands.
-                        match bi.resource.canonical_buffer_handle() {
-                            Some(h) => {
-                                barrier_buffers.insert(h);
+                        match bi.resource {
+                            ResourceId::TransientBuffer(tid) => {
+                                barrier_transients.insert(tid.0);
                             }
-                            None => {
-                                if let ResourceId::Texture(h) = bi.resource {
-                                    barrier_textures.insert(h);
+                            ResourceId::Texture(h) => {
+                                barrier_textures.insert(h);
+                            }
+                            _ => {
+                                // Collapse sub-range to parent for backend barrier commands.
+                                if let Some(h) = bi.resource.canonical_buffer_handle() {
+                                    barrier_buffers.insert(h);
                                 }
                             }
                         }
@@ -374,10 +393,16 @@ fn compute_barriers(
 
     let mut buffers: Vec<_> = barrier_buffers.into_iter().collect();
     let mut textures: Vec<_> = barrier_textures.into_iter().collect();
+    let mut transient_ids: Vec<_> = barrier_transients.into_iter().collect();
     buffers.sort();
     textures.sort();
+    transient_ids.sort();
 
-    BarrierSet { buffers, textures }
+    BarrierSet {
+        buffers,
+        textures,
+        transient_ids,
+    }
 }
 
 /// Emit a flat `Vec<GpuCommand>` for the given slice of [`Wave`]s.
@@ -396,13 +421,30 @@ fn compute_barriers(
 ///
 /// If any wave contains a [`NodeKind::RenderPass`] node.  Use
 /// [`emit_graph_commands`] for graphs that include render passes.
-pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCommand> {
+pub(crate) fn emit_waves_to_commands(
+    ir: &GraphIR,
+    waves: &[Wave],
+    resolver: Option<&SlotResolver>,
+) -> Vec<GpuCommand> {
     let mut commands = Vec::new();
 
     for wave in waves {
         if !wave.barriers_before.is_empty() {
+            let mut barrier_buffers = wave.barriers_before.buffers.clone();
+            // Resolve transient buffer IDs to their concrete parent handles.
+            if !wave.barriers_before.transient_ids.is_empty() {
+                if let Some(r) = resolver {
+                    for &tid in &wave.barriers_before.transient_ids {
+                        if let Some(resolved) = r.buffers.get(&tid) {
+                            if !barrier_buffers.contains(&resolved.parent) {
+                                barrier_buffers.push(resolved.parent);
+                            }
+                        }
+                    }
+                }
+            }
             commands.push(GpuCommand::ResourceBarrier {
-                buffers: wave.barriers_before.buffers.clone(),
+                buffers: barrier_buffers,
                 textures: wave.barriers_before.textures.clone(),
             });
         }
@@ -482,10 +524,24 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCom
         // already read counts from a GPU buffer; mixing them with the CPU arg
         // buffer layout is not straightforward.
         {
+            enum SlotData<'a> {
+                Borrowed(&'a Vec<u32>),
+                Resolved(Vec<u32>),
+            }
+
+            impl<'a> SlotData<'a> {
+                fn as_slice(&self) -> &[u32] {
+                    match self {
+                        SlotData::Borrowed(v) => v.as_slice(),
+                        SlotData::Resolved(v) => v.as_slice(),
+                    }
+                }
+            }
+
             struct PendingDispatch<'n> {
                 label: &'static str,
                 pipeline: crate::backend::ComputePipelineHandle,
-                resource_slots: &'n Vec<u32>,
+                resource_slots: SlotData<'n>,
                 user_slots: &'n Vec<u32>,
                 x: u32,
                 y: u32,
@@ -503,10 +559,16 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCom
                     dispatch: super::ir::DispatchDim::Direct { x, y, z },
                 } = &node.kind
                 {
+                    let slots = match resolver {
+                        Some(r) => {
+                            SlotData::Resolved(r.resolve_slots(resource_slots, &node.bindings))
+                        }
+                        None => SlotData::Borrowed(resource_slots),
+                    };
                     pending.push(PendingDispatch {
                         label: node.label,
                         pipeline: *pipeline,
-                        resource_slots,
+                        resource_slots: slots,
                         user_slots,
                         x: *x,
                         y: *y,
@@ -532,10 +594,14 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCom
                         dispatch: super::ir::DispatchDim::Indirect { buffer, offset },
                     } = &node.kind
                     {
+                        let slots = match resolver {
+                            Some(r) => r.resolve_slots(resource_slots, &node.bindings),
+                            None => resource_slots.clone(),
+                        };
                         commands.push(GpuCommand::SetPipeline(*pipeline));
-                        if !resource_slots.is_empty() || !user_slots.is_empty() {
+                        if !slots.is_empty() || !user_slots.is_empty() {
                             commands.push(GpuCommand::BindResourcesRaw {
-                                indices: resource_slots.clone(),
+                                indices: slots,
                                 user: user_slots.clone(),
                             });
                         }
@@ -565,7 +631,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCom
                         let mut layout = crate::backend::shared::PushLayout::default();
                         crate::backend::shared::fill_raw(
                             &mut layout,
-                            d.resource_slots,
+                            d.resource_slots.as_slice(),
                             d.user_slots,
                         );
                         arg_data.extend_from_slice(bytemuck::bytes_of(&layout));
@@ -582,9 +648,10 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCom
                 } else {
                     let d = &run[0];
                     commands.push(GpuCommand::SetPipeline(cur_pipeline));
-                    if !d.resource_slots.is_empty() || !d.user_slots.is_empty() {
+                    let slots = d.resource_slots.as_slice();
+                    if !slots.is_empty() || !d.user_slots.is_empty() {
                         commands.push(GpuCommand::BindResourcesRaw {
-                            indices: d.resource_slots.clone(),
+                            indices: slots.to_vec(),
                             user: d.user_slots.clone(),
                         });
                     }
@@ -625,8 +692,12 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCom
 /// # Panics
 ///
 /// If the graph contains [`NodeKind::RenderPass`], use [`emit_graph_commands`] instead.
-pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuCommand> {
-    emit_waves_to_commands(ir, &schedule.waves)
+pub fn emit_commands(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    resolver: Option<&SlotResolver>,
+) -> Vec<GpuCommand> {
+    emit_waves_to_commands(ir, &schedule.waves, resolver)
 }
 
 /// Partition the compiled schedule into multiple command streams for pipelined
@@ -654,6 +725,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
 pub fn emit_partitioned_commands(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
+    resolver: Option<&SlotResolver>,
 ) -> Vec<Vec<GpuCommand>> {
     let waves = &schedule.waves;
 
@@ -678,17 +750,17 @@ pub fn emit_partitioned_commands(
 
     if let Some(split_wave) = swapchain_wave {
         if split_wave > 0 {
-            let early = emit_waves_to_commands(ir, &waves[..split_wave]);
-            let late = emit_waves_to_commands(ir, &waves[split_wave..]);
+            let early = emit_waves_to_commands(ir, &waves[..split_wave], resolver);
+            let late = emit_waves_to_commands(ir, &waves[split_wave..], resolver);
             return vec![early, late];
         }
         // SwapchainOutput is in wave 0 — cannot split before it; single partition.
-        return vec![emit_waves_to_commands(ir, waves)];
+        return vec![emit_waves_to_commands(ir, waves, resolver)];
     }
 
     // Not enough waves to benefit from splitting.
     if waves.len() < 3 {
-        return vec![emit_waves_to_commands(ir, waves)];
+        return vec![emit_waves_to_commands(ir, waves, resolver)];
     }
 
     // Choose the wave boundary (index ≥ 1) with the highest barrier cost.
@@ -708,22 +780,38 @@ pub fn emit_partitioned_commands(
     // No cross-wave dependencies at any boundary — splitting adds overhead with
     // no benefit.
     if max_cost == 0 {
-        return vec![emit_waves_to_commands(ir, waves)];
+        return vec![emit_waves_to_commands(ir, waves, resolver)];
     }
 
-    let early = emit_waves_to_commands(ir, &waves[..split_wave]);
-    let late = emit_waves_to_commands(ir, &waves[split_wave..]);
+    let early = emit_waves_to_commands(ir, &waves[..split_wave], resolver);
+    let late = emit_waves_to_commands(ir, &waves[split_wave..], resolver);
     vec![early, late]
 }
 
 /// Emit [`GraphCommand`]s (compute + optional offscreen render) from the analyzed graph.
-pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GraphCommand> {
+pub fn emit_graph_commands(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    resolver: Option<&SlotResolver>,
+) -> Vec<GraphCommand> {
     let mut commands = Vec::new();
 
     for wave in &schedule.waves {
         if !wave.barriers_before.is_empty() {
+            let mut barrier_buffers = wave.barriers_before.buffers.clone();
+            if !wave.barriers_before.transient_ids.is_empty() {
+                if let Some(r) = resolver {
+                    for &tid in &wave.barriers_before.transient_ids {
+                        if let Some(resolved) = r.buffers.get(&tid) {
+                            if !barrier_buffers.contains(&resolved.parent) {
+                                barrier_buffers.push(resolved.parent);
+                            }
+                        }
+                    }
+                }
+            }
             commands.push(GraphCommand::Compute(GpuCommand::ResourceBarrier {
-                buffers: wave.barriers_before.buffers.clone(),
+                buffers: barrier_buffers,
                 textures: wave.barriers_before.textures.clone(),
             }));
         }
@@ -804,10 +892,14 @@ pub fn emit_graph_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Gra
                     user_slots,
                     dispatch,
                 } => {
+                    let slots = match resolver {
+                        Some(r) => r.resolve_slots(resource_slots, &node.bindings),
+                        None => resource_slots.clone(),
+                    };
                     commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
-                    if !resource_slots.is_empty() || !user_slots.is_empty() {
+                    if !slots.is_empty() || !user_slots.is_empty() {
                         commands.push(GraphCommand::Compute(GpuCommand::BindResourcesRaw {
-                            indices: resource_slots.clone(),
+                            indices: slots,
                             user: user_slots.clone(),
                         }));
                     }
@@ -1119,7 +1211,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
 
         // Wave 0: SetPipeline(10), Dispatch(8,1,1)
         // ResourceBarrier([0])
@@ -1156,7 +1248,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
 
         // Single wave, no barriers
         assert_eq!(cmds.len(), 4);
@@ -1184,7 +1276,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
 
         assert_eq!(cmds.len(), 3);
         assert!(matches!(cmds[0], GpuCommand::SetPipeline(10)));
@@ -1213,7 +1305,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
 
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
@@ -1226,7 +1318,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
 
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
@@ -1247,7 +1339,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
 
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
         // ClearBuffer, ResourceBarrier, SetPipeline, Dispatch
         assert_eq!(cmds.len(), 4);
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
@@ -1271,7 +1363,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 1);
 
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
         assert!(!cmds
             .iter()
             .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
@@ -1298,7 +1390,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
 
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
         assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
     }
@@ -1318,7 +1410,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 1);
 
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
         assert!(!cmds
             .iter()
             .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
@@ -1331,7 +1423,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
 
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
@@ -1351,7 +1443,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
 
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
         assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
     }
@@ -1370,7 +1462,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 1);
 
-        let cmds = emit_commands(&ir, &schedule);
+        let cmds = emit_commands(&ir, &schedule, None);
         assert!(!cmds
             .iter()
             .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
@@ -2114,14 +2206,14 @@ mod tests {
     fn partitions(ir: &GraphIR) -> Vec<Vec<GpuCommand>> {
         let edges = build_edges(ir);
         let schedule = schedule_waves(ir, &edges);
-        emit_partitioned_commands(ir, &schedule)
+        emit_partitioned_commands(ir, &schedule, None)
     }
 
     /// Helper: run the full analysis pipeline and return flat commands.
     fn flat_commands(ir: &GraphIR) -> Vec<GpuCommand> {
         let edges = build_edges(ir);
         let schedule = schedule_waves(ir, &edges);
-        emit_commands(ir, &schedule)
+        emit_commands(ir, &schedule, None)
     }
 
     #[test]
@@ -2363,5 +2455,132 @@ mod tests {
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], flat_commands(&ir));
+    }
+
+    // ── node_to_wave_map / transient interval tests ─────────────────────────
+
+    fn transient_buf(id: u32) -> ResourceId {
+        ResourceId::TransientBuffer(super::super::TransientId(id))
+    }
+
+    fn transient_tex(id: u32) -> ResourceId {
+        ResourceId::TransientTexture(super::super::TransientTextureId(id))
+    }
+
+    /// `node_to_wave_map` must produce the same mapping as `graph_node_waves`.
+    #[test]
+    fn node_to_wave_map_matches_graph_node_waves() {
+        // 3-wave diamond: A→(B,C)→D
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node(
+                    "B",
+                    2,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "C",
+                    3,
+                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "D",
+                    4,
+                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
+                    1,
+                ),
+            ],
+        };
+
+        let old_map = graph_node_waves(&ir).unwrap();
+
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let new_map = node_to_wave_map(&schedule, ir.nodes.len());
+
+        assert_eq!(
+            old_map, new_map,
+            "node_to_wave_map must equal graph_node_waves"
+        );
+        // Sanity: wave 0 is A, wave 1 is B and C, wave 2 is D
+        assert_eq!(new_map[0], 0);
+        assert_eq!(new_map[1], 1);
+        assert_eq!(new_map[2], 1);
+        assert_eq!(new_map[3], 2);
+    }
+
+    /// `transient_wave_intervals` with pre-computed map must equal the result
+    /// from the old path that re-ran the full scheduler internally.
+    #[test]
+    fn transient_wave_intervals_via_precomputed_map() {
+        // A writes transient 0, B reads transient 0 and writes transient 1, C reads transient 1.
+        // Expected intervals: t0 = [0,1], t1 = [1,2]
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(transient_buf(0), NodeAccess::Write)], 1),
+                node(
+                    "B",
+                    2,
+                    vec![
+                        (transient_buf(0), NodeAccess::Read),
+                        (transient_buf(1), NodeAccess::Write),
+                    ],
+                    1,
+                ),
+                node("C", 3, vec![(transient_buf(1), NodeAccess::Read)], 1),
+            ],
+        };
+
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let node_waves = node_to_wave_map(&schedule, ir.nodes.len());
+
+        let intervals = transient_wave_intervals(&ir, &node_waves).unwrap();
+        assert_eq!(intervals[&0], (0, 1), "transient 0: waves 0..1");
+        assert_eq!(intervals[&1], (1, 2), "transient 1: waves 1..2");
+    }
+
+    /// `transient_texture_wave_intervals` with pre-computed map produces correct ranges.
+    #[test]
+    fn transient_texture_wave_intervals_via_precomputed_map() {
+        // Upload transient texture 0, read it in wave 1, use transient texture 1 in wave 2.
+        let ir = GraphIR {
+            nodes: vec![
+                node("upload", 1, vec![(transient_tex(0), NodeAccess::Write)], 1),
+                node(
+                    "read0",
+                    2,
+                    vec![
+                        (transient_tex(0), NodeAccess::Read),
+                        (transient_tex(1), NodeAccess::Write),
+                    ],
+                    1,
+                ),
+                node("read1", 3, vec![(transient_tex(1), NodeAccess::Read)], 1),
+            ],
+        };
+
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let node_waves = node_to_wave_map(&schedule, ir.nodes.len());
+
+        let intervals = transient_texture_wave_intervals(&ir, &node_waves).unwrap();
+        assert_eq!(intervals[&0], (0, 1));
+        assert_eq!(intervals[&1], (1, 2));
+    }
+
+    /// Empty graph returns empty results without panicking.
+    #[test]
+    fn node_to_wave_map_empty_graph() {
+        let ir = GraphIR { nodes: vec![] };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let map = node_to_wave_map(&schedule, 0);
+        assert!(map.is_empty());
+        let intervals = transient_wave_intervals(&ir, &map).unwrap();
+        assert!(intervals.is_empty());
     }
 }

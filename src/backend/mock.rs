@@ -54,6 +54,8 @@ pub struct MockBackend {
     pub compute_dispatch_count: usize,
     /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
     pub wait_until_count: usize,
+    /// Count of `create_buffer_view` calls (for verifying transient view cache hit rate)
+    pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
     device_timeline_next: HashMap<DeviceHandle, u64>,
@@ -177,6 +179,7 @@ impl MockBackend {
             samplers_created: 0,
             compute_dispatch_count: 0,
             wait_until_count: 0,
+            buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
             device_timeline_completed: HashMap::new(),
@@ -203,6 +206,7 @@ impl MockBackend {
         self.samplers_created = 0;
         self.compute_dispatch_count = 0;
         self.wait_until_count = 0;
+        self.buffer_view_create_count = 0;
     }
 }
 
@@ -383,6 +387,7 @@ impl GpuBackend for MockBackend {
         size: u64,
         _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
+        self.buffer_view_create_count += 1;
         let parent_buf = self
             .buffers
             .get(&parent)

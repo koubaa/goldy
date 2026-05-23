@@ -404,11 +404,10 @@ pub(super) fn destroy(
                             .device
                             .free_command_buffers(logical_device.command_pool, &deferred_cbs);
                     }
-                    if !pending_tex_staging.is_empty() {
-                        super::texture::destroy_texture_staging_list(
-                            logical_device,
-                            pending_tex_staging,
-                        );
+                    // Orphaned pending entries were never submitted; device is
+                    // idle after device_wait_idle above, so destroy directly.
+                    for entry in pending_tex_staging {
+                        entry.destroy(logical_device);
                     }
                 }
 
@@ -464,15 +463,19 @@ pub(super) fn acquire(
 ) -> Result<SwapchainImageHandle> {
     let _tz = crate::tracy_zone!("vk.surface.acquire");
     // Clean up any previously acquired surface texture that wasn't presented
-    if let Some(surface_state) = state.surfaces.get(&surface_handle) {
-        if let Some(tex_handle) = surface_state.current_texture_handle {
-            tracing::warn!("Previous surface texture was not presented; cleaning up");
-            unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
+    {
+        let _uz = crate::tracy_zone!("vk.surface.acquire.unregister_prev");
+        if let Some(surface_state) = state.surfaces.get(&surface_handle) {
+            if let Some(tex_handle) = surface_state.current_texture_handle {
+                tracing::warn!("Previous surface texture was not presented; cleaning up");
+                unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
+            }
         }
     }
 
     // Get surface state and current frame index
     let (device_handle, current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
+        let _fz = crate::tracy_zone!("vk.surface.acquire.frame_state");
         let surface_state = state
             .surfaces
             .get(&surface_handle)
@@ -487,11 +490,14 @@ pub(super) fn acquire(
         )
     };
 
-    let pending_deferred_len = state
-        .devices
-        .get(&device_handle)
-        .map(|d| d.deletion_queue.len())
-        .unwrap_or(0);
+    let pending_deferred_len = {
+        let _dz = crate::tracy_zone!("vk.surface.acquire.deferred_query");
+        state
+            .devices
+            .get(&device_handle)
+            .map(|d| d.deletion_queue.len())
+            .unwrap_or(0)
+    };
 
     let wait_result = {
         let _wz = crate::tracy_zone!("vk.surface.wait_fence");
@@ -518,15 +524,21 @@ pub(super) fn acquire(
     wait_result.context("Failed to wait for frame fence")?;
 
     let completed = {
+        let _tz = crate::tracy_zone!("vk.surface.acquire.timeline_query");
         let ld = state
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
         unsafe { ld.device.get_semaphore_counter_value(ld.timeline_semaphore) }.unwrap_or(0)
     };
-    super::compute::reap_timeline_cmd_buffers_up_to(state, device_handle, completed);
 
     {
+        let _tz = crate::tracy_zone!("vk.surface.acquire.reap_timeline");
+        super::compute::reap_timeline_cmd_buffers_up_to(state, device_handle, completed);
+    }
+
+    {
+        let _tz = crate::tracy_zone!("vk.surface.acquire.frame_slot_reset");
         let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
         let cf = surface_state.current_frame;
         surface_state.frame_sync[cf].render_pass_submitted = false;
@@ -536,6 +548,7 @@ pub(super) fn acquire(
         // Unregister the surface texture whose VkImageView + bindless descriptor
         // were kept alive for the deferred compute CBs.
         if let Some(tex_handle) = surface_state.frame_sync[cf].pending_surface_texture.take() {
+            let _uz = crate::tracy_zone!("vk.surface.acquire.unregister_frame_tex");
             unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
         }
 
@@ -545,8 +558,13 @@ pub(super) fn acquire(
             std::mem::take(&mut surface_state.frame_sync[cf].pending_compute_texture_staging);
         let _ = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
         if !orphaned_tex_staging.is_empty() {
+            // These entries were never submitted; device is idle (frame fence
+            // waited above), so destroy them directly rather than pooling.
+            let _sz = crate::tracy_zone!("vk.surface.acquire.destroy_orphan_staging");
             if let Some(ld) = state.devices.get(&device_handle) {
-                super::texture::destroy_texture_staging_list(ld, orphaned_tex_staging);
+                for entry in orphaned_tex_staging {
+                    unsafe { entry.destroy(ld) };
+                }
             }
         }
     }
@@ -1360,10 +1378,11 @@ pub(super) fn present(
                 .finish(signal_timeline_value);
         }
         if !pending_tex_upload_staging.is_empty() {
-            state.compute_texture_staging_pool.insert(
-                (device_handle, signal_timeline_value),
-                pending_tex_upload_staging,
-            );
+            state
+                .texture_staging_pools
+                .entry(device_handle)
+                .or_insert_with(super::staging::TextureStagingPool::new)
+                .release(signal_timeline_value, pending_tex_upload_staging);
         }
 
         for cb in &deferred {

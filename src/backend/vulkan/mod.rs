@@ -270,7 +270,7 @@ impl VulkanBackend {
             next_sampler_handle: 1,
             slang_compiler,
             compute_fence_pool: HashMap::new(),
-            compute_texture_staging_pool: HashMap::new(),
+            texture_staging_pools: HashMap::new(),
             staging_belts: HashMap::new(),
             timeline_cmd_buffers: HashMap::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),

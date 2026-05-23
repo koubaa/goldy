@@ -487,15 +487,9 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 state
                     .compute_fence_pool
                     .retain(|_, (dh, _, _)| *dh != device_handle);
-                let staging_drop: Vec<(DeviceHandle, u64)> = state
-                    .compute_texture_staging_pool
-                    .keys()
-                    .filter(|(dh, _)| *dh == device_handle)
-                    .cloned()
-                    .collect();
-                for k in staging_drop {
-                    state.compute_texture_staging_pool.remove(&k);
-                }
+                // Texture staging pool: device is being lost so just drop entries
+                // without Vulkan destroy calls (handles are invalid after device loss).
+                state.texture_staging_pools.remove(&device_handle);
                 logical_device.device.destroy_device(None);
                 return;
             }
@@ -789,25 +783,13 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     }
                     logical_device.device.destroy_fence(fence, None);
                 }
-                if let Some(staging) = state
-                    .compute_texture_staging_pool
-                    .remove(&(device_handle, tok))
-                {
-                    super::texture::destroy_texture_staging_list(&logical_device, staging);
-                }
+                // Texture staging for fence pool tokens is now handled via the
+                // TextureStagingPool; it will be destroyed below.
             }
 
-            // Timeline-only compute/present may leave staging that was never tied to compute_fence_pool keys.
-            let staging_keys: Vec<(DeviceHandle, u64)> = state
-                .compute_texture_staging_pool
-                .keys()
-                .filter(|(dh, _)| *dh == device_handle)
-                .cloned()
-                .collect();
-            for key in staging_keys {
-                if let Some(staging) = state.compute_texture_staging_pool.remove(&key) {
-                    super::texture::destroy_texture_staging_list(&logical_device, staging);
-                }
+            // Destroy all pooled texture staging resources for this device.
+            if let Some(mut pool) = state.texture_staging_pools.remove(&device_handle) {
+                pool.destroy_all(&logical_device);
             }
 
             // Free command buffers still registered on the timeline for this device.

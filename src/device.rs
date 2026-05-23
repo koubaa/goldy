@@ -724,27 +724,10 @@ impl Device {
             return Ok(tv);
         }
 
-        let (_tex_keepalive, tex_handles) = graph
-            .allocate_transient_textures(self)
+        // All transient resource cases go through the heap (cached views/textures).
+        let tv = self
+            .submit_with_placement_heap(graph, true)
             .map_err(|e| self.classify(e))?;
-
-        if graph.has_transient_buffers() {
-            let tv = self
-                .submit_with_placement_heap(graph, &tex_handles, true)
-                .map_err(|e| self.classify(e))?;
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
-            return Ok(tv);
-        }
-
-        let mut backend = self.inner.backend.lock().unwrap();
-        let tv = graph
-            .submit_with_backend(self, backend.as_mut(), None, &tex_handles, true)
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
         self.inner
             .high_water_timeline
             .fetch_max(tv, Ordering::Relaxed);
@@ -776,27 +759,10 @@ impl Device {
             return Ok(tv);
         }
 
-        let (_tex_keepalive, tex_handles) = graph
-            .allocate_transient_textures(self)
+        // All transient resource cases go through the heap (cached views/textures).
+        let tv = self
+            .submit_with_placement_heap(graph, false)
             .map_err(|e| self.classify(e))?;
-
-        if graph.has_transient_buffers() {
-            let tv = self
-                .submit_with_placement_heap(graph, &tex_handles, false)
-                .map_err(|e| self.classify(e))?;
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
-            return Ok(tv);
-        }
-
-        let mut backend = self.inner.backend.lock().unwrap();
-        let tv = graph
-            .submit_with_backend(self, backend.as_mut(), None, &tex_handles, false)
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
         self.inner
             .high_water_timeline
             .fetch_max(tv, Ordering::Relaxed);
@@ -863,20 +829,37 @@ impl Device {
     /// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
     /// 4. Patch dispatch `resource_slots` with real bindless indices
     /// 5. Submit the resolved IR (views kept alive in the heap ring until GPU retires)
+    ///
+    /// Handles both transient-buffer and transient-texture cases, routing through
+    /// the device's [`PlacementHeap`](crate::placement_heap::PlacementHeap) for
+    /// stable-slot caching. Views and textures are owned by the heap across frames;
+    /// only evicted entries go through `defer_release`.
     fn submit_with_placement_heap(
         &self,
         graph: &mut TaskGraph,
-        tex_handles: &HashMap<u32, backend::TextureHandle>,
         wait_for_transient_completion: bool,
     ) -> Result<TimelineValue> {
-        let (total_size, base_align, layout) = graph.transient_heap_size_and_layout()?;
+        use crate::task_graph::{ResolvedTransientBuffer, ResolvedTransientTexture, SlotResolver};
 
-        // Over-allocate by `base_align - 1` so we can align the returned offset.
-        let alloc_size = (total_size + base_align - 1).max(256);
+        // Compute the schedule once; derive node_waves from it so the
+        // transient layout and texture resolution paths don't re-run
+        // build_edges + schedule_waves.
+        let (schedule, _) = graph.schedule_and_split_wave();
+        let node_waves =
+            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
+
+        let has_buffers = graph.has_transient_buffers();
+
+        let (alloc_size, base_align, layout_opt) = if has_buffers {
+            let (ts, ba, lay) = graph.transient_heap_size_and_layout(&node_waves)?;
+            let sz = (ts + ba - 1).max(256);
+            (sz, ba, Some(lay))
+        } else {
+            (0u64, 1u64, None)
+        };
 
         let mut heap_guard = self.inner.placement_heap.lock().unwrap();
 
-        // Lazily create or grow the placement heap.
         if heap_guard.is_none() {
             let cap = (256 * 1024 * 1024u64).max(alloc_size * Self::DEFAULT_PIPELINE_DEPTH);
             *heap_guard = Some(
@@ -886,75 +869,62 @@ impl Device {
         }
         let heap = heap_guard.as_mut().unwrap();
 
-        // Reclaim any retired regions from previous frames.
-        let progress = self.gpu_progress();
-        heap.reclaim(progress);
-
-        // Acquire a region from the placement heap, then align the start.
-        let raw_offset = match heap.acquire(alloc_size) {
-            Some(off) => off,
-            None => {
-                // Ring full — try reclaim again (progress may have advanced).
-                let progress2 = self.gpu_progress();
-                heap.reclaim(progress2);
-                heap.acquire(alloc_size).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
-                        alloc_size,
-                        heap.capacity(),
-                        heap.in_flight_bytes(),
-                    )
-                })?
-            }
-        };
-        let base_offset = raw_offset.div_ceil(base_align) * base_align;
-
-        let buf = heap.buffer();
-
-        // Create BufferViews at colored offsets, collecting bindless indices.
-        let mut views = Vec::with_capacity(layout.len());
-        let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
-
-        for spec in graph.transient_specs() {
-            let offset = base_offset + layout[&spec.id];
-            let view_stride = spec.stride.max(1);
-            let view = buf.create_view(offset, spec.size, Some(view_stride))?;
-            let uav = view.bindless_index().unwrap_or(u32::MAX);
-            let srv = view.bindless_srv_index().unwrap_or(uav);
-            bindless_map.insert(spec.id, (uav, srv));
-            views.push(view);
+        if has_buffers {
+            let depth = Self::DEFAULT_PIPELINE_DEPTH as usize;
+            heap.configure_pages(alloc_size, depth, self)?;
         }
 
-        // Lower IR: patch TransientBuffer -> BufferRange + patch resource_slots.
-        let range_map = TaskGraph::transient_buffer_range_map_with_base(
-            buf,
-            &layout,
-            graph.transient_specs(),
-            base_offset,
-        );
-        let resolved_ir = graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
+        // ── Build the SlotResolver ───────────────────────────────────────────
+        let mut resolver = SlotResolver::new();
 
-        // Build a resolved graph (no transient specs) and submit.
-        let mut resolved_graph = graph.into_resolved(resolved_ir);
+        let tex_handles = graph.resolve_transient_textures_with_heap(self, heap, &node_waves)?;
+        for (id, handle) in &tex_handles {
+            resolver
+                .textures
+                .insert(*id, ResolvedTransientTexture { handle: *handle });
+        }
 
-        // Drop the heap lock before acquiring the backend lock for submission.
+        if has_buffers {
+            let layout = layout_opt.unwrap();
+            let raw_offset = heap.advance_page();
+            let base_offset = raw_offset.div_ceil(base_align) * base_align;
+
+            let buf_handle = heap.buffer().handle;
+            for spec in graph.transient_specs() {
+                let offset = base_offset + layout[&spec.id];
+                let view_stride = spec.stride.max(1);
+                let (uav, srv, _hit) =
+                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, self)?;
+
+                resolver.buffers.insert(
+                    spec.id,
+                    ResolvedTransientBuffer {
+                        parent: buf_handle,
+                        offset,
+                        len: spec.size,
+                        uav_index: uav,
+                        srv_index: srv,
+                    },
+                );
+            }
+        }
+
         drop(heap_guard);
 
         let mut backend = self.inner.backend.lock().unwrap();
-        let tv = resolved_graph.submit_with_backend(
+        let tv = graph.submit_ir_with_resolver(
             self,
             backend.as_mut(),
-            None,
-            tex_handles,
+            &resolver,
             wait_for_transient_completion,
         )?;
         drop(backend);
 
-        // Stamp the ring entry and immediately defer views to VramAllocator.
-        // This keeps PlacementHeap ring entries free of view ownership (#150).
+        // Stamp paged-mode timeline.
         let mut heap_guard = self.inner.placement_heap.lock().unwrap();
-        let heap = heap_guard.as_mut().unwrap();
-        heap.stamp_and_defer_views(tv, views, self);
+        if let Some(heap) = heap_guard.as_mut() {
+            heap.stamp_pending(tv);
+        }
 
         Ok(tv)
     }
@@ -972,6 +942,41 @@ impl Device {
     pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
         let heap_guard = self.inner.placement_heap.lock().unwrap();
         heap_guard.as_ref().map(|h| h.stats())
+    }
+
+    /// Number of `BufferView`s and `Texture`s currently held in the placement heap's
+    /// stable-slot view cache. Returns `(cached_views, cached_textures)`.
+    ///
+    /// Useful for the `[PERF]` log and diagnostics; non-zero values in steady state
+    /// confirm that the cache is active and hitting.
+    pub fn transient_cache_counts(&self) -> (usize, usize) {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        match heap_guard.as_ref() {
+            Some(h) => (h.cached_view_count(), h.cached_texture_count()),
+            None => (0, 0),
+        }
+    }
+
+    /// Total number of `create_buffer_view` backend calls made by the placement heap's
+    /// view cache since initialization. Monotonically increasing.
+    ///
+    /// Use this in tests to verify that steady-state frames produce zero new creates.
+    pub fn transient_view_create_count(&self) -> usize {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        heap_guard
+            .as_ref()
+            .map(|h| h.view_create_count())
+            .unwrap_or(0)
+    }
+
+    /// Total number of `Texture::new` calls made by the placement heap's texture cache
+    /// since initialization. Monotonically increasing.
+    pub fn transient_texture_create_count(&self) -> usize {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        heap_guard
+            .as_ref()
+            .map(|h| h.texture_create_count())
+            .unwrap_or(0)
     }
 
     /// Get device capabilities and format preferences.
