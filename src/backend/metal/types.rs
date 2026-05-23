@@ -540,6 +540,10 @@ pub(crate) struct LogicalDevice {
     /// buffer is safe: it is safe only when `gpu_progress() >= last_committed_timeline`,
     /// meaning all previously submitted GPU work has completed and no in-flight reads remain.
     pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
+    /// Pooled staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).
+    pub staging_belt: super::staging::StagingBelt,
+    /// Pooled staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
+    pub texture_staging_pool: super::staging::TextureStagingPool,
 }
 
 impl LogicalDevice {
