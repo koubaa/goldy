@@ -160,11 +160,15 @@ impl GraphIR {
 pub struct BarrierSet {
     pub buffers: Vec<BufferHandle>,
     pub textures: Vec<TextureHandle>,
+    /// Transient buffer IDs whose concrete `BufferHandle` is only known at
+    /// emission time (after slot resolution).  Resolved and folded into the
+    /// `ResourceBarrier` command inside `emit_waves_to_commands`.
+    pub transient_ids: Vec<u32>,
 }
 
 impl BarrierSet {
     pub fn is_empty(&self) -> bool {
-        self.buffers.is_empty() && self.textures.is_empty()
+        self.buffers.is_empty() && self.textures.is_empty() && self.transient_ids.is_empty()
     }
 }
 

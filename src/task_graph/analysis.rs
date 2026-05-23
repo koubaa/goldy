@@ -363,6 +363,7 @@ fn compute_barriers(
     let wave_set: HashSet<usize> = wave_nodes.iter().copied().collect();
     let mut barrier_buffers: HashSet<BufferHandle> = HashSet::new();
     let mut barrier_textures: HashSet<TextureHandle> = HashSet::new();
+    let mut barrier_transients: HashSet<u32> = HashSet::new();
 
     // Any edge crossing into this wave means the conflicting resource needs a barrier.
     for &(from, to) in edges {
@@ -370,14 +371,17 @@ fn compute_barriers(
             for bi in &ir.nodes[from].bindings {
                 for bj in &ir.nodes[to].bindings {
                     if bindings_conflict(bi, bj) {
-                        // Collapse sub-range to parent for backend barrier commands.
-                        match bi.resource.canonical_buffer_handle() {
-                            Some(h) => {
-                                barrier_buffers.insert(h);
+                        match bi.resource {
+                            ResourceId::TransientBuffer(tid) => {
+                                barrier_transients.insert(tid.0);
                             }
-                            None => {
-                                if let ResourceId::Texture(h) = bi.resource {
-                                    barrier_textures.insert(h);
+                            ResourceId::Texture(h) => {
+                                barrier_textures.insert(h);
+                            }
+                            _ => {
+                                // Collapse sub-range to parent for backend barrier commands.
+                                if let Some(h) = bi.resource.canonical_buffer_handle() {
+                                    barrier_buffers.insert(h);
                                 }
                             }
                         }
@@ -389,10 +393,16 @@ fn compute_barriers(
 
     let mut buffers: Vec<_> = barrier_buffers.into_iter().collect();
     let mut textures: Vec<_> = barrier_textures.into_iter().collect();
+    let mut transient_ids: Vec<_> = barrier_transients.into_iter().collect();
     buffers.sort();
     textures.sort();
+    transient_ids.sort();
 
-    BarrierSet { buffers, textures }
+    BarrierSet {
+        buffers,
+        textures,
+        transient_ids,
+    }
 }
 
 /// Emit a flat `Vec<GpuCommand>` for the given slice of [`Wave`]s.
@@ -420,8 +430,21 @@ pub(crate) fn emit_waves_to_commands(
 
     for wave in waves {
         if !wave.barriers_before.is_empty() {
+            let mut barrier_buffers = wave.barriers_before.buffers.clone();
+            // Resolve transient buffer IDs to their concrete parent handles.
+            if !wave.barriers_before.transient_ids.is_empty() {
+                if let Some(r) = resolver {
+                    for &tid in &wave.barriers_before.transient_ids {
+                        if let Some(resolved) = r.buffers.get(&tid) {
+                            if !barrier_buffers.contains(&resolved.parent) {
+                                barrier_buffers.push(resolved.parent);
+                            }
+                        }
+                    }
+                }
+            }
             commands.push(GpuCommand::ResourceBarrier {
-                buffers: wave.barriers_before.buffers.clone(),
+                buffers: barrier_buffers,
                 textures: wave.barriers_before.textures.clone(),
             });
         }
@@ -775,8 +798,20 @@ pub fn emit_graph_commands(
 
     for wave in &schedule.waves {
         if !wave.barriers_before.is_empty() {
+            let mut barrier_buffers = wave.barriers_before.buffers.clone();
+            if !wave.barriers_before.transient_ids.is_empty() {
+                if let Some(r) = resolver {
+                    for &tid in &wave.barriers_before.transient_ids {
+                        if let Some(resolved) = r.buffers.get(&tid) {
+                            if !barrier_buffers.contains(&resolved.parent) {
+                                barrier_buffers.push(resolved.parent);
+                            }
+                        }
+                    }
+                }
+            }
             commands.push(GraphCommand::Compute(GpuCommand::ResourceBarrier {
-                buffers: wave.barriers_before.buffers.clone(),
+                buffers: barrier_buffers,
                 textures: wave.barriers_before.textures.clone(),
             }));
         }

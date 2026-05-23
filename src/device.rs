@@ -895,6 +895,7 @@ impl Device {
                 let view_stride = spec.stride.max(1);
                 let (uav, srv, _hit) =
                     heap.get_or_create_view(spec.id, offset, spec.size, view_stride, self)?;
+
                 resolver.buffers.insert(
                     spec.id,
                     ResolvedTransientBuffer {
