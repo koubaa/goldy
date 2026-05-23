@@ -42,55 +42,78 @@ fn build_upload_remap(ir: &GraphIR, commands: &[GpuCommand]) -> Vec<(usize, usiz
     let mut remap = Vec::with_capacity(8);
     let mut consumed = vec![false; ir.nodes.len()];
     for (cmd_idx, cmd) in commands.iter().enumerate() {
-        let mut found: Option<usize> = None;
-        for (n_idx, node) in ir.nodes.iter().enumerate() {
-            if consumed[n_idx] {
-                continue;
-            }
-            let matches = match (cmd, &node.kind) {
-                (
-                    GpuCommand::WriteBuffer {
-                        buffer: cb,
-                        offset: co,
-                        ..
-                    },
-                    NodeKind::WriteBuffer {
-                        buffer: nb,
-                        offset: no,
-                        ..
-                    },
-                ) => cb == nb && co == no,
-                (
-                    GpuCommand::WriteTexture { texture: ct, .. },
-                    NodeKind::WriteTexture { texture: nt, .. },
-                ) => ct == nt,
-                (
-                    GpuCommand::WriteTextureRegion {
-                        texture: ct,
-                        x: cx,
-                        y: cy,
-                        ..
-                    },
-                    NodeKind::WriteTextureRegion {
-                        texture: nt,
-                        x: nx,
-                        y: ny,
-                        ..
-                    },
-                ) => ct == nt && cx == nx && cy == ny,
-                _ => false,
-            };
-            if matches {
-                found = Some(n_idx);
-                break;
-            }
-        }
-        if let Some(n_idx) = found {
+        if let Some(n_idx) = find_upload_node(ir, cmd, &consumed) {
             consumed[n_idx] = true;
             remap.push((cmd_idx, n_idx));
         }
     }
     remap
+}
+
+/// Build the upload remap for a partitioned command set.
+///
+/// Each entry is `(partition_index, command_index_within_partition, ir_node_index)`.
+fn build_partitioned_upload_remap(
+    ir: &GraphIR,
+    partitions: &[Vec<GpuCommand>],
+) -> Vec<(usize, usize, usize)> {
+    let mut remap = Vec::with_capacity(8);
+    let mut consumed = vec![false; ir.nodes.len()];
+    for (part_idx, commands) in partitions.iter().enumerate() {
+        for (cmd_idx, cmd) in commands.iter().enumerate() {
+            if let Some(n_idx) = find_upload_node(ir, cmd, &consumed) {
+                consumed[n_idx] = true;
+                remap.push((part_idx, cmd_idx, n_idx));
+            }
+        }
+    }
+    remap
+}
+
+/// Find the IR node index that corresponds to an upload command.
+fn find_upload_node(ir: &GraphIR, cmd: &GpuCommand, consumed: &[bool]) -> Option<usize> {
+    for (n_idx, node) in ir.nodes.iter().enumerate() {
+        if consumed[n_idx] {
+            continue;
+        }
+        let matches = match (cmd, &node.kind) {
+            (
+                GpuCommand::WriteBuffer {
+                    buffer: cb,
+                    offset: co,
+                    ..
+                },
+                NodeKind::WriteBuffer {
+                    buffer: nb,
+                    offset: no,
+                    ..
+                },
+            ) => cb == nb && co == no,
+            (
+                GpuCommand::WriteTexture { texture: ct, .. },
+                NodeKind::WriteTexture { texture: nt, .. },
+            ) => ct == nt,
+            (
+                GpuCommand::WriteTextureRegion {
+                    texture: ct,
+                    x: cx,
+                    y: cy,
+                    ..
+                },
+                NodeKind::WriteTextureRegion {
+                    texture: nt,
+                    x: nx,
+                    y: ny,
+                    ..
+                },
+            ) => ct == nt && cx == nx && cy == ny,
+            _ => false,
+        };
+        if matches {
+            return Some(n_idx);
+        }
+    }
+    None
 }
 
 fn lcm(a: u64, b: u64) -> u64 {
@@ -148,6 +171,10 @@ pub struct TaskGraph {
     /// — the binding fingerprint excludes data bytes, so cached `Arc<[u8]>` Arcs
     /// would otherwise be stale.  The Arc swap is a single atomic refcount bump.
     schedule_cache: Option<CompiledCacheEntry>,
+    /// Node count at the time the schedule cache was last validated.
+    /// When the node count hasn't changed and the cache already holds a
+    /// schedule, we skip the expensive `binding_fingerprint` hash.
+    schedule_validated_node_count: usize,
 }
 
 /// Cache entry holding both the wave schedule and the emitted compute command stream.
@@ -160,6 +187,11 @@ pub(crate) struct CompiledCacheEntry {
     /// `(command_index, ir_node_index)` for each upload command in `commands`.
     /// Used to refresh `Arc<[u8]>` payloads from the current IR on cache hit.
     upload_remap: Vec<(usize, usize)>,
+    /// Cached partitioned emission output.  Populated on first call to
+    /// `get_or_build_partitioned_commands`.
+    partitioned_commands: Option<Vec<Vec<GpuCommand>>>,
+    /// `(partition_idx, cmd_idx, ir_node_idx)` for upload commands across partitions.
+    partitioned_upload_remap: Vec<(usize, usize, usize)>,
 }
 
 impl TaskGraph {
@@ -171,6 +203,7 @@ impl TaskGraph {
             transient_texture_specs: Vec::new(),
             next_transient_texture_id: 0,
             schedule_cache: None,
+            schedule_validated_node_count: 0,
         }
     }
 
@@ -304,14 +337,12 @@ impl TaskGraph {
         // Early partitions are submitted immediately so the GPU can start
         // executing coarse work while the CPU records the next partition.
         // The last partition's timeline value is returned to the caller.
-        let partitions = {
-            let schedule = Self::get_or_build_schedule(cache, ir);
-            analysis::emit_partitioned_commands(ir, schedule)
-        };
+        let fp = Self::binding_fingerprint(ir);
+        let partitions = Self::get_or_build_partitioned_commands(cache, ir, fp);
         let mut last_tv = backend.gpu_progress(device.inner.handle);
         for partition in partitions {
             let _tz = crate::tracy_zone!("goldy.submit_partition");
-            last_tv = backend.submit_standalone(device.inner.handle, &partition)?;
+            last_tv = backend.submit_standalone(device.inner.handle, partition)?;
         }
         Ok(last_tv)
     }
@@ -347,15 +378,16 @@ impl TaskGraph {
                     | NodeKind::CopyTexture { .. }
             )
         });
+        let fp = Self::binding_fingerprint(ir);
         if has_upload {
             // Upload commands use staging memory that is not re-encodable; fall back.
-            let cmds = Self::get_or_build_compute_commands(cache, ir);
+            let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
             return backend.submit_standalone(device.inner.handle, cmds);
         }
 
         // Derive the retention key from full CB content so it is always correct.
         let key = Self::retention_fingerprint(ir);
-        let cmds = Self::get_or_build_compute_commands(cache, ir);
+        let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
         let graph_cmds: Vec<GraphCommand> =
             cmds.iter().cloned().map(GraphCommand::Compute).collect();
         backend.submit_graph_and_retain(device.inner.handle, &graph_cmds, key)
@@ -520,6 +552,7 @@ impl TaskGraph {
             next_transient_texture_id: self.next_transient_texture_id,
             // Resolved graphs are ephemeral (transient buffers were lowered); no cache.
             schedule_cache: None,
+            schedule_validated_node_count: 0,
         }
     }
 
@@ -1075,6 +1108,27 @@ impl TaskGraph {
         h.finish()
     }
 
+    /// Return the schedule fingerprint, skipping the full hash when the cache
+    /// is warm and the node count hasn't changed since the last validation.
+    ///
+    /// The node count is a necessary (but not sufficient) condition for a
+    /// topology match. When it differs, we fall through to the full hash.
+    /// When it matches AND the cache already holds a schedule whose fp was
+    /// computed from the same node count, we return the cached fp directly —
+    /// the binding topology cannot differ if the node count is identical
+    /// and the graph was rebuilt by the same deterministic recording code.
+    fn schedule_fp(&mut self) -> u64 {
+        let n = self.ir.nodes.len();
+        if let Some(ref entry) = self.schedule_cache {
+            if n == self.schedule_validated_node_count {
+                return entry.fp;
+            }
+        }
+        let fp = Self::binding_fingerprint(&self.ir);
+        self.schedule_validated_node_count = n;
+        fp
+    }
+
     /// Compute a fingerprint of all state that affects the *recorded* command buffer.
     ///
     /// Hashes everything `binding_fingerprint` captures, plus per-`Dispatch` node:
@@ -1127,7 +1181,11 @@ impl TaskGraph {
                         }
                     }
                 }
-                NodeKind::ClearBuffer { buffer, offset, size } => {
+                NodeKind::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
                     1u8.hash(&mut h);
                     buffer.hash(&mut h);
                     offset.hash(&mut h);
@@ -1149,8 +1207,8 @@ impl TaskGraph {
     fn get_or_build_schedule<'c>(
         cache: &'c mut Option<CompiledCacheEntry>,
         ir: &GraphIR,
+        fp: u64,
     ) -> &'c CompiledSchedule {
-        let fp = Self::binding_fingerprint(ir);
         if cache.as_ref().is_some_and(|e| e.fp == fp) {
             tracing::trace!(target: "goldy::schedule_cache", hit = true, fp, "schedule");
             return &cache.as_ref().unwrap().schedule;
@@ -1163,6 +1221,8 @@ impl TaskGraph {
             schedule,
             commands: None,
             upload_remap: Vec::new(),
+            partitioned_commands: None,
+            partitioned_upload_remap: Vec::new(),
         });
         &cache.as_ref().unwrap().schedule
     }
@@ -1175,8 +1235,8 @@ impl TaskGraph {
     fn get_or_build_compute_commands<'c>(
         cache: &'c mut Option<CompiledCacheEntry>,
         ir: &GraphIR,
+        fp: u64,
     ) -> &'c [GpuCommand] {
-        let fp = Self::binding_fingerprint(ir);
         let needs_build = match cache.as_ref() {
             Some(e) => e.fp != fp || e.commands.is_none(),
             None => true,
@@ -1220,8 +1280,91 @@ impl TaskGraph {
             schedule,
             commands: Some(commands),
             upload_remap,
+            partitioned_commands: None,
+            partitioned_upload_remap: Vec::new(),
         });
         cache.as_ref().unwrap().commands.as_deref().unwrap()
+    }
+
+    /// Return cached partitioned commands for `ir`, building them if necessary.
+    ///
+    /// Like [`Self::get_or_build_compute_commands`] but returns a partitioned
+    /// `Vec<Vec<GpuCommand>>` suitable for multi-submission.  On cache hit only
+    /// the upload `Arc<[u8]>` payloads are refreshed.
+    fn get_or_build_partitioned_commands<'c>(
+        cache: &'c mut Option<CompiledCacheEntry>,
+        ir: &GraphIR,
+        fp: u64,
+    ) -> &'c [Vec<GpuCommand>] {
+        let _tz = crate::tracy_zone!("goldy.compile_partitioned");
+
+        // Ensure schedule exists.
+        let needs_schedule = match cache.as_ref() {
+            Some(e) => e.fp != fp,
+            None => true,
+        };
+        if needs_schedule {
+            let edges = analysis::build_edges(ir);
+            let schedule = analysis::schedule_waves(ir, &edges);
+            *cache = Some(CompiledCacheEntry {
+                fp,
+                schedule,
+                commands: None,
+                upload_remap: Vec::new(),
+                partitioned_commands: None,
+                partitioned_upload_remap: Vec::new(),
+            });
+        }
+
+        let needs_build = cache
+            .as_ref()
+            .map_or(true, |e| e.partitioned_commands.is_none());
+
+        tracing::trace!(target: "goldy::schedule_cache", hit = !needs_build, fp, "partitioned_commands");
+
+        if !needs_build {
+            // Hit: refresh upload payloads.
+            let entry = cache.as_mut().unwrap();
+            if let Some(parts) = entry.partitioned_commands.as_mut() {
+                for &(part_idx, cmd_idx, node_idx) in &entry.partitioned_upload_remap {
+                    let node = &ir.nodes[node_idx];
+                    match (&mut parts[part_idx][cmd_idx], &node.kind) {
+                        (
+                            GpuCommand::WriteBuffer { data, .. },
+                            NodeKind::WriteBuffer { data: src, .. },
+                        ) => *data = src.clone(),
+                        (
+                            GpuCommand::WriteTexture { data, .. },
+                            NodeKind::WriteTexture { data: src, .. },
+                        ) => *data = src.clone(),
+                        (
+                            GpuCommand::WriteTextureRegion { data, .. },
+                            NodeKind::WriteTextureRegion { data: src, .. },
+                        ) => *data = src.clone(),
+                        _ => {}
+                    }
+                }
+            }
+            return cache
+                .as_ref()
+                .unwrap()
+                .partitioned_commands
+                .as_deref()
+                .unwrap();
+        }
+
+        // Miss: emit partitioned commands from the cached schedule.
+        let entry = cache.as_mut().unwrap();
+        let partitions = analysis::emit_partitioned_commands(ir, &entry.schedule);
+        let remap = build_partitioned_upload_remap(ir, &partitions);
+        entry.partitioned_commands = Some(partitions);
+        entry.partitioned_upload_remap = remap;
+        cache
+            .as_ref()
+            .unwrap()
+            .partitioned_commands
+            .as_deref()
+            .unwrap()
     }
 
     /// Compile the graph into a flat command stream.
@@ -1245,7 +1388,8 @@ impl TaskGraph {
         if Self::has_render_passes_in_ir(&self.ir) {
             panic!("compile_commands: graph contains render_pass; use compile_graph_commands or Device::submit");
         }
-        Self::get_or_build_compute_commands(&mut self.schedule_cache, &self.ir).to_vec()
+        let fp = self.schedule_fp();
+        Self::get_or_build_compute_commands(&mut self.schedule_cache, &self.ir, fp).to_vec()
     }
 
     /// Compile a pre-lowered [`GraphIR`] into a flat GPU command stream.
@@ -1283,20 +1427,44 @@ impl TaskGraph {
         if Self::has_render_passes_in_ir(&self.ir) {
             panic!("compile_partitioned_commands: graph contains render_pass; use compile_graph_commands or Device::submit");
         }
-        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir);
-        analysis::emit_partitioned_commands(&self.ir, schedule)
+        let fp = self.schedule_fp();
+        Self::get_or_build_partitioned_commands(&mut self.schedule_cache, &self.ir, fp).to_vec()
     }
 
     /// Partitioned variant of [`Self::compile_ir_to_gpu_commands`] for pre-lowered IRs.
     ///
     /// Used by `Frame::submit_compute` on the transient path, where the IR has already
     /// been resolved and the schedule cache is not available.
+    #[allow(dead_code)]
     pub(crate) fn compile_ir_to_partitioned_gpu_commands(
         ir: &GraphIR,
     ) -> Vec<Vec<crate::backend::GpuCommand>> {
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
         analysis::emit_partitioned_commands(ir, &schedule)
+    }
+
+    /// Emit partitioned commands for a resolved (post-lowered) IR using the schedule
+    /// cached from `self.ir` (the pre-lowered IR).
+    ///
+    /// On the transient path the binding topology — node count and per-node
+    /// resource-access pairs — is identical before and after lowering: lowering
+    /// substitutes concrete `BufferHandle`s for `TransientBuffer` IDs and patches
+    /// bindless slot indices, but never adds, removes, or reorders nodes.  The
+    /// `CompiledSchedule` (wave groups + barrier positions) therefore transfers
+    /// directly to the resolved IR.
+    ///
+    /// This lets `build_edges` + `schedule_waves` be cached across frames (keyed
+    /// on the stable pre-lowered fingerprint) while `emit_partitioned_commands`
+    /// still runs on the fresh resolved IR so that `ResourceBarrier` handles and
+    /// dispatch slot indices are correct.
+    pub(crate) fn compile_resolved_to_partitioned_commands(
+        &mut self,
+        resolved_ir: &GraphIR,
+    ) -> Vec<Vec<crate::backend::GpuCommand>> {
+        let fp = self.schedule_fp();
+        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir, fp);
+        analysis::emit_partitioned_commands(resolved_ir, schedule)
     }
 
     /// Like [`Self::compile_commands`] but allows graphs that include render-pass nodes.
@@ -1309,7 +1477,8 @@ impl TaskGraph {
             self.transient_texture_specs.is_empty(),
             "compile_graph_commands: graph uses transient_texture; use Device::submit"
         );
-        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir);
+        let fp = self.schedule_fp();
+        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir, fp);
         analysis::emit_graph_commands(&self.ir, schedule)
     }
 }

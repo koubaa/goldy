@@ -648,7 +648,10 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<GpuComman
 ///
 /// **Invariant**: `partitions.into_iter().flatten().collect::<Vec<_>>()`
 /// always equals the output of [`emit_commands`] for the same inputs.
-pub fn emit_partitioned_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<Vec<GpuCommand>> {
+pub fn emit_partitioned_commands(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+) -> Vec<Vec<GpuCommand>> {
     let waves = &schedule.waves;
 
     // Not enough waves to benefit from splitting.
@@ -661,7 +664,12 @@ pub fn emit_partitioned_commands(ir: &GraphIR, schedule: &CompiledSchedule) -> V
         .iter()
         .enumerate()
         .skip(1)
-        .map(|(idx, w)| (idx, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
+        .map(|(idx, w)| {
+            (
+                idx,
+                w.barriers_before.buffers.len() + w.barriers_before.textures.len(),
+            )
+        })
         .max_by_key(|&(_, cost)| cost)
         .unwrap(); // safe: waves.len() >= 3
 
@@ -2120,9 +2128,24 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
-                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
-                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
+                node(
+                    "B",
+                    2,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "C",
+                    3,
+                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "D",
+                    4,
+                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
+                    1,
+                ),
             ],
         };
         let parts = partitions(&ir);
@@ -2165,16 +2188,58 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 write_node("upload", buf(0), 0),
-                node("coarse_a", 10, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
-                node("coarse_b", 11, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
-                node("coarse_c", 12, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read), (buf(3), NodeAccess::Write)], 1),
-                node("fine_a",   20, vec![(buf(3), NodeAccess::Read), (buf(4), NodeAccess::Write)], 1),
-                node("fine_b",   21, vec![(buf(3), NodeAccess::Read), (buf(5), NodeAccess::Write)], 1),
-                node("composite",22, vec![(buf(4), NodeAccess::Read), (buf(5), NodeAccess::Read), (buf(6), NodeAccess::Write)], 1),
+                node(
+                    "coarse_a",
+                    10,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "coarse_b",
+                    11,
+                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "coarse_c",
+                    12,
+                    vec![
+                        (buf(1), NodeAccess::Read),
+                        (buf(2), NodeAccess::Read),
+                        (buf(3), NodeAccess::Write),
+                    ],
+                    1,
+                ),
+                node(
+                    "fine_a",
+                    20,
+                    vec![(buf(3), NodeAccess::Read), (buf(4), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "fine_b",
+                    21,
+                    vec![(buf(3), NodeAccess::Read), (buf(5), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "composite",
+                    22,
+                    vec![
+                        (buf(4), NodeAccess::Read),
+                        (buf(5), NodeAccess::Read),
+                        (buf(6), NodeAccess::Write),
+                    ],
+                    1,
+                ),
             ],
         };
         let parts = partitions(&ir);
-        assert_eq!(parts.len(), 2, "coarse/fine graph must produce two partitions");
+        assert_eq!(
+            parts.len(),
+            2,
+            "coarse/fine graph must produce two partitions"
+        );
 
         // Second partition must begin with a ResourceBarrier.
         assert!(
@@ -2198,7 +2263,9 @@ mod tests {
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 1, "all-independent graph must not be split");
         // No barrier anywhere.
-        let has_barrier = parts[0].iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. }));
+        let has_barrier = parts[0]
+            .iter()
+            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. }));
         assert!(!has_barrier);
     }
 
@@ -2210,9 +2277,24 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
-                node("C", 3, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
-                node("D", 4, vec![(buf(2), NodeAccess::Read), (buf(3), NodeAccess::Write)], 1),
+                node(
+                    "B",
+                    2,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "C",
+                    3,
+                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "D",
+                    4,
+                    vec![(buf(2), NodeAccess::Read), (buf(3), NodeAccess::Write)],
+                    1,
+                ),
                 node("E", 5, vec![(buf(3), NodeAccess::Read)], 1),
             ],
         };

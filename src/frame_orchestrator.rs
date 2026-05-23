@@ -291,7 +291,10 @@ impl<T> FrameOrchestrator<T> {
     /// - **All other strategies**: always [`Device::submit_pipelined`].  Retention would be
     ///   unsafe at pipeline depth > 1 because the same CB can still be in-flight from the
     ///   previous frame when a new submission begins.
-    fn submit_with_retention(&mut self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
+    fn submit_with_retention(
+        &mut self,
+        graph: &mut TaskGraph,
+    ) -> Result<TimelineValue, GoldyError> {
         if self.strategy != FrameStrategy::LowLatency {
             return self.device.submit_pipelined(graph);
         }

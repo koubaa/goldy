@@ -248,7 +248,7 @@ impl Frame {
             } else {
                 // Transient textures only — lower the IR and compile partitioned.
                 let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
-                TaskGraph::compile_ir_to_partitioned_gpu_commands(&resolved_ir)
+                graph.compile_resolved_to_partitioned_commands(&resolved_ir)
             };
 
             // Stash textures so they survive until do_present defers them via VramAllocator.
@@ -300,7 +300,7 @@ impl Frame {
     /// `do_present` stamps all pending regions via `stamp_all_pending`.
     fn resolve_and_compile_transient_buffers(
         &self,
-        graph: &TaskGraph,
+        graph: &mut TaskGraph,
         tex_handles: HashMap<u32, crate::backend::TextureHandle>,
     ) -> Result<Vec<Vec<crate::backend::GpuCommand>>> {
         use crate::buffer::BufferView;
@@ -371,7 +371,7 @@ impl Frame {
             resolved_ir = TaskGraph::lower_transient_textures(&resolved_ir, &tex_handles)?;
         }
 
-        let partitions = TaskGraph::compile_ir_to_partitioned_gpu_commands(&resolved_ir);
+        let partitions = graph.compile_resolved_to_partitioned_commands(&resolved_ir);
 
         // Defer views via keepalive so they outlive the GPU work.
         // do_present drains keepalive via device.defer_release(tv, ...).
