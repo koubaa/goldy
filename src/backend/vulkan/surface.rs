@@ -404,11 +404,10 @@ pub(super) fn destroy(
                             .device
                             .free_command_buffers(logical_device.command_pool, &deferred_cbs);
                     }
-                    if !pending_tex_staging.is_empty() {
-                        super::texture::destroy_texture_staging_list(
-                            logical_device,
-                            pending_tex_staging,
-                        );
+                    // Orphaned pending entries were never submitted; device is
+                    // idle after device_wait_idle above, so destroy directly.
+                    for entry in pending_tex_staging {
+                        entry.destroy(logical_device);
                     }
                 }
 
@@ -559,9 +558,13 @@ pub(super) fn acquire(
             std::mem::take(&mut surface_state.frame_sync[cf].pending_compute_texture_staging);
         let _ = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
         if !orphaned_tex_staging.is_empty() {
+            // These entries were never submitted; device is idle (frame fence
+            // waited above), so destroy them directly rather than pooling.
             let _sz = crate::tracy_zone!("vk.surface.acquire.destroy_orphan_staging");
             if let Some(ld) = state.devices.get(&device_handle) {
-                super::texture::destroy_texture_staging_list(ld, orphaned_tex_staging);
+                for entry in orphaned_tex_staging {
+                    unsafe { entry.destroy(ld) };
+                }
             }
         }
     }
@@ -1375,10 +1378,10 @@ pub(super) fn present(
                 .finish(signal_timeline_value);
         }
         if !pending_tex_upload_staging.is_empty() {
-            state.compute_texture_staging_pool.insert(
-                (device_handle, signal_timeline_value),
-                pending_tex_upload_staging,
-            );
+            state.texture_staging_pools
+                .entry(device_handle)
+                .or_insert_with(super::staging::TextureStagingPool::new)
+                .release(signal_timeline_value, pending_tex_upload_staging);
         }
 
         for cb in &deferred {

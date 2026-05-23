@@ -215,14 +215,9 @@ fn reap_signaled_fences(state: &mut super::types::VulkanState) {
                     logical_device.device.destroy_fence(fence, None);
                 }
             }
-            if let Some(staging) = state
-                .compute_texture_staging_pool
-                .remove(&(device_handle, token))
-            {
-                if let Some(logical_device) = state.devices.get(&device_handle) {
-                    super::texture::destroy_texture_staging_list(logical_device, staging);
-                }
-            }
+            // Texture staging for fence-pool submissions is pooled via
+            // TextureStagingPool::release with the fence token as the timeline value;
+            // reclaim happens in the next submit cycle once the pool sees completion.
         }
     }
 }
@@ -339,7 +334,11 @@ pub(super) fn submit(
     // For timeline-keyed staging chunks (standalone-submit path) we also need the
     // current device timeline counter so `reclaim` knows which chunks are safe to
     // recycle without reaching into `compute_fence_pool`.
-    if has_write_buffer {
+    let has_write_texture = commands
+        .iter()
+        .any(|c| matches!(c, GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }));
+
+    if has_write_buffer || has_write_texture {
         let _rz = tracy_zone!("vk.submit.belt_reclaim");
         let completed_timeline = state
             .devices
@@ -351,14 +350,22 @@ pub(super) fn submit(
             })
             .unwrap_or(0);
 
-        for belt in state.staging_belts.values_mut() {
-            belt.reclaim(
-                &state.compute_fence_pool,
-                &state.devices,
-                completed_timeline,
-            )?;
+        if has_write_buffer {
+            for belt in state.staging_belts.values_mut() {
+                belt.reclaim(
+                    &state.compute_fence_pool,
+                    &state.devices,
+                    completed_timeline,
+                )?;
+            }
+            reap_signaled_fences(state);
         }
-        reap_signaled_fences(state);
+
+        if has_write_texture {
+            if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
+                pool.reclaim(completed_timeline);
+            }
+        }
     }
 
     // Belt slices for DEVICE_LOCAL WriteBuffer copies (same iteration order as command loop).
@@ -453,6 +460,13 @@ pub(super) fn submit(
     let buffers = &state.buffers;
 
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
+    if has_write_texture {
+        // Ensure a pool exists for this device before the upload loop so we can
+        // hold a mutable reference to just the pool while borrowing other fields.
+        state.texture_staging_pools
+            .entry(device_handle)
+            .or_insert_with(staging::TextureStagingPool::new);
+    }
     for command in commands {
         match command {
             GpuCommand::WriteTexture {
@@ -461,10 +475,12 @@ pub(super) fn submit(
                 width,
                 height,
             } => {
+                let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
                     &state.textures,
+                    pool,
                     *texture,
                     data,
                     0,
@@ -481,10 +497,12 @@ pub(super) fn submit(
                 height,
                 data,
             } => {
+                let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
                     &state.textures,
+                    pool,
                     *texture,
                     data,
                     *x,
@@ -1124,15 +1142,15 @@ pub(super) fn submit(
         let cf = surf.current_frame;
         surf.frame_sync[cf].deferred_compute_cbs.push(cmd);
         if !texture_upload_scratch.is_empty() {
-            let pooled: Vec<(vk::Buffer, vk::DeviceMemory)> = texture_upload_scratch
+            let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
                 .into_iter()
-                .map(|s| (s.buffer, s.memory))
+                .map(|s| s.entry)
                 .collect();
             surf.frame_sync[cf]
                 .pending_compute_texture_staging
-                .extend(pooled);
+                .extend(entries);
         }
-        // Staging belt `finish` and compute_texture_staging_pool insert happen in
+        // Staging belt `finish` and texture_staging_pools release happen in
         // `surface::present` once the timeline signal value for this batch is known.
         return Ok(0);
     }
@@ -1197,13 +1215,14 @@ pub(super) fn submit(
         .push((device_handle, cmd));
 
     if !texture_upload_scratch.is_empty() {
-        let pooled: Vec<(vk::Buffer, vk::DeviceMemory)> = texture_upload_scratch
+        let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
             .into_iter()
-            .map(|s| (s.buffer, s.memory))
+            .map(|s| s.entry)
             .collect();
-        state
-            .compute_texture_staging_pool
-            .insert((device_handle, signal_value), pooled);
+        state.texture_staging_pools
+            .entry(device_handle)
+            .or_insert_with(staging::TextureStagingPool::new)
+            .release(signal_value, entries);
     }
 
     state
@@ -1290,6 +1309,15 @@ fn submit_graph_impl(
             )
         )
     });
+    let has_write_texture_graph = commands.iter().any(|c| {
+        matches!(
+            c,
+            GraphCommand::Compute(
+                GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }
+            )
+        )
+    });
+
     if has_upload {
         let _rz = tracy_zone!("vk.submit_graph.belt_reclaim");
         let completed_timeline = state
@@ -1310,6 +1338,18 @@ fn submit_graph_impl(
             )?;
         }
         reap_signaled_fences(state);
+
+        if has_write_texture_graph {
+            if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
+                pool.reclaim(completed_timeline);
+            }
+        }
+    }
+
+    if has_write_texture_graph {
+        state.texture_staging_pools
+            .entry(device_handle)
+            .or_insert_with(staging::TextureStagingPool::new);
     }
 
     // --- Pre-pass: stage CPU data for WriteBuffer in compute segments ---
@@ -1376,11 +1416,14 @@ fn submit_graph_impl(
                         width,
                         height,
                     } => {
+                        let pool =
+                            state.texture_staging_pools.get_mut(&device_handle).unwrap();
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
                                 &state.devices,
                                 &state.textures,
+                                pool,
                                 *texture,
                                 data,
                                 0,
@@ -1398,11 +1441,14 @@ fn submit_graph_impl(
                         height,
                         data,
                     } => {
+                        let pool =
+                            state.texture_staging_pools.get_mut(&device_handle).unwrap();
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
                                 &state.devices,
                                 &state.textures,
+                                pool,
                                 *texture,
                                 data,
                                 *x,
@@ -2156,13 +2202,14 @@ fn submit_graph_impl(
     }
 
     if !texture_upload_scratch.is_empty() {
-        let pooled: Vec<(vk::Buffer, vk::DeviceMemory)> = texture_upload_scratch
+        let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
             .into_iter()
-            .map(|s| (s.buffer, s.memory))
+            .map(|s| s.entry)
             .collect();
-        state
-            .compute_texture_staging_pool
-            .insert((device_handle, signal_value), pooled);
+        state.texture_staging_pools
+            .entry(device_handle)
+            .or_insert_with(staging::TextureStagingPool::new)
+            .release(signal_value, entries);
     }
 
     state
@@ -2352,15 +2399,9 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
                 }
             }
         }
-        if let Some(staging) = state
-            .compute_texture_staging_pool
-            .remove(&(device_handle, k))
-        {
-            let _tz = crate::tracy_zone!("vk.reap_timeline.destroy_staging");
-            if let Some(ld) = state.devices.get(&device_handle) {
-                super::texture::destroy_texture_staging_list(ld, staging);
-            }
-        }
+        // Texture staging is now pooled; reclaim happens at the next submit
+        // when `completed_timeline` is read from the semaphore. No per-key
+        // destroy needed here.
     }
 
     if n <= keys_buf.len() {

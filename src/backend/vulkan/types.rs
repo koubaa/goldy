@@ -565,10 +565,11 @@ pub(crate) struct FrameSync {
     /// Compute command buffers recorded in [`GpuBackend::end_frame`](crate::backend::GpuBackend::end_frame) and submitted
     /// with the present-barrier batch in [`super::surface::present`].
     pub deferred_compute_cbs: Vec<vk::CommandBuffer>,
-    /// Texture upload staging for `deferred_compute_cbs`, merged into
-    /// [`VulkanState::compute_texture_staging_pool`] under the frame's timeline
-    /// signal value at present time.
-    pub pending_compute_texture_staging: Vec<(vk::Buffer, vk::DeviceMemory)>,
+    /// Texture upload staging entries for `deferred_compute_cbs`, released into
+    /// the per-device `TextureStagingPool` under the frame's timeline signal value
+    /// at present time.
+    pub pending_compute_texture_staging:
+        Vec<crate::backend::vulkan::staging::TextureStagingEntry>,
     /// Surface texture handle whose VkImageView + bindless descriptor must stay
     /// alive until the GPU finishes this frame slot's work.  Unregistered in
     /// `acquire()` after `in_flight_fence` has been waited on.
@@ -898,11 +899,11 @@ pub(super) struct VulkanState {
     /// Per-submission fences for non-blocking compute; token -> (device, `VkFence`, `Option<VkCommandBuffer>`).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
     pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
-    /// Texture upload staging (VkBuffer/VkDeviceMemory) freed when the matching compute fence
-    /// or timeline reap runs. Keyed by `(device, timeline_or_fence_token)` so teardown can drain
-    /// per device and values from different devices never collide.
-    pub compute_texture_staging_pool:
-        HashMap<(DeviceHandle, u64), Vec<(vk::Buffer, vk::DeviceMemory)>>,
+    /// Per-device pools that recycle texture-upload staging buffers across frames.
+    /// Entries are released with a GPU timeline value and reclaimed once that
+    /// timeline completes, avoiding per-frame vkAllocateMemory / vkFreeMemory.
+    pub texture_staging_pools:
+        HashMap<DeviceHandle, crate::backend::vulkan::staging::TextureStagingPool>,
     /// Per-device staging belts for batched WriteBuffer uploads.
     pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
     /// Command buffers to free once the device timeline reaches the given value

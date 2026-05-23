@@ -177,6 +177,10 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
 }
 
 /// Wave index for each task node (same order as [`GraphIR::nodes`]).
+///
+/// Recomputes the full schedule from the IR. Prefer [`node_to_wave_map`] when
+/// a [`CompiledSchedule`] is already available to avoid redundant scheduling.
+#[cfg(test)]
 pub(crate) fn graph_node_waves(ir: &GraphIR) -> Result<Vec<u32>> {
     let n = ir.nodes.len();
     if n == 0 {
@@ -184,36 +188,43 @@ pub(crate) fn graph_node_waves(ir: &GraphIR) -> Result<Vec<u32>> {
     }
     let edges = build_edges(ir);
     let schedule = schedule_waves(ir, &edges);
-    let mut node_to_wave: Vec<Option<u32>> = vec![None; n];
+    Ok(node_to_wave_map(&schedule, n))
+}
+
+/// Derive the node-to-wave assignment from an already-computed [`CompiledSchedule`].
+///
+/// This is O(N) and avoids the full `build_edges` + `schedule_waves` pass that
+/// [`graph_node_waves`] performs. Use this whenever a `CompiledSchedule` is
+/// already in hand (e.g. from `TaskGraph::schedule_and_split_wave`).
+pub(crate) fn node_to_wave_map(schedule: &CompiledSchedule, n: usize) -> Vec<u32> {
+    let mut map = vec![0u32; n];
     for (w, wave) in schedule.waves.iter().enumerate() {
-        let w = u32::try_from(w).map_err(|_| anyhow::anyhow!("wave index overflow"))?;
         for &ni in &wave.node_indices {
-            node_to_wave[ni] = Some(w);
+            map[ni] = w as u32;
         }
     }
-    for (i, slot) in node_to_wave.iter().enumerate() {
-        if slot.is_none() {
-            anyhow::bail!("internal: task node {} was not assigned a wave", i);
-        }
-    }
-    Ok(node_to_wave.into_iter().map(|x| x.unwrap()).collect())
+    map
 }
 
 /// For each [`ResourceId::TransientBuffer`](super::ResourceId), the inclusive
 /// range of wave indices where that transient appears in node bindings.
 ///
+/// `node_waves[i]` is the wave index of IR node `i`. Use [`node_to_wave_map`]
+/// to derive this from a [`CompiledSchedule`] without re-running the scheduler.
+///
 /// Used to pack transient heap allocations: non-overlapping wave intervals may
 /// alias the same memory.
-pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
-    let n = ir.nodes.len();
-    if n == 0 {
+pub(crate) fn transient_wave_intervals(
+    ir: &GraphIR,
+    node_waves: &[u32],
+) -> Result<HashMap<u32, (u32, u32)>> {
+    if ir.nodes.is_empty() {
         return Ok(HashMap::new());
     }
-    let waves = graph_node_waves(ir)?;
     let mut first: HashMap<u32, u32> = HashMap::new();
     let mut last: HashMap<u32, u32> = HashMap::new();
     for (ni, node) in ir.nodes.iter().enumerate() {
-        let w = waves[ni];
+        let w = node_waves[ni];
         for b in &node.bindings {
             if let ResourceId::TransientBuffer(tid) = b.resource {
                 let id = tid.0;
@@ -234,16 +245,20 @@ pub(crate) fn transient_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32
 }
 
 /// For each [`ResourceId::TransientTexture`](super::ResourceId), inclusive wave range.
-pub(crate) fn transient_texture_wave_intervals(ir: &GraphIR) -> Result<HashMap<u32, (u32, u32)>> {
-    let n = ir.nodes.len();
-    if n == 0 {
+///
+/// `node_waves[i]` is the wave index of IR node `i`. Use [`node_to_wave_map`]
+/// to derive this from a [`CompiledSchedule`] without re-running the scheduler.
+pub(crate) fn transient_texture_wave_intervals(
+    ir: &GraphIR,
+    node_waves: &[u32],
+) -> Result<HashMap<u32, (u32, u32)>> {
+    if ir.nodes.is_empty() {
         return Ok(HashMap::new());
     }
-    let waves = graph_node_waves(ir)?;
     let mut first: HashMap<u32, u32> = HashMap::new();
     let mut last: HashMap<u32, u32> = HashMap::new();
     for (ni, node) in ir.nodes.iter().enumerate() {
-        let w = waves[ni];
+        let w = node_waves[ni];
         for b in &node.bindings {
             if let ResourceId::TransientTexture(tid) = b.resource {
                 let id = tid.0;
@@ -2403,5 +2418,116 @@ mod tests {
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], flat_commands(&ir));
+    }
+
+    // ── node_to_wave_map / transient interval tests ─────────────────────────
+
+    fn transient_buf(id: u32) -> ResourceId {
+        ResourceId::TransientBuffer(super::super::TransientId(id))
+    }
+
+    fn transient_tex(id: u32) -> ResourceId {
+        ResourceId::TransientTexture(super::super::TransientTextureId(id))
+    }
+
+    /// `node_to_wave_map` must produce the same mapping as `graph_node_waves`.
+    #[test]
+    fn node_to_wave_map_matches_graph_node_waves() {
+        // 3-wave diamond: A→(B,C)→D
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
+            ],
+        };
+
+        let old_map = graph_node_waves(&ir).unwrap();
+
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let new_map = node_to_wave_map(&schedule, ir.nodes.len());
+
+        assert_eq!(old_map, new_map, "node_to_wave_map must equal graph_node_waves");
+        // Sanity: wave 0 is A, wave 1 is B and C, wave 2 is D
+        assert_eq!(new_map[0], 0);
+        assert_eq!(new_map[1], 1);
+        assert_eq!(new_map[2], 1);
+        assert_eq!(new_map[3], 2);
+    }
+
+    /// `transient_wave_intervals` with pre-computed map must equal the result
+    /// from the old path that re-ran the full scheduler internally.
+    #[test]
+    fn transient_wave_intervals_via_precomputed_map() {
+        // A writes transient 0, B reads transient 0 and writes transient 1, C reads transient 1.
+        // Expected intervals: t0 = [0,1], t1 = [1,2]
+        let ir = GraphIR {
+            nodes: vec![
+                node(
+                    "A",
+                    1,
+                    vec![(transient_buf(0), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "B",
+                    2,
+                    vec![
+                        (transient_buf(0), NodeAccess::Read),
+                        (transient_buf(1), NodeAccess::Write),
+                    ],
+                    1,
+                ),
+                node(
+                    "C",
+                    3,
+                    vec![(transient_buf(1), NodeAccess::Read)],
+                    1,
+                ),
+            ],
+        };
+
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let node_waves = node_to_wave_map(&schedule, ir.nodes.len());
+
+        let intervals = transient_wave_intervals(&ir, &node_waves).unwrap();
+        assert_eq!(intervals[&0], (0, 1), "transient 0: waves 0..1");
+        assert_eq!(intervals[&1], (1, 2), "transient 1: waves 1..2");
+    }
+
+    /// `transient_texture_wave_intervals` with pre-computed map produces correct ranges.
+    #[test]
+    fn transient_texture_wave_intervals_via_precomputed_map() {
+        // Upload transient texture 0, read it in wave 1, use transient texture 1 in wave 2.
+        let ir = GraphIR {
+            nodes: vec![
+                node("upload", 1, vec![(transient_tex(0), NodeAccess::Write)], 1),
+                node("read0",  2, vec![(transient_tex(0), NodeAccess::Read), (transient_tex(1), NodeAccess::Write)], 1),
+                node("read1",  3, vec![(transient_tex(1), NodeAccess::Read)], 1),
+            ],
+        };
+
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let node_waves = node_to_wave_map(&schedule, ir.nodes.len());
+
+        let intervals = transient_texture_wave_intervals(&ir, &node_waves).unwrap();
+        assert_eq!(intervals[&0], (0, 1));
+        assert_eq!(intervals[&1], (1, 2));
+    }
+
+    /// Empty graph returns empty results without panicking.
+    #[test]
+    fn node_to_wave_map_empty_graph() {
+        let ir = GraphIR { nodes: vec![] };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let map = node_to_wave_map(&schedule, 0);
+        assert!(map.is_empty());
+        let intervals = transient_wave_intervals(&ir, &map).unwrap();
+        assert!(intervals.is_empty());
     }
 }

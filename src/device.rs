@@ -842,10 +842,17 @@ impl Device {
     ) -> Result<TimelineValue> {
         use crate::task_graph::{ResolvedTransientBuffer, ResolvedTransientTexture, SlotResolver};
 
+        // Compute the schedule once; derive node_waves from it so the
+        // transient layout and texture resolution paths don't re-run
+        // build_edges + schedule_waves.
+        let (schedule, _) = graph.schedule_and_split_wave();
+        let node_waves =
+            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
+
         let has_buffers = graph.has_transient_buffers();
 
         let (alloc_size, base_align, layout_opt) = if has_buffers {
-            let (ts, ba, lay) = graph.transient_heap_size_and_layout()?;
+            let (ts, ba, lay) = graph.transient_heap_size_and_layout(&node_waves)?;
             let sz = (ts + ba - 1).max(256);
             (sz, ba, Some(lay))
         } else {
@@ -871,7 +878,7 @@ impl Device {
         // ── Build the SlotResolver ───────────────────────────────────────────
         let mut resolver = SlotResolver::new();
 
-        let tex_handles = graph.resolve_transient_textures_with_heap(self, heap)?;
+        let tex_handles = graph.resolve_transient_textures_with_heap(self, heap, &node_waves)?;
         for (id, handle) in &tex_handles {
             resolver.textures.insert(*id, ResolvedTransientTexture { handle: *handle });
         }

@@ -215,17 +215,35 @@ impl Surface {
         }
 
         // ── Step 1: schedule + swapchain split wave ──────────────────────────
-        let (schedule, split_wave) = graph.schedule_and_split_wave();
+        let (schedule, split_wave) = {
+            let _tz = tracy_zone!("surface.submit_graph.schedule");
+            graph.schedule_and_split_wave()
+        };
+
+        // Derive the node-to-wave map once from the cached schedule. This is
+        // O(N) and is reused by transient_heap_size_and_layout and
+        // resolve_transient_textures_with_heap, avoiding two redundant
+        // build_edges + schedule_waves passes per frame.
+        let node_waves = {
+            let _tz = tracy_zone!("surface.submit_graph.node_to_wave_map");
+            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len())
+        };
 
         // ── Step 2: build the transient SlotResolver ─────────────────────────
-        let resolver = self.build_resolver_for_submit_graph(graph)?;
+        let resolver = {
+            let _tz = tracy_zone!("surface.submit_graph.build_resolver");
+            self.build_resolver_for_submit_graph(graph, &node_waves)?
+        };
 
         // ── Step 3: emit early commands from the original IR + resolver ──────
-        let early_cmds = crate::task_graph::analysis::emit_waves_to_commands(
-            graph.ir(),
-            &schedule.waves[..split_wave],
-            resolver.as_ref(),
-        );
+        let early_cmds = {
+            let _tz = tracy_zone!("surface.submit_graph.emit_early");
+            crate::task_graph::analysis::emit_waves_to_commands(
+                graph.ir(),
+                &schedule.waves[..split_wave],
+                resolver.as_ref(),
+            )
+        };
 
         // ── Step 4: submit early commands ────────────────────────────────────
         if !early_cmds.is_empty() {
@@ -278,6 +296,7 @@ impl Surface {
     fn build_resolver_for_submit_graph(
         &self,
         graph: &mut TaskGraph,
+        node_waves: &[u32],
     ) -> Result<Option<crate::task_graph::SlotResolver>> {
         use crate::device::Device;
         use crate::placement_heap::PlacementHeap;
@@ -291,7 +310,7 @@ impl Surface {
 
         // ── Compute layout (needed to know alloc_size for configure_pages) ─────
         let (alloc_size, base_align, layout_opt) = if graph.has_transient_buffers() {
-            let (ts, ba, lay) = graph.transient_heap_size_and_layout()?;
+            let (ts, ba, lay) = graph.transient_heap_size_and_layout(node_waves)?;
             let sz = (ts + ba - 1).max(256);
             (sz, ba, Some(lay))
         } else {
@@ -314,11 +333,15 @@ impl Surface {
         // ── texture resolution so caches are clean when textures are created)  ──
         let depth = Device::DEFAULT_PIPELINE_DEPTH as usize;
         if layout_opt.is_some() {
+            let _tz = tracy_zone!("surface.build_resolver.configure_pages");
             heap.configure_pages(alloc_size, depth, &self._device)?;
         }
 
         // ── Resolve transient textures ───────────────────────────────────────────
-        let tex_handles = graph.resolve_transient_textures_with_heap(&self._device, heap)?;
+        let tex_handles = {
+            let _tz = tracy_zone!("surface.build_resolver.resolve_textures");
+            graph.resolve_transient_textures_with_heap(&self._device, heap, node_waves)?
+        };
         for (id, handle) in &tex_handles {
             resolver.textures.insert(*id, ResolvedTransientTexture { handle: *handle });
         }
@@ -329,23 +352,29 @@ impl Surface {
         let layout = layout_opt.unwrap();
 
         // ── Get this frame's deterministic page offset ───────────────────────────
-        let raw_offset = heap.advance_page();
+        let raw_offset = {
+            let _tz = tracy_zone!("surface.build_resolver.advance_page");
+            heap.advance_page()
+        };
         let base_offset = raw_offset.div_ceil(base_align) * base_align;
 
         // ── Populate view cache and fill resolver ────────────────────────────────
         let buf_handle = heap.buffer().handle;
-        for spec in graph.transient_specs() {
-            let offset = base_offset + layout[&spec.id];
-            let view_stride = spec.stride.max(1);
-            let (uav, srv, _hit) =
-                heap.get_or_create_view(spec.id, offset, spec.size, view_stride, &self._device)?;
-            resolver.buffers.insert(spec.id, ResolvedTransientBuffer {
-                parent: buf_handle,
-                offset,
-                len: spec.size,
-                uav_index: uav,
-                srv_index: srv,
-            });
+        {
+            let _tz = tracy_zone!("surface.build_resolver.create_views");
+            for spec in graph.transient_specs() {
+                let offset = base_offset + layout[&spec.id];
+                let view_stride = spec.stride.max(1);
+                let (uav, srv, _hit) =
+                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, &self._device)?;
+                resolver.buffers.insert(spec.id, ResolvedTransientBuffer {
+                    parent: buf_handle,
+                    offset,
+                    len: spec.size,
+                    uav_index: uav,
+                    srv_index: srv,
+                });
+            }
         }
 
         Ok(Some(resolver))

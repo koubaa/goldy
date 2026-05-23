@@ -1133,9 +1133,12 @@ pub(super) fn transition_image_layout(
 }
 
 /// Host-visible staging for a batched texture upload (see compute submit path).
+///
+/// The `entry` is a pooled, permanently-mapped staging buffer. When the GPU
+/// copy completes, it is returned to the [`super::staging::TextureStagingPool`]
+/// for reuse rather than freed.
 pub(super) struct ComputeTextureScratch {
-    pub buffer: vk::Buffer,
-    pub memory: vk::DeviceMemory,
+    pub entry: super::staging::TextureStagingEntry,
     pub texture_handle: TextureHandle,
     pub x: u32,
     pub y: u32,
@@ -1143,13 +1146,19 @@ pub(super) struct ComputeTextureScratch {
     pub height: u32,
 }
 
-/// Allocate and CPU-fill staging for [`GpuCommand::WriteTexture`](crate::backend::GpuCommand::WriteTexture)
+/// Acquire a staging entry from `pool` and CPU-fill it for
+/// [`GpuCommand::WriteTexture`](crate::backend::GpuCommand::WriteTexture)
 /// / [`GpuCommand::WriteTextureRegion`](crate::backend::GpuCommand::WriteTextureRegion).
+///
+/// The acquired entry is permanently mapped; data is copied in directly.
+/// After the GPU copy, the entry should be returned to the pool via
+/// [`TextureStagingPool::release`](super::staging::TextureStagingPool::release).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn allocate_compute_texture_staging(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::LogicalDevice>,
     textures: &HashMap<TextureHandle, TextureState>,
+    pool: &mut super::staging::TextureStagingPool,
     texture_handle: TextureHandle,
     data: &[u8],
     x: u32,
@@ -1186,70 +1195,17 @@ pub(super) fn allocate_compute_texture_staging(
         .get(&device_handle)
         .context("Invalid device handle")?;
 
-    let physical_device = logical_device.physical_device;
-    let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-    let find_mem_type = |type_filter: u32, properties: vk::MemoryPropertyFlags| -> Option<u32> {
-        (0..mem_props.memory_type_count).find(|&i| {
-            (type_filter & (1 << i)) != 0
-                && (mem_props.memory_types[i as usize].property_flags & properties) == properties
-        })
-    };
-
     let buffer_size = data.len() as u64;
-    let staging_buffer_info = vk::BufferCreateInfo::default()
-        .size(buffer_size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let entry = pool.acquire(instance, logical_device, buffer_size)
+        .context("compute texture staging: pool acquire")?;
 
-    let staging_buffer = unsafe {
-        logical_device
-            .device
-            .create_buffer(&staging_buffer_info, None)
-    }
-    .context("compute texture staging: create_buffer")?;
-
-    let staging_mem_reqs = unsafe {
-        logical_device
-            .device
-            .get_buffer_memory_requirements(staging_buffer)
-    };
-    let staging_memory_type = find_mem_type(
-        staging_mem_reqs.memory_type_bits,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    )
-    .context("compute texture staging: memory type")?;
-
-    let staging_alloc_info = vk::MemoryAllocateInfo::default()
-        .allocation_size(staging_mem_reqs.size)
-        .memory_type_index(staging_memory_type);
-
-    let staging_memory = unsafe {
-        logical_device
-            .device
-            .allocate_memory(&staging_alloc_info, None)
-    }
-    .context("compute texture staging: allocate_memory")?;
-
+    // Copy data into the permanently-mapped entry.
     unsafe {
-        logical_device
-            .device
-            .bind_buffer_memory(staging_buffer, staging_memory, 0)
-    }
-    .context("compute texture staging: bind_buffer_memory")?;
-
-    unsafe {
-        let ptr = logical_device
-            .map_memory2(staging_memory, 0, buffer_size)
-            .context("compute texture staging: map")?;
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-        logical_device
-            .unmap_memory2(staging_memory)
-            .context("compute texture staging: unmap")?;
+        std::ptr::copy_nonoverlapping(data.as_ptr(), entry.mapped_ptr(), data.len());
     }
 
     Ok(ComputeTextureScratch {
-        buffer: staging_buffer,
-        memory: staging_memory,
+        entry,
         texture_handle,
         x,
         y,
@@ -1354,7 +1310,7 @@ pub(super) fn record_compute_texture_upload(
     unsafe {
         logical_device.device.cmd_copy_buffer_to_image(
             cmd,
-            scratch.buffer,
+            scratch.entry.buffer,
             image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             std::slice::from_ref(&region),
@@ -1391,17 +1347,6 @@ pub(super) fn record_compute_texture_upload(
     Ok(())
 }
 
-pub(super) fn destroy_texture_staging_list(
-    logical_device: &types::LogicalDevice,
-    items: Vec<(vk::Buffer, vk::DeviceMemory)>,
-) {
-    for (buf, mem) in items {
-        unsafe {
-            logical_device.device.destroy_buffer(buf, None);
-            logical_device.device.free_memory(mem, None);
-        }
-    }
-}
 
 /// Get the bindless descriptor index for a texture, if any.
 pub(super) fn bindless_index(

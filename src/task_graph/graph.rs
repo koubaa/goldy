@@ -335,8 +335,11 @@ impl TaskGraph {
     /// the layout is placed at a non-zero base offset (e.g. inside a ring
     /// buffer), that base must be a multiple of this value so that every
     /// internal offset remains stride-aligned for its buffer view descriptor.
-    pub(crate) fn transient_heap_size_and_layout(&self) -> Result<(u64, u64, HashMap<u32, u64>)> {
-        Self::transient_heap_layout(&self.transient_specs, &self.ir)
+    pub(crate) fn transient_heap_size_and_layout(
+        &self,
+        node_waves: &[u32],
+    ) -> Result<(u64, u64, HashMap<u32, u64>)> {
+        Self::transient_heap_layout(&self.transient_specs, &self.ir, node_waves)
     }
 
     pub(crate) fn submit_with_backend(
@@ -459,12 +462,13 @@ impl TaskGraph {
     fn transient_heap_layout(
         specs: &[TransientBufferSpec],
         ir: &GraphIR,
+        node_waves: &[u32],
     ) -> Result<(u64, u64, HashMap<u32, u64>)> {
         if specs.is_empty() {
             return Ok((0, 256, HashMap::new()));
         }
 
-        let intervals = analysis::transient_wave_intervals(ir)?;
+        let intervals = analysis::transient_wave_intervals(ir, node_waves)?;
         for s in specs {
             if !intervals.contains_key(&s.id) {
                 anyhow::bail!(
@@ -612,11 +616,12 @@ impl TaskGraph {
         &self,
         device: &Device,
         heap: &mut crate::placement_heap::PlacementHeap,
+        node_waves: &[u32],
     ) -> Result<HashMap<u32, TextureHandle>> {
         if self.transient_texture_specs.is_empty() {
             return Ok(HashMap::new());
         }
-        let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
+        let intervals = analysis::transient_texture_wave_intervals(&self.ir, node_waves)?;
         for s in &self.transient_texture_specs {
             if !intervals.contains_key(&s.id) {
                 anyhow::bail!(
@@ -1782,7 +1787,10 @@ mod tests {
             .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
-        let (total, _, layout) = graph.transient_heap_size_and_layout().unwrap();
+        let (schedule, _) = graph.schedule_and_split_wave();
+        let node_waves =
+            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
+        let (total, _, layout) = graph.transient_heap_size_and_layout(&node_waves).unwrap();
         assert_eq!(
             total, 256,
             "sequential transients should pack into one 256-byte slot"
@@ -1811,7 +1819,10 @@ mod tests {
             .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
 
-        let (total, _, layout) = graph.transient_heap_size_and_layout().unwrap();
+        let (schedule, _) = graph.schedule_and_split_wave();
+        let node_waves =
+            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
+        let (total, _, layout) = graph.transient_heap_size_and_layout(&node_waves).unwrap();
         assert!(
             total >= 512,
             "concurrent transients need disjoint heap regions, got {}",
