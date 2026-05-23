@@ -218,8 +218,8 @@ impl Surface {
         }
 
         // ── Step 1: resolve transient resources into a concrete IR ──────────
-        // keepalive vecs are local; they're moved into frame.keepalive after begin().
-        let (resolved_ir, buf_views, tex_keepalive) = self.resolve_ir_for_submit_graph(graph)?;
+        // Transient views and textures are now owned by the PlacementHeap across frames.
+        let resolved_ir = self.resolve_ir_for_submit_graph(graph)?;
 
         // ── Step 2: get schedule + swapchain split wave ──────────────────────
         // Schedule is keyed on self.ir (pre-lowering fingerprint) and cached.
@@ -245,16 +245,9 @@ impl Surface {
             self.begin()?
         };
 
-        // ── Step 6: stash keepalives into frame ──────────────────────────────
-        {
-            let mut kv = frame.keepalive.lock().unwrap();
-            for view in buf_views {
-                kv.push(view);
-            }
-            for tex in tex_keepalive {
-                kv.push(tex);
-            }
-        }
+        // ── Step 6: Transient views and textures are owned by PlacementHeap. ───
+        // No keepalive push needed — the heap holds BufferViews and Textures until
+        // they are evicted or invalidated. Ring stamping happens in Frame::do_present.
 
         // ── Step 7: lower SwapchainOutput and emit final partition ───────────
         let swapchain_tex = frame.texture();
@@ -279,37 +272,37 @@ impl Surface {
         Ok(frame)
     }
 
-    /// Resolve transient resources in `graph` into a concrete [`GraphIR`],
-    /// returning the IR plus local keepalive collections.
+    /// Resolve transient resources in `graph` into a concrete [`GraphIR`].
+    ///
+    /// Transient `BufferView`s and `Texture`s are owned by the device's
+    /// [`PlacementHeap`] across frames (stable slot ID cache). No keepalive
+    /// collections are returned; the heap manages lifetimes directly.
     ///
     /// The IR still contains `ResourceId::SwapchainOutput`; that is lowered
     /// separately after `surface.begin()` in [`submit_graph`].
     fn resolve_ir_for_submit_graph(
         &self,
         graph: &mut TaskGraph,
-    ) -> Result<(
-        crate::task_graph::GraphIR,
-        Vec<crate::buffer::BufferView>,
-        Vec<crate::texture::Texture>,
-    )> {
-        use crate::buffer::BufferView;
+    ) -> Result<crate::task_graph::GraphIR> {
         use crate::placement_heap::PlacementHeap;
         use crate::task_graph::TaskGraph;
 
         if !graph.has_transient_resources() {
-            return Ok((graph.ir().clone(), Vec::new(), Vec::new()));
+            return Ok(graph.ir().clone());
         }
 
-        let (tex_keepalive, tex_handles) = graph.allocate_transient_textures(&self._device)?;
-
-        if !graph.has_transient_buffers() {
-            let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
-            return Ok((resolved_ir, Vec::new(), tex_keepalive));
-        }
-
-        // Placement heap resolution for transient buffers.
-        let (total_size, base_align, layout) = graph.transient_heap_size_and_layout()?;
-        let alloc_size = (total_size + base_align - 1).max(256);
+        // ── Initialise / reclaim the placement heap ──────────────────────────
+        let (total_size, base_align, layout) = if graph.has_transient_buffers() {
+            let (ts, ba, lay) = graph.transient_heap_size_and_layout()?;
+            (ts, ba, Some(lay))
+        } else {
+            (0, 1, None)
+        };
+        let alloc_size = if layout.is_some() {
+            (total_size + base_align - 1).max(256)
+        } else {
+            0
+        };
 
         let mut heap_guard = self._device.inner.placement_heap.lock().unwrap();
         if heap_guard.is_none() {
@@ -321,6 +314,17 @@ impl Surface {
             );
         }
         let heap = heap_guard.as_mut().unwrap();
+
+        // ── Resolve transient textures via the heap's texture cache ──────────
+        let tex_handles = graph.resolve_transient_textures_with_heap(&self._device, heap)?;
+
+        if layout.is_none() {
+            // Texture-only path (no transient buffers).
+            let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
+            return Ok(resolved_ir);
+        }
+        let layout = layout.unwrap();
+
         let progress = self._device.gpu_progress();
         heap.reclaim(progress);
         let raw_offset = match heap.acquire(alloc_size) {
@@ -339,20 +343,19 @@ impl Surface {
             }
         };
         let base_offset = raw_offset.div_ceil(base_align) * base_align;
-        let buf = heap.buffer();
 
-        let mut buf_views: Vec<BufferView> = Vec::with_capacity(layout.len());
-        let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
+        // ── Resolve transient buffer views via the heap's view cache ─────────
+        let mut bindless_map: HashMap<u32, (u32, u32)> =
+            HashMap::with_capacity(graph.transient_specs().len());
         for spec in graph.transient_specs() {
             let offset = base_offset + layout[&spec.id];
             let view_stride = spec.stride.max(1);
-            let view = buf.create_view(offset, spec.size, Some(view_stride))?;
-            let uav = view.bindless_index().unwrap_or(u32::MAX);
-            let srv = view.bindless_srv_index().unwrap_or(uav);
+            let (uav, srv, _hit) =
+                heap.get_or_create_view(spec.id, offset, spec.size, view_stride, &self._device)?;
             bindless_map.insert(spec.id, (uav, srv));
-            buf_views.push(view);
         }
 
+        let buf = heap.buffer();
         let range_map = TaskGraph::transient_buffer_range_map_with_base(
             buf,
             &layout,
@@ -365,7 +368,7 @@ impl Surface {
             resolved_ir = TaskGraph::lower_transient_textures(&resolved_ir, &tex_handles)?;
         }
 
-        Ok((resolved_ir, buf_views, tex_keepalive))
+        Ok(resolved_ir)
     }
 
     pub fn validate_pipeline_format(&self, pipeline_format: TextureFormat) -> Result<()> {

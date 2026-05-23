@@ -20,7 +20,7 @@ use crate::error::GoldyError;
 use crate::render_target::RenderTarget;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
+use crate::types::TextureFormat;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -158,6 +158,13 @@ pub struct TaskGraph {
     next_transient_id: u32,
     pub(crate) transient_texture_specs: Vec<TransientTextureSpec>,
     next_transient_texture_id: u32,
+    /// Previous frame's transient buffer spec snapshot for declaration-order stability
+    /// telemetry. Updated in [`Self::clear`].
+    #[cfg(debug_assertions)]
+    prev_transient_shapes: Vec<(u64, u32)>,
+    /// Previous frame's transient texture spec snapshot.
+    #[cfg(debug_assertions)]
+    prev_transient_texture_keys: Vec<TransientTextureKey>,
     /// Cached schedule + emitted command list, keyed on binding fingerprint.
     ///
     /// The fingerprint is a hash of the graph's binding structure (node count + per-node
@@ -204,6 +211,10 @@ impl TaskGraph {
             next_transient_texture_id: 0,
             schedule_cache: None,
             schedule_validated_node_count: 0,
+            #[cfg(debug_assertions)]
+            prev_transient_shapes: Vec::new(),
+            #[cfg(debug_assertions)]
+            prev_transient_texture_keys: Vec::new(),
         }
     }
 
@@ -223,9 +234,38 @@ impl TaskGraph {
     /// Like [`Self::transient_buffer`] but with an explicit element stride for the
     /// structured buffer descriptor. The stride is forwarded to
     /// [`crate::Buffer::create_view`] when the transient is materialised.
+    ///
+    /// ## Stable slot identity contract
+    ///
+    /// The returned [`TransientId`] encodes only the declaration order within this
+    /// recording phase (0, 1, 2, …). [`Self::clear`] resets the counter to 0, so the
+    /// **N-th call** to any `transient_buffer*` method in the next frame produces
+    /// `TransientId(N)`. The [`crate::placement_heap::PlacementHeap`] view cache relies
+    /// on this: it keys cached `BufferView` objects on `(slot_id, shape, placement)`,
+    /// where `slot_id == N`.
+    ///
+    /// **Recordings must be deterministic in steady state.** If the declaration order
+    /// is data-dependent, slots that diverge will always be cache misses. Debug builds
+    /// emit a `tracing::debug!` warning when a slot's shape changes between frames.
     pub fn transient_buffer_with_stride(&mut self, size: u64, stride: u32) -> TransientId {
         let id = self.next_transient_id;
         self.next_transient_id += 1;
+
+        #[cfg(debug_assertions)]
+        if (id as usize) < self.prev_transient_shapes.len() {
+            let (prev_size, prev_stride) = self.prev_transient_shapes[id as usize];
+            if prev_size != size || prev_stride != stride {
+                tracing::debug!(
+                    slot = id,
+                    prev_size,
+                    prev_stride,
+                    new_size = size,
+                    new_stride = stride,
+                    "transient buffer slot shape changed: view cache miss for slot {id}"
+                );
+            }
+        }
+
         self.transient_specs
             .push(TransientBufferSpec { id, size, stride });
         TransientId(id)
@@ -237,6 +277,13 @@ impl TaskGraph {
     /// [`Self::transient_buffer`] for scheduling behavior. [`crate::Device::submit`]
     /// waits until completion when transients are used; use [`crate::Device::submit_pipelined`]
     /// for overlapping submissions in a managed frame loop.
+    ///
+    /// ## Stable slot identity contract
+    ///
+    /// The returned [`TransientTextureId`] encodes the declaration order within this
+    /// recording phase. The texture cache in [`crate::placement_heap::PlacementHeap`]
+    /// keys on the graph-coloring color index, which is derived from stable spec ordering.
+    /// Recordings must be deterministic; debug builds warn when a slot's shape changes.
     pub fn transient_texture(
         &mut self,
         width: u32,
@@ -245,6 +292,24 @@ impl TaskGraph {
     ) -> TransientTextureId {
         let id = self.next_transient_texture_id;
         self.next_transient_texture_id += 1;
+
+        #[cfg(debug_assertions)]
+        if (id as usize) < self.prev_transient_texture_keys.len() {
+            let prev = self.prev_transient_texture_keys[id as usize];
+            if prev.width != width || prev.height != height || prev.format != format {
+                tracing::debug!(
+                    slot = id,
+                    prev_width = prev.width,
+                    prev_height = prev.height,
+                    ?prev.format,
+                    new_width = width,
+                    new_height = height,
+                    ?format,
+                    "transient texture slot shape changed: texture cache miss for slot {id}"
+                );
+            }
+        }
+
         self.transient_texture_specs.push(TransientTextureSpec {
             id,
             width,
@@ -553,6 +618,10 @@ impl TaskGraph {
             // Resolved graphs are ephemeral (transient buffers were lowered); no cache.
             schedule_cache: None,
             schedule_validated_node_count: 0,
+            #[cfg(debug_assertions)]
+            prev_transient_shapes: Vec::new(),
+            #[cfg(debug_assertions)]
+            prev_transient_texture_keys: Vec::new(),
         }
     }
 
@@ -635,14 +704,18 @@ impl TaskGraph {
         Ok(GraphIR { nodes })
     }
 
-    /// Create one GPU texture per aliasing color; map every transient texture id to its handle.
-    /// Returns textures that must be kept alive until the graph submit completes on the GPU.
-    pub(crate) fn allocate_transient_textures(
+    /// Like the old `allocate_transient_textures` but uses the heap's texture cache.
+    ///
+    /// Textures are owned by the `PlacementHeap` across frames; callers do not
+    /// receive a keepalive `Vec<Texture>`. The heap evicts stale entries via
+    /// `defer_release` when shapes change or the heap is grown.
+    pub(crate) fn resolve_transient_textures_with_heap(
         &self,
         device: &Device,
-    ) -> Result<(Vec<Texture>, HashMap<u32, TextureHandle>)> {
+        heap: &mut crate::placement_heap::PlacementHeap,
+    ) -> Result<HashMap<u32, TextureHandle>> {
         if self.transient_texture_specs.is_empty() {
-            return Ok((Vec::new(), HashMap::new()));
+            return Ok(HashMap::new());
         }
         let intervals = analysis::transient_texture_wave_intervals(&self.ir)?;
         for s in &self.transient_texture_specs {
@@ -655,26 +728,13 @@ impl TaskGraph {
         }
         let (id_to_color, color_keys) =
             Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
-        let mut keep_alive: Vec<Texture> = Vec::with_capacity(color_keys.len());
-        let mut per_color_handle: Vec<TextureHandle> = Vec::with_capacity(color_keys.len());
-        for k in &color_keys {
-            let tex = Texture::new(
-                device,
-                k.width,
-                k.height,
-                k.format,
-                SpatialAccess::Direct,
-                TextureFlags::COPY_DST,
-            )?;
-            per_color_handle.push(tex.handle());
-            keep_alive.push(tex);
-        }
+        let per_color_handles = heap.get_or_create_textures(device, &color_keys)?;
         let mut out = HashMap::new();
         for s in &self.transient_texture_specs {
             let c = id_to_color[&s.id];
-            out.insert(s.id, per_color_handle[c]);
+            out.insert(s.id, per_color_handles[c]);
         }
-        Ok((keep_alive, out))
+        Ok(out)
     }
 
     fn transient_texture_key(spec: &TransientTextureSpec) -> TransientTextureKey {
@@ -1157,7 +1217,33 @@ impl TaskGraph {
     /// Equivalent to `*self = TaskGraph::new()` but avoids freeing and
     /// re-allocating the internal `Vec` buffers. Call this after submitting the
     /// graph to reuse its capacity for the next frame's recording pass.
+    ///
+    /// ## Slot identity reset
+    ///
+    /// Resetting `next_transient_id` to 0 is what makes transient slot identity
+    /// deterministic across frames: the N-th call to `transient_buffer*` / `transient_texture`
+    /// in the next recording always produces the same `TransientId(N)` /
+    /// `TransientTextureId(N)`. The placement-heap view cache depends on this contract;
+    /// do not alter the reset order or skip it between frames.
     pub fn clear(&mut self) {
+        // Snapshot current specs for debug-assertions telemetry before clearing.
+        #[cfg(debug_assertions)]
+        {
+            self.prev_transient_shapes = self
+                .transient_specs
+                .iter()
+                .map(|s| (s.size, s.stride))
+                .collect();
+            self.prev_transient_texture_keys = self
+                .transient_texture_specs
+                .iter()
+                .map(|s| TransientTextureKey {
+                    width: s.width,
+                    height: s.height,
+                    format: s.format,
+                })
+                .collect();
+        }
         self.ir.nodes.clear();
         self.transient_specs.clear();
         self.transient_texture_specs.clear();
