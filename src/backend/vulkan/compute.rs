@@ -2318,12 +2318,15 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
     // Stack buffer for eligible keys; typical steady-state has 1-2 entries.
     let mut keys_buf = [0u64; 8];
     let mut n = 0usize;
-    for &k in state.timeline_cmd_buffers.keys() {
-        if k <= max_completed_value {
-            if n < keys_buf.len() {
-                keys_buf[n] = k;
+    {
+        let _tz = crate::tracy_zone!("vk.reap_timeline.key_scan");
+        for &k in state.timeline_cmd_buffers.keys() {
+            if k <= max_completed_value {
+                if n < keys_buf.len() {
+                    keys_buf[n] = k;
+                }
+                n += 1;
             }
-            n += 1;
         }
     }
     if n == 0 {
@@ -2331,25 +2334,29 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
     }
 
     fn process_key(state: &mut super::types::VulkanState, device_handle: DeviceHandle, k: u64) {
-        if let Some(mut entries) = state.timeline_cmd_buffers.remove(&k) {
-            entries.retain(|(dh, cb)| {
-                if *dh == device_handle {
-                    if let Some(ld) = state.devices.get_mut(dh) {
-                        ld.free_cmd_buffers.push(*cb);
+        {
+            let _tz = crate::tracy_zone!("vk.reap_timeline.recycle_cbs");
+            if let Some(mut entries) = state.timeline_cmd_buffers.remove(&k) {
+                entries.retain(|(dh, cb)| {
+                    if *dh == device_handle {
+                        if let Some(ld) = state.devices.get_mut(dh) {
+                            ld.free_cmd_buffers.push(*cb);
+                        }
+                        false
+                    } else {
+                        true
                     }
-                    false
-                } else {
-                    true
+                });
+                if !entries.is_empty() {
+                    state.timeline_cmd_buffers.insert(k, entries);
                 }
-            });
-            if !entries.is_empty() {
-                state.timeline_cmd_buffers.insert(k, entries);
             }
         }
         if let Some(staging) = state
             .compute_texture_staging_pool
             .remove(&(device_handle, k))
         {
+            let _tz = crate::tracy_zone!("vk.reap_timeline.destroy_staging");
             if let Some(ld) = state.devices.get(&device_handle) {
                 super::texture::destroy_texture_staging_list(ld, staging);
             }
@@ -2357,10 +2364,12 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
     }
 
     if n <= keys_buf.len() {
+        let _tz = crate::tracy_zone!("vk.reap_timeline.process_keys.stack");
         for &k in &keys_buf[..n] {
             process_key(state, device_handle, k);
         }
     } else {
+        let _tz = crate::tracy_zone!("vk.reap_timeline.process_keys.heap");
         let keys: Vec<u64> = state
             .timeline_cmd_buffers
             .keys()
