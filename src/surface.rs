@@ -190,6 +190,183 @@ impl Surface {
         backend.surface_present_mode(self.handle)
     }
 
+    /// Compile, auto-partition, and submit a graph that writes to the swapchain
+    /// output, deferring surface acquisition until after early partitions are
+    /// already executing on the GPU.
+    ///
+    /// 1. Compiles the schedule (cached) and partitions the graph.
+    /// 2. Emits and submits early partitions as standalone — GPU starts coarse work.
+    /// 3. Calls `self.begin()` (deferred acquire) after ~200 µs of CPU work.
+    /// 4. Lowers `SwapchainOutput` → concrete `TextureHandle` + patches UAV index.
+    /// 5. Records the final partition deferred to present.
+    /// 6. Returns the [`Frame`] for the caller to present.
+    ///
+    /// The graph **must** contain at least one [`ResourceId::SwapchainOutput`]
+    /// binding (declared via [`TaskGraph::declare_swapchain_output`] and bound
+    /// via [`NodeBuilder::bind_swapchain_output`]).  Transient buffers and
+    /// textures are fully resolved before partitioning.
+    pub fn submit_graph(&self, graph: &mut TaskGraph) -> Result<Frame> {
+        let _tz = tracy_zone!("surface.submit_graph");
+
+        if !graph.has_swapchain_output() {
+            anyhow::bail!(
+                "Surface::submit_graph: graph contains no SwapchainOutput binding; \
+                 use TaskGraph::declare_swapchain_output + NodeBuilder::bind_swapchain_output, \
+                 or render to a texture and copy in a separate graph"
+            );
+        }
+
+        // ── Step 1: resolve transient resources into a concrete IR ──────────
+        // keepalive vecs are local; they're moved into frame.keepalive after begin().
+        let (resolved_ir, buf_views, tex_keepalive) = self.resolve_ir_for_submit_graph(graph)?;
+
+        // ── Step 2: get schedule + swapchain split wave ──────────────────────
+        // Schedule is keyed on self.ir (pre-lowering fingerprint) and cached.
+        let (schedule, split_wave) = graph.schedule_and_split_wave();
+
+        // ── Step 3: emit early commands from resolved IR ─────────────────────
+        // Early waves contain no SwapchainOutput bindings by construction.
+        let early_cmds = crate::task_graph::analysis::emit_waves_to_commands(
+            &resolved_ir,
+            &schedule.waves[..split_wave],
+        );
+
+        // ── Step 4: submit early commands ────────────────────────────────────
+        if !early_cmds.is_empty() {
+            let mut backend = self.backend.lock().unwrap();
+            let _tz = tracy_zone!("surface.submit_partition_early");
+            backend.submit_standalone(self.device_handle, &early_cmds)?;
+        }
+
+        // ── Step 5: deferred surface acquire ────────────────────────────────
+        let frame = {
+            let _tz = tracy_zone!("surface.deferred_acquire");
+            self.begin()?
+        };
+
+        // ── Step 6: stash keepalives into frame ──────────────────────────────
+        {
+            let mut kv = frame.keepalive.lock().unwrap();
+            for view in buf_views {
+                kv.push(view);
+            }
+            for tex in tex_keepalive {
+                kv.push(tex);
+            }
+        }
+
+        // ── Step 7: lower SwapchainOutput and emit final partition ───────────
+        let swapchain_tex = frame.texture();
+        let sc_handle = swapchain_tex.handle;
+        let uav_index = swapchain_tex
+            .bindless_index()
+            .context("swapchain texture has no UAV bindless index")?;
+
+        let final_ir = TaskGraph::lower_swapchain_output(&resolved_ir, sc_handle, uav_index);
+        let final_cmds = crate::task_graph::analysis::emit_waves_to_commands(
+            &final_ir,
+            &schedule.waves[split_wave..],
+        );
+
+        // ── Step 8: record final partition deferred to present ───────────────
+        {
+            let mut backend = self.backend.lock().unwrap();
+            let _tz = tracy_zone!("surface.submit_partition_late");
+            backend.record_gpu_work(&frame.token, &final_cmds)?;
+        }
+
+        Ok(frame)
+    }
+
+    /// Resolve transient resources in `graph` into a concrete [`GraphIR`],
+    /// returning the IR plus local keepalive collections.
+    ///
+    /// The IR still contains `ResourceId::SwapchainOutput`; that is lowered
+    /// separately after `surface.begin()` in [`submit_graph`].
+    fn resolve_ir_for_submit_graph(
+        &self,
+        graph: &mut TaskGraph,
+    ) -> Result<(
+        crate::task_graph::GraphIR,
+        Vec<crate::buffer::BufferView>,
+        Vec<crate::texture::Texture>,
+    )> {
+        use crate::buffer::BufferView;
+        use crate::placement_heap::PlacementHeap;
+        use crate::task_graph::TaskGraph;
+
+        if !graph.has_transient_resources() {
+            return Ok((graph.ir().clone(), Vec::new(), Vec::new()));
+        }
+
+        let (tex_keepalive, tex_handles) = graph.allocate_transient_textures(&self._device)?;
+
+        if !graph.has_transient_buffers() {
+            let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
+            return Ok((resolved_ir, Vec::new(), tex_keepalive));
+        }
+
+        // Placement heap resolution for transient buffers.
+        let (total_size, base_align, layout) = graph.transient_heap_size_and_layout()?;
+        let alloc_size = (total_size + base_align - 1).max(256);
+
+        let mut heap_guard = self._device.inner.placement_heap.lock().unwrap();
+        if heap_guard.is_none() {
+            let cap = (256 * 1024 * 1024u64)
+                .max(alloc_size * crate::device::Device::DEFAULT_PIPELINE_DEPTH);
+            *heap_guard = Some(
+                PlacementHeap::with_capacity(&self._device, cap)
+                    .context("failed to create device placement heap")?,
+            );
+        }
+        let heap = heap_guard.as_mut().unwrap();
+        let progress = self._device.gpu_progress();
+        heap.reclaim(progress);
+        let raw_offset = match heap.acquire(alloc_size) {
+            Some(off) => off,
+            None => {
+                let progress2 = self._device.gpu_progress();
+                heap.reclaim(progress2);
+                heap.acquire(alloc_size).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
+                        alloc_size,
+                        heap.capacity(),
+                        heap.in_flight_bytes(),
+                    )
+                })?
+            }
+        };
+        let base_offset = raw_offset.div_ceil(base_align) * base_align;
+        let buf = heap.buffer();
+
+        let mut buf_views: Vec<BufferView> = Vec::with_capacity(layout.len());
+        let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
+        for spec in graph.transient_specs() {
+            let offset = base_offset + layout[&spec.id];
+            let view_stride = spec.stride.max(1);
+            let view = buf.create_view(offset, spec.size, Some(view_stride))?;
+            let uav = view.bindless_index().unwrap_or(u32::MAX);
+            let srv = view.bindless_srv_index().unwrap_or(uav);
+            bindless_map.insert(spec.id, (uav, srv));
+            buf_views.push(view);
+        }
+
+        let range_map = TaskGraph::transient_buffer_range_map_with_base(
+            buf,
+            &layout,
+            graph.transient_specs(),
+            base_offset,
+        );
+        let mut resolved_ir =
+            graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
+        if !tex_handles.is_empty() {
+            resolved_ir = TaskGraph::lower_transient_textures(&resolved_ir, &tex_handles)?;
+        }
+
+        Ok((resolved_ir, buf_views, tex_keepalive))
+    }
+
     pub fn validate_pipeline_format(&self, pipeline_format: TextureFormat) -> Result<()> {
         let surface_format = self.format();
         if pipeline_format != surface_format {
@@ -227,163 +404,6 @@ impl Frame {
         let commands = encoder.finish();
         let mut backend = self.backend.lock().unwrap();
         backend.record_render(&self.token, &commands)
-    }
-
-    /// Record analyzed compute / transfer work for this frame (e.g. compute into the swapchain).
-    ///
-    /// Graphs containing transient buffers and/or transient textures are resolved
-    /// automatically using the device-owned placement heap. The caller does not need
-    /// to call [`Device::submit`](crate::Device::submit) for graphs with transients;
-    /// this method handles the full resolution transparently.
-    pub fn submit_compute(&self, graph: &mut TaskGraph) -> Result<()> {
-        let _tz = tracy_zone!("frame.submit_compute");
-        let partitions = if !graph.has_transient_resources() {
-            graph.compile_partitioned_commands()
-        } else {
-            // Resolve transient textures first (may be needed even without transient buffers).
-            let (tex_keepalive, tex_handles) = graph.allocate_transient_textures(&self._device)?;
-
-            let parts = if graph.has_transient_buffers() {
-                self.resolve_and_compile_transient_buffers(graph, tex_handles)?
-            } else {
-                // Transient textures only — lower the IR and compile partitioned.
-                let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
-                graph.compile_resolved_to_partitioned_commands(&resolved_ir)
-            };
-
-            // Stash textures so they survive until do_present defers them via VramAllocator.
-            if !tex_keepalive.is_empty() {
-                let mut keepalive = self.keepalive.lock().unwrap();
-                for tex in tex_keepalive {
-                    keepalive.push(tex);
-                }
-            }
-
-            parts
-        };
-
-        self.submit_partitions(partitions)
-    }
-
-    /// Submit a list of partitioned command slices to the backend.
-    ///
-    /// All partitions except the last are submitted immediately via
-    /// [`GpuBackend::submit_standalone`], allowing the GPU to begin executing
-    /// early (coarse) work while the CPU records the final partition. The last
-    /// partition is deferred to present via [`GpuBackend::record_gpu_work`].
-    ///
-    /// Same-queue in-order execution guarantees that early partitions complete
-    /// before the final partition begins on the GPU. Memory visibility across
-    /// submissions is covered by the backend's cross-submission acquire barrier.
-    fn submit_partitions(&self, partitions: Vec<Vec<crate::backend::GpuCommand>>) -> Result<()> {
-        let n = partitions.len();
-        let mut backend = self.backend.lock().unwrap();
-        for (i, partition) in partitions.into_iter().enumerate() {
-            if i < n - 1 {
-                // Early partitions: submit immediately so the GPU starts executing.
-                let _tz = tracy_zone!("frame.submit_partition_early");
-                backend.submit_standalone(self.device_handle, &partition)?;
-            } else {
-                // Final partition: defer to present so it synchronises with the swapchain.
-                let _tz = tracy_zone!("frame.submit_partition_late");
-                backend.record_gpu_work(&self.token, &partition)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Acquire a placement-heap region, create BufferViews at colored offsets, lower the
-    /// graph IR, and compile it to a flat GPU command stream.
-    ///
-    /// Mirrors the logic in `Device::submit_with_placement_heap` but targets the
-    /// surface-frame path: views are attached to the heap ring entry *unstamped*;
-    /// `do_present` stamps all pending regions via `stamp_all_pending`.
-    fn resolve_and_compile_transient_buffers(
-        &self,
-        graph: &mut TaskGraph,
-        tex_handles: HashMap<u32, crate::backend::TextureHandle>,
-    ) -> Result<Vec<Vec<crate::backend::GpuCommand>>> {
-        use crate::buffer::BufferView;
-        use crate::placement_heap::PlacementHeap;
-
-        let (total_size, base_align, layout) = graph.transient_heap_size_and_layout()?;
-        let alloc_size = (total_size + base_align - 1).max(256);
-
-        let mut heap_guard = self._device.inner.placement_heap.lock().unwrap();
-
-        // Lazily create or grow the placement heap (same logic as Device::submit).
-        if heap_guard.is_none() {
-            let cap = (256 * 1024 * 1024u64)
-                .max(alloc_size * crate::device::Device::DEFAULT_PIPELINE_DEPTH);
-            *heap_guard = Some(
-                PlacementHeap::with_capacity(&self._device, cap)
-                    .context("failed to create device placement heap")?,
-            );
-        }
-        let heap = heap_guard.as_mut().unwrap();
-
-        let progress = self._device.gpu_progress();
-        heap.reclaim(progress);
-
-        let raw_offset = match heap.acquire(alloc_size) {
-            Some(off) => off,
-            None => {
-                let progress2 = self._device.gpu_progress();
-                heap.reclaim(progress2);
-                heap.acquire(alloc_size).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
-                        alloc_size,
-                        heap.capacity(),
-                        heap.in_flight_bytes(),
-                    )
-                })?
-            }
-        };
-        let base_offset = raw_offset.div_ceil(base_align) * base_align;
-
-        let buf = heap.buffer();
-
-        let mut views: Vec<BufferView> = Vec::with_capacity(layout.len());
-        let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
-
-        for spec in graph.transient_specs() {
-            let offset = base_offset + layout[&spec.id];
-            let view_stride = spec.stride.max(1);
-            let view = buf.create_view(offset, spec.size, Some(view_stride))?;
-            let uav = view.bindless_index().unwrap_or(u32::MAX);
-            let srv = view.bindless_srv_index().unwrap_or(uav);
-            bindless_map.insert(spec.id, (uav, srv));
-            views.push(view);
-        }
-
-        let range_map = TaskGraph::transient_buffer_range_map_with_base(
-            buf,
-            &layout,
-            graph.transient_specs(),
-            base_offset,
-        );
-        let mut resolved_ir =
-            graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
-
-        // Also lower transient textures if present.
-        if !tex_handles.is_empty() {
-            resolved_ir = TaskGraph::lower_transient_textures(&resolved_ir, &tex_handles)?;
-        }
-
-        let partitions = graph.compile_resolved_to_partitioned_commands(&resolved_ir);
-
-        // Defer views via keepalive so they outlive the GPU work.
-        // do_present drains keepalive via device.defer_release(tv, ...).
-        // This keeps PlacementHeap ring entries free of view ownership (#150).
-        {
-            let mut keepalive = self.keepalive.lock().unwrap();
-            for view in views {
-                keepalive.push(view);
-            }
-        }
-
-        Ok(partitions)
     }
 
     /// Submit all work and present. Returns the GPU timeline value when this frame completes.

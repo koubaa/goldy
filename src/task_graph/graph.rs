@@ -5,8 +5,8 @@ use super::ir::{
     CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode,
 };
 use super::{
-    ResourceId, TransientBufferSpec, TransientId, TransientTextureId, TransientTextureKey,
-    TransientTextureSpec,
+    ResourceId, SwapchainOutputHandle, TransientBufferSpec, TransientId, TransientTextureId,
+    TransientTextureKey, TransientTextureSpec, SWAPCHAIN_SLOT_PLACEHOLDER,
 };
 use crate::backend::{
     BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle,
@@ -778,6 +778,78 @@ impl TaskGraph {
         Ok(GraphIR { nodes })
     }
 
+    /// Replace every `ResourceId::SwapchainOutput` binding with
+    /// `ResourceId::Texture(handle)` and patch the corresponding
+    /// `resource_slots` entry from [`SWAPCHAIN_SLOT_PLACEHOLDER`] to the real
+    /// UAV bindless index `uav_index`.
+    ///
+    /// Called by [`Surface::submit_graph`] after `surface.begin()` resolves
+    /// the concrete swapchain `TextureHandle` and its bindless index.
+    pub(crate) fn lower_swapchain_output(
+        ir: &GraphIR,
+        handle: TextureHandle,
+        uav_index: u32,
+    ) -> GraphIR {
+        let mut nodes = Vec::with_capacity(ir.nodes.len());
+        for n in &ir.nodes {
+            let bindings: Vec<ResourceBinding> = n
+                .bindings
+                .iter()
+                .map(|b| ResourceBinding {
+                    resource: if b.resource == ResourceId::SwapchainOutput {
+                        ResourceId::Texture(handle)
+                    } else {
+                        b.resource
+                    },
+                    access: b.access,
+                })
+                .collect();
+
+            // Patch resource_slots: replace SWAPCHAIN_SLOT_PLACEHOLDER with
+            // the real UAV index at every position whose binding is SwapchainOutput.
+            let kind = if let NodeKind::Dispatch {
+                pipeline,
+                resource_slots,
+                user_slots,
+                dispatch,
+            } = &n.kind
+            {
+                let has_swapchain = n
+                    .bindings
+                    .iter()
+                    .any(|b| b.resource == ResourceId::SwapchainOutput);
+                if has_swapchain {
+                    let mut patched_slots = resource_slots.clone();
+                    for (i, b) in n.bindings.iter().enumerate() {
+                        if b.resource == ResourceId::SwapchainOutput
+                            && i < patched_slots.len()
+                            && patched_slots[i] == SWAPCHAIN_SLOT_PLACEHOLDER
+                        {
+                            patched_slots[i] = uav_index;
+                        }
+                    }
+                    NodeKind::Dispatch {
+                        pipeline: *pipeline,
+                        resource_slots: patched_slots,
+                        user_slots: user_slots.clone(),
+                        dispatch: dispatch.clone(),
+                    }
+                } else {
+                    n.kind.clone()
+                }
+            } else {
+                n.kind.clone()
+            };
+
+            nodes.push(TaskNode {
+                label: n.label,
+                bindings,
+                kind,
+            });
+        }
+        GraphIR { nodes }
+    }
+
     /// True if the graph has any transient resources (buffers and/or textures).
     pub fn has_transient_resources(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
@@ -791,6 +863,27 @@ impl TaskGraph {
     /// Access the transient buffer specs (id + size) for coloring/layout.
     pub(crate) fn transient_specs(&self) -> &[TransientBufferSpec] {
         &self.transient_specs
+    }
+
+    /// Declare that this graph will write to a swapchain output.
+    ///
+    /// Returns a [`SwapchainOutputHandle`] that must be passed to
+    /// [`NodeBuilder::bind_swapchain_output`] when recording the final
+    /// (fine-pass) dispatch node.  The concrete `TextureHandle` is resolved
+    /// at submit time inside [`Surface::submit_graph`].
+    ///
+    /// Call this exactly once per graph before recording fine-pass nodes.
+    pub fn declare_swapchain_output(&mut self) -> SwapchainOutputHandle {
+        SwapchainOutputHandle
+    }
+
+    /// Returns `true` if the graph contains any node that binds `SwapchainOutput`.
+    pub(crate) fn has_swapchain_output(&self) -> bool {
+        self.ir.nodes.iter().any(|n| {
+            n.bindings
+                .iter()
+                .any(|b| b.resource == ResourceId::SwapchainOutput)
+        })
     }
 
     pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
@@ -1403,68 +1496,33 @@ impl TaskGraph {
         analysis::emit_commands(ir, &schedule)
     }
 
-    /// Compile the graph into partitioned command streams for pipelined backend submission.
+    /// Return a clone of the cached [`CompiledSchedule`] (building it first if
+    /// necessary) and the wave index where the swapchain-output split occurs.
     ///
-    /// Runs the dependency analyzer, schedules waves, then splits the schedule at the
-    /// wave boundary with the largest barrier cost (see [`analysis::emit_partitioned_commands`]).
-    /// Returns one partition per planned backend submission:
+    /// The split wave is the index of the first wave that contains a node
+    /// binding [`ResourceId::SwapchainOutput`].  If no such wave exists, the
+    /// split equals the total wave count (i.e., no early partition).
     ///
-    /// - One partition → single submission (small or all-independent graph).
-    /// - Two partitions → early partition submitted immediately; late partition deferred to present.
-    ///
-    /// # Panics
-    ///
-    /// Same conditions as [`Self::compile_commands`]: render-pass nodes or transient specs.
-    pub fn compile_partitioned_commands(&mut self) -> Vec<Vec<crate::backend::GpuCommand>> {
-        assert!(
-            self.transient_specs.is_empty(),
-            "compile_partitioned_commands: graph uses transient_buffer; use Device::submit"
-        );
-        assert!(
-            self.transient_texture_specs.is_empty(),
-            "compile_partitioned_commands: graph uses transient_texture; use Device::submit"
-        );
-        if Self::has_render_passes_in_ir(&self.ir) {
-            panic!("compile_partitioned_commands: graph contains render_pass; use compile_graph_commands or Device::submit");
-        }
+    /// Callers use the schedule to re-emit early and final wave slices from
+    /// different IRs (pre-lowered vs. post-swapchain-lowered).
+    pub(crate) fn schedule_and_split_wave(&mut self) -> (CompiledSchedule, usize) {
         let fp = self.schedule_fp();
-        Self::get_or_build_partitioned_commands(&mut self.schedule_cache, &self.ir, fp).to_vec()
-    }
-
-    /// Partitioned variant of [`Self::compile_ir_to_gpu_commands`] for pre-lowered IRs.
-    ///
-    /// Used by `Frame::submit_compute` on the transient path, where the IR has already
-    /// been resolved and the schedule cache is not available.
-    #[allow(dead_code)]
-    pub(crate) fn compile_ir_to_partitioned_gpu_commands(
-        ir: &GraphIR,
-    ) -> Vec<Vec<crate::backend::GpuCommand>> {
-        let edges = analysis::build_edges(ir);
-        let schedule = analysis::schedule_waves(ir, &edges);
-        analysis::emit_partitioned_commands(ir, &schedule)
-    }
-
-    /// Emit partitioned commands for a resolved (post-lowered) IR using the schedule
-    /// cached from `self.ir` (the pre-lowered IR).
-    ///
-    /// On the transient path the binding topology — node count and per-node
-    /// resource-access pairs — is identical before and after lowering: lowering
-    /// substitutes concrete `BufferHandle`s for `TransientBuffer` IDs and patches
-    /// bindless slot indices, but never adds, removes, or reorders nodes.  The
-    /// `CompiledSchedule` (wave groups + barrier positions) therefore transfers
-    /// directly to the resolved IR.
-    ///
-    /// This lets `build_edges` + `schedule_waves` be cached across frames (keyed
-    /// on the stable pre-lowered fingerprint) while `emit_partitioned_commands`
-    /// still runs on the fresh resolved IR so that `ResourceBarrier` handles and
-    /// dispatch slot indices are correct.
-    pub(crate) fn compile_resolved_to_partitioned_commands(
-        &mut self,
-        resolved_ir: &GraphIR,
-    ) -> Vec<Vec<crate::backend::GpuCommand>> {
-        let fp = self.schedule_fp();
-        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir, fp);
-        analysis::emit_partitioned_commands(resolved_ir, schedule)
+        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir, fp).clone();
+        let split = schedule
+            .waves
+            .iter()
+            .enumerate()
+            .find(|(_, w)| {
+                w.node_indices.iter().any(|&ni| {
+                    self.ir.nodes[ni]
+                        .bindings
+                        .iter()
+                        .any(|b| b.resource == ResourceId::SwapchainOutput)
+                })
+            })
+            .map(|(idx, _)| idx)
+            .unwrap_or(schedule.waves.len());
+        (schedule, split)
     }
 
     /// Like [`Self::compile_commands`] but allows graphs that include render-pass nodes.
@@ -1553,6 +1611,25 @@ impl<'a> NodeBuilder<'a> {
     pub fn bind_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientTexture(id),
+            access,
+        });
+        self
+    }
+
+    /// Declare that this node writes to the swapchain output.
+    ///
+    /// The concrete `TextureHandle` is resolved at submit time by
+    /// [`Surface::submit_graph`].  The caller (ekrano) must place
+    /// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` at the corresponding
+    /// binding position so [`lower_swapchain_output`] can patch it with the
+    /// real UAV bindless index after `surface.begin()`.
+    pub fn bind_swapchain_output(
+        mut self,
+        _handle: SwapchainOutputHandle,
+        access: NodeAccess,
+    ) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::SwapchainOutput,
             access,
         });
         self

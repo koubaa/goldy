@@ -6,7 +6,7 @@
 
 use crate::device::Device;
 use crate::error::GoldyError;
-use crate::surface::Frame;
+use crate::surface::{Frame, Surface};
 use crate::task_graph::TaskGraph;
 use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
@@ -338,26 +338,33 @@ impl<T> FrameOrchestrator<T> {
         Ok(tv)
     }
 
-    /// End a surface frame: optionally submits compute, then pushes a slot whose timeline is
-    /// filled later via [`Self::note_presented`].
+    /// End a surface frame: submit the graph via [`Surface::submit_graph`]
+    /// (deferred acquire), push a ring slot whose timeline is filled later by
+    /// [`Self::note_presented`], and return the acquired [`Frame`] for the
+    /// caller to present.
+    ///
+    /// When the graph is empty, falls back to [`Surface::begin`] so the caller
+    /// still receives a `Frame` (useful for cleared-only frames).
     pub fn end_frame_for_surface(
         &mut self,
         handle: FrameHandle,
         graph: &mut TaskGraph,
-        frame: &Frame,
+        surface: &Surface,
         cleanup: T,
-    ) -> Result<(), GoldyError> {
+    ) -> Result<Frame, GoldyError> {
         let _tz = tracy_zone!("orchestrator.end_frame_for_surface");
         self.expect_open(handle)?;
-        if !graph.is_empty() {
-            frame.submit_compute(graph).map_err(GoldyError::from)?;
-        }
+        let frame = if graph.is_empty() {
+            surface.begin().map_err(GoldyError::from)?
+        } else {
+            surface.submit_graph(graph).map_err(GoldyError::from)?
+        };
         self.ring.push_back(FrameSlot {
             timeline: None,
             data: cleanup,
         });
         self.open = None;
-        Ok(())
+        Ok(frame)
     }
 
     /// After [`Frame::present`], stamp the most recent surface slot with the returned timeline.

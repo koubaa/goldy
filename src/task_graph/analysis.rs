@@ -87,6 +87,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
         (ResourceId::Texture(x), ResourceId::Texture(y)) => x == y,
         (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
+        (ResourceId::SwapchainOutput, ResourceId::SwapchainOutput) => true,
         _ => false,
     }
 }
@@ -117,6 +118,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         Texture(u64),
         TransientBuffer(u32),
         TransientTexture(u32),
+        SwapchainOutput,
     }
 
     fn group_key(r: &ResourceId) -> GroupKey {
@@ -126,6 +128,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::Texture(h) => GroupKey::Texture(h),
             ResourceId::TransientBuffer(t) => GroupKey::TransientBuffer(t.0),
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
+            ResourceId::SwapchainOutput => GroupKey::SwapchainOutput,
         }
     }
 
@@ -393,7 +396,7 @@ fn compute_barriers(
 ///
 /// If any wave contains a [`NodeKind::RenderPass`] node.  Use
 /// [`emit_graph_commands`] for graphs that include render passes.
-fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCommand> {
+pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave]) -> Vec<GpuCommand> {
     let mut commands = Vec::new();
 
     for wave in waves {
@@ -653,6 +656,35 @@ pub fn emit_partitioned_commands(
     schedule: &CompiledSchedule,
 ) -> Vec<Vec<GpuCommand>> {
     let waves = &schedule.waves;
+
+    // Hard constraint: if the graph has a SwapchainOutput binding, find the
+    // earliest wave containing a node that binds it and split there.
+    // All waves before that index contain no SwapchainOutput references and
+    // can be submitted before the surface is acquired.  The swapchain wave and
+    // everything after forms the final partition, submitted after
+    // `surface.begin()` resolves the concrete TextureHandle.
+    let swapchain_wave: Option<usize> = waves
+        .iter()
+        .enumerate()
+        .find(|(_, w)| {
+            w.node_indices.iter().any(|&ni| {
+                ir.nodes[ni]
+                    .bindings
+                    .iter()
+                    .any(|b| b.resource == ResourceId::SwapchainOutput)
+            })
+        })
+        .map(|(idx, _)| idx);
+
+    if let Some(split_wave) = swapchain_wave {
+        if split_wave > 0 {
+            let early = emit_waves_to_commands(ir, &waves[..split_wave]);
+            let late = emit_waves_to_commands(ir, &waves[split_wave..]);
+            return vec![early, late];
+        }
+        // SwapchainOutput is in wave 0 — cannot split before it; single partition.
+        return vec![emit_waves_to_commands(ir, waves)];
+    }
 
     // Not enough waves to benefit from splitting.
     if waves.len() < 3 {

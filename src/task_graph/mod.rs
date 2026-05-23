@@ -100,6 +100,24 @@ pub struct TransientId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransientTextureId(pub u32);
 
+/// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
+/// of a `SwapchainOutput` binding.  Replaced by the real UAV bindless index in
+/// [`lower_swapchain_output`](graph::lower_swapchain_output) after `surface.begin()`.
+pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
+
+/// Opaque handle returned by [`TaskGraph::declare_swapchain_output`].
+///
+/// Passed to [`NodeBuilder::bind_swapchain_output`] when recording the
+/// fine-pass dispatch.  Carries no data — it exists purely for type-safety so
+/// callers cannot accidentally swap a concrete texture with a swapchain output.
+///
+/// The caller (ekrano's `collect_bindless_indices_into`) must place
+/// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in the `resource_slots` at the position
+/// corresponding to this binding.  [`TaskGraph::lower_swapchain_output`] then
+/// patches that sentinel with the real UAV index after `surface.begin()`.
+#[derive(Debug, Clone, Copy)]
+pub struct SwapchainOutputHandle;
+
 #[derive(Debug, Clone)]
 pub(crate) struct TransientBufferSpec {
     pub(crate) id: u32,
@@ -155,6 +173,12 @@ pub(crate) enum ResourceId {
     TransientBuffer(TransientId),
     /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
     TransientTexture(TransientTextureId),
+    /// Swapchain output: late-bound at submit time via [`Surface::submit_graph`].
+    ///
+    /// Records a stable dependency placeholder without requiring an acquired
+    /// swapchain image.  Lowered to [`ResourceId::Texture`] after
+    /// `surface.begin()` runs between early and final partition submission.
+    SwapchainOutput,
 }
 
 impl ResourceId {
@@ -169,6 +193,7 @@ impl ResourceId {
             ResourceId::Texture(_) => None,
             ResourceId::TransientBuffer(_) => None,
             ResourceId::TransientTexture(_) => None,
+            ResourceId::SwapchainOutput => None,
         }
     }
 }
