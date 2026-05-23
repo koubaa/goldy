@@ -805,17 +805,16 @@ impl Device {
 
     /// Submit a task graph and retain the closed command list for potential reuse.
     ///
-    /// Works like [`Self::submit_pipelined`] but also stores the compiled command list
-    /// keyed by `key`.  Call [`Self::try_resubmit_retained`] on the next frame to
+    /// Works like [`Self::submit_pipelined`] but also stores the compiled command list keyed
+    /// by the graph's [`TaskGraph::compute_retention_fingerprint`].  Call
+    /// [`Self::try_resubmit_retained`] on the next frame — passing the same fingerprint — to
     /// re-execute the same list without re-recording when the graph is unchanged.
     ///
-    /// Graphs with transient resources are not eligible for retention (they use
-    /// placement-heap allocations that are recycled each frame); the call degrades
-    /// gracefully to a plain submit in that case.
+    /// Graphs with transient resources, render passes, or upload nodes are not eligible for
+    /// retention and fall back gracefully to a plain submit.
     pub fn submit_pipelined_and_retain(
         &self,
         graph: &mut TaskGraph,
-        key: u64,
     ) -> Result<TimelineValue, GoldyError> {
         if graph.has_transient_resources() {
             // Transient-buffer graphs cannot be safely retained; fall back.
@@ -823,7 +822,7 @@ impl Device {
         }
         let mut backend = self.inner.backend.lock().unwrap();
         let tv = graph
-            .submit_with_backend_and_retain(self, backend.as_mut(), key)
+            .submit_with_backend_and_retain(self, backend.as_mut())
             .map_err(|e| {
                 drop(backend);
                 self.classify(e)

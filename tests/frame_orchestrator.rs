@@ -16,7 +16,7 @@ fn orchestrator_double_begin_fails() {
         .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
         .is_err());
 
-    orch.end_frame_standalone(h, TaskGraph::new(), None, ())
+    orch.end_frame_standalone(h, &mut TaskGraph::new(), None, ())
         .expect("end");
 }
 

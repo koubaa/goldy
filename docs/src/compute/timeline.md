@@ -102,7 +102,7 @@ let mut orch: FrameOrchestrator<MyCleanup> = FrameOrchestrator::new(&device, 3);
 loop {
     let handle = orch.begin_frame(|dev, retired| my_cleanup(dev, retired))?;
     // ... record and submit ...
-    orch.end_frame_standalone(handle, graph, None, cleanup)?;
+    orch.end_frame_standalone(handle, &mut graph, None, cleanup)?;
 }
 
 orch.drain_all(|dev, retired| my_cleanup(dev, retired))?;

@@ -75,6 +75,7 @@ pub use surface::{Frame, Surface};
 pub use task_graph::{
     GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId,
 };
+pub use task_graph::{SwapchainOutputHandle, SWAPCHAIN_SLOT_PLACEHOLDER};
 
 pub use texture::Texture;
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};

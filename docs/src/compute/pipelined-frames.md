@@ -42,7 +42,7 @@ loop {
     let cleanup = MyCleanup { /* views, buffers, etc. */ };
 
     // 4. Submit & register the slot.  Returns the timeline value.
-    let tv = orch.end_frame_standalone(handle, graph, None, cleanup)?;
+    let tv = orch.end_frame_standalone(handle, &mut graph, None, cleanup)?;
 }
 
 // Shutdown: drain all remaining slots.
@@ -95,7 +95,7 @@ orch.flush(handle, &mut graph, None, &mut last_tv)?;
 record_fine(&mut graph);
 
 let cleanup = MyCleanup { /* ... */ };
-let tv = orch.end_frame_standalone(handle, graph, last_tv, cleanup)?;
+let tv = orch.end_frame_standalone(handle, &mut graph, last_tv, cleanup)?;
 ```
 
 For surface frames pass `Some(&frame)` instead of `None`:
