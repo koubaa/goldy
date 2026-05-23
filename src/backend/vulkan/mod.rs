@@ -33,6 +33,20 @@ use anyhow::{Context, Result};
 use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
+use std::sync::Mutex;
+
+/// Process-global lock serialising `vkCreateInstance` and `vkDestroyInstance`.
+///
+/// The Vulkan spec marks both calls as implicitly externally synchronized at the
+/// loader level (ICD enumeration, dispatch-table construction, layer init). No
+/// internal lock protects that global state, so concurrent calls from different
+/// test threads produce undefined behaviour — visible as a SIGSEGV on lavapipe
+/// and as heap corruption on other software renderers.  Hardware drivers often
+/// have incidental internal serialisation that masks the race, but the UB exists
+/// regardless.  Holding this lock only for the duration of instance
+/// creation/destruction adds negligible overhead in production (instances are
+/// long-lived) while making tests safe under the default parallel test runner.
+static VK_INSTANCE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Extract push-constant slot categories for a render pipeline from shader
 /// reflection. Fragment shader data takes precedence; vertex is a fallback.
@@ -96,6 +110,7 @@ impl Drop for VulkanBackend {
         //
         // Only safe when all child objects (devices, surfaces) have been destroyed first.
         if self.state.devices.is_empty() && self.state.surfaces.is_empty() {
+            let _guard = VK_INSTANCE_LOCK.lock().unwrap();
             unsafe {
                 self.state.instance.destroy_instance(None);
             }
@@ -163,8 +178,11 @@ impl VulkanBackend {
             .enabled_extension_names(&extensions)
             .enabled_layer_names(&validation_layers);
 
-        let instance = unsafe { entry.create_instance(&create_info, None) }
-            .context("Failed to create Vulkan instance")?;
+        let instance = {
+            let _guard = VK_INSTANCE_LOCK.lock().unwrap();
+            unsafe { entry.create_instance(&create_info, None) }
+                .context("Failed to create Vulkan instance")?
+        };
 
         if enable_validation {
             tracing::info!("Vulkan instance created with validation layers");
