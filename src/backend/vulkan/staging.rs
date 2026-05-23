@@ -240,7 +240,10 @@ pub(super) struct TextureStagingPool {
 
 impl TextureStagingPool {
     pub fn new() -> Self {
-        Self { free: Vec::new(), in_flight: Vec::new() }
+        Self {
+            free: Vec::new(),
+            in_flight: Vec::new(),
+        }
     }
 
     /// Acquire a staging entry with at least `size` bytes of capacity.
@@ -351,7 +354,12 @@ fn allocate_texture_staging_entry(
             .context("TextureStagingPool: map_memory2 failed")?
     } as usize;
 
-    Ok(TextureStagingEntry { buffer, memory, capacity: size, mapped })
+    Ok(TextureStagingEntry {
+        buffer,
+        memory,
+        capacity: size,
+        mapped,
+    })
 }
 
 #[cfg(test)]
@@ -381,7 +389,11 @@ mod tests {
 
         // Reclaim up to timeline 10 — first batch freed, second stays in-flight.
         pool.reclaim(10);
-        assert_eq!(pool.free.len(), 2, "two entries from timeline 10 should be free");
+        assert_eq!(
+            pool.free.len(),
+            2,
+            "two entries from timeline 10 should be free"
+        );
         assert_eq!(pool.in_flight.len(), 1, "timeline 20 batch still in-flight");
 
         // Reclaim up to timeline 20 — second batch freed.
@@ -421,8 +433,15 @@ mod tests {
 
         // Requesting more than the free entry's capacity → miss.
         let miss = pool.acquire_from_free_only(256);
-        assert!(miss.is_none(), "entry with capacity 128 should not satisfy 256");
-        assert_eq!(pool.free.len(), 1, "entry should remain in free list on miss");
+        assert!(
+            miss.is_none(),
+            "entry with capacity 128 should not satisfy 256"
+        );
+        assert_eq!(
+            pool.free.len(),
+            1,
+            "entry should remain in free list on miss"
+        );
     }
 
     #[test]

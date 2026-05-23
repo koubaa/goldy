@@ -537,7 +537,9 @@ pub(crate) fn emit_waves_to_commands(
                 } = &node.kind
                 {
                     let slots = match resolver {
-                        Some(r) => SlotData::Resolved(r.resolve_slots(resource_slots, &node.bindings)),
+                        Some(r) => {
+                            SlotData::Resolved(r.resolve_slots(resource_slots, &node.bindings))
+                        }
                         None => SlotData::Borrowed(resource_slots),
                     };
                     pending.push(PendingDispatch {
@@ -2437,9 +2439,24 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
-                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
-                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
+                node(
+                    "B",
+                    2,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "C",
+                    3,
+                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
+                node(
+                    "D",
+                    4,
+                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
+                    1,
+                ),
             ],
         };
 
@@ -2449,7 +2466,10 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let new_map = node_to_wave_map(&schedule, ir.nodes.len());
 
-        assert_eq!(old_map, new_map, "node_to_wave_map must equal graph_node_waves");
+        assert_eq!(
+            old_map, new_map,
+            "node_to_wave_map must equal graph_node_waves"
+        );
         // Sanity: wave 0 is A, wave 1 is B and C, wave 2 is D
         assert_eq!(new_map[0], 0);
         assert_eq!(new_map[1], 1);
@@ -2465,12 +2485,7 @@ mod tests {
         // Expected intervals: t0 = [0,1], t1 = [1,2]
         let ir = GraphIR {
             nodes: vec![
-                node(
-                    "A",
-                    1,
-                    vec![(transient_buf(0), NodeAccess::Write)],
-                    1,
-                ),
+                node("A", 1, vec![(transient_buf(0), NodeAccess::Write)], 1),
                 node(
                     "B",
                     2,
@@ -2480,12 +2495,7 @@ mod tests {
                     ],
                     1,
                 ),
-                node(
-                    "C",
-                    3,
-                    vec![(transient_buf(1), NodeAccess::Read)],
-                    1,
-                ),
+                node("C", 3, vec![(transient_buf(1), NodeAccess::Read)], 1),
             ],
         };
 
@@ -2505,8 +2515,16 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("upload", 1, vec![(transient_tex(0), NodeAccess::Write)], 1),
-                node("read0",  2, vec![(transient_tex(0), NodeAccess::Read), (transient_tex(1), NodeAccess::Write)], 1),
-                node("read1",  3, vec![(transient_tex(1), NodeAccess::Read)], 1),
+                node(
+                    "read0",
+                    2,
+                    vec![
+                        (transient_tex(0), NodeAccess::Read),
+                        (transient_tex(1), NodeAccess::Write),
+                    ],
+                    1,
+                ),
+                node("read1", 3, vec![(transient_tex(1), NodeAccess::Read)], 1),
             ],
         };
 

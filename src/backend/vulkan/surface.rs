@@ -1378,7 +1378,8 @@ pub(super) fn present(
                 .finish(signal_timeline_value);
         }
         if !pending_tex_upload_staging.is_empty() {
-            state.texture_staging_pools
+            state
+                .texture_staging_pools
                 .entry(device_handle)
                 .or_insert_with(super::staging::TextureStagingPool::new)
                 .release(signal_timeline_value, pending_tex_upload_staging);

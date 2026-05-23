@@ -1196,7 +1196,8 @@ pub(super) fn allocate_compute_texture_staging(
         .context("Invalid device handle")?;
 
     let buffer_size = data.len() as u64;
-    let entry = pool.acquire(instance, logical_device, buffer_size)
+    let entry = pool
+        .acquire(instance, logical_device, buffer_size)
         .context("compute texture staging: pool acquire")?;
 
     // Copy data into the permanently-mapped entry.
@@ -1346,7 +1347,6 @@ pub(super) fn record_compute_texture_upload(
     let _ = format;
     Ok(())
 }
-
 
 /// Get the bindless descriptor index for a texture, if any.
 pub(super) fn bindless_index(

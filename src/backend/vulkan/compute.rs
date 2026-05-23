@@ -334,9 +334,12 @@ pub(super) fn submit(
     // For timeline-keyed staging chunks (standalone-submit path) we also need the
     // current device timeline counter so `reclaim` knows which chunks are safe to
     // recycle without reaching into `compute_fence_pool`.
-    let has_write_texture = commands
-        .iter()
-        .any(|c| matches!(c, GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }));
+    let has_write_texture = commands.iter().any(|c| {
+        matches!(
+            c,
+            GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }
+        )
+    });
 
     if has_write_buffer || has_write_texture {
         let _rz = tracy_zone!("vk.submit.belt_reclaim");
@@ -463,7 +466,8 @@ pub(super) fn submit(
     if has_write_texture {
         // Ensure a pool exists for this device before the upload loop so we can
         // hold a mutable reference to just the pool while borrowing other fields.
-        state.texture_staging_pools
+        state
+            .texture_staging_pools
             .entry(device_handle)
             .or_insert_with(staging::TextureStagingPool::new);
     }
@@ -1219,7 +1223,8 @@ pub(super) fn submit(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        state.texture_staging_pools
+        state
+            .texture_staging_pools
             .entry(device_handle)
             .or_insert_with(staging::TextureStagingPool::new)
             .release(signal_value, entries);
@@ -1347,7 +1352,8 @@ fn submit_graph_impl(
     }
 
     if has_write_texture_graph {
-        state.texture_staging_pools
+        state
+            .texture_staging_pools
             .entry(device_handle)
             .or_insert_with(staging::TextureStagingPool::new);
     }
@@ -1416,8 +1422,7 @@ fn submit_graph_impl(
                         width,
                         height,
                     } => {
-                        let pool =
-                            state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                        let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -1441,8 +1446,7 @@ fn submit_graph_impl(
                         height,
                         data,
                     } => {
-                        let pool =
-                            state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                        let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -2206,7 +2210,8 @@ fn submit_graph_impl(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        state.texture_staging_pools
+        state
+            .texture_staging_pools
             .entry(device_handle)
             .or_insert_with(staging::TextureStagingPool::new)
             .release(signal_value, entries);

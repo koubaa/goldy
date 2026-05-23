@@ -26,9 +26,10 @@
 //!
 //! The view cache is keyed on `TransientId` (a `u32` from `0..N` per graph). Since
 //! `TransientId` is assigned by declaration order and reset to 0 on each
-//! [`TaskGraph::clear`], `TransientId(0)` from graph A and `TransientId(0)` from
-//! graph B would collide. **This heap therefore assumes exactly one `TaskGraph` per
-//! device.** A `debug_assert` enforces this in [`PlacementHeap::assert_single_graph`].
+//! [`TaskGraph::clear`](crate::TaskGraph::clear), `TransientId(0)` from graph A and
+//! `TransientId(0)` from graph B would collide. **This heap therefore assumes exactly
+//! one `TaskGraph` per device.** Debug-assertions telemetry in [`TaskGraph`](crate::TaskGraph)
+//! enforces deterministic declaration order across frames.
 
 use crate::backend::TextureHandle;
 use crate::buffer::{Buffer, BufferView};
@@ -91,7 +92,7 @@ struct CachedTexture {
 ///
 /// ## View and texture cache
 ///
-/// [`Self::get_or_create_view`] and [`Self::get_or_create_textures`] implement a
+/// [`Self::get_or_create_view`] and `get_or_create_textures` implement a
 /// stable-slot cache. In steady state (same spec, same placement) all backend
 /// descriptor work is skipped. Eviction via [`Device::defer_release`] ensures
 /// GPU safety when shapes or placements change.
@@ -397,7 +398,7 @@ impl PlacementHeap {
     ///
     /// Slot IDs are not namespaced. If two `TaskGraph`s are submitted through the same device,
     /// their IDs collide. This method panics in debug builds if concurrent submissions
-    /// would violate cache correctness (use `assert_single_graph` to enforce).
+    /// would violate cache correctness (see the one-graph-per-device section above).
     pub fn get_or_create_view(
         &mut self,
         slot_id: u32,
@@ -460,7 +461,8 @@ impl PlacementHeap {
     ) -> Result<Vec<TextureHandle>> {
         // Evict surplus cached slots when the color count shrinks.
         if self.texture_cache.len() > color_keys.len() {
-            let surplus: Vec<CachedTexture> = self.texture_cache.drain(color_keys.len()..).collect();
+            let surplus: Vec<CachedTexture> =
+                self.texture_cache.drain(color_keys.len()..).collect();
             let epoch = self.max_in_flight_timeline();
             if let Some(epoch) = epoch {
                 let mut payload = DeferredPayload::new();
@@ -878,7 +880,11 @@ mod tests {
         // Frame 1: acquire a region and create all three views.
         let base_offset = heap.acquire(4 * 1024).unwrap();
         heap.stamp(1);
-        let offsets: Vec<u64> = specs.iter().enumerate().map(|(i, _)| i as u64 * 512).collect();
+        let offsets: Vec<u64> = specs
+            .iter()
+            .enumerate()
+            .map(|(i, _)| i as u64 * 512)
+            .collect();
         for (i, &(id, size, stride)) in specs.iter().enumerate() {
             heap.get_or_create_view(id, base_offset + offsets[i], size, stride, &device)
                 .unwrap();
@@ -918,7 +924,11 @@ mod tests {
 
         // Frame 2: slot 0 changes size to 512 → evict + create.
         heap.get_or_create_view(0, base, 512, 4, &device).unwrap();
-        assert_eq!(heap.view_create_count(), 2, "shape change caused a new create");
+        assert_eq!(
+            heap.view_create_count(),
+            2,
+            "shape change caused a new create"
+        );
     }
 
     /// Growing the heap must invalidate all cached views (they reference the old buffer).
@@ -945,7 +955,11 @@ mod tests {
         let base2 = heap.acquire(1024).unwrap();
         heap.stamp(2);
         heap.get_or_create_view(0, base2, 256, 4, &device).unwrap();
-        assert_eq!(heap.view_create_count(), 2, "post-grow frame creates a new view");
+        assert_eq!(
+            heap.view_create_count(),
+            2,
+            "post-grow frame creates a new view"
+        );
     }
 
     /// Zero-size slots should not panic or pollute the cache.
@@ -1039,7 +1053,11 @@ mod tests {
             }
         }
 
-        assert_eq!(heap.view_create_count(), num_transients, "total creates = {num_transients}");
+        assert_eq!(
+            heap.view_create_count(),
+            num_transients,
+            "total creates = {num_transients}"
+        );
     }
 
     /// Transient textures: same shape twice should produce exactly N creates.

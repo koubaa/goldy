@@ -829,7 +829,6 @@ impl Device {
     /// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
     /// 4. Patch dispatch `resource_slots` with real bindless indices
     /// 5. Submit the resolved IR (views kept alive in the heap ring until GPU retires)
-    /// Submit a graph that uses transient resources.
     ///
     /// Handles both transient-buffer and transient-texture cases, routing through
     /// the device's [`PlacementHeap`](crate::placement_heap::PlacementHeap) for
@@ -880,7 +879,9 @@ impl Device {
 
         let tex_handles = graph.resolve_transient_textures_with_heap(self, heap, &node_waves)?;
         for (id, handle) in &tex_handles {
-            resolver.textures.insert(*id, ResolvedTransientTexture { handle: *handle });
+            resolver
+                .textures
+                .insert(*id, ResolvedTransientTexture { handle: *handle });
         }
 
         if has_buffers {
@@ -894,13 +895,16 @@ impl Device {
                 let view_stride = spec.stride.max(1);
                 let (uav, srv, _hit) =
                     heap.get_or_create_view(spec.id, offset, spec.size, view_stride, self)?;
-                resolver.buffers.insert(spec.id, ResolvedTransientBuffer {
-                    parent: buf_handle,
-                    offset,
-                    len: spec.size,
-                    uav_index: uav,
-                    srv_index: srv,
-                });
+                resolver.buffers.insert(
+                    spec.id,
+                    ResolvedTransientBuffer {
+                        parent: buf_handle,
+                        offset,
+                        len: spec.size,
+                        uav_index: uav,
+                        srv_index: srv,
+                    },
+                );
             }
         }
 
@@ -958,14 +962,20 @@ impl Device {
     /// Use this in tests to verify that steady-state frames produce zero new creates.
     pub fn transient_view_create_count(&self) -> usize {
         let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.view_create_count()).unwrap_or(0)
+        heap_guard
+            .as_ref()
+            .map(|h| h.view_create_count())
+            .unwrap_or(0)
     }
 
     /// Total number of `Texture::new` calls made by the placement heap's texture cache
     /// since initialization. Monotonically increasing.
     pub fn transient_texture_create_count(&self) -> usize {
         let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.texture_create_count()).unwrap_or(0)
+        heap_guard
+            .as_ref()
+            .map(|h| h.texture_create_count())
+            .unwrap_or(0)
     }
 
     /// Get device capabilities and format preferences.

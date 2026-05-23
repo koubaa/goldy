@@ -256,9 +256,7 @@ impl SlotResolver {
                     len: r.len,
                 }
             }
-            ResourceId::TransientTexture(t) => {
-                ResourceId::Texture(self.textures[&t.0].handle)
-            }
+            ResourceId::TransientTexture(t) => ResourceId::Texture(self.textures[&t.0].handle),
             ResourceId::SwapchainOutput => {
                 let sc = self.swapchain.as_ref().expect(
                     "SlotResolver::resolve: SwapchainOutput accessed before swapchain acquired",
@@ -285,15 +283,18 @@ impl SlotResolver {
                 ResourceId::TransientBuffer(t) => {
                     let r = &self.buffers[&t.0];
                     let is_read_only = b.access == ir::NodeAccess::Read;
-                    out[i] = if is_read_only { r.srv_index } else { r.uav_index };
+                    out[i] = if is_read_only {
+                        r.srv_index
+                    } else {
+                        r.uav_index
+                    };
                 }
-                ResourceId::SwapchainOutput => {
-                    if out[i] == SWAPCHAIN_SLOT_PLACEHOLDER {
-                        let sc = self.swapchain.as_ref().expect(
-                            "SlotResolver::resolve_slots: SwapchainOutput before acquire",
-                        );
-                        out[i] = sc.uav_index;
-                    }
+                ResourceId::SwapchainOutput if out[i] == SWAPCHAIN_SLOT_PLACEHOLDER => {
+                    let sc = self
+                        .swapchain
+                        .as_ref()
+                        .expect("SlotResolver::resolve_slots: SwapchainOutput before acquire");
+                    out[i] = sc.uav_index;
                 }
                 _ => {}
             }

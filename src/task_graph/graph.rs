@@ -559,7 +559,6 @@ impl TaskGraph {
         Ok((next_off, max_align, m))
     }
 
-
     /// Submit the original (unlowered) IR to the backend, resolving transient
     /// and swapchain slots at emission time via `resolver`.
     ///
@@ -580,11 +579,7 @@ impl TaskGraph {
 
         // Build the schedule from disjoint fields to avoid borrow conflicts.
         let fp = Self::binding_fingerprint(&self.ir);
-        let schedule = Self::get_or_build_schedule(
-            &mut self.schedule_cache,
-            &self.ir,
-            fp,
-        );
+        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir, fp);
 
         if has_render {
             let g = analysis::emit_graph_commands(&self.ir, schedule, Some(resolver));
@@ -1499,7 +1494,7 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// The concrete `TextureHandle` is resolved at submit time by
     /// [`Surface::submit_graph`](crate::Surface::submit_graph).  The caller (ekrano) must place
-    /// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` at the corresponding
+    /// [`super::SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` at the corresponding
     /// binding position so `TaskGraph::lower_swapchain_output` can patch it with the
     /// real UAV bindless index after `surface.begin()`.
     pub fn bind_swapchain_output(

@@ -568,8 +568,7 @@ pub(crate) struct FrameSync {
     /// Texture upload staging entries for `deferred_compute_cbs`, released into
     /// the per-device `TextureStagingPool` under the frame's timeline signal value
     /// at present time.
-    pub pending_compute_texture_staging:
-        Vec<crate::backend::vulkan::staging::TextureStagingEntry>,
+    pub pending_compute_texture_staging: Vec<crate::backend::vulkan::staging::TextureStagingEntry>,
     /// Surface texture handle whose VkImageView + bindless descriptor must stay
     /// alive until the GPU finishes this frame slot's work.  Unregistered in
     /// `acquire()` after `in_flight_fence` has been waited on.

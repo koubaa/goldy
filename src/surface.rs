@@ -320,8 +320,7 @@ impl Surface {
         // ── Initialise the placement heap ────────────────────────────────────────
         let mut heap_guard = self._device.inner.placement_heap.lock().unwrap();
         if heap_guard.is_none() {
-            let cap = (256 * 1024 * 1024u64)
-                .max(alloc_size * Device::DEFAULT_PIPELINE_DEPTH);
+            let cap = (256 * 1024 * 1024u64).max(alloc_size * Device::DEFAULT_PIPELINE_DEPTH);
             *heap_guard = Some(
                 PlacementHeap::with_capacity(&self._device, cap)
                     .context("failed to create device placement heap")?,
@@ -343,7 +342,9 @@ impl Surface {
             graph.resolve_transient_textures_with_heap(&self._device, heap, node_waves)?
         };
         for (id, handle) in &tex_handles {
-            resolver.textures.insert(*id, ResolvedTransientTexture { handle: *handle });
+            resolver
+                .textures
+                .insert(*id, ResolvedTransientTexture { handle: *handle });
         }
 
         if layout_opt.is_none() {
@@ -365,15 +366,23 @@ impl Surface {
             for spec in graph.transient_specs() {
                 let offset = base_offset + layout[&spec.id];
                 let view_stride = spec.stride.max(1);
-                let (uav, srv, _hit) =
-                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, &self._device)?;
-                resolver.buffers.insert(spec.id, ResolvedTransientBuffer {
-                    parent: buf_handle,
+                let (uav, srv, _hit) = heap.get_or_create_view(
+                    spec.id,
                     offset,
-                    len: spec.size,
-                    uav_index: uav,
-                    srv_index: srv,
-                });
+                    spec.size,
+                    view_stride,
+                    &self._device,
+                )?;
+                resolver.buffers.insert(
+                    spec.id,
+                    ResolvedTransientBuffer {
+                        parent: buf_handle,
+                        offset,
+                        len: spec.size,
+                        uav_index: uav,
+                        srv_index: srv,
+                    },
+                );
             }
         }
 
