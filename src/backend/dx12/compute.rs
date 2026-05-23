@@ -15,6 +15,65 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
+use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+
+/// Convert the Koubaa-level producer/consumer kind set to a DX12 sync scope.
+///
+/// Returns `D3D12_BARRIER_SYNC_ALL` if no kinds are recorded (empty set) so
+/// that the barrier is conservatively correct even without IR information.
+fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
+    if usage.kinds.is_empty() {
+        return D3D12_BARRIER_SYNC_ALL;
+    }
+    let mut sync = D3D12_BARRIER_SYNC(0);
+    if usage.kinds.contains(UsageKindFlags::COMPUTE) {
+        sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
+    }
+    if usage.kinds.contains(UsageKindFlags::TRANSFER) {
+        sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
+    }
+    if usage.kinds.contains(UsageKindFlags::RENDER) {
+        sync.0 |= D3D12_BARRIER_SYNC_RENDER_TARGET.0 | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0;
+    }
+    sync
+}
+
+/// Convert the Koubaa-level producer/consumer access set to a DX12 access mask.
+///
+/// Returns `D3D12_BARRIER_ACCESS_COMMON` if no kinds are recorded.
+///
+/// For compute: always includes both UAV and SRV because the `SlotUsageSet`
+/// cannot distinguish whether the shader binds a buffer via UAV or SRV
+/// descriptor.  A mismatch (e.g. `AccessAfter = SRV` when the shader reads
+/// via UAV) causes the driver to use the wrong cache coherence protocol,
+/// resulting in implicit full stalls on hardware.
+fn slot_usage_to_dx12_access(usage: &SlotUsageSet) -> D3D12_BARRIER_ACCESS {
+    if usage.kinds.is_empty() {
+        return D3D12_BARRIER_ACCESS_COMMON;
+    }
+    let mut access = D3D12_BARRIER_ACCESS(0);
+    if usage.kinds.contains(UsageKindFlags::COMPUTE) {
+        access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
+            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
+    }
+    if usage.kinds.contains(UsageKindFlags::TRANSFER) {
+        if usage.access == NodeAccessUnion::Write {
+            access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
+        } else {
+            access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0;
+        }
+    }
+    if usage.kinds.contains(UsageKindFlags::RENDER) {
+        access.0 |=
+            D3D12_BARRIER_ACCESS_RENDER_TARGET.0 | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE.0;
+    }
+    if access.0 == 0 {
+        D3D12_BARRIER_ACCESS_COMMON
+    } else {
+        access
+    }
+}
+
 #[derive(Debug)]
 struct Dx12GpuProfileResources {
     heap: ID3D12QueryHeap,
@@ -427,8 +486,6 @@ struct CmdCtx<'a> {
     belt_idx: usize,
     staged_texture_uploads: &'a [super::texture::StagedTextureUpload],
     texture_upload_idx: usize,
-    pending_sync: D3D12_BARRIER_SYNC,
-    pending_access: D3D12_BARRIER_ACCESS,
     gpu_profile: &'a mut Option<Dx12GpuProfileResources>,
     dispatch_idx: u32,
     current_compute_pipeline: Option<ComputePipelineHandle>,
@@ -560,8 +617,6 @@ fn record_gpu_command(
                 unsafe { cl.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base + 1) };
             }
             ctx.dispatch_idx += 1;
-            ctx.pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
-            ctx.pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
         }
         GpuCommand::DispatchIndirect {
             buffer,
@@ -634,8 +689,6 @@ fn record_gpu_command(
                 unsafe { barriers::barrier_buffers(cl7, &to_uav) };
                 unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
             }
-            ctx.pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
-            ctx.pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
         }
         GpuCommand::DispatchBatch {
             label: _,
@@ -658,7 +711,10 @@ fn record_gpu_command(
                     DepthOrArraySize: 1,
                     MipLevels: 1,
                     Format: DXGI_FORMAT_UNKNOWN,
-                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
                     Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
                     Flags: D3D12_RESOURCE_FLAG_NONE,
                 };
@@ -678,8 +734,7 @@ fn record_gpu_command(
                     )
                 }
                 .context("DispatchBatch: failed to create arg buffer")?;
-                let arg_resource =
-                    arg_resource.context("DispatchBatch: arg_resource is None")?;
+                let arg_resource = arg_resource.context("DispatchBatch: arg_resource is None")?;
 
                 let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
                 let no_read = D3D12_RANGE { Begin: 0, End: 0 };
@@ -692,7 +747,10 @@ fn record_gpu_command(
                         mapped as *mut u8,
                         arg_data.len(),
                     );
-                    let written = D3D12_RANGE { Begin: 0, End: arg_data.len() };
+                    let written = D3D12_RANGE {
+                        Begin: 0,
+                        End: arg_data.len(),
+                    };
                     arg_resource.Unmap(0, Some(&written));
                 }
                 unsafe {
@@ -716,14 +774,11 @@ fn record_gpu_command(
                     let base = i * stride;
                     let layout_bytes = &arg_data[base..base + push_size];
                     let wg_off = base + push_size;
-                    let wg_x =
-                        u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
-                    let wg_y = u32::from_ne_bytes(
-                        arg_data[wg_off + 4..wg_off + 8].try_into().unwrap(),
-                    );
-                    let wg_z = u32::from_ne_bytes(
-                        arg_data[wg_off + 8..wg_off + 12].try_into().unwrap(),
-                    );
+                    let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
+                    let wg_y =
+                        u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into().unwrap());
+                    let wg_z =
+                        u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into().unwrap());
                     unsafe {
                         cl.SetComputeRoot32BitConstants(
                             0,
@@ -735,90 +790,37 @@ fn record_gpu_command(
                     }
                 }
             }
-            ctx.pending_sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
-            ctx.pending_access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0;
         }
         GpuCommand::Barrier => {
+            // Legacy non-graph barrier: no access semantics available, use the
+            // conservative global sync.  This path is audited by `remove-legacy-barrier`.
             let _tz = tracy_zone!("dx12.barrier");
-            let at_start = ctx.pending_sync.0 == 0;
-            let sync_before = if !at_start {
-                ctx.pending_sync
-            } else {
-                D3D12_BARRIER_SYNC_ALL
-            };
-            let access_before = if !at_start {
-                ctx.pending_access
-            } else {
-                D3D12_BARRIER_ACCESS_COMMON
-            };
             let g = D3D12_GLOBAL_BARRIER {
-                SyncBefore: sync_before,
-                SyncAfter: if !at_start {
-                    D3D12_BARRIER_SYNC_COMPUTE_SHADING
-                } else {
-                    D3D12_BARRIER_SYNC_ALL
-                },
-                AccessBefore: access_before,
-                AccessAfter: if !at_start {
-                    D3D12_BARRIER_ACCESS(
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
-                    )
-                } else {
-                    D3D12_BARRIER_ACCESS_COMMON
-                },
+                SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                SyncAfter: D3D12_BARRIER_SYNC_ALL,
+                AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+                AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
             };
             unsafe { barriers::barrier_globals(cl7, &[g]) };
-            ctx.pending_sync = D3D12_BARRIER_SYNC(0);
-            ctx.pending_access = D3D12_BARRIER_ACCESS(0);
         }
         GpuCommand::ResourceBarrier {
             buffers: buf_handles,
             textures: tex_handles,
+            src_usage,
+            dst_usage,
         } => {
             let _tz = tracy_zone!("dx12.resource_barrier");
-            // When pending_sync/access are zero we are at the start of a command list
-            // (either the very first submission or the second partition of a split graph).
-            // Using COMPUTE_SHADING as SyncBefore would be "wait for compute in THIS list,"
-            // but there is none yet — that work lives in the previous command list.
-            // D3D12_BARRIER_SYNC_ALL / COMMON conservatively covers all preceding work on
-            // the queue, including from prior command lists, and is always correct here.
-            // Per spec: when AccessBefore = COMMON, AccessAfter must also be COMMON.
-            //
-            // TODO: SYNC_ALL/COMMON is overly conservative and causes wait_gpu to dominate
-            // in profiling. A more precise fix would propagate the tail barrier's actual
-            // sync/access scope from partition 1 into partition 2's first barrier (e.g.
-            // COMPUTE_SHADING|COPY → COMPUTE_SHADING, UAV|COPY_DEST → UAV|SRV).
-            let at_partition_start = ctx.pending_sync.0 == 0;
-            let sync_before = if !at_partition_start {
-                ctx.pending_sync
-            } else {
-                D3D12_BARRIER_SYNC_ALL
-            };
-            let access_before = if !at_partition_start {
-                ctx.pending_access
-            } else {
-                D3D12_BARRIER_ACCESS_COMMON
-            };
-            let sync_after = if !at_partition_start {
-                D3D12_BARRIER_SYNC_COMPUTE_SHADING
-            } else {
-                D3D12_BARRIER_SYNC_ALL
-            };
-            let access_after = if !at_partition_start {
-                D3D12_BARRIER_ACCESS(
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                        | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
-                )
-            } else {
-                D3D12_BARRIER_ACCESS_COMMON
-            };
+            let sync_before = slot_usage_to_dx12_sync(src_usage);
+            let access_before = slot_usage_to_dx12_access(src_usage);
+            let sync_after = slot_usage_to_dx12_sync(dst_usage);
+            let access_after = slot_usage_to_dx12_access(dst_usage);
+
             // WARP silently removes the device when D3D12_BARRIER_TYPE_BUFFER
             // enhanced barriers are used, causing ExecuteCommandLists to fail
             // and the subsequent Signal() to AV. Fall back to a global barrier
             // which is correct (just less precise).
             if ctx.use_global_buffer_barriers || buf_handles.is_empty() {
-                if !buf_handles.is_empty() || at_partition_start {
+                if !buf_handles.is_empty() {
                     let g = D3D12_GLOBAL_BARRIER {
                         SyncBefore: sync_before,
                         SyncAfter: sync_after,
@@ -837,10 +839,7 @@ fn record_gpu_command(
                             sync_before,
                             sync_after,
                             access_before,
-                            D3D12_BARRIER_ACCESS(
-                                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                                    | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
-                            ),
+                            access_after,
                         )
                     })
                     .collect();
@@ -852,24 +851,30 @@ fn record_gpu_command(
                 .iter()
                 .filter_map(|h| state.textures.get(h))
                 .map(|ts| {
-                    let (access, layout) = if ts.last_layout
+                    // Each texture keeps its own layout, which encodes what kind of
+                    // access it last saw.  Use the layout to determine sync_before /
+                    // access_before so we don't mix incompatible sync+access pairs
+                    // (e.g. SYNC_COPY + ACCESS_SHADER_RESOURCE is invalid on DX12).
+                    let (tex_sync_before, access, layout) = if ts.last_layout
                         == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
                         || ts.last_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
                     {
                         (
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                             D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                             D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
                         )
                     } else {
                         (
+                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                             D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
                             D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
                         )
                     };
                     barriers::texture_barrier_full(
                         &ts.resource,
-                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                        D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                        tex_sync_before,
+                        sync_after,
                         access,
                         access,
                         layout,
@@ -879,8 +884,6 @@ fn record_gpu_command(
                 .collect();
             unsafe { barriers::barrier_textures(cl7, &tex_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
-            ctx.pending_sync = D3D12_BARRIER_SYNC(0);
-            ctx.pending_access = D3D12_BARRIER_ACCESS(0);
         }
         GpuCommand::ClearBuffer {
             buffer,
@@ -941,8 +944,6 @@ fn record_gpu_command(
                         }
                         cleared += this_chunk;
                     }
-                    ctx.pending_sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
-                    ctx.pending_access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
                 } else {
                     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
                     let no_read = D3D12_RANGE { Begin: 0, End: 0 };
@@ -1037,8 +1038,6 @@ fn record_gpu_command(
                         );
                     }
                 }
-                ctx.pending_sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
-                ctx.pending_access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
             }
         }
         GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
@@ -1048,12 +1047,7 @@ fn record_gpu_command(
                 .get(ctx.texture_upload_idx)
                 .context("WriteTexture: staged upload missing (internal)")?;
             ctx.texture_upload_idx += 1;
-            super::texture::record_staged_texture_upload(
-                cl,
-                cl7,
-                &mut state.textures,
-                upload,
-            )?;
+            super::texture::record_staged_texture_upload(cl, cl7, &mut state.textures, upload)?;
         }
         GpuCommand::CopyTexture { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_texture");
@@ -1072,11 +1066,10 @@ fn record_gpu_command(
                 (ts.resource.clone(), ts.last_layout)
             };
 
-            let sync_before = if ctx.pending_sync.0 != 0 {
-                ctx.pending_sync
-            } else {
-                D3D12_BARRIER_SYNC_COMPUTE_SHADING
-            };
+            // The preceding ResourceBarrier has already serialized any producers.
+            // Use COMPUTE_SHADING to synchronize with compute work that may have
+            // written the source texture before this copy wave.
+            let sync_before = D3D12_BARRIER_SYNC_COMPUTE_SHADING;
             let src_access_before = if src_layout
                 == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
                 || src_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
@@ -1149,9 +1142,6 @@ fn record_gpu_command(
             if let Some(ts) = state.textures.get_mut(dst) {
                 ts.last_layout = post_layout;
             }
-
-            ctx.pending_sync = D3D12_BARRIER_SYNC(0);
-            ctx.pending_access = D3D12_BARRIER_ACCESS(0);
         }
     }
     Ok(())
@@ -1192,16 +1182,22 @@ fn execute_signal_and_finish(
         ));
     }
 
-    let cmd_list: ID3D12CommandList = command_list
-        .cast()
-        .context("Failed to cast command list")?;
+    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = state.devices.get(&device_handle).unwrap();
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
-        unsafe { logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]) };
-        unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-            .context("Failed to signal fence")?;
+        unsafe {
+            logical_device
+                .command_queue
+                .ExecuteCommandLists(&[Some(cmd_list)])
+        };
+        unsafe {
+            logical_device
+                .command_queue
+                .Signal(&logical_device.fence, fence_value)
+        }
+        .context("Failed to signal fence")?;
     }
 
     if let Some(prof) = gpu_profile {
@@ -1308,7 +1304,11 @@ pub(super) fn submit(
         let _tz_prepass = tracy_zone!("dx12.submit.upload_prepass");
         for command in commands {
             match command {
-                GpuCommand::WriteBuffer { buffer: buf_handle, data, .. } => {
+                GpuCommand::WriteBuffer {
+                    buffer: buf_handle,
+                    data,
+                    ..
+                } => {
                     let buf = state
                         .buffers
                         .get(buf_handle)
@@ -1326,12 +1326,24 @@ pub(super) fn submit(
                         belt_slices.push((res, off));
                     }
                 }
-                GpuCommand::WriteTexture { texture, data, width, height } => {
+                GpuCommand::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
                     staged_texture_uploads.push(super::texture::stage_texture_upload_full(
                         state, *texture, data, *width, *height,
                     )?);
                 }
-                GpuCommand::WriteTextureRegion { texture, x, y, width, height, data } => {
+                GpuCommand::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
                     staged_texture_uploads.push(super::texture::stage_texture_upload_region(
                         state, *texture, *x, *y, *width, *height, data,
                     )?);
@@ -1381,8 +1393,6 @@ pub(super) fn submit(
             belt_idx: 0,
             staged_texture_uploads: &staged_texture_uploads,
             texture_upload_idx: 0,
-            pending_sync: D3D12_BARRIER_SYNC(0),
-            pending_access: D3D12_BARRIER_ACCESS(0),
             gpu_profile: &mut dx_gpu_profile,
             dispatch_idx: 0,
             current_compute_pipeline: None,
@@ -1495,7 +1505,11 @@ pub(super) fn submit_graph(
         for graph_cmd in commands {
             if let GraphCommand::Compute(gpu_cmd) = graph_cmd {
                 match gpu_cmd {
-                    GpuCommand::WriteBuffer { buffer: buf_handle, data, .. } => {
+                    GpuCommand::WriteBuffer {
+                        buffer: buf_handle,
+                        data,
+                        ..
+                    } => {
                         let buf = state
                             .buffers
                             .get(buf_handle)
@@ -1513,12 +1527,24 @@ pub(super) fn submit_graph(
                             belt_slices.push((res, off));
                         }
                     }
-                    GpuCommand::WriteTexture { texture, data, width, height } => {
+                    GpuCommand::WriteTexture {
+                        texture,
+                        data,
+                        width,
+                        height,
+                    } => {
                         staged_texture_uploads.push(super::texture::stage_texture_upload_full(
                             state, *texture, data, *width, *height,
                         )?);
                     }
-                    GpuCommand::WriteTextureRegion { texture, x, y, width, height, data } => {
+                    GpuCommand::WriteTextureRegion {
+                        texture,
+                        x,
+                        y,
+                        width,
+                        height,
+                        data,
+                    } => {
                         staged_texture_uploads.push(super::texture::stage_texture_upload_region(
                             state, *texture, *x, *y, *width, *height, data,
                         )?);
@@ -1571,8 +1597,6 @@ pub(super) fn submit_graph(
             belt_idx: 0,
             staged_texture_uploads: &staged_texture_uploads,
             texture_upload_idx: 0,
-            pending_sync: D3D12_BARRIER_SYNC(0),
-            pending_access: D3D12_BARRIER_ACCESS(0),
             gpu_profile: &mut dx_gpu_profile,
             dispatch_idx: 0,
             current_compute_pipeline: None,
@@ -1583,7 +1607,10 @@ pub(super) fn submit_graph(
                 GraphCommand::Compute(gpu_cmd) => {
                     record_gpu_command(state, device_handle, &mut ctx, gpu_cmd)?;
                 }
-                GraphCommand::Render { target, commands: render_cmds } => {
+                GraphCommand::Render {
+                    target,
+                    commands: render_cmds,
+                } => {
                     let _tz = tracy_zone!("dx12.render_pass");
                     let compute_to_render = D3D12_GLOBAL_BARRIER {
                         SyncBefore: D3D12_BARRIER_SYNC(
@@ -1618,8 +1645,7 @@ pub(super) fn submit_graph(
 
                     let render_to_compute = D3D12_GLOBAL_BARRIER {
                         SyncBefore: D3D12_BARRIER_SYNC(
-                            D3D12_BARRIER_SYNC_RENDER_TARGET.0
-                                | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0,
+                            D3D12_BARRIER_SYNC_RENDER_TARGET.0 | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0,
                         ),
                         SyncAfter: D3D12_BARRIER_SYNC(
                             D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,

@@ -6,12 +6,60 @@ use super::types::{ComputePipelineState, LogicalDevice, PushLayout};
 use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, SurfaceHandle};
 use crate::backend::{GpuCommand, GraphCommand};
 use crate::gpu_profiler::{self, DispatchGpuNs};
+use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+
+/// Map a Koubaa producer/consumer usage set to Vulkan pipeline stage flags.
+fn slot_usage_to_vk_stage(usage: &SlotUsageSet) -> vk::PipelineStageFlags2 {
+    if usage.kinds.is_empty() {
+        return vk::PipelineStageFlags2::ALL_COMMANDS;
+    }
+    let mut flags = vk::PipelineStageFlags2::empty();
+    if usage.kinds.contains(UsageKindFlags::COMPUTE) {
+        flags |= vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::DRAW_INDIRECT;
+    }
+    if usage.kinds.contains(UsageKindFlags::TRANSFER) {
+        flags |= vk::PipelineStageFlags2::TRANSFER;
+    }
+    if usage.kinds.contains(UsageKindFlags::RENDER) {
+        flags |= vk::PipelineStageFlags2::ALL_GRAPHICS;
+    }
+    flags
+}
+
+/// Map a Koubaa producer/consumer usage set to Vulkan access flags.
+fn slot_usage_to_vk_access(usage: &SlotUsageSet) -> vk::AccessFlags2 {
+    if usage.kinds.is_empty() {
+        return vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE;
+    }
+    let mut flags = vk::AccessFlags2::empty();
+    if usage.kinds.contains(UsageKindFlags::COMPUTE) {
+        if usage.access == NodeAccessUnion::Write {
+            flags |= vk::AccessFlags2::SHADER_WRITE;
+        } else {
+            flags |= vk::AccessFlags2::SHADER_READ;
+        }
+        // DRAW_INDIRECT reads are always reads.
+        flags |= vk::AccessFlags2::INDIRECT_COMMAND_READ;
+    }
+    if usage.kinds.contains(UsageKindFlags::TRANSFER) {
+        if usage.access == NodeAccessUnion::Write {
+            flags |= vk::AccessFlags2::TRANSFER_WRITE;
+        } else {
+            flags |= vk::AccessFlags2::TRANSFER_READ;
+        }
+    }
+    if usage.kinds.contains(UsageKindFlags::RENDER) {
+        flags |= vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
+    }
+    flags
+}
 
 /// Acquire a command buffer: recycle from the free-list or allocate a fresh one.
 fn acquire_cmd_buffer(ld: &mut LogicalDevice) -> Result<vk::CommandBuffer> {
@@ -833,36 +881,24 @@ pub(super) fn submit(
                 GpuCommand::ResourceBarrier {
                     buffers: buf_handles,
                     textures: tex_handles,
+                    src_usage,
+                    dst_usage,
                 } => {
                     let _tz = tracy_zone!("vk.resource_barrier");
+                    let src_stage = slot_usage_to_vk_stage(src_usage);
+                    let src_access = slot_usage_to_vk_access(src_usage);
+                    let dst_stage = slot_usage_to_vk_stage(dst_usage);
+                    let dst_access = slot_usage_to_vk_access(dst_usage);
                     unsafe {
-                        // The graph scheduler emits ResourceBarrier between any pair
-                        // of dependent nodes (WriteBuffer→Dispatch, Dispatch→Dispatch,
-                        // Dispatch→DispatchIndirect, ClearBuffer→Dispatch).  We don't
-                        // track per-buffer prior access, so use the union of all
-                        // possible src/dst stages and access masks.
                         let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_handles
                             .iter()
                             .filter_map(|h| buffers.get(h))
                             .map(|bs| {
                                 vk::BufferMemoryBarrier2::default()
-                                    .src_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::TRANSFER,
-                                    )
-                                    .src_access_mask(
-                                        vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::TRANSFER_WRITE,
-                                    )
-                                    .dst_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::DRAW_INDIRECT,
-                                    )
-                                    .dst_access_mask(
-                                        vk::AccessFlags2::SHADER_READ
-                                            | vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::INDIRECT_COMMAND_READ,
-                                    )
+                                    .src_stage_mask(src_stage)
+                                    .src_access_mask(src_access)
+                                    .dst_stage_mask(dst_stage)
+                                    .dst_access_mask(dst_access)
                                     .buffer(bs.buffer)
                                     .offset(0)
                                     .size(vk::WHOLE_SIZE)
@@ -874,23 +910,10 @@ pub(super) fn submit(
                         let tex_mem: Option<vk::MemoryBarrier2> = if !tex_handles.is_empty() {
                             Some(
                                 vk::MemoryBarrier2::default()
-                                    .src_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::TRANSFER,
-                                    )
-                                    .src_access_mask(
-                                        vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::TRANSFER_WRITE,
-                                    )
-                                    .dst_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::DRAW_INDIRECT,
-                                    )
-                                    .dst_access_mask(
-                                        vk::AccessFlags2::SHADER_READ
-                                            | vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::INDIRECT_COMMAND_READ,
-                                    ),
+                                    .src_stage_mask(src_stage)
+                                    .src_access_mask(src_access)
+                                    .dst_stage_mask(dst_stage)
+                                    .dst_access_mask(dst_access),
                             )
                         } else {
                             None
@@ -1774,36 +1797,24 @@ fn submit_graph_impl(
                 GpuCommand::ResourceBarrier {
                     buffers: buf_handles,
                     textures: tex_handles,
+                    src_usage,
+                    dst_usage,
                 } => {
                     let _tz = tracy_zone!("vk.resource_barrier");
+                    let src_stage = slot_usage_to_vk_stage(src_usage);
+                    let src_access = slot_usage_to_vk_access(src_usage);
+                    let dst_stage = slot_usage_to_vk_stage(dst_usage);
+                    let dst_access = slot_usage_to_vk_access(dst_usage);
                     unsafe {
-                        // The graph scheduler emits ResourceBarrier between any pair
-                        // of dependent nodes (WriteBuffer→Dispatch, Dispatch→Dispatch,
-                        // Dispatch→DispatchIndirect, ClearBuffer→Dispatch).  We don't
-                        // track per-buffer prior access, so use the union of all
-                        // possible src/dst stages and access masks.
                         let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_handles
                             .iter()
                             .filter_map(|h| buffers.get(h))
                             .map(|bs| {
                                 vk::BufferMemoryBarrier2::default()
-                                    .src_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::TRANSFER,
-                                    )
-                                    .src_access_mask(
-                                        vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::TRANSFER_WRITE,
-                                    )
-                                    .dst_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::DRAW_INDIRECT,
-                                    )
-                                    .dst_access_mask(
-                                        vk::AccessFlags2::SHADER_READ
-                                            | vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::INDIRECT_COMMAND_READ,
-                                    )
+                                    .src_stage_mask(src_stage)
+                                    .src_access_mask(src_access)
+                                    .dst_stage_mask(dst_stage)
+                                    .dst_access_mask(dst_access)
                                     .buffer(bs.buffer)
                                     .offset(0)
                                     .size(vk::WHOLE_SIZE)
@@ -1815,23 +1826,10 @@ fn submit_graph_impl(
                         let tex_mem: Option<vk::MemoryBarrier2> = if !tex_handles.is_empty() {
                             Some(
                                 vk::MemoryBarrier2::default()
-                                    .src_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::TRANSFER,
-                                    )
-                                    .src_access_mask(
-                                        vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::TRANSFER_WRITE,
-                                    )
-                                    .dst_stage_mask(
-                                        vk::PipelineStageFlags2::COMPUTE_SHADER
-                                            | vk::PipelineStageFlags2::DRAW_INDIRECT,
-                                    )
-                                    .dst_access_mask(
-                                        vk::AccessFlags2::SHADER_READ
-                                            | vk::AccessFlags2::SHADER_WRITE
-                                            | vk::AccessFlags2::INDIRECT_COMMAND_READ,
-                                    ),
+                                    .src_stage_mask(src_stage)
+                                    .src_access_mask(src_access)
+                                    .dst_stage_mask(dst_stage)
+                                    .dst_access_mask(dst_access),
                             )
                         } else {
                             None

@@ -348,14 +348,26 @@ pub enum GpuCommand {
         arg_data: Arc<[u8]>,
         count: u32,
     },
-    /// Memory barrier between compute dispatches.
-    /// Ensures all prior shader writes are visible to subsequent reads.
+    /// Manual memory barrier inserted via [`crate::ComputeEncoder::barrier`].
+    ///
+    /// This is the non-graph path: it carries no Koubaa-level access semantics,
+    /// so backends emit a conservative global sync covering all prior work.
+    /// Within a [`crate::task_graph::TaskGraph`] submission, prefer
+    /// `ResourceBarrier` which is produced by the scheduler with precise
+    /// `src_usage` / `dst_usage` derived from the dependency graph.
     Barrier,
-    /// Per-resource memory barrier. Only the listed resources are synchronized.
+    /// Per-resource memory barrier with full access semantics.
+    ///
     /// Emitted by the compute graph scheduler at dependency edges.
+    /// `src_usage` and `dst_usage` describe what kind of GPU work produced and
+    /// will consume the listed resources, in Koubaa-level terms.  Each backend
+    /// lowers them to its native synchronization primitives without needing to
+    /// infer access from surrounding commands.
     ResourceBarrier {
         buffers: Vec<BufferHandle>,
         textures: Vec<TextureHandle>,
+        src_usage: crate::task_graph::SlotUsageSet,
+        dst_usage: crate::task_graph::SlotUsageSet,
     },
 }
 

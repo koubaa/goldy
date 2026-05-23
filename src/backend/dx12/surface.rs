@@ -359,6 +359,7 @@ pub(super) fn acquire(
     // This caps CPU-ahead frames to MAX_FRAMES_IN_FLIGHT and replaces the
     // ad-hoc fence stall that previously occurred inside present().
     if let Some(SendSyncHandle(waitable_handle)) = waitable {
+        let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
         unsafe { WaitForSingleObject(waitable_handle, INFINITE) };
     }
 
@@ -368,6 +369,7 @@ pub(super) fn acquire(
     // roughly two CPU frames have elapsed since the slot was last submitted.
     if prev_fence > 0 {
         {
+            let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
             let logical_device = state
                 .devices
                 .get(&device_handle)
@@ -381,6 +383,7 @@ pub(super) fn acquire(
 
     // Process deferred deletions now that the fence wait has completed.
     if let Some(device) = state.devices.get_mut(&device_handle) {
+        let _tz = crate::tracy_zone!("surface.acquire.deletion_queue");
         device.process_deletion_queue();
     }
 

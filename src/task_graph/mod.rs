@@ -87,7 +87,7 @@ mod graph;
 mod ir;
 
 pub use graph::{NodeBuilder, RenderPassBuilder, TaskGraph};
-pub use ir::{GraphIR, NodeAccess};
+pub use ir::{GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 
 use crate::backend::{BufferHandle, TextureHandle};
 use crate::types::TextureFormat;

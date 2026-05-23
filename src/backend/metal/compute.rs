@@ -715,6 +715,7 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::ResourceBarrier {
                 buffers: buf_handles,
                 textures: tex_handles,
+                ..
             } => {
                 if let Some(enc) = guard.compute {
                     let mut resources: Vec<&mtl::ResourceRef> = Vec::new();

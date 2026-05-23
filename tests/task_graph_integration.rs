@@ -621,8 +621,8 @@ fn stress_clear_write_dispatch_chain() {
 /// that reads the output of the first.
 ///
 /// Tests inter-submission synchronization (tail barrier correctness).
-/// Mimics Ekrano's coarse→fine two-phase rendering where flush_mid_frame
-/// submits the coarse graph and then the fine graph reads its output.
+/// Mimics Ekrano's coarse→fine two-phase rendering where the backend may
+/// split a single graph into multiple command buffers internally.
 #[test]
 fn stress_two_phase_submission() {
     let device = make_device();
