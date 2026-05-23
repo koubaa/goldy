@@ -6,7 +6,7 @@ use super::ir::{
 };
 use super::{
     ResourceId, SwapchainOutputHandle, TransientBufferSpec, TransientId, TransientTextureId,
-    TransientTextureKey, TransientTextureSpec, SWAPCHAIN_SLOT_PLACEHOLDER,
+    TransientTextureKey, TransientTextureSpec,
 };
 use crate::backend::{
     BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle,
@@ -201,6 +201,13 @@ pub(crate) struct CompiledCacheEntry {
     partitioned_upload_remap: Vec<(usize, usize, usize)>,
 }
 
+/// Per-page cache of a fully-lowered [`GraphIR`].
+///
+/// Keyed on `(spec_fp, base_offset)` where `spec_fp` is a hash of the transient
+/// spec set and `base_offset` is the page's deterministic heap offset. When both
+/// match, the IR is returned directly, skipping all lowering work.
+///
+/// At pipeline depth D, at most D entries are live simultaneously.
 impl TaskGraph {
     pub fn new() -> Self {
         Self {
@@ -336,45 +343,16 @@ impl TaskGraph {
         &mut self,
         device: &Device,
         backend: &mut dyn GpuBackend,
-        transient_buffer_ranges: Option<&HashMap<u32, (BufferHandle, u64, u64)>>,
-        transient_texture_handles: &HashMap<u32, TextureHandle>,
+        _transient_buffer_ranges: Option<&HashMap<u32, (BufferHandle, u64, u64)>>,
+        _transient_texture_handles: &HashMap<u32, TextureHandle>,
         wait_for_transient_completion: bool,
     ) -> Result<TimelineValue> {
-        if !self.transient_texture_specs.is_empty() {
-            for s in &self.transient_texture_specs {
-                if !transient_texture_handles.contains_key(&s.id) {
-                    anyhow::bail!("internal: missing transient texture handle for id {}", s.id);
-                }
-            }
-        }
+        debug_assert!(
+            self.transient_specs.is_empty() && self.transient_texture_specs.is_empty(),
+            "submit_with_backend: transient resources must go through submit_ir_with_resolver"
+        );
 
-        let mut ir = if self.transient_specs.is_empty() {
-            debug_assert!(
-                transient_buffer_ranges.is_none(),
-                "transient buffer map must be None when graph has no transient buffers"
-            );
-            self.ir.clone()
-        } else {
-            let map = transient_buffer_ranges.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "internal: transient buffer ranges required for graphs with transient buffers"
-                )
-            })?;
-            Self::lower_transient_buffers(&self.ir, map)?
-        };
-
-        if !self.transient_texture_specs.is_empty() {
-            ir = Self::lower_transient_textures(&ir, transient_texture_handles)?;
-        }
-
-        // Use the schedule cache when the IR is unmodified (no transients), otherwise build fresh.
-        let tv = if self.transient_specs.is_empty() && self.transient_texture_specs.is_empty() {
-            Self::submit_resolved_ir(&mut self.schedule_cache, device, backend, &ir)?
-        } else {
-            // IR was lowered (has transients); cache is keyed to the original IR — skip.
-            let mut local_cache = None;
-            Self::submit_resolved_ir(&mut local_cache, device, backend, &ir)?
-        };
+        let tv = Self::submit_resolved_ir(&mut self.schedule_cache, device, backend, &self.ir)?;
         if wait_for_transient_completion && self.needs_transient_gpu_wait() {
             backend.wait_until(device.inner.handle, tv)?;
         }
@@ -577,131 +555,52 @@ impl TaskGraph {
         Ok((next_off, max_align, m))
     }
 
-    pub(crate) fn transient_buffer_range_map_with_base(
-        heap: &Buffer,
-        layout: &HashMap<u32, u64>,
-        specs: &[TransientBufferSpec],
-        base_offset: u64,
-    ) -> HashMap<u32, (BufferHandle, u64, u64)> {
-        let parent = heap.gpu_buffer_handle();
-        specs
-            .iter()
-            .map(|s| (s.id, (parent, base_offset + layout[&s.id], s.size)))
-            .collect()
-    }
 
-    /// Resolve all transient buffer references in the IR: patch bindings
-    /// (`TransientBuffer` → `BufferRange`) AND patch `resource_slots` in
-    /// dispatch nodes (placeholder → real bindless index).
+    /// Submit the original (unlowered) IR to the backend, resolving transient
+    /// and swapchain slots at emission time via `resolver`.
     ///
-    /// `bindless_map` maps each transient id to its (UAV index, SRV index).
-    pub(crate) fn lower_transient_buffers_with_bindless(
-        &self,
-        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
-        bindless_map: &HashMap<u32, (u32, u32)>,
-    ) -> Result<GraphIR> {
-        Self::lower_transient_buffers_inner(&self.ir, range_map, Some(bindless_map))
-    }
+    /// The schedule is cached (graph topology is invariant); commands are emitted
+    /// fresh each frame through the resolver.
+    pub(crate) fn submit_ir_with_resolver(
+        &mut self,
+        device: &Device,
+        backend: &mut dyn GpuBackend,
+        resolver: &super::SlotResolver,
+        wait_for_transient_completion: bool,
+    ) -> Result<TimelineValue> {
+        let has_render = self
+            .ir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
 
-    /// Produce a new `TaskGraph` with all transient buffer specs cleared and
-    /// the IR fully resolved (no `TransientBuffer` resource ids remain).
-    /// The returned graph can be submitted via `compile_commands` or
-    /// `Frame::submit_compute`.
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn into_resolved(&self, resolved_ir: GraphIR) -> TaskGraph {
-        TaskGraph {
-            ir: resolved_ir,
-            transient_specs: Vec::new(),
-            next_transient_id: 0,
-            transient_texture_specs: self.transient_texture_specs.clone(),
-            next_transient_texture_id: self.next_transient_texture_id,
-            // Resolved graphs are ephemeral (transient buffers were lowered); no cache.
-            schedule_cache: None,
-            schedule_validated_node_count: 0,
-            #[cfg(debug_assertions)]
-            prev_transient_shapes: Vec::new(),
-            #[cfg(debug_assertions)]
-            prev_transient_texture_keys: Vec::new(),
+        // Build the schedule from disjoint fields to avoid borrow conflicts.
+        let fp = Self::binding_fingerprint(&self.ir);
+        let schedule = Self::get_or_build_schedule(
+            &mut self.schedule_cache,
+            &self.ir,
+            fp,
+        );
+
+        if has_render {
+            let g = analysis::emit_graph_commands(&self.ir, schedule, Some(resolver));
+            let tv = backend.submit_graph(device.inner.handle, &g)?;
+            if wait_for_transient_completion && self.needs_transient_gpu_wait() {
+                backend.wait_until(device.inner.handle, tv)?;
+            }
+            return Ok(tv);
         }
-    }
 
-    fn lower_transient_buffers(
-        ir: &GraphIR,
-        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
-    ) -> Result<GraphIR> {
-        Self::lower_transient_buffers_inner(ir, range_map, None)
-    }
-
-    fn lower_transient_buffers_inner(
-        ir: &GraphIR,
-        range_map: &HashMap<u32, (BufferHandle, u64, u64)>,
-        bindless_map: Option<&HashMap<u32, (u32, u32)>>,
-    ) -> Result<GraphIR> {
-        let mut nodes = Vec::with_capacity(ir.nodes.len());
-        for n in &ir.nodes {
-            let bindings: Result<Vec<ResourceBinding>> = n
-                .bindings
-                .iter()
-                .map(|b| {
-                    let resource = match b.resource {
-                        ResourceId::TransientBuffer(t) => {
-                            let (parent, offset, len) =
-                                range_map.get(&t.0).copied().ok_or_else(|| {
-                                    anyhow::anyhow!("unknown transient buffer id {}", t.0)
-                                })?;
-                            ResourceId::BufferRange {
-                                parent,
-                                offset,
-                                len,
-                            }
-                        }
-                        o => o,
-                    };
-                    Ok(ResourceBinding {
-                        resource,
-                        access: b.access,
-                    })
-                })
-                .collect();
-
-            let kind = if let (
-                Some(bmap),
-                NodeKind::Dispatch {
-                    pipeline,
-                    resource_slots,
-                    user_slots,
-                    dispatch,
-                },
-            ) = (bindless_map, &n.kind)
-            {
-                let mut patched_slots = resource_slots.clone();
-                for (i, b) in n.bindings.iter().enumerate() {
-                    if let ResourceId::TransientBuffer(t) = b.resource {
-                        if let Some(&(uav_idx, srv_idx)) = bmap.get(&t.0) {
-                            if i < patched_slots.len() {
-                                let is_read_only = b.access == NodeAccess::Read;
-                                patched_slots[i] = if is_read_only { srv_idx } else { uav_idx };
-                            }
-                        }
-                    }
-                }
-                NodeKind::Dispatch {
-                    pipeline: *pipeline,
-                    resource_slots: patched_slots,
-                    user_slots: user_slots.clone(),
-                    dispatch: dispatch.clone(),
-                }
-            } else {
-                n.kind.clone()
-            };
-
-            nodes.push(TaskNode {
-                label: n.label,
-                bindings: bindings?,
-                kind,
-            });
+        let partitions = analysis::emit_partitioned_commands(&self.ir, schedule, Some(resolver));
+        let mut last_tv = backend.gpu_progress(device.inner.handle);
+        for partition in &partitions {
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend.submit_standalone(device.inner.handle, partition)?;
         }
-        Ok(GraphIR { nodes })
+        if wait_for_transient_completion && self.needs_transient_gpu_wait() {
+            backend.wait_until(device.inner.handle, last_tv)?;
+        }
+        Ok(last_tv)
     }
 
     /// Like the old `allocate_transient_textures` but uses the heap's texture cache.
@@ -804,112 +703,6 @@ impl TaskGraph {
         Ok((id_to_color, color_keys))
     }
 
-    pub(crate) fn lower_transient_textures(
-        ir: &GraphIR,
-        handles: &HashMap<u32, TextureHandle>,
-    ) -> Result<GraphIR> {
-        let mut nodes = Vec::with_capacity(ir.nodes.len());
-        for n in &ir.nodes {
-            let bindings: Result<Vec<ResourceBinding>> = n
-                .bindings
-                .iter()
-                .map(|b| {
-                    let resource = match b.resource {
-                        ResourceId::TransientTexture(t) => {
-                            let h = handles.get(&t.0).copied().ok_or_else(|| {
-                                anyhow::anyhow!("unknown transient texture id {}", t.0)
-                            })?;
-                            ResourceId::Texture(h)
-                        }
-                        o => o,
-                    };
-                    Ok(ResourceBinding {
-                        resource,
-                        access: b.access,
-                    })
-                })
-                .collect();
-            nodes.push(TaskNode {
-                label: n.label,
-                bindings: bindings?,
-                kind: n.kind.clone(),
-            });
-        }
-        Ok(GraphIR { nodes })
-    }
-
-    /// Replace every `ResourceId::SwapchainOutput` binding with
-    /// `ResourceId::Texture(handle)` and patch the corresponding
-    /// `resource_slots` entry from [`SWAPCHAIN_SLOT_PLACEHOLDER`] to the real
-    /// UAV bindless index `uav_index`.
-    ///
-    /// Called by [`Surface::submit_graph`](crate::Surface::submit_graph) after `surface.begin()` resolves
-    /// the concrete swapchain `TextureHandle` and its bindless index.
-    pub(crate) fn lower_swapchain_output(
-        ir: &GraphIR,
-        handle: TextureHandle,
-        uav_index: u32,
-    ) -> GraphIR {
-        let mut nodes = Vec::with_capacity(ir.nodes.len());
-        for n in &ir.nodes {
-            let bindings: Vec<ResourceBinding> = n
-                .bindings
-                .iter()
-                .map(|b| ResourceBinding {
-                    resource: if b.resource == ResourceId::SwapchainOutput {
-                        ResourceId::Texture(handle)
-                    } else {
-                        b.resource
-                    },
-                    access: b.access,
-                })
-                .collect();
-
-            // Patch resource_slots: replace SWAPCHAIN_SLOT_PLACEHOLDER with
-            // the real UAV index at every position whose binding is SwapchainOutput.
-            let kind = if let NodeKind::Dispatch {
-                pipeline,
-                resource_slots,
-                user_slots,
-                dispatch,
-            } = &n.kind
-            {
-                let has_swapchain = n
-                    .bindings
-                    .iter()
-                    .any(|b| b.resource == ResourceId::SwapchainOutput);
-                if has_swapchain {
-                    let mut patched_slots = resource_slots.clone();
-                    for (i, b) in n.bindings.iter().enumerate() {
-                        if b.resource == ResourceId::SwapchainOutput
-                            && i < patched_slots.len()
-                            && patched_slots[i] == SWAPCHAIN_SLOT_PLACEHOLDER
-                        {
-                            patched_slots[i] = uav_index;
-                        }
-                    }
-                    NodeKind::Dispatch {
-                        pipeline: *pipeline,
-                        resource_slots: patched_slots,
-                        user_slots: user_slots.clone(),
-                        dispatch: dispatch.clone(),
-                    }
-                } else {
-                    n.kind.clone()
-                }
-            } else {
-                n.kind.clone()
-            };
-
-            nodes.push(TaskNode {
-                label: n.label,
-                bindings,
-                kind,
-            });
-        }
-        GraphIR { nodes }
-    }
-
     /// True if the graph has any transient resources (buffers and/or textures).
     pub fn has_transient_resources(&self) -> bool {
         !self.transient_specs.is_empty() || !self.transient_texture_specs.is_empty()
@@ -949,7 +742,7 @@ impl TaskGraph {
     pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
-        analysis::emit_graph_commands(ir, &schedule)
+        analysis::emit_graph_commands(ir, &schedule, None)
     }
 
     fn has_render_passes_in_ir(ir: &GraphIR) -> bool {
@@ -1287,15 +1080,10 @@ impl TaskGraph {
         h.finish()
     }
 
-    /// Return the schedule fingerprint, skipping the full hash when the cache
-    /// is warm and the node count hasn't changed since the last validation.
+    /// Compute a fingerprint of the transient spec set (buffers + textures).
     ///
-    /// The node count is a necessary (but not sufficient) condition for a
-    /// topology match. When it differs, we fall through to the full hash.
-    /// When it matches AND the cache already holds a schedule whose fp was
-    /// computed from the same node count, we return the cached fp directly —
-    /// the binding topology cannot differ if the node count is identical
-    /// and the graph was rebuilt by the same deterministic recording code.
+    /// Used by [`Self::get_or_lower_resolved_ir`] to detect shape changes between
+    /// frames. A mismatch invalidates the resolved IR cache.
     fn schedule_fp(&mut self) -> u64 {
         let n = self.ir.nodes.len();
         if let Some(ref entry) = self.schedule_cache {
@@ -1452,7 +1240,7 @@ impl TaskGraph {
         // Miss: rebuild schedule (if needed) and emit commands fresh.
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
-        let commands = analysis::emit_commands(ir, &schedule);
+        let commands = analysis::emit_commands(ir, &schedule, None);
         let upload_remap = build_upload_remap(ir, &commands);
         *cache = Some(CompiledCacheEntry {
             fp,
@@ -1534,7 +1322,7 @@ impl TaskGraph {
 
         // Miss: emit partitioned commands from the cached schedule.
         let entry = cache.as_mut().unwrap();
-        let partitions = analysis::emit_partitioned_commands(ir, &entry.schedule);
+        let partitions = analysis::emit_partitioned_commands(ir, &entry.schedule, None);
         let remap = build_partitioned_upload_remap(ir, &partitions);
         entry.partitioned_commands = Some(partitions);
         entry.partitioned_upload_remap = remap;
@@ -1579,7 +1367,7 @@ impl TaskGraph {
     pub(crate) fn compile_ir_to_gpu_commands(ir: &GraphIR) -> Vec<crate::backend::GpuCommand> {
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
-        analysis::emit_commands(ir, &schedule)
+        analysis::emit_commands(ir, &schedule, None)
     }
 
     /// Return a clone of the cached [`CompiledSchedule`] (building it first if
@@ -1623,7 +1411,7 @@ impl TaskGraph {
         );
         let fp = self.schedule_fp();
         let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir, fp);
-        analysis::emit_graph_commands(&self.ir, schedule)
+        analysis::emit_graph_commands(&self.ir, schedule, None)
     }
 }
 

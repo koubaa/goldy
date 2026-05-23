@@ -197,3 +197,107 @@ impl ResourceId {
         }
     }
 }
+
+/// Resolved storage for a transient buffer slot.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ResolvedTransientBuffer {
+    pub parent: BufferHandle,
+    pub offset: u64,
+    pub len: u64,
+    pub uav_index: u32,
+    pub srv_index: u32,
+}
+
+/// Resolved storage for a transient texture slot.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ResolvedTransientTexture {
+    pub handle: TextureHandle,
+}
+
+/// Resolved storage for the swapchain output slot.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ResolvedSwapchain {
+    pub handle: TextureHandle,
+    pub uav_index: u32,
+}
+
+/// Maps promised slots to their concrete storage for the current submission.
+///
+/// The IR is invariant data written by the user; the runtime resolves
+/// promised slots (`TransientBuffer`, `TransientTexture`, `SwapchainOutput`)
+/// through this table at emission time.  No IR clone is ever necessary.
+///
+/// Transient entries are page-local (supplied by `PlacementHeap::advance_page`).
+/// The swapchain entry is boundary-local (filled after `surface.begin()`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SlotResolver {
+    pub buffers: std::collections::HashMap<u32, ResolvedTransientBuffer>,
+    pub textures: std::collections::HashMap<u32, ResolvedTransientTexture>,
+    pub swapchain: Option<ResolvedSwapchain>,
+}
+
+impl SlotResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve a `ResourceId` to its concrete form.  Concrete ids pass through.
+    #[allow(dead_code)]
+    pub fn resolve(&self, id: ResourceId) -> ResourceId {
+        match id {
+            ResourceId::TransientBuffer(t) => {
+                let r = &self.buffers[&t.0];
+                ResourceId::BufferRange {
+                    parent: r.parent,
+                    offset: r.offset,
+                    len: r.len,
+                }
+            }
+            ResourceId::TransientTexture(t) => {
+                ResourceId::Texture(self.textures[&t.0].handle)
+            }
+            ResourceId::SwapchainOutput => {
+                let sc = self.swapchain.as_ref().expect(
+                    "SlotResolver::resolve: SwapchainOutput accessed before swapchain acquired",
+                );
+                ResourceId::Texture(sc.handle)
+            }
+            other => other,
+        }
+    }
+
+    /// Resolve a dispatch's `resource_slots`, patching transient and swapchain
+    /// entries to their concrete bindless indices.
+    pub fn resolve_slots(
+        &self,
+        resource_slots: &[u32],
+        bindings: &[ir::ResourceBinding],
+    ) -> Vec<u32> {
+        let mut out = resource_slots.to_vec();
+        for (i, b) in bindings.iter().enumerate() {
+            if i >= out.len() {
+                break;
+            }
+            match b.resource {
+                ResourceId::TransientBuffer(t) => {
+                    let r = &self.buffers[&t.0];
+                    let is_read_only = b.access == ir::NodeAccess::Read;
+                    out[i] = if is_read_only { r.srv_index } else { r.uav_index };
+                }
+                ResourceId::SwapchainOutput => {
+                    if out[i] == SWAPCHAIN_SLOT_PLACEHOLDER {
+                        let sc = self.swapchain.as_ref().expect(
+                            "SlotResolver::resolve_slots: SwapchainOutput before acquire",
+                        );
+                        out[i] = sc.uav_index;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}

@@ -1,10 +1,15 @@
-//! Persistent placement heap with ring-based frame allocation.
+//! Persistent placement heap with ring-based or paged frame allocation.
 //!
 //! A [`PlacementHeap`] owns a single large GPU [`Buffer`] and carves frame-sized
-//! regions from it using a ring allocator. Each frame acquires a contiguous region,
-//! creates [`BufferView`]s at graph-colored offsets within that region, and releases
-//! the region once the GPU retires past its timeline epoch. View lifetimes are tracked
-//! via [`Device::defer_release`] rather than the ring itself.
+//! regions from it. Two modes are supported:
+//!
+//! - **Ring mode** (default): a ring allocator bumps forward each frame and reclaims
+//!   retired regions. The offset changes each frame, so view-cache lookups may miss on
+//!   the offset key.
+//! - **Paged mode** (activated by [`PlacementHeap::configure_pages`]): the buffer is
+//!   pre-divided into `depth` fixed-size pages. Frame N uses page `N % depth` at a
+//!   deterministic offset. Since the offset never changes (for a given page), the view
+//!   cache always hits in steady state and no reclaim bookkeeping is needed.
 //!
 //! This eliminates per-frame `Buffer::new` overhead: in steady state the backing
 //! buffer is allocated once and reused across all frames.
@@ -93,10 +98,12 @@ struct CachedTexture {
 pub struct PlacementHeap {
     buffer: Buffer,
     page_size: u64,
-    /// Next write position (byte offset into the buffer).
+    /// Next write position (byte offset into the buffer). Only used in ring mode.
     bump: u64,
-    /// In-flight regions, ordered by submission time (FIFO).
+    /// In-flight regions, ordered by submission time (FIFO). Only used in ring mode.
     regions: VecDeque<RingEntry>,
+    /// Paged-mode state. When `Some`, the ring fields are inactive.
+    pages: Option<PagedState>,
     /// Per-slot `BufferView` cache. Indexed by `TransientId` (raw `u32`).
     /// Survives across frames; invalidated on `grow` or explicit shape change.
     view_cache: HashMap<u32, CachedView>,
@@ -107,6 +114,22 @@ pub struct PlacementHeap {
     view_create_count: usize,
     /// Number of `Texture::new` calls since last reset (for tests and Tracy).
     texture_create_count: usize,
+}
+
+/// Paged-mode state: the buffer is divided into `depth` fixed-size pages.
+///
+/// Frame N uses page `N % depth` at offset `(N % depth) * page_alloc_size`.
+/// The offset is deterministic, so the view cache always hits in steady state.
+/// Reclaim bookkeeping is unnecessary — pages rotate without being freed.
+struct PagedState {
+    /// Size of each page (rounded up to `PlacementHeap::page_size`).
+    page_alloc_size: u64,
+    /// Number of pages (= pipeline depth).
+    depth: usize,
+    /// Monotonic frame counter; `advance_page()` increments this.
+    frame_counter: u64,
+    /// Most recently stamped timeline, used for safe eviction of stale cache entries.
+    last_timeline: Option<TimelineValue>,
 }
 
 /// Tracks a frame's allocation within the ring.
@@ -133,6 +156,7 @@ impl PlacementHeap {
             page_size,
             bump: 0,
             regions: VecDeque::new(),
+            pages: None,
             view_cache: HashMap::new(),
             texture_cache: Vec::new(),
             view_create_count: 0,
@@ -150,13 +174,19 @@ impl PlacementHeap {
         self.buffer.allocated_size()
     }
 
-    /// Bytes currently occupied by in-flight regions.
+    /// Bytes currently occupied by in-flight regions. Always 0 in paged mode.
     pub fn in_flight_bytes(&self) -> u64 {
+        if self.pages.is_some() {
+            return 0;
+        }
         self.regions.iter().map(|r| r.size).sum()
     }
 
-    /// Number of in-flight regions.
+    /// Number of in-flight regions. Always 0 in paged mode.
     pub fn in_flight_count(&self) -> usize {
+        if self.pages.is_some() {
+            return 0;
+        }
         self.regions.len()
     }
 
@@ -192,9 +222,12 @@ impl PlacementHeap {
 
     /// Reclaim regions whose GPU timeline has retired.
     ///
-    /// Reclaimed regions' views are dropped, freeing their bindless slots.
+    /// In paged mode this is a no-op: pages rotate deterministically and are never freed.
     /// Returns the number of regions reclaimed.
     pub fn reclaim(&mut self, gpu_progress: TimelineValue) -> usize {
+        if self.pages.is_some() {
+            return 0;
+        }
         let mut count = 0;
         while let Some(front) = self.regions.front() {
             match front.timeline {
@@ -266,6 +299,85 @@ impl PlacementHeap {
                 }
             }
         }
+    }
+
+    /// Switch to paged mode with `depth` fixed-size pages.
+    ///
+    /// Each page is sized to hold `alloc_size` bytes (rounded up to `page_size`).
+    /// The backing buffer is grown if it cannot accommodate `depth` pages.
+    ///
+    /// If the heap is already in paged mode with the same layout, this is a no-op.
+    /// If the layout changes (different `alloc_size` or `depth`), the view cache is
+    /// invalidated via `defer_release` and pages are reconfigured.
+    ///
+    /// Call this once per submit when `transient_heap_size_and_layout` returns a
+    /// stable size; afterwards use [`Self::advance_page`] to get each frame's offset.
+    pub fn configure_pages(
+        &mut self,
+        alloc_size: u64,
+        depth: usize,
+        device: &Device,
+    ) -> Result<()> {
+        let depth = depth.max(1);
+        let page_alloc_size = round_up(alloc_size.max(1), self.page_size);
+        let required_cap = page_alloc_size
+            .checked_mul(depth as u64)
+            .context("PlacementHeap::configure_pages: capacity overflow")?;
+
+        // Fast path: already configured with identical layout.
+        if let Some(ref p) = self.pages {
+            if p.page_alloc_size == page_alloc_size && p.depth == depth {
+                return Ok(());
+            }
+        }
+
+        // Layout changed: invalidate all cached views (they point into the old layout).
+        self.invalidate_all(device);
+
+        // Grow the backing buffer if needed. `grow` requires the ring to be empty;
+        // in paged mode regions are never pushed, so it is always empty.
+        if required_cap > self.buffer.allocated_size() {
+            // `grow` calls `invalidate_all` internally; safe to call again (idempotent).
+            self.buffer = device
+                .alloc_buffer(
+                    required_cap,
+                    crate::types::DataAccess::Scattered,
+                    None,
+                    crate::types::BufferFlags::empty(),
+                )
+                .context("PlacementHeap::configure_pages: failed to grow backing buffer")?;
+            self.bump = 0;
+        }
+
+        self.pages = Some(PagedState {
+            page_alloc_size,
+            depth,
+            frame_counter: 0,
+            last_timeline: None,
+        });
+        Ok(())
+    }
+
+    /// Return the base offset for the current frame's page and advance the frame counter.
+    ///
+    /// Must only be called after [`Self::configure_pages`]. Panics in debug builds if
+    /// the heap is not in paged mode.
+    ///
+    /// The returned offset is page-aligned and deterministic for frame N:
+    /// `(N % depth) * page_alloc_size`.
+    pub fn advance_page(&mut self) -> u64 {
+        let p = self
+            .pages
+            .as_mut()
+            .expect("PlacementHeap::advance_page called outside paged mode");
+        let page_idx = p.frame_counter % (p.depth as u64);
+        p.frame_counter += 1;
+        page_idx * p.page_alloc_size
+    }
+
+    /// Returns `true` if the heap is in paged mode.
+    pub fn is_paged(&self) -> bool {
+        self.pages.is_some()
     }
 
     /// Return the cached `BufferView` for `slot_id` if its shape and placement match,
@@ -495,7 +607,13 @@ impl PlacementHeap {
     ///
     /// Use this on the standalone-submit path after the transient view cache is enabled:
     /// views are now owned by the heap and no longer need per-submit deferral.
+    ///
+    /// In paged mode, updates the last-known timeline for safe eviction of stale views.
     pub fn stamp_pending(&mut self, timeline: TimelineValue) {
+        if let Some(ref mut p) = self.pages {
+            p.last_timeline = Some(timeline);
+            return;
+        }
         if let Some(entry) = self.regions.back_mut() {
             if entry.timeline.is_none() {
                 entry.timeline = Some(timeline);
@@ -505,10 +623,12 @@ impl PlacementHeap {
 
     /// Stamp all unstamped regions with the given timeline (for the surface-present path).
     ///
-    /// Views for these regions are already managed by the heap's view cache
-    /// (see [`Self::get_or_create_view`]). This method only updates the ring's timeline
-    /// tracking so that `reclaim` can free ring space correctly.
+    /// In paged mode, updates the last-known timeline for safe eviction of stale views.
     pub fn stamp_all_pending(&mut self, timeline: TimelineValue) {
+        if let Some(ref mut p) = self.pages {
+            p.last_timeline = Some(timeline);
+            return;
+        }
         for entry in &mut self.regions {
             if entry.timeline.is_none() {
                 entry.timeline = Some(timeline);
@@ -522,7 +642,11 @@ impl PlacementHeap {
     }
 
     /// Highest in-flight timeline value across all regions, or `None` if idle.
+    /// In paged mode, returns the last stamped timeline.
     pub fn max_in_flight_timeline(&self) -> Option<TimelineValue> {
+        if let Some(ref p) = self.pages {
+            return p.last_timeline;
+        }
         self.regions.iter().filter_map(|r| r.timeline).max()
     }
 
@@ -538,13 +662,14 @@ impl PlacementHeap {
     /// Grow the heap to at least `new_capacity`.
     ///
     /// Only safe when the ring is empty (no in-flight regions). Returns `Err`
-    /// if there are in-flight regions or if allocation fails.
+    /// if there are in-flight ring regions or if allocation fails. In paged mode
+    /// the ring is always empty; growth is always permitted.
     ///
     /// All cached buffer views and textures are invalidated (via `defer_release`)
     /// before the new backing buffer replaces the old one, since all existing views
     /// reference the old buffer handle.
     pub fn grow(&mut self, device: &Device, new_capacity: u64) -> Result<()> {
-        if !self.regions.is_empty() {
+        if self.pages.is_none() && !self.regions.is_empty() {
             anyhow::bail!(
                 "PlacementHeap::grow: cannot grow with {} in-flight regions",
                 self.regions.len()
@@ -566,6 +691,11 @@ impl PlacementHeap {
             )
             .context("PlacementHeap::grow: failed to allocate new backing buffer")?;
         self.bump = 0;
+        // Reset paged-mode state so configure_pages reconfigures after growth.
+        if let Some(ref mut p) = self.pages {
+            p.frame_counter = 0;
+            p.last_timeline = None;
+        }
         Ok(())
     }
 

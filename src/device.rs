@@ -840,22 +840,20 @@ impl Device {
         graph: &mut TaskGraph,
         wait_for_transient_completion: bool,
     ) -> Result<TimelineValue> {
+        use crate::task_graph::{ResolvedTransientBuffer, ResolvedTransientTexture, SlotResolver};
+
         let has_buffers = graph.has_transient_buffers();
 
-        let (total_size, base_align, layout) = if has_buffers {
+        let (alloc_size, base_align, layout_opt) = if has_buffers {
             let (ts, ba, lay) = graph.transient_heap_size_and_layout()?;
-            (ts, ba, Some(lay))
+            let sz = (ts + ba - 1).max(256);
+            (sz, ba, Some(lay))
         } else {
-            (0, 1, None)
+            (0u64, 1u64, None)
         };
-        let alloc_size = layout
-            .as_ref()
-            .map(|_| (total_size + base_align - 1).max(256))
-            .unwrap_or(0);
 
         let mut heap_guard = self.inner.placement_heap.lock().unwrap();
 
-        // Lazily create the placement heap.
         if heap_guard.is_none() {
             let cap = (256 * 1024 * 1024u64).max(alloc_size * Self::DEFAULT_PIPELINE_DEPTH);
             *heap_guard = Some(
@@ -865,93 +863,56 @@ impl Device {
         }
         let heap = heap_guard.as_mut().unwrap();
 
-        // ── Transient texture cache ──────────────────────────────────────────
+        if has_buffers {
+            let depth = Self::DEFAULT_PIPELINE_DEPTH as usize;
+            heap.configure_pages(alloc_size, depth, self)?;
+        }
+
+        // ── Build the SlotResolver ───────────────────────────────────────────
+        let mut resolver = SlotResolver::new();
+
         let tex_handles = graph.resolve_transient_textures_with_heap(self, heap)?;
-
-        if !has_buffers {
-            // Texture-only path: lower textures and submit (no ring acquire needed).
-            let resolved_ir =
-                TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
-            let mut resolved_graph = graph.into_resolved(resolved_ir);
-            drop(heap_guard);
-
-            let mut backend = self.inner.backend.lock().unwrap();
-            let tv = resolved_graph.submit_with_backend(
-                self,
-                backend.as_mut(),
-                None,
-                &tex_handles,
-                wait_for_transient_completion,
-            )?;
-            return Ok(tv);
+        for (id, handle) in &tex_handles {
+            resolver.textures.insert(*id, ResolvedTransientTexture { handle: *handle });
         }
 
-        let layout = layout.unwrap();
+        if has_buffers {
+            let layout = layout_opt.unwrap();
+            let raw_offset = heap.advance_page();
+            let base_offset = raw_offset.div_ceil(base_align) * base_align;
 
-        // ── Transient buffer region acquire ──────────────────────────────────
-        let progress = self.gpu_progress();
-        heap.reclaim(progress);
-
-        let raw_offset = match heap.acquire(alloc_size) {
-            Some(off) => off,
-            None => {
-                let progress2 = self.gpu_progress();
-                heap.reclaim(progress2);
-                heap.acquire(alloc_size).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
-                        alloc_size,
-                        heap.capacity(),
-                        heap.in_flight_bytes(),
-                    )
-                })?
+            let buf_handle = heap.buffer().handle;
+            for spec in graph.transient_specs() {
+                let offset = base_offset + layout[&spec.id];
+                let view_stride = spec.stride.max(1);
+                let (uav, srv, _hit) =
+                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, self)?;
+                resolver.buffers.insert(spec.id, ResolvedTransientBuffer {
+                    parent: buf_handle,
+                    offset,
+                    len: spec.size,
+                    uav_index: uav,
+                    srv_index: srv,
+                });
             }
-        };
-        let base_offset = raw_offset.div_ceil(base_align) * base_align;
-
-        // ── Transient buffer view cache ──────────────────────────────────────
-        let mut bindless_map: HashMap<u32, (u32, u32)> =
-            HashMap::with_capacity(graph.transient_specs().len());
-        for spec in graph.transient_specs() {
-            let offset = base_offset + layout[&spec.id];
-            let view_stride = spec.stride.max(1);
-            let (uav, srv, _hit) =
-                heap.get_or_create_view(spec.id, offset, spec.size, view_stride, self)?;
-            bindless_map.insert(spec.id, (uav, srv));
         }
 
-        // Lower IR: patch TransientBuffer → BufferRange + patch resource_slots.
-        let buf = heap.buffer();
-        let range_map = TaskGraph::transient_buffer_range_map_with_base(
-            buf,
-            &layout,
-            graph.transient_specs(),
-            base_offset,
-        );
-        let mut resolved_ir =
-            graph.lower_transient_buffers_with_bindless(&range_map, &bindless_map)?;
-        if !tex_handles.is_empty() {
-            resolved_ir = TaskGraph::lower_transient_textures(&resolved_ir, &tex_handles)?;
-        }
-        let mut resolved_graph = graph.into_resolved(resolved_ir);
-
-        // Drop the heap lock before acquiring the backend lock for submission.
         drop(heap_guard);
 
         let mut backend = self.inner.backend.lock().unwrap();
-        let tv = resolved_graph.submit_with_backend(
+        let tv = graph.submit_ir_with_resolver(
             self,
             backend.as_mut(),
-            None,
-            &tex_handles,
+            &resolver,
             wait_for_transient_completion,
         )?;
         drop(backend);
 
-        // Stamp the ring entry. Views are owned by the heap cache — no per-submit defer.
+        // Stamp paged-mode timeline.
         let mut heap_guard = self.inner.placement_heap.lock().unwrap();
-        let heap = heap_guard.as_mut().unwrap();
-        heap.stamp_pending(tv);
+        if let Some(heap) = heap_guard.as_mut() {
+            heap.stamp_pending(tv);
+        }
 
         Ok(tv)
     }
