@@ -2,6 +2,7 @@
 
 use super::super::shared;
 use super::super::{ComputePipelineHandle, DeviceHandle, GpuCommand, ShaderHandle};
+use super::staging::{StagingBelt, TextureStagingEntry, TextureStagingPool};
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
@@ -16,7 +17,17 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLCommandBufferStatus, MTLOrigin, MTLSize};
 use objc::{msg_send, sel, sel_impl};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+
+/// Whether `GOLDY_METAL_MEMORY_LOG` is set (cached on first access).
+fn metal_memory_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("GOLDY_METAL_MEMORY_LOG").is_ok())
+}
+
+/// Monotonic submit counter used to throttle `GOLDY_METAL_MEMORY_LOG` output.
+static METAL_MEMORY_LOG_FRAME: AtomicU64 = AtomicU64::new(0);
 
 /// Create a compute pipeline.
 pub(super) fn create(
@@ -190,12 +201,25 @@ impl Drop for EncoderGuard<'_> {
 /// encoder is ended before the new one begins. Metal guarantees sequential
 /// execution of encoders within a command buffer, so this preserves the
 /// caller's intended ordering (e.g. dispatch → clear → dispatch).
+///
+/// `belt_slices` and `texture_scratches` are pre-staged data produced by
+/// [`stage_uploads`].  `belt_idx` and `tex_idx` are advanced in-place so
+/// callers that invoke this function multiple times (e.g. `submit_graph`)
+/// can share a single staging pre-pass across all compute batches.
+///
+/// `gpu_idle` must equal `last_committed_timeline.map(|l| signaled >= l).unwrap_or(true)`
+/// as computed by the caller before the pre-pass.
 pub(super) fn record_commands_to_buffer(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
+    belt_slices: &[(mtl::Buffer, u64)],
+    texture_scratches: &[TextureStagingEntry],
+    belt_idx: &mut usize,
+    tex_idx: &mut usize,
+    gpu_idle: bool,
 ) -> Result<()> {
     let mut guard = EncoderGuard {
         compute: None,
@@ -330,10 +354,6 @@ pub(super) fn record_commands_to_buffer(
                 // ClearBuffer fill_buffer is recorded but hasn't executed; a CPU memcpy
                 // here would be overwritten when the command buffer commits.
                 const SMALL_WRITE_THRESHOLD: usize = 4096;
-                let gpu_idle = logical_device
-                    .last_committed_timeline
-                    .map(|last| logical_device.timeline_event.as_ref().signaled_value() >= last)
-                    .unwrap_or(true);
                 if gpu_idle
                     && !has_recorded_gpu_work
                     && !buf_state
@@ -354,15 +374,15 @@ pub(super) fn record_commands_to_buffer(
                     }
                 }
 
+                // Slow path: consume the pre-staged belt slice for this write.
                 ensure_blit_buf!(*buf_handle);
-                let staging = logical_device.device.new_buffer_with_data(
-                    data.as_ptr() as *const _,
-                    data.len() as u64,
-                    mtl::MTLResourceOptions::StorageModeShared,
-                );
+                let (stg_buf, stg_off) = belt_slices
+                    .get(*belt_idx)
+                    .context("WriteBuffer: belt_slices index out of range (pre-pass mismatch)")?;
+                *belt_idx += 1;
                 guard.blit.unwrap().copy_from_buffer(
-                    &staging,
-                    0,
+                    stg_buf,
+                    *stg_off,
                     &buf_state.buffer,
                     *offset,
                     data.len() as u64,
@@ -395,15 +415,15 @@ pub(super) fn record_commands_to_buffer(
                 if expected == 0 {
                     continue;
                 }
+                // Consume the pre-staged texture entry for this upload.
                 ensure_blit_tex!(*tex_handle);
-                let staging = logical_device.device.new_buffer_with_data(
-                    data.as_ptr() as *const _,
-                    data.len() as u64,
-                    mtl::MTLResourceOptions::StorageModeShared,
-                );
+                let scratch = texture_scratches
+                    .get(*tex_idx)
+                    .context("WriteTexture: texture_scratches index out of range")?;
+                *tex_idx += 1;
                 let bytes_per_row = (*width as u64) * (bpp as u64);
                 guard.blit.unwrap().copy_from_buffer_to_texture(
-                    &staging,
+                    &scratch.buffer,
                     0,
                     bytes_per_row,
                     0,
@@ -446,15 +466,15 @@ pub(super) fn record_commands_to_buffer(
                 if expected == 0 {
                     continue;
                 }
+                // Consume the pre-staged texture entry for this upload.
                 ensure_blit_tex!(*tex_handle);
-                let staging = logical_device.device.new_buffer_with_data(
-                    data.as_ptr() as *const _,
-                    data.len() as u64,
-                    mtl::MTLResourceOptions::StorageModeShared,
-                );
+                let scratch = texture_scratches
+                    .get(*tex_idx)
+                    .context("WriteTextureRegion: texture_scratches index out of range")?;
+                *tex_idx += 1;
                 let bytes_per_row = (*width as u64) * (bpp as u64);
                 guard.blit.unwrap().copy_from_buffer_to_texture(
-                    &staging,
+                    &scratch.buffer,
                     0,
                     bytes_per_row,
                     0,
@@ -731,6 +751,157 @@ pub(super) fn record_commands_to_buffer(
     Ok(())
 }
 
+// ── Staging pre-pass ─────────────────────────────────────────────────────────
+
+/// Reclaim completed staging resources and pre-stage all upload commands.
+///
+/// Returns `(belt_slices, texture_scratches, gpu_idle)`.
+///
+/// `belt_slices[i]` corresponds to the i-th non-fast-path `WriteBuffer` command
+/// in `commands` (in source order).  `texture_scratches[i]` corresponds to the
+/// i-th `WriteTexture` or `WriteTextureRegion` command in `commands`.
+///
+/// `gpu_idle` is `true` when no previously-committed GPU work is still in flight
+/// (i.e. the GPU timeline has caught up to `last_committed_timeline`).  It is
+/// forwarded to `record_commands_to_buffer` so the fast-path check there uses the
+/// same value computed here — keeping the pre-pass and command loop in sync.
+fn stage_uploads(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    commands: &[GpuCommand],
+) -> Result<(Vec<(mtl::Buffer, u64)>, Vec<TextureStagingEntry>, bool)> {
+    let has_upload = commands.iter().any(|c| {
+        matches!(
+            c,
+            GpuCommand::WriteBuffer { .. }
+                | GpuCommand::WriteTexture { .. }
+                | GpuCommand::WriteTextureRegion { .. }
+        )
+    });
+
+    let gpu_idle = state
+        .devices
+        .get(&device_handle)
+        .map(|ld| {
+            ld.last_committed_timeline
+                .map(|last| ld.timeline_event.as_ref().signaled_value() >= last)
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+
+    if !has_upload {
+        return Ok((Vec::new(), Vec::new(), gpu_idle));
+    }
+
+    // Reclaim: return completed in-flight resources to the free lists.
+    {
+        let completed = state
+            .devices
+            .get(&device_handle)
+            .map(|ld| ld.timeline_event.as_ref().signaled_value())
+            .unwrap_or(0);
+        let ld = state
+            .devices
+            .get_mut(&device_handle)
+            .context("stage_uploads: invalid device handle")?;
+        ld.staging_belt.reclaim(completed);
+        ld.texture_staging_pool.reclaim(completed);
+    }
+
+    // Pre-pass: stage data for every command that will need the slow path.
+    //
+    // We shadow `would_have_gpu_work` to mirror the `has_recorded_gpu_work`
+    // flag in `record_commands_to_buffer` so the fast-path eligibility check
+    // here is identical to the one in the command loop.
+    let mut belt_slices: Vec<(mtl::Buffer, u64)> = Vec::new();
+    let mut texture_scratches: Vec<TextureStagingEntry> = Vec::new();
+    let mut would_have_gpu_work = false;
+
+    // Cache the device pointer once to avoid repeated HashMap lookups.
+    let device_mtl: mtl::Device = state
+        .devices
+        .get(&device_handle)
+        .context("stage_uploads: invalid device handle")?
+        .device
+        .clone();
+
+    const SMALL_WRITE_THRESHOLD: usize = 4096;
+
+    for cmd in commands {
+        match cmd {
+            GpuCommand::WriteBuffer {
+                buffer: buf_handle,
+                data,
+                ..
+            } => {
+                if data.is_empty() {
+                    continue;
+                }
+                // Extract only what we need so the borrow of state.buffers ends
+                // before we mutably borrow state.devices below.
+                let (buf_flags, contents_null) = state
+                    .buffers
+                    .get(buf_handle)
+                    .map(|b| (b.flags, b.buffer.contents().is_null()))
+                    .unwrap_or((crate::types::BufferFlags::empty(), true));
+
+                let fast_path = gpu_idle
+                    && !would_have_gpu_work
+                    && !buf_flags.contains(crate::types::BufferFlags::GPU_ONLY)
+                    && data.len() <= SMALL_WRITE_THRESHOLD
+                    && !contents_null;
+
+                if fast_path {
+                    // Fast path will do a direct CPU memcpy; no staging needed.
+                    // The fast path does NOT open an encoder, so would_have_gpu_work stays as-is.
+                } else {
+                    let ld = state
+                        .devices
+                        .get_mut(&device_handle)
+                        .context("stage_uploads: invalid device handle")?;
+                    // Split borrow: device and staging_belt are distinct fields.
+                    let belt: &mut StagingBelt = &mut ld.staging_belt;
+                    let (buf, off) = belt.write(&device_mtl, data)?;
+                    belt_slices.push((buf, off));
+                    // Slow-path WriteBuffer opens a blit encoder.
+                    would_have_gpu_work = true;
+                }
+            }
+            GpuCommand::WriteTexture { data, .. } | GpuCommand::WriteTextureRegion { data, .. } => {
+                if data.is_empty() {
+                    continue;
+                }
+                let ld = state
+                    .devices
+                    .get_mut(&device_handle)
+                    .context("stage_uploads: invalid device handle")?;
+                let pool: &mut TextureStagingPool = &mut ld.texture_staging_pool;
+                let entry = pool.acquire(&device_mtl, data.len() as u64)?;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), entry.mapped_ptr(), data.len());
+                }
+                texture_scratches.push(entry);
+                would_have_gpu_work = true;
+            }
+            // Commands that open an encoder set would_have_gpu_work.
+            GpuCommand::ClearBuffer { .. }
+            | GpuCommand::CopyTexture { .. }
+            | GpuCommand::SetPipeline(_)
+            | GpuCommand::BindResources { .. }
+            | GpuCommand::BindResourcesRaw { .. }
+            | GpuCommand::BindResourcesTyped { .. }
+            | GpuCommand::Dispatch { .. }
+            | GpuCommand::DispatchBatch { .. }
+            | GpuCommand::DispatchIndirect { .. } => {
+                would_have_gpu_work = true;
+            }
+            GpuCommand::Barrier | GpuCommand::ResourceBarrier { .. } => {}
+        }
+    }
+
+    Ok((belt_slices, texture_scratches, gpu_idle))
+}
+
 /// Submit compute commands without blocking. Returns the timeline value signaled when the work completes.
 pub(super) fn submit(
     state: &mut MetalState,
@@ -751,12 +922,28 @@ pub(super) fn submit(
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
 
+    // Reclaim and pre-stage all uploads before recording.
+    let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, device_handle, commands)?;
+
     {
         let ld = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        record_commands_to_buffer(state, command_buffer_ref, ld, device_handle, commands)?;
+        let mut belt_idx = 0usize;
+        let mut tex_idx = 0usize;
+        record_commands_to_buffer(
+            state,
+            command_buffer_ref,
+            ld,
+            device_handle,
+            commands,
+            &belt_slices,
+            &texture_scratches,
+            &mut belt_idx,
+            &mut tex_idx,
+            gpu_idle,
+        )?;
     }
 
     let signal_value = {
@@ -809,9 +996,21 @@ pub(super) fn submit(
 
     command_buffer_ref.commit();
 
+    // Post-submit: tag in-flight staging resources with the timeline signal value.
     if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.staging_belt.finish(signal_value);
+        ld.texture_staging_pool
+            .release(signal_value, texture_scratches);
         ld.last_committed_timeline = Some(signal_value);
         ld.process_deletion_queue_up_to_signaled();
+
+        if metal_memory_log_enabled() {
+            let n = METAL_MEMORY_LOG_FRAME.fetch_add(1, Ordering::Relaxed);
+            if n % 60 == 0 {
+                let mib = ld.device.current_allocated_size() / (1024 * 1024);
+                tracing::info!(metal_current_allocated_mib = mib, "metal-alloc");
+            }
+        }
     }
 
     Ok(signal_value)
@@ -845,9 +1044,29 @@ pub(super) fn submit_graph(
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
 
+    // Pre-pass: collect all compute commands across the entire graph into a flat
+    // list, run the staging pre-pass once, then replay the graph using shared
+    // belt/tex indices that advance across compute batches.
+    let all_compute_cmds: Vec<GpuCommand> = commands
+        .iter()
+        .filter_map(|c| {
+            if let GraphCommand::Compute(gpu_cmd) = c {
+                Some(gpu_cmd.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let (belt_slices, texture_scratches, gpu_idle) =
+        stage_uploads(state, device_handle, &all_compute_cmds)?;
+
     // Walk GraphCommands, collecting contiguous compute batches and recording
     // render passes inline. Encoder transitions within a single command buffer
     // provide implicit full pipeline barriers on Metal.
+    //
+    // belt_idx and tex_idx advance across all compute-batch calls to
+    // record_commands_to_buffer so they consume the single pre-pass result.
     {
         let ld = state
             .devices
@@ -855,6 +1074,8 @@ pub(super) fn submit_graph(
             .context("Invalid device handle")?;
 
         let mut compute_batch: Vec<GpuCommand> = Vec::new();
+        let mut belt_idx = 0usize;
+        let mut tex_idx = 0usize;
 
         for cmd in commands {
             match cmd {
@@ -873,6 +1094,11 @@ pub(super) fn submit_graph(
                             ld,
                             device_handle,
                             &compute_batch,
+                            &belt_slices,
+                            &texture_scratches,
+                            &mut belt_idx,
+                            &mut tex_idx,
+                            gpu_idle,
                         )?;
                         compute_batch.clear();
                     }
@@ -898,6 +1124,11 @@ pub(super) fn submit_graph(
                 ld,
                 device_handle,
                 &compute_batch,
+                &belt_slices,
+                &texture_scratches,
+                &mut belt_idx,
+                &mut tex_idx,
+                gpu_idle,
             )?;
         }
     }
@@ -953,7 +1184,11 @@ pub(super) fn submit_graph(
 
     command_buffer_ref.commit();
 
+    // Post-submit: tag in-flight staging resources with the timeline signal value.
     if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.staging_belt.finish(signal_value);
+        ld.texture_staging_pool
+            .release(signal_value, texture_scratches);
         ld.last_committed_timeline = Some(signal_value);
         ld.process_deletion_queue_up_to_signaled();
     }

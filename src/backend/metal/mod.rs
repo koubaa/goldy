@@ -19,6 +19,7 @@ mod render_commands;
 mod render_target;
 mod sampler;
 mod shader;
+pub(super) mod staging;
 mod surface;
 mod texture;
 mod types;
