@@ -259,7 +259,7 @@ pub enum RenderCommand {
 ///
 /// Includes compute dispatches, buffer upload/clear, texture uploads, and
 /// scheduling barriers — not compute-only despite historical naming in call sites.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GpuCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),

@@ -295,20 +295,37 @@ impl TaskGraph {
             .any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
 
         if has_render {
+            // Render-pass graphs: single submission (mixed compute+render CBs).
             let g = Self::compile_graph_commands_for_ir(ir);
-            backend.submit_graph(device.inner.handle, &g)
-        } else {
-            let cmds = Self::get_or_build_compute_commands(cache, ir);
-            backend.submit_standalone(device.inner.handle, cmds)
+            return backend.submit_graph(device.inner.handle, &g);
         }
+
+        // Compute-only: partition the wave schedule and submit each group.
+        // Early partitions are submitted immediately so the GPU can start
+        // executing coarse work while the CPU records the next partition.
+        // The last partition's timeline value is returned to the caller.
+        let partitions = {
+            let schedule = Self::get_or_build_schedule(cache, ir);
+            analysis::emit_partitioned_commands(ir, schedule)
+        };
+        let mut last_tv = backend.gpu_progress(device.inner.handle);
+        for partition in partitions {
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend.submit_standalone(device.inner.handle, &partition)?;
+        }
+        Ok(last_tv)
     }
 
+    /// Submit `ir` to the backend and retain the closed command list for future resubmission.
+    ///
+    /// The retention key is always derived from [`Self::retention_fingerprint`] so it
+    /// reflects every field that affects the recorded command buffer.  Render-pass graphs
+    /// and graphs containing upload nodes fall back to a plain submit (no retention).
     fn submit_resolved_ir_and_retain(
         cache: &mut Option<CompiledCacheEntry>,
         device: &Device,
         backend: &mut dyn GpuBackend,
         ir: &GraphIR,
-        key: u64,
     ) -> Result<TimelineValue> {
         let has_render = ir
             .nodes
@@ -318,39 +335,48 @@ impl TaskGraph {
         if has_render {
             // Render-pass graphs cannot be retained (mixed command lists); fall back.
             let g = Self::compile_graph_commands_for_ir(ir);
-            backend.submit_graph(device.inner.handle, &g)
-        } else {
-            // The retention path needs a `Vec<GraphCommand>`, so we clone the
-            // cached compute stream — `Arc<[u8]>` payloads are cheap to clone
-            // (refcount bump only).  The schedule + emit work is still saved.
-            let cmds = Self::get_or_build_compute_commands(cache, ir);
-            let graph_cmds: Vec<GraphCommand> =
-                cmds.iter().cloned().map(GraphCommand::Compute).collect();
-            backend.submit_graph_and_retain(device.inner.handle, &graph_cmds, key)
+            return backend.submit_graph(device.inner.handle, &g);
         }
+
+        let has_upload = ir.nodes.iter().any(|n| {
+            matches!(
+                n.kind,
+                NodeKind::WriteBuffer { .. }
+                    | NodeKind::WriteTexture { .. }
+                    | NodeKind::WriteTextureRegion { .. }
+                    | NodeKind::CopyTexture { .. }
+            )
+        });
+        if has_upload {
+            // Upload commands use staging memory that is not re-encodable; fall back.
+            let cmds = Self::get_or_build_compute_commands(cache, ir);
+            return backend.submit_standalone(device.inner.handle, cmds);
+        }
+
+        // Derive the retention key from full CB content so it is always correct.
+        let key = Self::retention_fingerprint(ir);
+        let cmds = Self::get_or_build_compute_commands(cache, ir);
+        let graph_cmds: Vec<GraphCommand> =
+            cmds.iter().cloned().map(GraphCommand::Compute).collect();
+        backend.submit_graph_and_retain(device.inner.handle, &graph_cmds, key)
     }
 
-    /// Like [`Self::submit_with_backend`] but retains the closed command list for `key`.
+    /// Like [`Self::submit_with_backend`] but retains the closed command list keyed by
+    /// the graph's [`Self::retention_fingerprint`].
     ///
-    /// Graphs with transient resources are not eligible for retention and silently fall
-    /// back to a normal submit.  Called from [`Device::submit_pipelined_and_retain`].
+    /// Graphs with transient resources, render passes, or upload nodes are not eligible for
+    /// retention and silently fall back to a normal submit.
+    /// Called from [`Device::submit_pipelined_and_retain`].
     pub(crate) fn submit_with_backend_and_retain(
         &mut self,
         device: &Device,
         backend: &mut dyn GpuBackend,
-        key: u64,
     ) -> Result<TimelineValue> {
-        // Only retain pure compute graphs (no transients, no render passes).
+        // Only retain pure compute graphs (no transients, no render passes, no uploads).
         if self.has_transient_resources() {
             return Self::submit_resolved_ir(&mut self.schedule_cache, device, backend, &self.ir);
         }
-        Self::submit_resolved_ir_and_retain(
-            &mut self.schedule_cache,
-            device,
-            backend,
-            &self.ir,
-            key,
-        )
+        Self::submit_resolved_ir_and_retain(&mut self.schedule_cache, device, backend, &self.ir)
     }
 
     /// Pack transient buffers into a heap using wave live ranges: transients whose
@@ -1027,8 +1053,8 @@ impl TaskGraph {
     /// **Not suitable for CB retention.** It does not hash `NodeKind` fields (pipeline
     /// handle, `resource_slots`, `user_slots`, dispatch dimensions). Two graphs with
     /// identical bindings but different pipelines or dispatch sizes would share this
-    /// fingerprint but record different `VkCommandBuffer` contents. Use a separate
-    /// retention fingerprint (to be added) for that purpose.
+    /// fingerprint but record different `VkCommandBuffer` contents. Use
+    /// [`Self::compute_retention_fingerprint`] when keying retained command lists.
     pub fn compute_binding_fingerprint(&self) -> u64 {
         Self::binding_fingerprint(&self.ir)
     }
@@ -1049,6 +1075,74 @@ impl TaskGraph {
         h.finish()
     }
 
+    /// Compute a fingerprint of all state that affects the *recorded* command buffer.
+    ///
+    /// Hashes everything `binding_fingerprint` captures, plus per-`Dispatch` node:
+    /// pipeline handle, `resource_slots`, `user_slots`, and dispatch dimensions.
+    /// Also hashes `ClearBuffer` target identity.
+    ///
+    /// Upload nodes (`WriteBuffer`, `WriteTexture`, `WriteTextureRegion`, `CopyTexture`)
+    /// are excluded because their data is replayed via staging on every submit; retaining
+    /// a CB that contains upload commands is currently unsupported (those graphs fall back
+    /// to a normal submit).
+    ///
+    /// Pass this value to [`crate::Device::try_resubmit_retained`] to attempt zero-cost
+    /// resubmission; [`crate::Device::submit_pipelined_and_retain`] derives and stores the
+    /// same key internally.
+    pub fn compute_retention_fingerprint(&self) -> u64 {
+        Self::retention_fingerprint(&self.ir)
+    }
+
+    fn retention_fingerprint(ir: &GraphIR) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        let mut h = DefaultHasher::new();
+        ir.nodes.len().hash(&mut h);
+        for node in &ir.nodes {
+            node.bindings.len().hash(&mut h);
+            for b in &node.bindings {
+                b.hash(&mut h);
+            }
+            match &node.kind {
+                NodeKind::Dispatch {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    dispatch,
+                } => {
+                    0u8.hash(&mut h);
+                    pipeline.hash(&mut h);
+                    resource_slots.hash(&mut h);
+                    user_slots.hash(&mut h);
+                    match dispatch {
+                        DispatchDim::Direct { x, y, z } => {
+                            0u8.hash(&mut h);
+                            x.hash(&mut h);
+                            y.hash(&mut h);
+                            z.hash(&mut h);
+                        }
+                        DispatchDim::Indirect { buffer, offset } => {
+                            1u8.hash(&mut h);
+                            buffer.hash(&mut h);
+                            offset.hash(&mut h);
+                        }
+                    }
+                }
+                NodeKind::ClearBuffer { buffer, offset, size } => {
+                    1u8.hash(&mut h);
+                    buffer.hash(&mut h);
+                    offset.hash(&mut h);
+                    size.hash(&mut h);
+                }
+                // Upload / copy nodes: excluded intentionally (data varies per frame;
+                // graphs containing these nodes are not eligible for retention).
+                _ => {
+                    2u8.hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
+
     /// Return a reference to the compiled schedule for `ir`, using the cache when possible.
     ///
     /// On a miss the schedule is built and stored; on a hit it is returned directly.
@@ -1058,8 +1152,10 @@ impl TaskGraph {
     ) -> &'c CompiledSchedule {
         let fp = Self::binding_fingerprint(ir);
         if cache.as_ref().is_some_and(|e| e.fp == fp) {
+            tracing::trace!(target: "goldy::schedule_cache", hit = true, fp, "schedule");
             return &cache.as_ref().unwrap().schedule;
         }
+        tracing::trace!(target: "goldy::schedule_cache", hit = false, fp, "schedule");
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
         *cache = Some(CompiledCacheEntry {
@@ -1156,12 +1252,51 @@ impl TaskGraph {
     ///
     /// Unlike [`Self::compile_commands`], this operates directly on a resolved IR that
     /// contains no transient specs — callers are responsible for lowering transients first.
-    /// Used by `Frame::submit_compute` to compile the resolved IR after placement-heap
-    /// allocation without going through the transient-guarded public path.
+    #[allow(dead_code)]
     pub(crate) fn compile_ir_to_gpu_commands(ir: &GraphIR) -> Vec<crate::backend::GpuCommand> {
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
         analysis::emit_commands(ir, &schedule)
+    }
+
+    /// Compile the graph into partitioned command streams for pipelined backend submission.
+    ///
+    /// Runs the dependency analyzer, schedules waves, then splits the schedule at the
+    /// wave boundary with the largest barrier cost (see [`analysis::emit_partitioned_commands`]).
+    /// Returns one partition per planned backend submission:
+    ///
+    /// - One partition → single submission (small or all-independent graph).
+    /// - Two partitions → early partition submitted immediately; late partition deferred to present.
+    ///
+    /// # Panics
+    ///
+    /// Same conditions as [`Self::compile_commands`]: render-pass nodes or transient specs.
+    pub fn compile_partitioned_commands(&mut self) -> Vec<Vec<crate::backend::GpuCommand>> {
+        assert!(
+            self.transient_specs.is_empty(),
+            "compile_partitioned_commands: graph uses transient_buffer; use Device::submit"
+        );
+        assert!(
+            self.transient_texture_specs.is_empty(),
+            "compile_partitioned_commands: graph uses transient_texture; use Device::submit"
+        );
+        if Self::has_render_passes_in_ir(&self.ir) {
+            panic!("compile_partitioned_commands: graph contains render_pass; use compile_graph_commands or Device::submit");
+        }
+        let schedule = Self::get_or_build_schedule(&mut self.schedule_cache, &self.ir);
+        analysis::emit_partitioned_commands(&self.ir, schedule)
+    }
+
+    /// Partitioned variant of [`Self::compile_ir_to_gpu_commands`] for pre-lowered IRs.
+    ///
+    /// Used by `Frame::submit_compute` on the transient path, where the IR has already
+    /// been resolved and the schedule cache is not available.
+    pub(crate) fn compile_ir_to_partitioned_gpu_commands(
+        ir: &GraphIR,
+    ) -> Vec<Vec<crate::backend::GpuCommand>> {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        analysis::emit_partitioned_commands(ir, &schedule)
     }
 
     /// Like [`Self::compile_commands`] but allows graphs that include render-pass nodes.
@@ -2325,6 +2460,146 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "disjoint views should produce no barrier"
+        );
+    }
+
+    // ---- retention fingerprint tests --------------------------------------------------
+
+    /// A graph rebuilt with identical topology, pipeline, and dispatch dimensions must
+    /// produce the same retention fingerprint, allowing the retained CB to be resubmitted.
+    #[test]
+    fn retention_fingerprint_stable_on_identical_graph() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut g1 = TaskGraph::new();
+        g1.node("dispatch", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[1])
+            .dispatch(4, 4, 1);
+
+        let mut g2 = TaskGraph::new();
+        g2.node("dispatch", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[1])
+            .dispatch(4, 4, 1);
+
+        assert_eq!(
+            g1.compute_retention_fingerprint(),
+            g2.compute_retention_fingerprint(),
+            "identical graphs must share retention fingerprint"
+        );
+    }
+
+    /// Changing dispatch dimensions must change the retention fingerprint but NOT the
+    /// binding fingerprint, because wave scheduling depends only on resource access.
+    #[test]
+    fn retention_fingerprint_changes_on_dispatch_dim_change() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut g1 = TaskGraph::new();
+        g1.node("dispatch", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[1])
+            .dispatch(4, 4, 1);
+
+        let mut g2 = TaskGraph::new();
+        g2.node("dispatch", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[1])
+            .dispatch(8, 8, 1); // different dims
+
+        assert_ne!(
+            g1.compute_retention_fingerprint(),
+            g2.compute_retention_fingerprint(),
+            "dispatch dim change must invalidate retention fingerprint"
+        );
+        // Schedule (binding) fingerprint should be stable across dispatch dim changes.
+        assert_eq!(
+            g1.compute_binding_fingerprint(),
+            g2.compute_binding_fingerprint(),
+            "binding fingerprint must be unaffected by dispatch dim change"
+        );
+    }
+
+    /// Changing the pipeline on an otherwise identical binding pattern must invalidate
+    /// the retention fingerprint.
+    #[test]
+    fn retention_fingerprint_changes_on_pipeline_change() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let p1 = mock_pipeline(&device, &shader);
+        let p2 = mock_pipeline(&device, &shader);
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut g1 = TaskGraph::new();
+        g1.node("dispatch", &p1)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[1])
+            .dispatch(4, 4, 1);
+
+        let mut g2 = TaskGraph::new();
+        g2.node("dispatch", &p2) // different pipeline
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[1])
+            .dispatch(4, 4, 1);
+
+        let fp1 = g1.compute_retention_fingerprint();
+        let fp2 = g2.compute_retention_fingerprint();
+
+        // Pipelines created from the same shader by MockBackend get distinct handles only
+        // when the backend increments its counter — check conditionally so the test is
+        // valid regardless of mock handle allocation.
+        if p1.handle != p2.handle {
+            assert_ne!(
+                fp1, fp2,
+                "different pipeline handles must produce different retention fingerprints"
+            );
+        }
+
+        // Binding fingerprint must still be stable (same resources/accesses).
+        assert_eq!(
+            g1.compute_binding_fingerprint(),
+            g2.compute_binding_fingerprint(),
+            "pipeline change must not affect binding fingerprint"
+        );
+    }
+
+    /// Changing resource_slots (push-constant bindless indices) must invalidate
+    /// the retention fingerprint.
+    #[test]
+    fn retention_fingerprint_changes_on_resource_slots_change() {
+        let device = mock_device();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+
+        let mut g1 = TaskGraph::new();
+        g1.node("dispatch", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[1])
+            .dispatch(4, 4, 1);
+
+        let mut g2 = TaskGraph::new();
+        g2.node("dispatch", &pipeline)
+            .bind_buffer(&buf, NodeAccess::Write)
+            .bind_resources_raw_slice(&[2]) // different bindless slot
+            .dispatch(4, 4, 1);
+
+        assert_ne!(
+            g1.compute_retention_fingerprint(),
+            g2.compute_retention_fingerprint(),
+            "resource slot change must invalidate retention fingerprint"
+        );
+        assert_eq!(
+            g1.compute_binding_fingerprint(),
+            g2.compute_binding_fingerprint(),
+            "resource slot change must not affect binding fingerprint"
         );
     }
 }

@@ -22,9 +22,13 @@ use std::collections::VecDeque;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameStrategy {
     /// Minimize latency. Frames are fully synchronous: the CPU blocks until the
-    /// GPU finishes each frame before starting the next. CPU recording overhead
-    /// is eliminated via command buffer retention when the binding structure is
-    /// stable across frames.
+    /// GPU finishes each frame before starting the next.
+    ///
+    /// [`FrameOrchestrator::flush`] and [`FrameOrchestrator::end_frame_standalone`]
+    /// automatically attempt zero-cost command-buffer resubmission via
+    /// [`Device::try_resubmit_retained`].  When the graph's topology, pipeline, and
+    /// dispatch dimensions are unchanged from the previous frame the GPU command buffer
+    /// is replayed without any CPU re-recording overhead.
     ///
     /// Best for: interactive applications, games, live previews.
     LowLatency,
@@ -105,6 +109,10 @@ pub struct FrameOrchestrator<T> {
     next_id: u64,
     /// `Some` between [`Self::begin_frame`] and a matching end-frame call.
     open: Option<FrameHandle>,
+    /// Retention fingerprint stored by the most recent successful [`Self::submit_with_retention`]
+    /// call.  `None` until the first retain-eligible submit.  Used by [`FrameStrategy::LowLatency`]
+    /// to attempt zero-cost resubmission on subsequent frames.
+    last_retention_key: Option<u64>,
 }
 
 impl<T> FrameOrchestrator<T> {
@@ -126,6 +134,7 @@ impl<T> FrameOrchestrator<T> {
             ring: VecDeque::new(),
             next_id: 1,
             open: None,
+            last_retention_key: None,
         }
     }
 
@@ -140,6 +149,7 @@ impl<T> FrameOrchestrator<T> {
             ring: VecDeque::new(),
             next_id: 1,
             open: None,
+            last_retention_key: None,
         }
     }
 
@@ -214,15 +224,16 @@ impl<T> FrameOrchestrator<T> {
 
     /// Mid-frame submit: dispatches the current graph and starts a fresh one.
     ///
-    /// Always uses [`Device::submit_pipelined`] so the GPU can begin executing the submitted
-    /// work (e.g. coarse rasterization) while the CPU continues recording subsequent work
-    /// (e.g. fine rasterization) into a new [`TaskGraph`].  This creates a real command-buffer
-    /// boundary on all backends, including windowed/surface frames where the fine pass and
-    /// present are submitted later via [`Self::end_frame_for_surface`].
+    /// For [`FrameStrategy::LowLatency`] the graph is submitted via
+    /// [`Device::submit_pipelined_and_retain`] and on subsequent frames zero-cost
+    /// resubmission is attempted first via [`Device::try_resubmit_retained`].
+    /// All other strategies use [`Device::submit_pipelined`] unconditionally.
     ///
-    /// Because Metal (and Vulkan/DX12) execute command buffers on the same queue in submission
-    /// order, the fine command buffer automatically waits for the coarse one to complete —
-    /// no explicit fence is required.
+    /// This creates a real command-buffer boundary on all backends, including windowed/
+    /// surface frames where the fine pass and present are submitted later via
+    /// [`Self::end_frame_for_surface`].  Because Metal (and Vulkan/DX12) execute command
+    /// buffers on the same queue in submission order, the fine command buffer automatically
+    /// waits for the coarse one to complete — no explicit fence is required.
     pub fn flush(
         &mut self,
         handle: FrameHandle,
@@ -234,7 +245,7 @@ impl<T> FrameOrchestrator<T> {
         if graph.is_empty() {
             return Ok(());
         }
-        let tv = self.device.submit_pipelined(graph)?;
+        let tv = self.submit_with_retention(graph)?;
         *last_timeline = Some(tv);
         graph.clear();
         Ok(())
@@ -242,6 +253,9 @@ impl<T> FrameOrchestrator<T> {
 
     /// End a standalone (headless / render-to-texture) frame: submit remaining work, push the
     /// cleanup slot with a known timeline, clear the open handle.
+    ///
+    /// For [`FrameStrategy::LowLatency`] the same retention logic as [`Self::flush`] applies:
+    /// zero-cost resubmission is attempted first, falling back to a retain-and-record submit.
     ///
     /// If `graph` is empty, `fallback_timeline` is used (e.g. the value from previous
     /// [`Self::flush`] calls). If that is `None`, [`Device::gpu_progress`] is used.
@@ -257,7 +271,7 @@ impl<T> FrameOrchestrator<T> {
         let tv = if graph.is_empty() {
             fallback_timeline.unwrap_or_else(|| self.device.gpu_progress())
         } else {
-            self.device.submit_pipelined(graph)?
+            self.submit_with_retention(graph)?
         };
         self.ring.push_back(FrameSlot {
             timeline: Some(tv),
@@ -265,6 +279,59 @@ impl<T> FrameOrchestrator<T> {
         });
         self.open = None;
         tracy_frame_mark!();
+        Ok(tv)
+    }
+
+    /// Submit `graph` using the retention-aware strategy for the configured [`FrameStrategy`].
+    ///
+    /// - **[`FrameStrategy::LowLatency`]**: tries [`Device::try_resubmit_retained`] first
+    ///   (zero CPU recording cost on a hit); on a miss (first frame or fingerprint change)
+    ///   falls back to [`Device::submit_pipelined_and_retain`] so the next frame can hit.
+    ///   The last successful retention key is stored in `self.last_retention_key`.
+    /// - **All other strategies**: always [`Device::submit_pipelined`].  Retention would be
+    ///   unsafe at pipeline depth > 1 because the same CB can still be in-flight from the
+    ///   previous frame when a new submission begins.
+    fn submit_with_retention(&mut self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
+        if self.strategy != FrameStrategy::LowLatency {
+            return self.device.submit_pipelined(graph);
+        }
+
+        // Compute the full content fingerprint — covers pipeline, dispatch dims, push constants.
+        let fp = graph.compute_retention_fingerprint();
+
+        // Attempt zero-cost resubmission when the fingerprint matches the stored CB.
+        if self.last_retention_key == Some(fp) {
+            match self.device.try_resubmit_retained(fp)? {
+                Some(tv) => {
+                    tracing::trace!(
+                        target: "goldy::retention",
+                        key = fp,
+                        "retention hit — resubmitted without re-recording"
+                    );
+                    return Ok(tv);
+                }
+                None => {
+                    // Key matched but CB was evicted (e.g. a previous fallback path);
+                    // fall through to record-and-retain below.
+                    tracing::trace!(
+                        target: "goldy::retention",
+                        key = fp,
+                        "retention miss — CB evicted, re-recording"
+                    );
+                }
+            }
+        } else {
+            tracing::trace!(
+                target: "goldy::retention",
+                old_key = ?self.last_retention_key,
+                new_key = fp,
+                "retention fingerprint changed — re-recording"
+            );
+        }
+
+        // Record the command buffer and store it for the next frame.
+        let tv = self.device.submit_pipelined_and_retain(graph)?;
+        self.last_retention_key = Some(fp);
         Ok(tv)
     }
 

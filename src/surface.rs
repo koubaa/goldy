@@ -237,33 +237,59 @@ impl Frame {
     /// this method handles the full resolution transparently.
     pub fn submit_compute(&self, graph: &mut TaskGraph) -> Result<()> {
         let _tz = tracy_zone!("frame.submit_compute");
-        if !graph.has_transient_resources() {
-            let commands = graph.compile_commands();
-            let mut backend = self.backend.lock().unwrap();
-            return backend.record_gpu_work(&self.token, &commands);
-        }
-
-        // Resolve transient textures first (may be needed even without transient buffers).
-        let (tex_keepalive, tex_handles) = graph.allocate_transient_textures(&self._device)?;
-
-        let commands = if graph.has_transient_buffers() {
-            self.resolve_and_compile_transient_buffers(graph, tex_handles)?
+        let partitions = if !graph.has_transient_resources() {
+            graph.compile_partitioned_commands()
         } else {
-            // Transient textures only — lower the IR and compile.
-            let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
-            TaskGraph::compile_ir_to_gpu_commands(&resolved_ir)
+            // Resolve transient textures first (may be needed even without transient buffers).
+            let (tex_keepalive, tex_handles) = graph.allocate_transient_textures(&self._device)?;
+
+            let parts = if graph.has_transient_buffers() {
+                self.resolve_and_compile_transient_buffers(graph, tex_handles)?
+            } else {
+                // Transient textures only — lower the IR and compile partitioned.
+                let resolved_ir = TaskGraph::lower_transient_textures(graph.ir(), &tex_handles)?;
+                TaskGraph::compile_ir_to_partitioned_gpu_commands(&resolved_ir)
+            };
+
+            // Stash textures so they survive until do_present defers them via VramAllocator.
+            if !tex_keepalive.is_empty() {
+                let mut keepalive = self.keepalive.lock().unwrap();
+                for tex in tex_keepalive {
+                    keepalive.push(tex);
+                }
+            }
+
+            parts
         };
 
-        // Stash textures so they survive until do_present defers them via VramAllocator.
-        if !tex_keepalive.is_empty() {
-            let mut keepalive = self.keepalive.lock().unwrap();
-            for tex in tex_keepalive {
-                keepalive.push(tex);
+        self.submit_partitions(partitions)
+    }
+
+    /// Submit a list of partitioned command slices to the backend.
+    ///
+    /// All partitions except the last are submitted immediately via
+    /// [`GpuBackend::submit_standalone`], allowing the GPU to begin executing
+    /// early (coarse) work while the CPU records the final partition. The last
+    /// partition is deferred to present via [`GpuBackend::record_gpu_work`].
+    ///
+    /// Same-queue in-order execution guarantees that early partitions complete
+    /// before the final partition begins on the GPU. Memory visibility across
+    /// submissions is covered by the backend's cross-submission acquire barrier.
+    fn submit_partitions(&self, partitions: Vec<Vec<crate::backend::GpuCommand>>) -> Result<()> {
+        let n = partitions.len();
+        let mut backend = self.backend.lock().unwrap();
+        for (i, partition) in partitions.into_iter().enumerate() {
+            if i < n - 1 {
+                // Early partitions: submit immediately so the GPU starts executing.
+                let _tz = tracy_zone!("frame.submit_partition_early");
+                backend.submit_standalone(self.device_handle, &partition)?;
+            } else {
+                // Final partition: defer to present so it synchronises with the swapchain.
+                let _tz = tracy_zone!("frame.submit_partition_late");
+                backend.record_gpu_work(&self.token, &partition)?;
             }
         }
-
-        let mut backend = self.backend.lock().unwrap();
-        backend.record_gpu_work(&self.token, &commands)
+        Ok(())
     }
 
     /// Acquire a placement-heap region, create BufferViews at colored offsets, lower the
@@ -276,7 +302,7 @@ impl Frame {
         &self,
         graph: &TaskGraph,
         tex_handles: HashMap<u32, crate::backend::TextureHandle>,
-    ) -> Result<Vec<crate::backend::GpuCommand>> {
+    ) -> Result<Vec<Vec<crate::backend::GpuCommand>>> {
         use crate::buffer::BufferView;
         use crate::placement_heap::PlacementHeap;
 
@@ -345,7 +371,7 @@ impl Frame {
             resolved_ir = TaskGraph::lower_transient_textures(&resolved_ir, &tex_handles)?;
         }
 
-        let commands = TaskGraph::compile_ir_to_gpu_commands(&resolved_ir);
+        let partitions = TaskGraph::compile_ir_to_partitioned_gpu_commands(&resolved_ir);
 
         // Defer views via keepalive so they outlive the GPU work.
         // do_present drains keepalive via device.defer_release(tv, ...).
@@ -357,7 +383,7 @@ impl Frame {
             }
         }
 
-        Ok(commands)
+        Ok(partitions)
     }
 
     /// Submit all work and present. Returns the GPU timeline value when this frame completes.
