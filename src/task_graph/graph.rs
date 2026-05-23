@@ -783,7 +783,7 @@ impl TaskGraph {
     /// `resource_slots` entry from [`SWAPCHAIN_SLOT_PLACEHOLDER`] to the real
     /// UAV bindless index `uav_index`.
     ///
-    /// Called by [`Surface::submit_graph`] after `surface.begin()` resolves
+    /// Called by [`Surface::submit_graph`](crate::Surface::submit_graph) after `surface.begin()` resolves
     /// the concrete swapchain `TextureHandle` and its bindless index.
     pub(crate) fn lower_swapchain_output(
         ir: &GraphIR,
@@ -870,7 +870,7 @@ impl TaskGraph {
     /// Returns a [`SwapchainOutputHandle`] that must be passed to
     /// [`NodeBuilder::bind_swapchain_output`] when recording the final
     /// (fine-pass) dispatch node.  The concrete `TextureHandle` is resolved
-    /// at submit time inside [`Surface::submit_graph`].
+    /// at submit time inside [`Surface::submit_graph`](crate::Surface::submit_graph).
     ///
     /// Call this exactly once per graph before recording fine-pass nodes.
     pub fn declare_swapchain_output(&mut self) -> SwapchainOutputHandle {
@@ -1411,7 +1411,7 @@ impl TaskGraph {
 
         let needs_build = cache
             .as_ref()
-            .map_or(true, |e| e.partitioned_commands.is_none());
+            .is_none_or(|e| e.partitioned_commands.is_none());
 
         tracing::trace!(target: "goldy::schedule_cache", hit = !needs_build, fp, "partitioned_commands");
 
@@ -1619,9 +1619,9 @@ impl<'a> NodeBuilder<'a> {
     /// Declare that this node writes to the swapchain output.
     ///
     /// The concrete `TextureHandle` is resolved at submit time by
-    /// [`Surface::submit_graph`].  The caller (ekrano) must place
+    /// [`Surface::submit_graph`](crate::Surface::submit_graph).  The caller (ekrano) must place
     /// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` at the corresponding
-    /// binding position so [`lower_swapchain_output`] can patch it with the
+    /// binding position so `TaskGraph::lower_swapchain_output` can patch it with the
     /// real UAV bindless index after `surface.begin()`.
     pub fn bind_swapchain_output(
         mut self,

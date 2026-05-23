@@ -166,7 +166,11 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           # LD_LIBRARY_PATH needs the directory for dependent libraries
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-        run: cargo test --features vulkan
+        # Lavapipe (like WARP on DX12) is unstable when many test threads create
+        # concurrent VkDevice instances — each test spawns its own Vulkan instance
+        # and large bindless descriptor pools, exhausting driver-side resources.
+        # --test-threads=1 serialises them within each test binary.
+        run: cargo test --features vulkan -- --test-threads=1
 
       - name: Run integration tests
         env:
@@ -174,7 +178,7 @@ jobs:
           VK_LAYER_PATH: ""
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-        run: cargo test --features vulkan --test '*'
+        run: cargo test --features vulkan --test '*' -- --test-threads=1
 
   # Full GPU tests using native Metal backend (macOS)
   test-metal:

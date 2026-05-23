@@ -201,9 +201,10 @@ impl Surface {
     /// 5. Records the final partition deferred to present.
     /// 6. Returns the [`Frame`] for the caller to present.
     ///
-    /// The graph **must** contain at least one [`ResourceId::SwapchainOutput`]
-    /// binding (declared via [`TaskGraph::declare_swapchain_output`] and bound
-    /// via [`NodeBuilder::bind_swapchain_output`]).  Transient buffers and
+    /// The graph **must** contain at least one swapchain-output binding
+    /// (declared via [`TaskGraph::declare_swapchain_output`] and bound
+    /// via [`NodeBuilder::bind_swapchain_output`](crate::NodeBuilder::bind_swapchain_output)).
+    /// Transient buffers and
     /// textures are fully resolved before partitioning.
     pub fn submit_graph(&self, graph: &mut TaskGraph) -> Result<Frame> {
         let _tz = tracy_zone!("surface.submit_graph");
