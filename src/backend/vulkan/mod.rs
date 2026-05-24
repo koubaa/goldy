@@ -705,9 +705,11 @@ impl GpuBackend for VulkanBackend {
         surface::create(
             &self.state.entry,
             &self.state.instance,
-            &self.state.devices,
+            &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
             &mut self.state.next_surface_handle,
+            &mut self.state.next_texture_handle,
             device_handle,
             window,
             display,
@@ -771,8 +773,10 @@ impl GpuBackend for VulkanBackend {
         surface::resize(
             &self.state.entry,
             &self.state.instance,
-            &self.state.devices,
+            &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
+            &mut self.state.next_texture_handle,
             surface_handle,
             width,
             height,
@@ -795,8 +799,10 @@ impl GpuBackend for VulkanBackend {
         surface::set_present_mode(
             &self.state.entry,
             &self.state.instance,
-            &self.state.devices,
+            &mut self.state.devices,
             &mut self.state.surfaces,
+            &mut self.state.textures,
+            &mut self.state.next_texture_handle,
             surface_handle,
             mode,
         )
