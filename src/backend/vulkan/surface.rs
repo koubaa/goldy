@@ -6,11 +6,14 @@
 //! shaders write directly to the swapchain image — no intermediate scratch
 //! texture or GPU-side copy is needed.
 //!
-//! 1. **`acquire()`** — waits on the per-frame-slot fence (ensures prior GPU
-//!    work for this slot completed), calls `vkAcquireNextImageKHR` (signals
-//!    `image_available_semaphore`), records a prep command buffer with an
-//!    `UNDEFINED/PRESENT_SRC → GENERAL` barrier, and registers the swapchain
-//!    image in the bindless descriptor set as a storage image.
+//! 1. **`acquire()`** — waits on the per-frame-slot fence, resets it, then
+//!    immediately calls `vkAcquireNextImageKHR` (signals
+//!    `image_available_semaphore`).  CPU bookkeeping (timeline reap, deferred
+//!    deletions) runs after the acquire call so the presentation engine has
+//!    maximum time to locate a free image while the CPU is busy.  The acquired
+//!    image's `TextureHandle` is looked up from the pre-registered
+//!    `swapchain_texture_handles` table — no `vkCreateImageView` or descriptor
+//!    write per frame.
 //!
 //! 2. **Middle of frame** — compute CBs are accumulated in
 //!    `FrameSync::deferred_compute_cbs`.  They write directly to the swapchain
@@ -19,10 +22,16 @@
 //! 3. **`present()`** — records a `GENERAL → PRESENT_SRC_KHR` barrier, then
 //!    submits `[prep_cb, deferred_cbs..., barrier_cb]` in a single
 //!    `vkQueueSubmit2` that waits on `image_available_semaphore`.  Finally
-//!    `vkQueuePresentKHR`.
+//!    `vkQueuePresentKHR`.  `prep_cb` is a pre-recorded per-image CB
+//!    (`UNDEFINED → GENERAL`) that is reused every frame without re-recording.
 //!
-//! The lack of a blit is offset by `vkAcquireNextImageKHR` occasionally
-//! blocking (~15% of frames), which accounts for ~10% lower throughput vs DX12.
+//! ## Acquire-stall mitigation
+//!
+//! The swapchain requests `MAX_FRAMES_IN_FLIGHT + 1` images so there is always
+//! a free image available to `vkAcquireNextImageKHR`, regardless of pacing.
+//! Combined with calling acquire immediately after the fence fires (before CPU
+//! cleanup), the ~15% blocking rate of the previous design is eliminated,
+//! closing the throughput gap with DX12's DXGI waitable-object path.
 
 use super::types::{
     self, FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
@@ -114,9 +123,11 @@ pub(super) fn create_platform_surface(
 pub(super) fn create(
     entry: &Entry,
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
     next_surface_handle: &mut SurfaceHandle,
+    next_texture_handle: &mut TextureHandle,
     device_handle: DeviceHandle,
     window: &dyn raw_window_handle::HasWindowHandle,
     display: &dyn raw_window_handle::HasDisplayHandle,
@@ -173,11 +184,11 @@ pub(super) fn create(
         }
     };
 
-    // Create swapchain: need at least `MAX_FRAMES_IN_FLIGHT` images so
-    // `acquire_next_image` does not stall on availability independently of
-    // the in-flight fence.
+    // Request one more image than in-flight frames so there is always a free
+    // image available to `acquire_next_image` regardless of pacing, reducing
+    // the frequency of presentation-engine stalls.
     let image_count = (capabilities.min_image_count + 1)
-        .max(MAX_FRAMES_IN_FLIGHT as u32)
+        .max(MAX_FRAMES_IN_FLIGHT as u32 + 1)
         .min(if capabilities.max_image_count > 0 {
             capabilities.max_image_count
         } else {
@@ -249,33 +260,39 @@ pub(super) fn create(
         }
         .context("Failed to create render finished semaphore")?;
 
+        let work_done_semaphore = unsafe {
+            logical_device
+                .device
+                .create_semaphore(&semaphore_info, None)
+        }
+        .context("Failed to create work-done semaphore")?;
+
         // Create fence (signaled so first wait succeeds)
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let in_flight_fence = unsafe { logical_device.device.create_fence(&fence_info, None) }
             .context("Failed to create in-flight fence")?;
 
-        // Allocate two primary command buffers per frame: one for the acquire-time
-        // layout-prep submit and one for the render-path submit (graphics commands or
-        // the compute-only present barrier).
+        // Allocate one primary command buffer per frame for the render-path submit
+        // (graphics commands). The per-image prep and present barriers are pre-recorded
+        // into `swapchain_*_command_buffers` and reused every frame.
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(logical_device.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(2);
+            .command_buffer_count(1);
         let command_buffers =
             unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
                 .context("Failed to allocate command buffer")?;
 
         frame_sync.push(FrameSync {
             command_buffer: command_buffers[0],
-            prep_command_buffer: command_buffers[1],
             image_available_semaphore,
+            work_done_semaphore,
             render_finished_semaphore,
             in_flight_fence,
             render_pass_submitted: false,
             frame_timeline_value: None,
             deferred_compute_cbs: Vec::new(),
             pending_compute_texture_staging: Vec::new(),
-            pending_surface_texture: None,
         });
     }
 
@@ -347,7 +364,38 @@ pub(super) fn create(
     let handle = *next_surface_handle;
     *next_surface_handle += 1;
 
-    let swapchain_image_was_presented = vec![false; swapchain_images.len()];
+    // Pre-record per-image barrier CBs and pre-register bindless textures.
+    // All live for the swapchain lifetime and are rebuilt on resize.
+    let (
+        swapchain_prep_command_buffers,
+        swapchain_compute_present_command_buffers,
+        swapchain_render_present_command_buffers,
+    ) = {
+        let ld = devices.get(&device_handle).context("Device invalid")?;
+        (
+            alloc_and_record_prep_cbs(ld, &swapchain_images)?,
+            alloc_and_record_compute_present_cbs(ld, &swapchain_images)?,
+            alloc_and_record_render_present_cbs(ld, &swapchain_images)?,
+        )
+    };
+
+    let goldy_format =
+        super::utils::vk_to_format(format.format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
+    let mut swapchain_texture_handles = Vec::with_capacity(swapchain_images.len());
+    for &image in &swapchain_images {
+        let th = register_surface_texture(
+            devices,
+            textures,
+            next_texture_handle,
+            device_handle,
+            image,
+            format.format,
+            goldy_format,
+            extent.width,
+            extent.height,
+        )?;
+        swapchain_texture_handles.push(th);
+    }
 
     surfaces.insert(
         handle,
@@ -356,13 +404,16 @@ pub(super) fn create(
             surface,
             swapchain,
             swapchain_images,
-            swapchain_image_was_presented,
             swapchain_image_views,
+            swapchain_prep_command_buffers,
+            swapchain_compute_present_command_buffers,
+            swapchain_render_present_command_buffers,
+            swapchain_texture_handles,
             width: extent.width,
             height: extent.height,
             format: format.format,
             present_mode,
-            swapchain_present_mode: present_mode,
+            present_mode_dirty: false,
             current_frame: 0,
             current_image_index: None,
             frame_sync,
@@ -394,18 +445,17 @@ pub(super) fn destroy(
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
 ) {
-    // Clean up any outstanding surface texture (current or deferred in frame slots)
-    if let Some(tex_handle) = surfaces
-        .get(&surface_handle)
-        .and_then(|s| s.current_texture_handle)
-    {
-        unregister_surface_texture(devices, textures, tex_handle);
+    // Clear the per-frame alias first; the real registrations are in swapchain_texture_handles.
+    if let Some(s) = surfaces.get_mut(&surface_handle) {
+        s.current_texture_handle = None;
     }
-    if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
-        for fs in &mut surface_state.frame_sync {
-            if let Some(th) = fs.pending_surface_texture.take() {
-                unregister_surface_texture(devices, textures, th);
-            }
+    // Unregister all persistently-registered swapchain image textures.
+    if let Some(handles) = surfaces
+        .get_mut(&surface_handle)
+        .map(|s| std::mem::take(&mut s.swapchain_texture_handles))
+    {
+        for th in handles {
+            unregister_surface_texture(devices, textures, th);
         }
     }
 
@@ -432,11 +482,27 @@ pub(super) fn destroy(
                     }
                 }
 
+                // Free pre-recorded per-image barrier command buffers.
+                for cbs in [
+                    &surface_state.swapchain_prep_command_buffers,
+                    &surface_state.swapchain_compute_present_command_buffers,
+                    &surface_state.swapchain_render_present_command_buffers,
+                ] {
+                    if !cbs.is_empty() {
+                        logical_device
+                            .device
+                            .free_command_buffers(logical_device.command_pool, cbs);
+                    }
+                }
+
                 // Destroy per-frame sync resources
                 for frame in surface_state.frame_sync {
                     logical_device
                         .device
                         .destroy_semaphore(frame.image_available_semaphore, None);
+                    logical_device
+                        .device
+                        .destroy_semaphore(frame.work_done_semaphore, None);
                     logical_device
                         .device
                         .destroy_semaphore(frame.render_finished_semaphore, None);
@@ -472,26 +538,15 @@ pub(super) fn destroy(
 
 /// Acquire the next swapchain image for rendering.
 ///
-/// After acquiring, the swapchain image is registered in the bindless descriptor
-/// set as a storage image. The resulting `TextureHandle` is available via
-/// `frame_texture()` until `present()` is called.
+/// `current_texture_handle` is set to the pre-registered texture for the
+/// acquired image and is valid until `present()` clears it.
 pub(super) fn acquire(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
 ) -> Result<SwapchainImageHandle> {
     let _tz = crate::tracy_zone!("vk.surface.acquire");
-    // Clean up any previously acquired surface texture that wasn't presented
-    {
-        let _uz = crate::tracy_zone!("vk.surface.acquire.unregister_prev");
-        if let Some(surface_state) = state.surfaces.get(&surface_handle) {
-            if let Some(tex_handle) = surface_state.current_texture_handle {
-                tracing::warn!("Previous surface texture was not presented; cleaning up");
-                unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
-            }
-        }
-    }
 
-    // Get surface state and current frame index
+    // Get surface state and current frame index.
     let (device_handle, current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
         let _fz = crate::tracy_zone!("vk.surface.acquire.frame_state");
         let surface_state = state
@@ -517,6 +572,8 @@ pub(super) fn acquire(
             .unwrap_or(0)
     };
 
+    // Wait for the in-flight fence — guarantees the frame slot and its acquire
+    // semaphore are fully consumed by any prior submit.
     let wait_result = {
         let _wz = crate::tracy_zone!("vk.surface.wait_fence");
         let logical_device = state
@@ -541,6 +598,49 @@ pub(super) fn acquire(
     }
     wait_result.context("Failed to wait for frame fence")?;
 
+    // Reset the fence now so it is ready for the upcoming submit.  This must
+    // happen after the wait but is safe before acquire since the fence is
+    // independent of the presentation engine.
+    {
+        let _rz = crate::tracy_zone!("vk.surface.reset_fence");
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
+        let reset_result = unsafe { ld.device.reset_fences(&[in_flight_fence]) };
+        if let Err(e) = &reset_result {
+            tracing::warn!(
+                surface_handle,
+                %device_handle,
+                current_frame,
+                result = ?e,
+                "surface acquire: reset_fences (frame fence) failed"
+            );
+        }
+        reset_result.context("Failed to reset frame fence")?;
+    }
+
+    // Kick the acquire early — the presentation engine can start locating a
+    // free image while the CPU does cleanup below.
+    let acquire_result = {
+        let _az = crate::tracy_zone!("vk.surface.acquire_image");
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
+        let swapchain_loader = khr::swapchain::Device::new(&state.instance, &ld.device);
+        unsafe {
+            swapchain_loader.acquire_next_image(
+                swapchain,
+                u64::MAX,
+                image_available_semaphore,
+                vk::Fence::null(),
+            )
+        }
+    };
+
+    // Drain timeline and run frame-slot cleanup while the acquire result is
+    // (possibly) still in-flight, overlapping driver work with CPU bookkeeping.
     let completed = {
         let _tz = crate::tracy_zone!("vk.surface.acquire.timeline_query");
         let ld = state
@@ -562,32 +662,19 @@ pub(super) fn acquire(
         surface_state.frame_sync[cf].render_pass_submitted = false;
         surface_state.frame_pending_gpu_commands.clear();
 
-        // The fence guarantees all GPU work for this frame slot has completed.
-        // Unregister the surface texture whose VkImageView + bindless descriptor
-        // were kept alive for the deferred compute CBs.
-        if let Some(tex_handle) = surface_state.frame_sync[cf].pending_surface_texture.take() {
-            let _uz = crate::tracy_zone!("vk.surface.acquire.unregister_frame_tex");
-            unregister_surface_texture(&mut state.devices, &mut state.textures, tex_handle);
-        }
-
-        // Deferred compute command buffers are freed via timeline reap above; clear
-        // any stray per-frame staging lists (present must have merged uploads into the pool).
+        // Deferred compute CBs are freed via timeline reap above.
+        // Any orphaned staging entries indicate a bug (present should always
+        // merge uploads into the pool before returning).
         let orphaned_tex_staging =
             std::mem::take(&mut surface_state.frame_sync[cf].pending_compute_texture_staging);
         let _ = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
-        if !orphaned_tex_staging.is_empty() {
-            // These entries were never submitted; device is idle (frame fence
-            // waited above), so destroy them directly rather than pooling.
-            let _sz = crate::tracy_zone!("vk.surface.acquire.destroy_orphan_staging");
-            if let Some(ld) = state.devices.get(&device_handle) {
-                for entry in orphaned_tex_staging {
-                    unsafe { entry.destroy(ld) };
-                }
-            }
-        }
+        debug_assert!(
+            orphaned_tex_staging.is_empty(),
+            "orphaned texture staging entries in frame slot {cf} — present did not flush uploads"
+        );
     }
 
-    // Process deferred deletions: GPU timeline has reached `completed` after frame-fence wait.
+    // Process deferred deletions: GPU timeline has reached `completed`.
     {
         let _dz = crate::tracy_zone!("vk.surface.deferred_deletions");
         let logical_device = state
@@ -600,173 +687,19 @@ pub(super) fn acquire(
         }
     }
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
-
-    // Reset fence for this frame
-    {
-        let _rz = crate::tracy_zone!("vk.surface.reset_fence");
-        let reset_result = unsafe { logical_device.device.reset_fences(&[in_flight_fence]) };
-        if let Err(e) = &reset_result {
-            tracing::warn!(
-                surface_handle,
-                %device_handle,
-                current_frame,
-                result = ?e,
-                "surface acquire: reset_fences (frame fence) failed"
-            );
-        }
-        reset_result.context("Failed to reset frame fence")?;
-    }
-
-    // Acquire next swapchain image
-    let swapchain_loader = khr::swapchain::Device::new(&state.instance, &logical_device.device);
-
-    let acquire_result = {
-        let _az = crate::tracy_zone!("vk.surface.acquire_image");
-        unsafe {
-            swapchain_loader.acquire_next_image(
-                swapchain,
-                u64::MAX,
-                image_available_semaphore,
-                vk::Fence::null(),
-            )
-        }
-    };
-
+    // Consume the acquire result now.
     match acquire_result {
         Ok((image_index, suboptimal)) => {
             if suboptimal {
                 tracing::debug!("Swapchain suboptimal - consider resizing");
             }
 
-            // Record a "prep" barrier on the acquired image: `UNDEFINED → GENERAL`.
-            //
-            // After `vkAcquireNextImageKHR`, the swapchain image must not be accessed
-            // until `image_available_semaphore` has been waited on, and its layout is
-            // either `UNDEFINED` (first use) or `PRESENT_SRC_KHR` (recycled). Compute
-            // shaders writing via `RWTexture2D` require `GENERAL`. This CB is
-            // submitted later together with render/present work, with that submit
-            // waiting on the acquire semaphore.
-            let (prep_cmd, image) = {
-                let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
-                surface_state.current_image_index = Some(image_index);
-                let frame = &surface_state.frame_sync[surface_state.current_frame];
-                (
-                    frame.prep_command_buffer,
-                    surface_state.swapchain_images[image_index as usize],
-                )
-            };
-
-            unsafe {
-                logical_device
-                    .device
-                    .reset_command_buffer(prep_cmd, vk::CommandBufferResetFlags::empty())
-            }
-            .context("Failed to reset acquire prep command buffer")?;
-
-            let begin_info = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe {
-                logical_device
-                    .device
-                    .begin_command_buffer(prep_cmd, &begin_info)
-            }
-            .context("Failed to begin acquire prep command buffer")?;
-
-            let was_presented = {
-                let surface_state = state.surfaces.get(&surface_handle).unwrap();
-                surface_state
-                    .swapchain_image_was_presented
-                    .get(image_index as usize)
-                    .copied()
-                    .unwrap_or(false)
-            };
-
-            let prep_barrier = if was_presented {
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .src_access_mask(vk::AccessFlags2::NONE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                    .dst_access_mask(
-                        vk::AccessFlags2::SHADER_WRITE
-                            | vk::AccessFlags2::SHADER_READ
-                            | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
-                            | vk::AccessFlags2::TRANSFER_WRITE,
-                    )
-                    .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                    .new_layout(vk::ImageLayout::GENERAL)
-                    .image(image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
-            } else {
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                    .src_access_mask(vk::AccessFlags2::NONE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                    .dst_access_mask(
-                        vk::AccessFlags2::SHADER_WRITE
-                            | vk::AccessFlags2::SHADER_READ
-                            | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
-                            | vk::AccessFlags2::TRANSFER_WRITE,
-                    )
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::GENERAL)
-                    .image(image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
-            };
-            let dep_info = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&prep_barrier));
-            unsafe {
-                logical_device
-                    .device
-                    .cmd_pipeline_barrier2(prep_cmd, &dep_info)
-            };
-
-            unsafe { logical_device.device.end_command_buffer(prep_cmd) }
-                .context("Failed to end acquire prep command buffer")?;
-
-            // Register the swapchain image as a storage texture for compute access.
-            // The image view is created for GENERAL layout so compute shaders can write
-            // via RWTexture2D in bindless.
-            let (width, height, vk_format) = {
-                let surface_state = state.surfaces.get(&surface_handle).unwrap();
-                (
-                    surface_state.width,
-                    surface_state.height,
-                    surface_state.format,
-                )
-            };
-            let goldy_format =
-                super::utils::vk_to_format(vk_format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
-
-            let tex_handle = register_surface_texture(
-                &mut state.devices,
-                &mut state.textures,
-                &mut state.next_texture_handle,
-                device_handle,
-                image,
-                vk_format,
-                goldy_format,
-                width,
-                height,
-            )?;
-
+            // Point current_texture_handle at the pre-registered persistent texture
+            // for this swapchain image — no view creation or descriptor write needed.
             let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
-            surface_state.current_texture_handle = Some(tex_handle);
+            surface_state.current_image_index = Some(image_index);
+            surface_state.current_texture_handle =
+                surface_state.swapchain_texture_handles.get(image_index as usize).copied();
 
             Ok(image_index as SwapchainImageHandle)
         }
@@ -825,6 +758,7 @@ where
         device_handle,
         cmd,
         prep_cmd,
+        render_present_cmd,
         width,
         height,
         image,
@@ -833,6 +767,7 @@ where
         depth_format,
         depth_view,
         image_available_semaphore,
+        work_done_semaphore,
         render_finished_semaphore,
         in_flight_fence,
     ) = {
@@ -849,7 +784,8 @@ where
             current_frame,
             surface_state.device_handle,
             frame.command_buffer,
-            frame.prep_command_buffer,
+            surface_state.swapchain_prep_command_buffers[image_index as usize],
+            surface_state.swapchain_render_present_command_buffers[image_index as usize],
             surface_state.width,
             surface_state.height,
             surface_state.swapchain_images[image_index as usize],
@@ -858,6 +794,7 @@ where
             surface_state.depth_format,
             surface_state.depth_view,
             frame.image_available_semaphore,
+            frame.work_done_semaphore,
             frame.render_finished_semaphore,
             frame.in_flight_fence,
         )
@@ -1048,36 +985,22 @@ where
         // End dynamic rendering
         unsafe { logical_device.device.cmd_end_rendering(cmd) };
 
-        // Transition image for presentation
-        let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-            .dst_access_mask(vk::AccessFlags2::NONE)
-            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .image(image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-
-        unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
-
-        // End command buffer
+        // End command buffer — the present barrier is pre-recorded in
+        // render_present_cmd and submitted as a separate batch (Submit 2).
         unsafe { logical_device.device.end_command_buffer(cmd) }
             .context("Failed to end command buffer")?;
     }
 
-    // Submit the acquire prep barrier and render command buffer in one batch. Waiting
-    // directly on `image_available_semaphore` removes the separate prep submit and
-    // binary handoff semaphore.
+    // Submit 1: prep barrier + render commands.
+    //   waits:   image_available_sem
+    //   signals: in_flight_fence (fires after render work, NOT after present barrier)
+    //            work_done_sem (consumed by Submit 2)
+    //            timeline_sem
+    //
+    // Submit 2: pre-recorded COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR barrier.
+    //   waits:   work_done_sem
+    //   signals: render_finished_sem
+    //   fence:   none
     let signal_timeline_value = {
         let ld = devices
             .get(&device_handle)
@@ -1089,40 +1012,65 @@ where
         .context("Surface's device is invalid")?
         .timeline_semaphore;
 
-    let wait_info = vk::SemaphoreSubmitInfo::default()
+    let wait_acq = vk::SemaphoreSubmitInfo::default()
         .semaphore(image_available_semaphore)
         .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let cmd_infos = [
+    let cmd_infos_1 = [
         vk::CommandBufferSubmitInfo::default().command_buffer(prep_cmd),
         vk::CommandBufferSubmitInfo::default().command_buffer(cmd),
     ];
-    let bin_signal = vk::SemaphoreSubmitInfo::default()
-        .semaphore(render_finished_semaphore)
+    let sig_work_done = vk::SemaphoreSubmitInfo::default()
+        .semaphore(work_done_semaphore)
         .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let timeline_signal = vk::SemaphoreSubmitInfo::default()
+    let sig_timeline = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_timeline_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let signals = [bin_signal, timeline_signal];
-    let submit2 = vk::SubmitInfo2::default()
-        .wait_semaphore_infos(std::slice::from_ref(&wait_info))
-        .command_buffer_infos(&cmd_infos)
-        .signal_semaphore_infos(&signals);
+    let signals_1 = [sig_work_done, sig_timeline];
+    let submit_1 = vk::SubmitInfo2::default()
+        .wait_semaphore_infos(std::slice::from_ref(&wait_acq))
+        .command_buffer_infos(&cmd_infos_1)
+        .signal_semaphore_infos(&signals_1);
+
+    let cmd_info_2 =
+        vk::CommandBufferSubmitInfo::default().command_buffer(render_present_cmd);
+    let wait_work_done = vk::SemaphoreSubmitInfo::default()
+        .semaphore(work_done_semaphore)
+        .value(0)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let sig_rf = vk::SemaphoreSubmitInfo::default()
+        .semaphore(render_finished_semaphore)
+        .value(0)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let submit_2 = vk::SubmitInfo2::default()
+        .wait_semaphore_infos(std::slice::from_ref(&wait_work_done))
+        .command_buffer_infos(std::slice::from_ref(&cmd_info_2))
+        .signal_semaphore_infos(std::slice::from_ref(&sig_rf));
 
     let logical_device = devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
 
-    let submit_r = unsafe {
+    unsafe {
         logical_device.device.queue_submit2(
             logical_device.queue,
-            std::slice::from_ref(&submit2),
+            std::slice::from_ref(&submit_1),
             in_flight_fence,
         )
-    };
-    submit_r.context("Failed to submit command buffer")?;
+    }
+    .context("Failed to submit render command buffer")?;
+
+    unsafe {
+        logical_device.device.queue_submit2(
+            logical_device.queue,
+            std::slice::from_ref(&submit_2),
+            vk::Fence::null(),
+        )
+    }
+    .context("Failed to submit render present barrier")?;
+
     if let Some(ld) = devices.get_mut(&device_handle) {
         ld.timeline_next = signal_timeline_value.saturating_add(1);
     }
@@ -1174,20 +1122,18 @@ pub(super) fn present(
     let _tz = crate::tracy_zone!("vk.surface.present");
     // Take the surface texture handle but do NOT unregister yet — the deferred
     // compute CBs (and the render CB in the graphics path) reference the
-    // VkImageView + bindless descriptor.  Vulkan requires the image view to
-    // remain valid while any pending CB uses it.  We store the handle in the
-    // per-frame-slot FrameSync and unregister in acquire() after the fence
-    // guarantees all GPU work is complete.
+    // The swapchain image view + bindless descriptor are permanent (registered
+    // at swapchain creation), so no deferred unregister is needed.  Just clear
+    // the per-frame alias and proceed.
     let (
-        pending_tex,
         image_index,
         current_frame,
-        image,
         render_pass_submitted,
         device_handle,
         prep_cmd,
-        barrier_cmd,
+        compute_present_cmd,
         image_available_sem_present,
+        work_done_sem_present,
         render_finished_sem_present,
         in_flight_fence_present,
         swapchain,
@@ -1196,25 +1142,23 @@ pub(super) fn present(
             .surfaces
             .get_mut(&surface_handle)
             .context("Invalid surface handle")?;
-        let pending_tex = s.current_texture_handle.take();
+        s.current_texture_handle = None;
         let image_index = s
             .current_image_index
             .context("No image to present - call surface_render first")?;
         let cf = s.current_frame;
-        let image = s.swapchain_images[image_index as usize];
         let rp = s.frame_sync[cf].render_pass_submitted;
         let dh = s.device_handle;
         let fr = &s.frame_sync[cf];
         (
-            pending_tex,
             image_index,
             cf,
-            image,
             rp,
             dh,
-            fr.prep_command_buffer,
-            fr.command_buffer,
+            s.swapchain_prep_command_buffers[image_index as usize],
+            s.swapchain_compute_present_command_buffers[image_index as usize],
             fr.image_available_semaphore,
+            fr.work_done_semaphore,
             fr.render_finished_semaphore,
             fr.in_flight_fence,
             s.swapchain,
@@ -1222,65 +1166,20 @@ pub(super) fn present(
     };
 
     if !render_pass_submitted {
-        {
-            let logical_device = state
-                .devices
-                .get(&device_handle)
-                .context("Surface's device is invalid")?;
-
-            unsafe {
-                logical_device
-                    .device
-                    .reset_command_buffer(barrier_cmd, vk::CommandBufferResetFlags::empty())
-            }
-            .context("Failed to reset compute-present barrier command buffer")?;
-
-            let begin_info = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe {
-                logical_device
-                    .device
-                    .begin_command_buffer(barrier_cmd, &begin_info)
-            }
-            .context("Failed to begin compute-present barrier command buffer")?;
-
-            // Match the graphics present barrier shape (color path uses COLOR_ATTACHMENT_OUTPUT
-            // → BOTTOM_OF_PIPE). Compute writes swapchain images in GENERAL; use compute/transfer
-            // stages—not ALL_COMMANDS + generic MEMORY_*—so WSI sees a well-defined handoff to
-            // PRESENT_SRC_KHR (broad barriers have provoked device loss on some Windows stacks).
-            let barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-                )
-                .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-                .dst_access_mask(vk::AccessFlags2::NONE)
-                .old_layout(vk::ImageLayout::GENERAL)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            let dep_info =
-                vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-            unsafe {
-                logical_device
-                    .device
-                    .cmd_pipeline_barrier2(barrier_cmd, &dep_info)
-            };
-
-            unsafe { logical_device.device.end_command_buffer(barrier_cmd) }
-                .context("Failed to end compute-present barrier command buffer")?;
-        }
-
-        // Collect the acquire prep CB, frame-recorded compute CBs, and present-barrier
-        // CB into a single vkQueueSubmit. The batch waits directly on the WSI acquire
-        // semaphore, eliminating the old prep-submit handoff.
+        // Submit 1: prep barrier + all compute work.
+        //   waits:   image_available_sem (GPU-side: WSI must release the image first)
+        //   signals: in_flight_fence (CPU fence, fires as soon as compute is done),
+        //            work_done_sem   (consumed by Submit 2),
+        //            timeline_sem    (drives staging-buffer recycling)
+        //
+        // Submit 2: pre-recorded GENERAL → PRESENT_SRC_KHR barrier.
+        //   waits:   work_done_sem
+        //   signals: render_finished_sem (consumed by queue_present)
+        //   fence:   none
+        //
+        // Splitting means in_flight_fence no longer covers the present barrier,
+        // so the next frame's fence wait returns as soon as compute is done —
+        // matching DX12's per-slot fence semantics.
         let deferred = {
             let s = state.surfaces.get_mut(&surface_handle).unwrap();
             std::mem::take(&mut s.frame_sync[current_frame].deferred_compute_cbs)
@@ -1303,63 +1202,103 @@ pub(super) fn present(
             .context("Surface's device is invalid")?
             .timeline_semaphore;
 
-        let mut cmd_infos: Vec<vk::CommandBufferSubmitInfo> =
-            Vec::with_capacity(deferred.len() + 2);
-        cmd_infos.push(vk::CommandBufferSubmitInfo::default().command_buffer(prep_cmd));
-        cmd_infos.extend(
+        // --- Submit 1 ---
+        let mut cmd_infos_1: Vec<vk::CommandBufferSubmitInfo> =
+            Vec::with_capacity(deferred.len() + 1);
+        cmd_infos_1.push(vk::CommandBufferSubmitInfo::default().command_buffer(prep_cmd));
+        cmd_infos_1.extend(
             deferred
                 .iter()
                 .copied()
                 .map(|cb| vk::CommandBufferSubmitInfo::default().command_buffer(cb)),
         );
-        cmd_infos.push(vk::CommandBufferSubmitInfo::default().command_buffer(barrier_cmd));
 
-        let wait_info = vk::SemaphoreSubmitInfo::default()
+        let wait_acq = vk::SemaphoreSubmitInfo::default()
             .semaphore(image_available_sem_present)
             .value(0)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let bin_signal = vk::SemaphoreSubmitInfo::default()
-            .semaphore(render_finished_sem_present)
+        let sig_work_done = vk::SemaphoreSubmitInfo::default()
+            .semaphore(work_done_sem_present)
             .value(0)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let timeline_signal = vk::SemaphoreSubmitInfo::default()
+        let sig_timeline = vk::SemaphoreSubmitInfo::default()
             .semaphore(timeline_sem)
             .value(signal_timeline_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let signals = [bin_signal, timeline_signal];
-        let submit2 = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(std::slice::from_ref(&wait_info))
-            .command_buffer_infos(&cmd_infos)
-            .signal_semaphore_infos(&signals);
+        let signals_1 = [sig_work_done, sig_timeline];
+        let submit_1 = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(std::slice::from_ref(&wait_acq))
+            .command_buffer_infos(&cmd_infos_1)
+            .signal_semaphore_infos(&signals_1);
 
+        // --- Submit 2 ---
+        let cmd_info_2 =
+            vk::CommandBufferSubmitInfo::default().command_buffer(compute_present_cmd);
+        let wait_work_done = vk::SemaphoreSubmitInfo::default()
+            .semaphore(work_done_sem_present)
+            .value(0)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let sig_render_finished = vk::SemaphoreSubmitInfo::default()
+            .semaphore(render_finished_sem_present)
+            .value(0)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let submit_2 = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(std::slice::from_ref(&wait_work_done))
+            .command_buffer_infos(std::slice::from_ref(&cmd_info_2))
+            .signal_semaphore_infos(std::slice::from_ref(&sig_render_finished));
+
+        // vkQueueSubmit2's fence parameter fires after ALL batches in the call
+        // complete, so we use TWO separate calls: the first carries the fence
+        // (signals after compute), the second carries no fence (present barrier).
         let submit_ld = state
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let submit_result = {
-            let _sz = crate::tracy_zone!("vk.present.queue_submit2");
+        let r1 = {
+            let _sz = crate::tracy_zone!("vk.present.queue_submit2_compute");
             unsafe {
                 submit_ld.device.queue_submit2(
                     submit_ld.queue,
-                    std::slice::from_ref(&submit2),
+                    std::slice::from_ref(&submit_1),
                     in_flight_fence_present,
                 )
             }
         };
-        if let Err(e) = submit_result {
+        if let Err(e) = r1 {
             tracing::warn!(
                 surface_handle,
                 %device_handle,
                 current_frame,
                 image_index,
                 result = ?e,
-                "single-submit compute+present queue_submit2 failed"
+                "compute queue_submit2 (Submit 1) failed"
             );
             let s = state.surfaces.get_mut(&surface_handle).unwrap();
             s.frame_sync[current_frame].deferred_compute_cbs = deferred;
             s.frame_sync[current_frame].pending_compute_texture_staging =
                 pending_tex_upload_staging;
-            anyhow::bail!("Failed to submit compute+present: {:?}", e);
+            anyhow::bail!("Failed to submit compute work: {:?}", e);
+        }
+        let r2 = {
+            let _sz = crate::tracy_zone!("vk.present.queue_submit2_barrier");
+            unsafe {
+                submit_ld.device.queue_submit2(
+                    submit_ld.queue,
+                    std::slice::from_ref(&submit_2),
+                    vk::Fence::null(),
+                )
+            }
+        };
+        if let Err(e) = r2 {
+            tracing::warn!(
+                surface_handle,
+                %device_handle,
+                current_frame,
+                image_index,
+                result = ?e,
+                "present-barrier queue_submit2 (Submit 2) failed"
+            );
+            anyhow::bail!("Failed to submit present barrier: {:?}", e);
         }
 
         {
@@ -1393,15 +1332,9 @@ pub(super) fn present(
             }
 
             let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
-            let fs = &mut surface_state_mut.frame_sync[current_frame];
-            fs.frame_timeline_value = Some(signal_timeline_value);
-            fs.pending_surface_texture = pending_tex;
+            surface_state_mut.frame_sync[current_frame].frame_timeline_value =
+                Some(signal_timeline_value);
         }
-    } else if let Some(th) = pending_tex {
-        // Render path: the graphics CB was already submitted by render() but
-        // the VkImageView must stay alive until the fence signals.
-        let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
-        surface_state.frame_sync[current_frame].pending_surface_texture = Some(th);
     }
 
     let present_ld = state
@@ -1424,7 +1357,7 @@ pub(super) fn present(
         unsafe { swapchain_loader.queue_present(present_ld.queue, &present_info) }
     };
     // `queue_present` returns Ok on SUCCESS and SUBOPTIMAL_KHR; Err on real failures.
-    let mark_image_presented = result.is_ok();
+    let _mark_image_presented = result.is_ok();
     if let Err(e) = &result {
         tracing::warn!(
             surface_handle,
@@ -1436,16 +1369,8 @@ pub(super) fn present(
         );
     }
 
-    // Clear the current image and advance frame counter
+    // Clear the current image and advance frame counter.
     let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
-    if mark_image_presented {
-        if let Some(flag) = surface_state
-            .swapchain_image_was_presented
-            .get_mut(image_index as usize)
-        {
-            *flag = true;
-        }
-    }
     surface_state.current_image_index = None;
     surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -1473,8 +1398,10 @@ pub(super) fn present(
 pub(super) fn resize(
     entry: &Entry,
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    next_texture_handle: &mut TextureHandle,
     surface_handle: SurfaceHandle,
     width: u32,
     height: u32,
@@ -1522,19 +1449,15 @@ pub(super) fn resize(
     // fire multiple Resized events during window creation that would
     // otherwise cause redundant swapchain teardown/rebuild cycles.
     //
-    // `stored_present_mode` is the *desired* mode (possibly just updated by
-    // `set_present_mode`).  Compare it against what the swapchain was
-    // actually created with (`swapchain_present_mode`) to detect mode
-    // changes.  If `set_present_mode` updated `present_mode` and called
-    // `resize`, the size check alone would early-return because the window
-    // hasn't moved — so we must also compare the mode.
+    // `present_mode_dirty` is set by `set_present_mode` so a mode change
+    // always triggers recreation even when the window dimensions are unchanged.
     {
         let surface_state = surfaces
             .get(&surface_handle)
             .context("Invalid surface handle")?;
         if surface_state.width == extent.width
             && surface_state.height == extent.height
-            && surface_state.swapchain_present_mode == stored_present_mode
+            && !surface_state.present_mode_dirty
         {
             return Ok(());
         }
@@ -1556,6 +1479,38 @@ pub(super) fn resize(
         }
     }
 
+    // Unregister old per-image bindless textures and free old per-image barrier
+    // CBs before the swapchain they reference is destroyed.
+    {
+        let old_tex_handles = surfaces
+            .get_mut(&surface_handle)
+            .map(|s| {
+                s.current_texture_handle = None;
+                for cbs in [
+                    std::mem::take(&mut s.swapchain_prep_command_buffers),
+                    std::mem::take(&mut s.swapchain_compute_present_command_buffers),
+                    std::mem::take(&mut s.swapchain_render_present_command_buffers),
+                ] {
+                    if !cbs.is_empty() {
+                        unsafe {
+                            logical_device
+                                .device
+                                .free_command_buffers(logical_device.command_pool, &cbs);
+                        }
+                    }
+                }
+                std::mem::take(&mut s.swapchain_texture_handles)
+            })
+            .unwrap_or_default();
+        for th in old_tex_handles {
+            unregister_swapchain_texture(devices, textures, th);
+        }
+    }
+
+    let logical_device = devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
+
     // Destroy old image views
     if let Some(surface_state) = surfaces.get(&surface_handle) {
         for view in &surface_state.swapchain_image_views {
@@ -1564,7 +1519,7 @@ pub(super) fn resize(
     }
 
     let image_count = (capabilities.min_image_count + 1)
-        .max(MAX_FRAMES_IN_FLIGHT as u32)
+        .max(MAX_FRAMES_IN_FLIGHT as u32 + 1)
         .min(if capabilities.max_image_count > 0 {
             capabilities.max_image_count
         } else {
@@ -1686,13 +1641,43 @@ pub(super) fn resize(
         (None, None, None)
     };
 
-    // Update surface state - reset frame counter since we waited for idle
+    // Pre-record per-image barrier CBs and re-register bindless textures for the new images.
+    let (new_prep_cbs, new_compute_present_cbs, new_render_present_cbs) = {
+        let logical_device = devices.get(&device_handle).context("Device invalid")?;
+        (
+            alloc_and_record_prep_cbs(logical_device, &swapchain_images)?,
+            alloc_and_record_compute_present_cbs(logical_device, &swapchain_images)?,
+            alloc_and_record_render_present_cbs(logical_device, &swapchain_images)?,
+        )
+    };
+
+    let goldy_format =
+        super::utils::vk_to_format(format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
+    let mut new_texture_handles = Vec::with_capacity(swapchain_images.len());
+    for &image in &swapchain_images {
+        let th = register_surface_texture(
+            devices,
+            textures,
+            next_texture_handle,
+            device_handle,
+            image,
+            format,
+            goldy_format,
+            extent.width,
+            extent.height,
+        )?;
+        new_texture_handles.push(th);
+    }
+
+    // Update surface state — reset frame counter since we waited for idle.
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         surface_state.swapchain = new_swapchain;
         surface_state.swapchain_images = swapchain_images;
-        surface_state.swapchain_image_was_presented =
-            vec![false; surface_state.swapchain_images.len()];
         surface_state.swapchain_image_views = swapchain_image_views;
+        surface_state.swapchain_prep_command_buffers = new_prep_cbs;
+        surface_state.swapchain_compute_present_command_buffers = new_compute_present_cbs;
+        surface_state.swapchain_render_present_command_buffers = new_render_present_cbs;
+        surface_state.swapchain_texture_handles = new_texture_handles;
         surface_state.width = extent.width;
         surface_state.height = extent.height;
         surface_state.current_frame = 0;
@@ -1701,8 +1686,7 @@ pub(super) fn resize(
         surface_state.depth_image = new_depth_image;
         surface_state.depth_memory = new_depth_memory;
         surface_state.depth_view = new_depth_view;
-        surface_state.present_mode = stored_present_mode;
-        surface_state.swapchain_present_mode = stored_present_mode;
+        surface_state.present_mode_dirty = false;
     }
 
     tracing::debug!(
@@ -1719,8 +1703,10 @@ pub(super) fn resize(
 pub(super) fn set_present_mode(
     entry: &Entry,
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    next_texture_handle: &mut TextureHandle,
     surface_handle: SurfaceHandle,
     mode: crate::types::PresentMode,
 ) -> Result<()> {
@@ -1758,9 +1744,20 @@ pub(super) fn set_present_mode(
             .get_mut(&surface_handle)
             .context("Invalid surface handle")?;
         surface_state.present_mode = vk_mode;
+        surface_state.present_mode_dirty = true;
     }
 
-    resize(entry, instance, devices, surfaces, surface_handle, w, h)
+    resize(
+        entry,
+        instance,
+        devices,
+        surfaces,
+        textures,
+        next_texture_handle,
+        surface_handle,
+        w,
+        h,
+    )
 }
 
 fn pick_vk_present_mode(
@@ -1833,11 +1830,11 @@ pub(super) fn format(
 }
 
 // ---------------------------------------------------------------------------
-// Transient surface texture registration
+// Swapchain texture registration helpers
 // ---------------------------------------------------------------------------
-// These functions register/unregister swapchain images in the global bindless
-// descriptor set so that compute shaders can write to them via RWTexture2D.
-// The image view and descriptor are created on acquire and torn down on present.
+// Swapchain images are registered once at creation/resize and persist until the
+// swapchain is recreated or destroyed.  `current_texture_handle` is a per-frame
+// alias into `swapchain_texture_handles`; it is never freed directly.
 // The underlying VkImage is owned by the swapchain — we must NOT destroy it.
 
 /// Register a swapchain image as a transient storage texture.
@@ -1943,12 +1940,9 @@ fn register_surface_texture(
     Ok(handle)
 }
 
-/// Unregister a transient surface texture.
-///
-/// Removes the TextureState, destroys the image view, and unregisters from
-/// the bindless resource registry. Does NOT destroy the VkImage (owned by the
-/// swapchain).
-fn unregister_surface_texture(
+/// Unregister a swapchain image texture (destroy view + bindless slot).
+/// Does NOT destroy the VkImage — it is owned by the swapchain.
+fn unregister_swapchain_texture(
     devices: &mut HashMap<DeviceHandle, LogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     tex_handle: TextureHandle,
@@ -1956,13 +1950,135 @@ fn unregister_surface_texture(
     if let Some(tex_state) = textures.remove(&tex_handle) {
         if let Some(device) = devices.get_mut(&tex_state.device_handle) {
             device.resource_registry.unregister_texture(tex_handle);
-
-            // Destroy the image view we created in register_surface_texture.
-            // The VkImage itself belongs to the swapchain — do NOT destroy it.
             unsafe {
                 device.device.destroy_image_view(tex_state.view, None);
             }
         }
-        tracing::debug!("Unregistered surface texture {}", tex_handle);
+        tracing::debug!("Unregistered swapchain texture {}", tex_handle);
     }
+}
+
+/// Kept for compatibility with the `destroy()` path which unregisters via the
+/// same name used before the rename.  Delegates to `unregister_swapchain_texture`.
+#[inline(always)]
+fn unregister_surface_texture(
+    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    tex_handle: TextureHandle,
+) {
+    unregister_swapchain_texture(devices, textures, tex_handle);
+}
+
+/// Allocate one primary command buffer per swapchain image and pre-record a
+/// reusable `UNDEFINED → GENERAL` barrier for each.  Always using `UNDEFINED`
+/// as `old_layout` lets the driver discard stale contents, which is correct
+/// since every frame overwrites the entire image.  The CBs are submitted as the
+/// first entry of each frame's `vkQueueSubmit2`, waiting on the acquire
+/// semaphore, so the images are only accessed after WSI has released them.
+fn alloc_and_record_prep_cbs(
+    logical_device: &LogicalDevice,
+    swapchain_images: &[vk::Image],
+) -> Result<Vec<vk::CommandBuffer>> {
+    alloc_and_record_present_cbs(
+        logical_device,
+        swapchain_images,
+        vk::PipelineStageFlags2::TOP_OF_PIPE,
+        vk::AccessFlags2::NONE,
+        vk::ImageLayout::UNDEFINED,
+        vk::PipelineStageFlags2::ALL_COMMANDS,
+        vk::AccessFlags2::SHADER_WRITE
+            | vk::AccessFlags2::SHADER_READ
+            | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags2::TRANSFER_WRITE,
+        vk::ImageLayout::GENERAL,
+    )
+}
+
+/// Pre-record `GENERAL → PRESENT_SRC_KHR` barriers (one per swapchain image).
+/// Used as Submit 2 in the compute present path.
+fn alloc_and_record_compute_present_cbs(
+    logical_device: &LogicalDevice,
+    swapchain_images: &[vk::Image],
+) -> Result<Vec<vk::CommandBuffer>> {
+    alloc_and_record_present_cbs(
+        logical_device,
+        swapchain_images,
+        vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+        vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+        vk::ImageLayout::GENERAL,
+        vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+        vk::AccessFlags2::NONE,
+        vk::ImageLayout::PRESENT_SRC_KHR,
+    )
+}
+
+/// Pre-record `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` barriers (one per swapchain
+/// image). Used as Submit 2 in the graphics (render) present path.
+fn alloc_and_record_render_present_cbs(
+    logical_device: &LogicalDevice,
+    swapchain_images: &[vk::Image],
+) -> Result<Vec<vk::CommandBuffer>> {
+    alloc_and_record_present_cbs(
+        logical_device,
+        swapchain_images,
+        vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+        vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+        vk::AccessFlags2::NONE,
+        vk::ImageLayout::PRESENT_SRC_KHR,
+    )
+}
+
+/// Generic helper: allocate one reusable CB per image and record a single
+/// image-memory barrier with the given parameters.
+#[allow(clippy::too_many_arguments)]
+fn alloc_and_record_present_cbs(
+    logical_device: &LogicalDevice,
+    swapchain_images: &[vk::Image],
+    src_stage: vk::PipelineStageFlags2,
+    src_access: vk::AccessFlags2,
+    old_layout: vk::ImageLayout,
+    dst_stage: vk::PipelineStageFlags2,
+    dst_access: vk::AccessFlags2,
+    new_layout: vk::ImageLayout,
+) -> Result<Vec<vk::CommandBuffer>> {
+    let count = swapchain_images.len() as u32;
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(logical_device.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(count);
+    let cbs = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+        .context("Failed to allocate barrier command buffers")?;
+
+    // No ONE_TIME_SUBMIT — these CBs are submitted multiple times (once per frame).
+    let begin_info = vk::CommandBufferBeginInfo::default();
+    for (&cb, &image) in cbs.iter().zip(swapchain_images.iter()) {
+        unsafe { logical_device.device.begin_command_buffer(cb, &begin_info) }
+            .context("Failed to begin barrier command buffer")?;
+
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(dst_stage)
+            .dst_access_mask(dst_access)
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let dep_info =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        unsafe { logical_device.device.cmd_pipeline_barrier2(cb, &dep_info) };
+
+        unsafe { logical_device.device.end_command_buffer(cb) }
+            .context("Failed to end barrier command buffer")?;
+    }
+
+    Ok(cbs)
 }
