@@ -267,10 +267,12 @@ pub(super) fn create(
         }
         .context("Failed to create work-done semaphore")?;
 
-        // Create fence (signaled so first wait succeeds)
+        // Create fences (both start signaled so the first-frame wait is a no-op)
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let in_flight_fence = unsafe { logical_device.device.create_fence(&fence_info, None) }
             .context("Failed to create in-flight fence")?;
+        let acquire_fence = unsafe { logical_device.device.create_fence(&fence_info, None) }
+            .context("Failed to create acquire fence")?;
 
         // Allocate one primary command buffer per frame for the render-path submit
         // (graphics commands). The per-image prep and present barriers are pre-recorded
@@ -289,6 +291,7 @@ pub(super) fn create(
             work_done_semaphore,
             render_finished_semaphore,
             in_flight_fence,
+            acquire_fence,
             render_pass_submitted: false,
             frame_timeline_value: None,
             deferred_compute_cbs: Vec::new(),
@@ -509,6 +512,9 @@ pub(super) fn destroy(
                     logical_device
                         .device
                         .destroy_fence(frame.in_flight_fence, None);
+                    logical_device
+                        .device
+                        .destroy_fence(frame.acquire_fence, None);
                 }
 
                 for view in surface_state.swapchain_image_views {
@@ -547,7 +553,7 @@ pub(super) fn acquire(
     let _tz = crate::tracy_zone!("vk.surface.acquire");
 
     // Get surface state and current frame index.
-    let (device_handle, current_frame, swapchain, in_flight_fence, image_available_semaphore) = {
+    let (device_handle, current_frame, swapchain, in_flight_fence, acquire_fence, image_available_semaphore) = {
         let _fz = crate::tracy_zone!("vk.surface.acquire.frame_state");
         let surface_state = state
             .surfaces
@@ -559,6 +565,7 @@ pub(super) fn acquire(
             surface_state.current_frame,
             surface_state.swapchain,
             frame.in_flight_fence,
+            frame.acquire_fence,
             frame.image_available_semaphore,
         )
     };
@@ -572,10 +579,12 @@ pub(super) fn acquire(
             .unwrap_or(0)
     };
 
-    // Wait for the in-flight fence — guarantees the frame slot and its acquire
-    // semaphore are fully consumed by any prior submit.
+    // ── Zone 1: vk.surface.wait_compute ──────────────────────────────────────
+    // Waits for the previous use of this frame slot to finish GPU compute work.
+    // Long here → GPU is compute-bound.  Near-zero → GPU finished well ahead
+    // of the CPU (well-pipelined or CPU-bound frame).
     let wait_result = {
-        let _wz = crate::tracy_zone!("vk.surface.wait_fence");
+        let _wz = crate::tracy_zone!("vk.surface.wait_compute");
         let logical_device = state
             .devices
             .get(&device_handle)
@@ -593,54 +602,27 @@ pub(super) fn acquire(
             current_frame,
             pending_deferred = pending_deferred_len,
             result = ?e,
-            "surface acquire: wait_for_fences (frame fence) failed"
+            "surface acquire: wait_for_fences (compute fence) failed"
         );
     }
-    wait_result.context("Failed to wait for frame fence")?;
+    wait_result.context("Failed to wait for compute fence")?;
 
-    // Reset the fence now so it is ready for the upcoming submit.  This must
-    // happen after the wait but is safe before acquire since the fence is
-    // independent of the presentation engine.
+    // Reset both the compute fence and the acquire fence (the acquire fence is
+    // still signaled from the previous use of this slot; reset it before passing
+    // it to vkAcquireNextImageKHR so it is in the required unsignaled state).
     {
-        let _rz = crate::tracy_zone!("vk.surface.reset_fence");
+        let _rz = crate::tracy_zone!("vk.surface.reset_fences");
         let ld = state
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let reset_result = unsafe { ld.device.reset_fences(&[in_flight_fence]) };
-        if let Err(e) = &reset_result {
-            tracing::warn!(
-                surface_handle,
-                %device_handle,
-                current_frame,
-                result = ?e,
-                "surface acquire: reset_fences (frame fence) failed"
-            );
-        }
-        reset_result.context("Failed to reset frame fence")?;
+        unsafe { ld.device.reset_fences(&[in_flight_fence, acquire_fence]) }
+            .context("Failed to reset frame fences")?;
     }
 
-    // Kick the acquire early — the presentation engine can start locating a
-    // free image while the CPU does cleanup below.
-    let acquire_result = {
-        let _az = crate::tracy_zone!("vk.surface.acquire_image");
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
-        let swapchain_loader = khr::swapchain::Device::new(&state.instance, &ld.device);
-        unsafe {
-            swapchain_loader.acquire_next_image(
-                swapchain,
-                u64::MAX,
-                image_available_semaphore,
-                vk::Fence::null(),
-            )
-        }
-    };
-
-    // Drain timeline and run frame-slot cleanup while the acquire result is
-    // (possibly) still in-flight, overlapping driver work with CPU bookkeeping.
+    // CPU cleanup: drain the GPU timeline and reset the frame slot.  This work
+    // runs while the presentation engine is preparing the swapchain image,
+    // overlapping CPU bookkeeping with the (typically short) WSI handoff.
     let completed = {
         let _tz = crate::tracy_zone!("vk.surface.acquire.timeline_query");
         let ld = state
@@ -674,7 +656,6 @@ pub(super) fn acquire(
         );
     }
 
-    // Process deferred deletions: GPU timeline has reached `completed`.
     {
         let _dz = crate::tracy_zone!("vk.surface.deferred_deletions");
         let logical_device = state
@@ -685,6 +666,41 @@ pub(super) fn acquire(
         for r in drained {
             types::destroy_pending_deletion(logical_device, r);
         }
+    }
+
+    // Request the next swapchain image.  `acquire_fence` is passed alongside
+    // `image_available_semaphore`: both are signaled by the presentation engine
+    // when the image is safe to write to.  The semaphore gates GPU work (Submit 1);
+    // the fence gates the CPU `vk.surface.wait_acquire` zone below.
+    let acquire_result = {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
+        let swapchain_loader = khr::swapchain::Device::new(&state.instance, &ld.device);
+        unsafe {
+            swapchain_loader.acquire_next_image(
+                swapchain,
+                u64::MAX,
+                image_available_semaphore,
+                acquire_fence,
+            )
+        }
+    };
+
+    // ── Zone 2: vk.surface.wait_acquire ──────────────────────────────────────
+    // Waits for the presentation engine to make the acquired image writable.
+    // Long here → WSI / presentation-engine bound (e.g. OS display pipeline
+    // stall).  Near-zero → the image was already ready by the time CPU got here.
+    {
+        let _aw = crate::tracy_zone!("vk.surface.wait_acquire");
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?;
+        // Only wait if the acquire didn't fail outright; error handling below
+        // will surface any real failures from acquire_result.
+        let _ = unsafe { ld.device.wait_for_fences(&[acquire_fence], true, u64::MAX) };
     }
 
     // Consume the acquire result now.
