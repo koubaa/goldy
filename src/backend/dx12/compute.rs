@@ -1324,15 +1324,15 @@ fn execute_signal_and_finish(
         .finish(fence_value);
 
     if !staged_texture_uploads.is_empty() {
-        let resources = staged_texture_uploads
+        let entries = staged_texture_uploads
             .into_iter()
-            .map(|u| u.staging_resource)
+            .map(|u| u.staging_entry)
             .collect::<Vec<_>>();
         state
-            .staging_belts
+            .texture_staging_pools
             .entry(device_handle)
-            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-            .defer_standalone_resources(fence_value, resources);
+            .or_insert_with(super::staging::TextureStagingPool::new)
+            .release(fence_value, entries);
     }
 
     Ok(fence_value)
@@ -1377,6 +1377,10 @@ pub(super) fn submit(
             .entry(device_handle)
             .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
             .reclaim(&fence_clone)?;
+        if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
+            let completed = unsafe { fence_clone.GetCompletedValue() };
+            pool.reclaim(completed);
+        }
     }
 
     let command_list7: ID3D12GraphicsCommandList7 = command_list
@@ -1386,6 +1390,11 @@ pub(super) fn submit(
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
+        let mut pool = state
+            .texture_staging_pools
+            .remove(&device_handle)
+            .unwrap_or_else(|| super::staging::TextureStagingPool::new());
+
         let _tz_prepass = tracy_zone!("dx12.submit.upload_prepass");
         for command in commands {
             match command {
@@ -1418,7 +1427,13 @@ pub(super) fn submit(
                     height,
                 } => {
                     staged_texture_uploads.push(super::texture::stage_texture_upload_full(
-                        state, *texture, data, *width, *height,
+                        &state.devices,
+                        &state.textures,
+                        &mut pool,
+                        *texture,
+                        data,
+                        *width,
+                        *height,
                     )?);
                 }
                 GpuCommand::WriteTextureRegion {
@@ -1430,12 +1445,22 @@ pub(super) fn submit(
                     data,
                 } => {
                     staged_texture_uploads.push(super::texture::stage_texture_upload_region(
-                        state, *texture, *x, *y, *width, *height, data,
+                        &state.devices,
+                        &state.textures,
+                        &mut pool,
+                        *texture,
+                        *x,
+                        *y,
+                        *width,
+                        *height,
+                        data,
                     )?);
                 }
                 _ => {}
             }
         }
+
+        state.texture_staging_pools.insert(device_handle, pool);
     }
 
     let mut dx_gpu_profile = {
@@ -1577,6 +1602,10 @@ pub(super) fn submit_graph(
             .entry(device_handle)
             .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
             .reclaim(&fence_clone)?;
+        if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
+            let completed = unsafe { fence_clone.GetCompletedValue() };
+            pool.reclaim(completed);
+        }
     }
 
     let command_list7: ID3D12GraphicsCommandList7 = command_list
@@ -1586,6 +1615,11 @@ pub(super) fn submit_graph(
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
+        let mut pool = state
+            .texture_staging_pools
+            .remove(&device_handle)
+            .unwrap_or_else(|| super::staging::TextureStagingPool::new());
+
         let _tz_prepass = tracy_zone!("dx12.submit_graph.upload_prepass");
         for graph_cmd in commands {
             if let GraphCommand::Compute(gpu_cmd) = graph_cmd {
@@ -1619,7 +1653,13 @@ pub(super) fn submit_graph(
                         height,
                     } => {
                         staged_texture_uploads.push(super::texture::stage_texture_upload_full(
-                            state, *texture, data, *width, *height,
+                            &state.devices,
+                            &state.textures,
+                            &mut pool,
+                            *texture,
+                            data,
+                            *width,
+                            *height,
                         )?);
                     }
                     GpuCommand::WriteTextureRegion {
@@ -1631,13 +1671,23 @@ pub(super) fn submit_graph(
                         data,
                     } => {
                         staged_texture_uploads.push(super::texture::stage_texture_upload_region(
-                            state, *texture, *x, *y, *width, *height, data,
+                            &state.devices,
+                            &state.textures,
+                            &mut pool,
+                            *texture,
+                            *x,
+                            *y,
+                            *width,
+                            *height,
+                            data,
                         )?);
                     }
                     _ => {}
                 }
             }
         }
+
+        state.texture_staging_pools.insert(device_handle, pool);
     }
 
     let mut dx_gpu_profile = {

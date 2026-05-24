@@ -11,7 +11,7 @@ use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
 /// Staged texture upload (CPU-filled staging + copy footprint) before GPU copy.
 pub(super) struct StagedTextureUpload {
-    pub staging_resource: ID3D12Resource,
+    pub staging_entry: super::staging::TextureStagingEntry,
     pub footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
     pub texture_handle: TextureHandle,
     pub dst_x: u32,
@@ -328,14 +328,15 @@ pub(super) fn create(
 /// Build a staged full-texture upload (caller runs GPU copy via task graph or
 /// [`execute_staged_uploads_sync`]).
 pub(super) fn stage_texture_upload_full(
-    state: &Dx12State,
+    devices: &std::collections::HashMap<DeviceHandle, super::types::LogicalDevice>,
+    textures: &std::collections::HashMap<TextureHandle, super::types::TextureState>,
+    pool: &mut super::staging::TextureStagingPool,
     texture_handle: TextureHandle,
     data: &[u8],
     width: u32,
     height: u32,
 ) -> Result<StagedTextureUpload> {
-    let texture = state
-        .textures
+    let texture = textures
         .get(&texture_handle)
         .context("Invalid texture handle")?;
 
@@ -344,8 +345,7 @@ pub(super) fn stage_texture_upload_full(
     }
 
     let device_handle = texture.device_handle;
-    let logical_device = state
-        .devices
+    let logical_device = devices
         .get(&device_handle)
         .context("Invalid device handle")?;
 
@@ -368,13 +368,9 @@ pub(super) fn stage_texture_upload_full(
     }
     let staging_size = total_bytes;
 
-    let staging = create_upload_staging(&logical_device.device, staging_size)?;
+    let staging_entry = pool.acquire(logical_device, staging_size)?;
 
-    let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let read_range = D3D12_RANGE { Begin: 0, End: 0 };
-    unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
-        .context("Failed to map staging buffer (texture write)")?;
-
+    let mapped_ptr = staging_entry.mapped_ptr();
     let texture_format = texture.format;
     let bytes_per_row = (width * texture_format.bytes_per_pixel()) as usize;
     let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
@@ -384,22 +380,16 @@ pub(super) fn stage_texture_upload_full(
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr().add(src_offset),
-                (mapped_ptr as *mut u8).add(dst_offset),
+                mapped_ptr.add(dst_offset),
                 bytes_per_row,
             );
         }
     }
 
-    let written_range = D3D12_RANGE {
-        Begin: 0,
-        End: staging_size as usize,
-    };
-    unsafe { staging.Unmap(0, Some(&written_range)) };
-
     let layout_before = texture.last_layout;
 
     Ok(StagedTextureUpload {
-        staging_resource: staging,
+        staging_entry,
         footprint,
         texture_handle,
         dst_x: 0,
@@ -410,7 +400,9 @@ pub(super) fn stage_texture_upload_full(
 
 /// Build a staged subregion texture upload.
 pub(super) fn stage_texture_upload_region(
-    state: &Dx12State,
+    devices: &std::collections::HashMap<DeviceHandle, super::types::LogicalDevice>,
+    textures: &std::collections::HashMap<TextureHandle, super::types::TextureState>,
+    pool: &mut super::staging::TextureStagingPool,
     texture_handle: TextureHandle,
     x: u32,
     y: u32,
@@ -418,8 +410,7 @@ pub(super) fn stage_texture_upload_region(
     height: u32,
     data: &[u8],
 ) -> Result<StagedTextureUpload> {
-    let texture = state
-        .textures
+    let texture = textures
         .get(&texture_handle)
         .context("Invalid texture handle")?;
 
@@ -445,8 +436,7 @@ pub(super) fn stage_texture_upload_region(
     }
 
     let device_handle = texture.device_handle;
-    let logical_device = state
-        .devices
+    let logical_device = devices
         .get(&device_handle)
         .context("Invalid device handle")?;
 
@@ -483,14 +473,11 @@ pub(super) fn stage_texture_upload_region(
     }
     let staging_size = total_bytes;
 
-    let staging = create_upload_staging(&logical_device.device, staging_size)?;
+    let staging_entry = pool.acquire(logical_device, staging_size)?;
 
     let texture_format = texture.format;
     let bytes_per_row = (width * texture_format.bytes_per_pixel()) as usize;
-    let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let read_range = D3D12_RANGE { Begin: 0, End: 0 };
-    unsafe { staging.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }
-        .context("Failed to map staging buffer (texture write_region)")?;
+    let mapped_ptr = staging_entry.mapped_ptr();
 
     let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
     for row in 0..height {
@@ -499,22 +486,16 @@ pub(super) fn stage_texture_upload_region(
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr().add(src_offset),
-                (mapped_ptr as *mut u8).add(dst_offset),
+                mapped_ptr.add(dst_offset),
                 bytes_per_row,
             );
         }
     }
 
-    let written_range = D3D12_RANGE {
-        Begin: 0,
-        End: staging_size as usize,
-    };
-    unsafe { staging.Unmap(0, Some(&written_range)) };
-
     let layout_before = texture.last_layout;
 
     Ok(StagedTextureUpload {
-        staging_resource: staging,
+        staging_entry,
         footprint,
         texture_handle,
         dst_x: x,
@@ -549,7 +530,7 @@ pub(super) fn record_staged_texture_upload(
     unsafe { barriers::drop_texture_barriers(&mut b_to_copy) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&upload.staging_resource) },
+        pResource: unsafe { std::mem::transmute_copy(&upload.staging_entry.resource) },
         Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
             PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
@@ -604,7 +585,12 @@ pub(super) fn write(
     width: u32,
     height: u32,
 ) -> Result<()> {
-    let staged = stage_texture_upload_full(state, texture_handle, data, width, height)?;
+    let texture = state.textures.get(&texture_handle).context("Invalid texture")?;
+    let device_handle = texture.device_handle;
+    let staged = {
+        let pool = state.texture_staging_pools.entry(device_handle).or_insert_with(super::staging::TextureStagingPool::new);
+        stage_texture_upload_full(&state.devices, &state.textures, pool, texture_handle, data, width, height)?
+    };
     execute_staged_uploads_sync(state, vec![staged])?;
     tracing::debug!("Wrote {}x{} texture (sync upload)", width, height);
     Ok(())
@@ -620,7 +606,12 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
-    let staged = stage_texture_upload_region(state, texture_handle, x, y, width, height, data)?;
+    let texture = state.textures.get(&texture_handle).context("Invalid texture")?;
+    let device_handle = texture.device_handle;
+    let staged = {
+        let pool = state.texture_staging_pools.entry(device_handle).or_insert_with(super::staging::TextureStagingPool::new);
+        stage_texture_upload_region(&state.devices, &state.textures, pool, texture_handle, x, y, width, height, data)?
+    };
     execute_staged_uploads_sync(state, vec![staged])?;
     tracing::debug!(
         "Wrote {}x{} texture region at ({},{}) (sync upload)",
@@ -630,45 +621,6 @@ pub(super) fn write_region(
         y,
     );
     Ok(())
-}
-
-/// Allocate a UPLOAD-heap staging buffer of `size` bytes.
-fn create_upload_staging(device: &ID3D12Device10, size: u64) -> Result<ID3D12Resource> {
-    let upload_heap = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_UPLOAD,
-        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-        CreationNodeMask: 0,
-        VisibleNodeMask: 0,
-    };
-    let buffer_desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Alignment: 0,
-        Width: size,
-        Height: 1,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        Flags: D3D12_RESOURCE_FLAG_NONE,
-    };
-    let mut resource: Option<ID3D12Resource> = None;
-    unsafe {
-        device.CreateCommittedResource(
-            &upload_heap,
-            D3D12_HEAP_FLAG_NONE,
-            &buffer_desc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            None,
-            &mut resource,
-        )
-    }
-    .context("Failed to create upload staging buffer")?;
-    resource.context("CreateCommittedResource returned null")
 }
 
 /// Execute staged texture uploads on a dedicated command list and wait (sync path).
@@ -751,7 +703,7 @@ pub(super) fn execute_staged_uploads_sync(
             let copy = &copies[idx];
 
             let src_location = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: unsafe { std::mem::transmute_copy(&copy.staging_resource) },
+                pResource: unsafe { std::mem::transmute_copy(&copy.staging_entry.resource) },
                 Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
                 Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                     PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
@@ -822,8 +774,15 @@ pub(super) fn execute_staged_uploads_sync(
         dev.fence_value += 1;
     }
 
-    // Staging resources dropped here (GPU is done via fence wait).
-    drop(copies);
+    // Release and reclaim the staging entries back to the pool immediately.
+    if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
+        let entries: Vec<super::staging::TextureStagingEntry> = copies
+            .into_iter()
+            .map(|c| c.staging_entry)
+            .collect();
+        pool.release(fence_value, entries);
+        pool.reclaim(fence_value);
+    }
 
     tracing::debug!("Flushed {} pending texture copies in one submission", count);
     Ok(())
