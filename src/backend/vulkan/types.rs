@@ -550,6 +550,13 @@ pub(crate) struct FrameSync {
     pub work_done_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
+    /// CPU-side fence signaled by the presentation engine when the swapchain
+    /// image is truly available for write.  Passed to `vkAcquireNextImageKHR`
+    /// alongside `image_available_semaphore`; waited in a separate
+    /// `vk.surface.wait_acquire` tracy zone so the flame graph can distinguish
+    /// GPU-compute stalls (`vk.surface.wait_compute`) from WSI / presentation-
+    /// engine latency (`vk.surface.wait_acquire`).
+    pub acquire_fence: vk::Fence,
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
     /// presentation uses a barrier submit in `present` instead (see `surface::present`).
     pub render_pass_submitted: bool,
