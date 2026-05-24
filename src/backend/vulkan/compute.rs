@@ -40,7 +40,8 @@ fn slot_usage_to_vk_access(usage: &SlotUsageSet) -> vk::AccessFlags2 {
     let mut flags = vk::AccessFlags2::empty();
     if usage.kinds.contains(UsageKindFlags::COMPUTE) {
         if usage.access == NodeAccessUnion::Write {
-            flags |= vk::AccessFlags2::SHADER_WRITE;
+            // we don't track writes independently of reads, so we have to be conservative here
+            flags |= vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ;
         } else {
             flags |= vk::AccessFlags2::SHADER_READ;
         }
