@@ -734,9 +734,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                             .destroy_semaphore(frame.image_available_semaphore, None);
                         logical_device
                             .device
-                            .destroy_semaphore(frame.image_ready_semaphore, None);
-                        logical_device
-                            .device
                             .destroy_semaphore(frame.render_finished_semaphore, None);
                         logical_device
                             .device

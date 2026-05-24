@@ -132,6 +132,7 @@ pub enum DispatchDim {
 /// The analyzer only looks at [`TaskNode::bindings`]; `NodeKind` is used by
 /// [`emit_commands`](super::analysis::emit_commands) to produce the final command stream.
 #[derive(Debug, Clone)]
+#[allow(private_interfaces)]
 pub enum NodeKind {
     /// Execute a compute shader.
     Dispatch {
@@ -173,10 +174,7 @@ pub enum NodeKind {
     /// Both textures must have compatible formats and identical dimensions.
     /// `src` must have [`crate::types::TextureFlags::COPY_SRC`] and
     /// `dst` must have [`crate::types::TextureFlags::COPY_DST`].
-    CopyTexture {
-        src: TextureHandle,
-        dst: TextureHandle,
-    },
+    CopyTexture { src: TextureHandle, dst: ResourceId },
     /// Offscreen render pass targeting a [`crate::RenderTarget`].
     ///
     /// Declare all buffers and textures read by draw commands via

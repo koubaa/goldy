@@ -167,7 +167,11 @@ pub(super) fn create(
         .image_color_space(format.color_space)
         .image_extent(extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE)
+        .image_usage(
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::TRANSFER_DST,
+        )
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -214,12 +218,6 @@ pub(super) fn create(
                 .create_semaphore(&semaphore_info, None)
         }
         .context("Failed to create image available semaphore")?;
-        let image_ready_semaphore = unsafe {
-            logical_device
-                .device
-                .create_semaphore(&semaphore_info, None)
-        }
-        .context("Failed to create image ready semaphore")?;
         let render_finished_semaphore = unsafe {
             logical_device
                 .device
@@ -247,7 +245,6 @@ pub(super) fn create(
             command_buffer: command_buffers[0],
             prep_command_buffer: command_buffers[1],
             image_available_semaphore,
-            image_ready_semaphore,
             render_finished_semaphore,
             in_flight_fence,
             render_pass_submitted: false,
@@ -418,9 +415,6 @@ pub(super) fn destroy(
                         .destroy_semaphore(frame.image_available_semaphore, None);
                     logical_device
                         .device
-                        .destroy_semaphore(frame.image_ready_semaphore, None);
-                    logical_device
-                        .device
                         .destroy_semaphore(frame.render_finished_semaphore, None);
                     logical_device
                         .device
@@ -588,28 +582,34 @@ pub(super) fn acquire(
         .context("Surface's device is invalid")?;
 
     // Reset fence for this frame
-    let reset_result = unsafe { logical_device.device.reset_fences(&[in_flight_fence]) };
-    if let Err(e) = &reset_result {
-        tracing::warn!(
-            surface_handle,
-            %device_handle,
-            current_frame,
-            result = ?e,
-            "surface acquire: reset_fences (frame fence) failed"
-        );
+    {
+        let _rz = crate::tracy_zone!("vk.surface.reset_fence");
+        let reset_result = unsafe { logical_device.device.reset_fences(&[in_flight_fence]) };
+        if let Err(e) = &reset_result {
+            tracing::warn!(
+                surface_handle,
+                %device_handle,
+                current_frame,
+                result = ?e,
+                "surface acquire: reset_fences (frame fence) failed"
+            );
+        }
+        reset_result.context("Failed to reset frame fence")?;
     }
-    reset_result.context("Failed to reset frame fence")?;
 
     // Acquire next swapchain image
     let swapchain_loader = khr::swapchain::Device::new(&state.instance, &logical_device.device);
 
-    let acquire_result = unsafe {
-        swapchain_loader.acquire_next_image(
-            swapchain,
-            u64::MAX,
-            image_available_semaphore,
-            vk::Fence::null(),
-        )
+    let acquire_result = {
+        let _az = crate::tracy_zone!("vk.surface.acquire_image");
+        unsafe {
+            swapchain_loader.acquire_next_image(
+                swapchain,
+                u64::MAX,
+                image_available_semaphore,
+                vk::Fence::null(),
+            )
+        }
     };
 
     match acquire_result {
@@ -617,25 +617,21 @@ pub(super) fn acquire(
             if suboptimal {
                 tracing::debug!("Swapchain suboptimal - consider resizing");
             }
-            // Submit a "prep" barrier on the acquired image: `UNDEFINED → GENERAL`,
-            // waiting on `image_available_semaphore` and signaling `image_ready_semaphore`.
+
+            // Record a "prep" barrier on the acquired image: `UNDEFINED → GENERAL`.
             //
             // After `vkAcquireNextImageKHR`, the swapchain image must not be accessed
             // until `image_available_semaphore` has been waited on, and its layout is
             // either `UNDEFINED` (first use) or `PRESENT_SRC_KHR` (recycled). Compute
-            // shaders writing via `RWTexture2D` require `GENERAL`. This prep submit
-            // consumes the acquire semaphore, performs the layout transition once, and
-            // signals `image_ready_semaphore` which both the graphics render path
-            // and the compute-only present path wait on. Compute submits include
-            // a release barrier at the end of the command buffer that makes their
-            // writes available, so the present-barrier layout transition sees them.
-            let (prep_cmd, image_ready_semaphore, image) = {
+            // shaders writing via `RWTexture2D` require `GENERAL`. This CB is
+            // submitted later together with render/present work, with that submit
+            // waiting on the acquire semaphore.
+            let (prep_cmd, image) = {
                 let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
                 surface_state.current_image_index = Some(image_index);
                 let frame = &surface_state.frame_sync[surface_state.current_frame];
                 (
                     frame.prep_command_buffer,
-                    frame.image_ready_semaphore,
                     surface_state.swapchain_images[image_index as usize],
                 )
             };
@@ -718,38 +714,6 @@ pub(super) fn acquire(
 
             unsafe { logical_device.device.end_command_buffer(prep_cmd) }
                 .context("Failed to end acquire prep command buffer")?;
-
-            let wait_semaphores = [image_available_semaphore];
-            // Match WSI acquire guidance: wait at COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE,
-            // so the layout transition cannot start before the presentation engine releases the image.
-            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let signal_semaphores = [image_ready_semaphore];
-            let prep_submit = vk::SubmitInfo::default()
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_stages)
-                .command_buffers(std::slice::from_ref(&prep_cmd))
-                .signal_semaphores(&signal_semaphores);
-            let prep_submit_result = {
-                let _ps = crate::tracy_zone!("vk.surface.prep_submit");
-                unsafe {
-                    logical_device.device.queue_submit(
-                        logical_device.queue,
-                        std::slice::from_ref(&prep_submit),
-                        vk::Fence::null(),
-                    )
-                }
-            };
-            if let Err(e) = &prep_submit_result {
-                tracing::warn!(
-                    surface_handle,
-                    %device_handle,
-                    current_frame,
-                    image_index,
-                    result = ?e,
-                    "surface acquire: prep barrier queue_submit failed"
-                );
-            }
-            prep_submit_result.context("Failed to submit acquire prep barrier")?;
 
             // Register the swapchain image as a storage texture for compute access.
             // The image view is created for GENERAL layout so compute shaders can write
@@ -836,6 +800,7 @@ where
         current_frame,
         device_handle,
         cmd,
+        prep_cmd,
         width,
         height,
         image,
@@ -843,7 +808,7 @@ where
         depth_image,
         depth_format,
         depth_view,
-        image_ready_semaphore,
+        image_available_semaphore,
         render_finished_semaphore,
         in_flight_fence,
     ) = {
@@ -860,6 +825,7 @@ where
             current_frame,
             surface_state.device_handle,
             frame.command_buffer,
+            frame.prep_command_buffer,
             surface_state.width,
             surface_state.height,
             surface_state.swapchain_images[image_index as usize],
@@ -867,7 +833,7 @@ where
             surface_state.depth_image,
             surface_state.depth_format,
             surface_state.depth_view,
-            frame.image_ready_semaphore,
+            frame.image_available_semaphore,
             frame.render_finished_semaphore,
             frame.in_flight_fence,
         )
@@ -1085,9 +1051,9 @@ where
             .context("Failed to end command buffer")?;
     }
 
-    // Get per-frame sync primitives. We wait on `image_ready_semaphore` (signaled by
-    // the acquire-time prep submit) rather than `image_available_semaphore` — the
-    // prep submit already consumed the latter to transition the image into `GENERAL`.
+    // Submit the acquire prep barrier and render command buffer in one batch. Waiting
+    // directly on `image_available_semaphore` removes the separate prep submit and
+    // binary handoff semaphore.
     let signal_timeline_value = {
         let ld = devices
             .get(&device_handle)
@@ -1100,10 +1066,13 @@ where
         .timeline_semaphore;
 
     let wait_info = vk::SemaphoreSubmitInfo::default()
-        .semaphore(image_ready_semaphore)
+        .semaphore(image_available_semaphore)
         .value(0)
-        .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
-    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let cmd_infos = [
+        vk::CommandBufferSubmitInfo::default().command_buffer(prep_cmd),
+        vk::CommandBufferSubmitInfo::default().command_buffer(cmd),
+    ];
     let bin_signal = vk::SemaphoreSubmitInfo::default()
         .semaphore(render_finished_semaphore)
         .value(0)
@@ -1115,7 +1084,7 @@ where
     let signals = [bin_signal, timeline_signal];
     let submit2 = vk::SubmitInfo2::default()
         .wait_semaphore_infos(std::slice::from_ref(&wait_info))
-        .command_buffer_infos(std::slice::from_ref(&cmd_info))
+        .command_buffer_infos(&cmd_infos)
         .signal_semaphore_infos(&signals);
 
     let logical_device = devices
@@ -1192,8 +1161,9 @@ pub(super) fn present(
         image,
         render_pass_submitted,
         device_handle,
+        prep_cmd,
         barrier_cmd,
-        image_ready_sem_present,
+        image_available_sem_present,
         render_finished_sem_present,
         in_flight_fence_present,
         swapchain,
@@ -1218,8 +1188,9 @@ pub(super) fn present(
             image,
             rp,
             dh,
+            fr.prep_command_buffer,
             fr.command_buffer,
-            fr.image_ready_semaphore,
+            fr.image_available_semaphore,
             fr.render_finished_semaphore,
             fr.in_flight_fence,
             s.swapchain,
@@ -1283,11 +1254,9 @@ pub(super) fn present(
                 .context("Failed to end compute-present barrier command buffer")?;
         }
 
-        // Collect frame-recorded compute CBs + the present-barrier CB into a single
-        // vkQueueSubmit.  Within one submit, command buffers execute in array
-        // order with full memory visibility from prior CBs' barriers, so the
-        // release barrier in the compute CB makes writes visible to the layout
-        // transition in the barrier CB.
+        // Collect the acquire prep CB, frame-recorded compute CBs, and present-barrier
+        // CB into a single vkQueueSubmit. The batch waits directly on the WSI acquire
+        // semaphore, eliminating the old prep-submit handoff.
         let deferred = {
             let s = state.surfaces.get_mut(&surface_handle).unwrap();
             std::mem::take(&mut s.frame_sync[current_frame].deferred_compute_cbs)
@@ -1310,17 +1279,21 @@ pub(super) fn present(
             .context("Surface's device is invalid")?
             .timeline_semaphore;
 
-        let mut cmd_infos: Vec<vk::CommandBufferSubmitInfo> = deferred
-            .iter()
-            .copied()
-            .map(|cb| vk::CommandBufferSubmitInfo::default().command_buffer(cb))
-            .collect();
+        let mut cmd_infos: Vec<vk::CommandBufferSubmitInfo> =
+            Vec::with_capacity(deferred.len() + 2);
+        cmd_infos.push(vk::CommandBufferSubmitInfo::default().command_buffer(prep_cmd));
+        cmd_infos.extend(
+            deferred
+                .iter()
+                .copied()
+                .map(|cb| vk::CommandBufferSubmitInfo::default().command_buffer(cb)),
+        );
         cmd_infos.push(vk::CommandBufferSubmitInfo::default().command_buffer(barrier_cmd));
 
         let wait_info = vk::SemaphoreSubmitInfo::default()
-            .semaphore(image_ready_sem_present)
+            .semaphore(image_available_sem_present)
             .value(0)
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
         let bin_signal = vk::SemaphoreSubmitInfo::default()
             .semaphore(render_finished_sem_present)
             .value(0)
@@ -1365,38 +1338,41 @@ pub(super) fn present(
             anyhow::bail!("Failed to submit compute+present: {:?}", e);
         }
 
-        let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
-        ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
+        {
+            let _bk = crate::tracy_zone!("vk.present.post_submit");
+            let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
+            ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
 
-        if !deferred.is_empty() {
-            state
-                .staging_belts
-                .entry(device_handle)
-                .or_insert_with(|| {
-                    super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE)
-                })
-                .finish(signal_timeline_value);
-        }
-        if !pending_tex_upload_staging.is_empty() {
-            state
-                .texture_staging_pools
-                .entry(device_handle)
-                .or_insert_with(super::staging::TextureStagingPool::new)
-                .release(signal_timeline_value, pending_tex_upload_staging);
-        }
+            if !deferred.is_empty() {
+                state
+                    .staging_belts
+                    .entry(device_handle)
+                    .or_insert_with(|| {
+                        super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE)
+                    })
+                    .finish(signal_timeline_value);
+            }
+            if !pending_tex_upload_staging.is_empty() {
+                state
+                    .texture_staging_pools
+                    .entry(device_handle)
+                    .or_insert_with(super::staging::TextureStagingPool::new)
+                    .release(signal_timeline_value, pending_tex_upload_staging);
+            }
 
-        for cb in &deferred {
-            state
-                .timeline_cmd_buffers
-                .entry(signal_timeline_value)
-                .or_default()
-                .push((device_handle, *cb));
-        }
+            for cb in &deferred {
+                state
+                    .timeline_cmd_buffers
+                    .entry(signal_timeline_value)
+                    .or_default()
+                    .push((device_handle, *cb));
+            }
 
-        let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
-        let fs = &mut surface_state_mut.frame_sync[current_frame];
-        fs.frame_timeline_value = Some(signal_timeline_value);
-        fs.pending_surface_texture = pending_tex;
+            let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
+            let fs = &mut surface_state_mut.frame_sync[current_frame];
+            fs.frame_timeline_value = Some(signal_timeline_value);
+            fs.pending_surface_texture = pending_tex;
+        }
     } else if let Some(th) = pending_tex {
         // Render path: the graphics CB was already submitted by render() but
         // the VkImageView must stay alive until the fence signals.
@@ -1579,7 +1555,11 @@ pub(super) fn resize(
         .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
         .image_extent(extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE)
+        .image_usage(
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::TRANSFER_DST,
+        )
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)

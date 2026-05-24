@@ -542,18 +542,13 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 /// Per-frame synchronization resources for proper swapchain pipelining.
 pub(crate) struct FrameSync {
     pub command_buffer: vk::CommandBuffer,
-    /// Dedicated command buffer for the acquire-time "prep" submit that transitions
+    /// Dedicated command buffer for the acquire-time "prep" barrier that transitions
     /// the newly-acquired swapchain image to `GENERAL` (`UNDEFINED → GENERAL` on first
-    /// use, `PRESENT_SRC_KHR → GENERAL` after that image has been presented). Consumes
-    /// `image_available_semaphore` and signals `image_ready_semaphore`; later render/present
-    /// submits wait on the latter.
+    /// use, `PRESENT_SRC_KHR → GENERAL` after that image has been presented). Submitted
+    /// together with the render/present command buffers while waiting on
+    /// `image_available_semaphore`.
     pub prep_command_buffer: vk::CommandBuffer,
     pub image_available_semaphore: vk::Semaphore,
-    /// Signaled by the acquire-time prep submit once the swapchain image is in
-    /// `GENERAL` layout. The graphics render path and the compute-only flush
-    /// submit wait on this so the swapchain image is always in a
-    /// compute-writable layout by the time any downstream submit touches it.
-    pub image_ready_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
     /// Set after `surface_render` submits the graphics command buffer. Compute-only

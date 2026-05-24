@@ -74,6 +74,95 @@ fn slot_usage_to_dx12_access(usage: &SlotUsageSet) -> D3D12_BARRIER_ACCESS {
     }
 }
 
+fn texture_barrier_state_for_layout(
+    layout: D3D12_BARRIER_LAYOUT,
+) -> (
+    D3D12_BARRIER_SYNC,
+    D3D12_BARRIER_ACCESS,
+    D3D12_BARRIER_LAYOUT,
+) {
+    if layout == D3D12_BARRIER_LAYOUT_COPY_SOURCE {
+        (
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_ACCESS_COPY_SOURCE,
+            layout,
+        )
+    } else if layout == D3D12_BARRIER_LAYOUT_COPY_DEST {
+        (
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+            layout,
+        )
+    } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+        || layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+    {
+        (
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+        )
+    } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
+        || layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+    {
+        (
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+        )
+    } else {
+        (D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, layout)
+    }
+}
+
+fn texture_barrier_state_for_usage(
+    usage: &SlotUsageSet,
+    is_storage: bool,
+) -> (
+    D3D12_BARRIER_SYNC,
+    D3D12_BARRIER_ACCESS,
+    D3D12_BARRIER_LAYOUT,
+) {
+    if usage.kinds.contains(UsageKindFlags::TRANSFER) {
+        if usage.access == NodeAccessUnion::Write {
+            (
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_LAYOUT_COPY_DEST,
+            )
+        } else {
+            (
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+            )
+        }
+    } else if usage.kinds.contains(UsageKindFlags::COMPUTE) && usage.access.writes() && is_storage {
+        (
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+        )
+    } else if usage.kinds.contains(UsageKindFlags::COMPUTE) {
+        (
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+        )
+    } else if usage.kinds.contains(UsageKindFlags::RENDER) {
+        (
+            D3D12_BARRIER_SYNC_RENDER_TARGET,
+            D3D12_BARRIER_ACCESS_RENDER_TARGET,
+            D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+        )
+    } else {
+        (
+            D3D12_BARRIER_SYNC_ALL,
+            D3D12_BARRIER_ACCESS_COMMON,
+            D3D12_BARRIER_LAYOUT_COMMON,
+        )
+    }
+}
+
 #[derive(Debug)]
 struct Dx12GpuProfileResources {
     heap: ID3D12QueryHeap,
@@ -851,39 +940,30 @@ fn record_gpu_command(
                 .iter()
                 .filter_map(|h| state.textures.get(h))
                 .map(|ts| {
-                    // Each texture keeps its own layout, which encodes what kind of
-                    // access it last saw.  Use the layout to determine sync_before /
-                    // access_before so we don't mix incompatible sync+access pairs
-                    // (e.g. SYNC_COPY + ACCESS_SHADER_RESOURCE is invalid on DX12).
-                    let (tex_sync_before, access, layout) = if ts.last_layout
-                        == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-                        || ts.last_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
-                    {
-                        (
-                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
-                        )
-                    } else {
-                        (
-                            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                            D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-                            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
-                        )
-                    };
+                    let (tex_sync_after, tex_access_after, tex_layout_after) =
+                        texture_barrier_state_for_usage(dst_usage, ts.is_storage);
+                    let (tex_sync_before, tex_access_before, tex_layout_before) =
+                        texture_barrier_state_for_layout(ts.last_layout);
                     barriers::texture_barrier_full(
                         &ts.resource,
                         tex_sync_before,
-                        sync_after,
-                        access,
-                        access,
-                        layout,
-                        layout,
+                        tex_sync_after,
+                        tex_access_before,
+                        tex_access_after,
+                        tex_layout_before,
+                        tex_layout_after,
                     )
                 })
                 .collect();
             unsafe { barriers::barrier_textures(cl7, &tex_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
+            for h in tex_handles {
+                if let Some(ts) = state.textures.get_mut(h) {
+                    let (_, _, tex_layout_after) =
+                        texture_barrier_state_for_usage(dst_usage, ts.is_storage);
+                    ts.last_layout = tex_layout_after;
+                }
+            }
         }
         GpuCommand::ClearBuffer {
             buffer,
@@ -1051,59 +1131,43 @@ fn record_gpu_command(
         }
         GpuCommand::CopyTexture { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_texture");
-            let (src_res, src_layout) = {
+            let (src_res, src_layout, src_is_storage) = {
                 let ts = state
                     .textures
                     .get(src)
                     .context("CopyTexture: src texture not found")?;
-                (ts.resource.clone(), ts.last_layout)
+                (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
-            let (dst_res, dst_layout) = {
+            let (dst_res, dst_layout, dst_is_storage) = {
                 let ts = state
                     .textures
                     .get(dst)
                     .context("CopyTexture: dst texture not found")?;
-                (ts.resource.clone(), ts.last_layout)
+                (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
 
-            // The preceding ResourceBarrier has already serialized any producers.
-            // Use COMPUTE_SHADING to synchronize with compute work that may have
-            // written the source texture before this copy wave.
-            let sync_before = D3D12_BARRIER_SYNC_COMPUTE_SHADING;
-            let src_access_before = if src_layout
-                == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-                || src_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
-            {
-                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
-            } else {
-                D3D12_BARRIER_ACCESS_SHADER_RESOURCE
-            };
-            let dst_access_before = if dst_layout
-                == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-                || dst_layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
-            {
-                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
-            } else {
-                D3D12_BARRIER_ACCESS_NO_ACCESS
-            };
+            let (src_sync_before, src_access_before, src_layout_before) =
+                texture_barrier_state_for_layout(src_layout);
+            let (dst_sync_before, dst_access_before, dst_layout_before) =
+                texture_barrier_state_for_layout(dst_layout);
 
             let mut pre_barriers = vec![
                 barriers::texture_barrier_full(
                     &src_res,
-                    sync_before,
+                    src_sync_before,
                     D3D12_BARRIER_SYNC_COPY,
                     src_access_before,
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                    src_layout,
+                    src_layout_before,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                 ),
                 barriers::texture_barrier_full(
                     &dst_res,
-                    sync_before,
+                    dst_sync_before,
                     D3D12_BARRIER_SYNC_COPY,
                     dst_access_before,
                     D3D12_BARRIER_ACCESS_COPY_DEST,
-                    dst_layout,
+                    dst_layout_before,
                     D3D12_BARRIER_LAYOUT_COPY_DEST,
                 ),
             ];
@@ -1112,35 +1176,56 @@ fn record_gpu_command(
 
             unsafe { cl.CopyResource(&dst_res, &src_res) };
 
-            let post_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
+            let src_post_state = if src_is_storage {
+                (
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                )
+            } else {
+                (
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                )
+            };
+            let dst_post_state = if dst_is_storage {
+                (
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                )
+            } else {
+                (
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                )
+            };
             let mut post_barriers = vec![
                 barriers::texture_barrier_full(
                     &src_res,
                     D3D12_BARRIER_SYNC_COPY,
                     D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    src_post_state.0,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-                    post_layout,
+                    src_post_state.1,
                 ),
                 barriers::texture_barrier_full(
                     &dst_res,
                     D3D12_BARRIER_SYNC_COPY,
                     D3D12_BARRIER_SYNC_COMPUTE_SHADING,
                     D3D12_BARRIER_ACCESS_COPY_DEST,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    dst_post_state.0,
                     D3D12_BARRIER_LAYOUT_COPY_DEST,
-                    post_layout,
+                    dst_post_state.1,
                 ),
             ];
             unsafe { barriers::barrier_textures(cl7, &post_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
 
             if let Some(ts) = state.textures.get_mut(src) {
-                ts.last_layout = post_layout;
+                ts.last_layout = src_post_state.1;
             }
             if let Some(ts) = state.textures.get_mut(dst) {
-                ts.last_layout = post_layout;
+                ts.last_layout = dst_post_state.1;
             }
         }
     }

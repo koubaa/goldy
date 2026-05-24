@@ -1037,6 +1037,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn gpu_progress(&self, device_handle: DeviceHandle) -> crate::timeline::TimelineValue {
+        let _tz = crate::tracy_zone!("vk.gpu_progress");
         let Some(ld) = self.state.devices.get(&device_handle) else {
             return 0;
         };
@@ -1048,29 +1049,43 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
-        let sem = self
-            .state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?
-            .timeline_semaphore;
-        let dev = &self.state.devices.get(&device_handle).unwrap().device;
-        let wait = vk::SemaphoreWaitInfo::default()
-            .semaphores(std::slice::from_ref(&sem))
-            .values(std::slice::from_ref(&value));
-        if let Err(e) = unsafe { dev.wait_semaphores(&wait, u64::MAX) } {
-            if e == vk::Result::ERROR_DEVICE_LOST {
-                self.state
-                    .device_lost
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+        let _tz = crate::tracy_zone!("vk.wait_until");
+        {
+            let _lookup = crate::tracy_zone!("vk.wait_until.lookup");
+            let sem = self
+                .state
+                .devices
+                .get(&device_handle)
+                .context("Invalid device handle")?
+                .timeline_semaphore;
+            let dev = &self.state.devices.get(&device_handle).unwrap().device;
+            let wait = vk::SemaphoreWaitInfo::default()
+                .semaphores(std::slice::from_ref(&sem))
+                .values(std::slice::from_ref(&value));
+            let _wait = crate::tracy_zone!("vk.wait_until.wait_semaphores");
+            if let Err(e) = unsafe { dev.wait_semaphores(&wait, u64::MAX) } {
+                if e == vk::Result::ERROR_DEVICE_LOST {
+                    self.state
+                        .device_lost
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                return Err(anyhow::anyhow!("wait_semaphores: {:?}", e));
             }
-            return Err(anyhow::anyhow!("wait_semaphores: {:?}", e));
         }
-        compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+        {
+            let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
+            compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+        }
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            let drained = ld.deletion_queue.drain_up_to(value);
-            for r in drained {
-                types::destroy_pending_deletion(ld, r);
+            let drained = {
+                let _drain = crate::tracy_zone!("vk.wait_until.deletion_queue.drain");
+                ld.deletion_queue.drain_up_to(value)
+            };
+            {
+                let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
+                for r in drained {
+                    types::destroy_pending_deletion(ld, r);
+                }
             }
         }
         Ok(())

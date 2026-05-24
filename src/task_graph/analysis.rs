@@ -34,7 +34,7 @@ use super::ir::{
 use super::ir::NodeAccess;
 use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
-use crate::backend::{GpuCommand, GraphCommand};
+use crate::backend::{GpuCommand, GraphCommand, TextureHandle};
 use anyhow::Result;
 
 /// Returns true if byte range `[o1, o1+l1)` overlaps `[o2, o2+l2)`.
@@ -92,6 +92,20 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         (ResourceId::SwapchainOutput, ResourceId::SwapchainOutput) => true,
         _ => false,
+    }
+}
+
+fn resolve_texture_resource(id: ResourceId, resolver: Option<&SlotResolver>) -> TextureHandle {
+    let resolved = match resolver {
+        Some(r) => r.resolve(id),
+        None => id,
+    };
+    match resolved {
+        ResourceId::Texture(h) => h,
+        ResourceId::SwapchainOutput => {
+            panic!("CopyTexture destination SwapchainOutput emitted before surface acquire")
+        }
+        other => panic!("CopyTexture destination resolved to non-texture resource: {other:?}"),
     }
 }
 
@@ -537,10 +551,8 @@ pub(crate) fn emit_waves_to_commands(
                     });
                 }
                 NodeKind::CopyTexture { src, dst } => {
-                    commands.push(GpuCommand::CopyTexture {
-                        src: *src,
-                        dst: *dst,
-                    });
+                    let dst = resolve_texture_resource(*dst, resolver);
+                    commands.push(GpuCommand::CopyTexture { src: *src, dst });
                 }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
             }
@@ -905,9 +917,10 @@ pub fn emit_graph_commands(
                     }));
                 }
                 NodeKind::CopyTexture { src, dst } => {
+                    let dst = resolve_texture_resource(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyTexture {
                         src: *src,
-                        dst: *dst,
+                        dst,
                     }));
                 }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
@@ -1058,6 +1071,41 @@ mod tests {
                 height: 1,
             },
         }
+    }
+
+    #[test]
+    fn copy_texture_resolves_swapchain_output_dst() {
+        let ir = GraphIR {
+            nodes: vec![TaskNode {
+                label: "copy_to_swapchain",
+                bindings: vec![
+                    ResourceBinding {
+                        resource: ResourceId::Texture(1),
+                        access: NodeAccess::Read,
+                    },
+                    ResourceBinding {
+                        resource: ResourceId::SwapchainOutput,
+                        access: NodeAccess::Write,
+                    },
+                ],
+                kind: NodeKind::CopyTexture {
+                    src: 1,
+                    dst: ResourceId::SwapchainOutput,
+                },
+            }],
+        };
+        let schedule = schedule_waves(&ir, &build_edges(&ir));
+        let mut resolver = SlotResolver::default();
+        resolver.swapchain = Some(crate::task_graph::ResolvedSwapchain {
+            handle: 99,
+            uav_index: 7,
+        });
+
+        let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
+        assert!(matches!(
+            commands.as_slice(),
+            [GpuCommand::CopyTexture { src: 1, dst: 99 }]
+        ));
     }
 
     #[test]

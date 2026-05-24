@@ -478,7 +478,12 @@ impl Buffer {
     /// [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`]). Direct3D 12 performs a
     /// GPU copy into a READBACK heap and waits — query capabilities to branch on behavior.
     pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
-        let mut backend = self.backend.lock().unwrap();
+        let _tz = crate::tracy_zone!("buffer.read_to_cpu");
+        let mut backend = {
+            let _lock = crate::tracy_zone!("buffer.read_to_cpu.lock");
+            self.backend.lock().unwrap()
+        };
+        let _backend = crate::tracy_zone!("buffer.read_to_cpu.backend");
         backend.read_buffer_to_cpu(device.inner.handle, self.handle, output)
     }
 

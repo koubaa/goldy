@@ -555,7 +555,11 @@ impl Device {
     /// `gpu_progress() >= value`).
     pub fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("device.gpu_progress");
-        let backend = self.inner.backend.lock().unwrap();
+        let backend = {
+            let _lock = crate::tracy_zone!("device.gpu_progress.lock");
+            self.inner.backend.lock().unwrap()
+        };
+        let _query = crate::tracy_zone!("device.gpu_progress.query");
         backend.gpu_progress(self.inner.handle)
     }
 
@@ -590,7 +594,12 @@ impl Device {
 
     /// Block until the device timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
-        let mut backend = self.inner.backend.lock().unwrap();
+        let _tz = crate::tracy_zone!("device.wait_until");
+        let mut backend = {
+            let _lock = crate::tracy_zone!("device.wait_until.lock");
+            self.inner.backend.lock().unwrap()
+        };
+        let _backend = crate::tracy_zone!("device.wait_until.backend");
         backend.wait_until(self.inner.handle, value).map_err(|e| {
             drop(backend);
             self.classify(e)

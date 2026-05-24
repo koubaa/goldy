@@ -288,6 +288,81 @@ impl Surface {
         Ok(frame)
     }
 
+    /// Compile, auto-partition, and submit a graph that writes to an already-acquired frame.
+    ///
+    /// This preserves `SwapchainOutput` as an abstract graph resource while allowing callers to
+    /// request the WSI image at the beginning of frame recording. Early partitions still run before
+    /// the swapchain-touching partition; the late partition is resolved against `frame`.
+    pub fn submit_graph_to_frame(&self, graph: &mut TaskGraph, frame: Frame) -> Result<Frame> {
+        let _tz = tracy_zone!("surface.submit_graph_to_frame");
+
+        if frame.token.surface != self.handle {
+            anyhow::bail!("Surface::submit_graph_to_frame: frame belongs to a different surface");
+        }
+        if graph.is_empty() {
+            return Ok(frame);
+        }
+        if !graph.has_swapchain_output() {
+            anyhow::bail!(
+                "Surface::submit_graph_to_frame: graph contains no SwapchainOutput binding; \
+                 use TaskGraph::declare_swapchain_output + copy/bind to SwapchainOutput"
+            );
+        }
+
+        let (schedule, split_wave) = {
+            let _tz = tracy_zone!("surface.submit_graph_to_frame.schedule");
+            graph.schedule_and_split_wave()
+        };
+        let node_waves = {
+            let _tz = tracy_zone!("surface.submit_graph_to_frame.node_to_wave_map");
+            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len())
+        };
+        let resolver = {
+            let _tz = tracy_zone!("surface.submit_graph_to_frame.build_resolver");
+            self.build_resolver_for_submit_graph(graph, &node_waves)?
+        };
+
+        let early_cmds = {
+            let _tz = tracy_zone!("surface.submit_graph_to_frame.emit_early");
+            crate::task_graph::analysis::emit_waves_to_commands(
+                graph.ir(),
+                &schedule.waves[..split_wave],
+                resolver.as_ref(),
+            )
+        };
+        if !early_cmds.is_empty() {
+            let mut backend = self.backend.lock().unwrap();
+            let _tz = tracy_zone!("surface.submit_graph_to_frame.partition_early");
+            backend.submit_standalone(self.device_handle, &early_cmds)?;
+        }
+
+        let swapchain_tex = frame.texture();
+        let sc_handle = swapchain_tex.handle;
+        let uav_index = swapchain_tex
+            .bindless_index()
+            .context("swapchain texture has no UAV bindless index")?;
+
+        let mut full_resolver = resolver.unwrap_or_default();
+        full_resolver.swapchain = Some(crate::task_graph::ResolvedSwapchain {
+            handle: sc_handle,
+            uav_index,
+        });
+
+        let final_cmds = crate::task_graph::analysis::emit_waves_to_commands(
+            graph.ir(),
+            &schedule.waves[split_wave..],
+            Some(&full_resolver),
+        );
+
+        {
+            let mut backend = self.backend.lock().unwrap();
+            let _tz = tracy_zone!("surface.submit_graph_to_frame.partition_late");
+            backend.record_gpu_work(&frame.token, &final_cmds)?;
+        }
+
+        Ok(frame)
+    }
+
     /// Build a [`SlotResolver`] for transient resources (buffers + textures).
     ///
     /// Returns `None` when the graph has no transients (no resolution needed).
