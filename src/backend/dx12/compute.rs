@@ -53,8 +53,8 @@ fn slot_usage_to_dx12_access(usage: &SlotUsageSet) -> D3D12_BARRIER_ACCESS {
     }
     let mut access = D3D12_BARRIER_ACCESS(0);
     if usage.kinds.contains(UsageKindFlags::COMPUTE) {
-        access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-            | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
+        access.0 |=
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         if usage.access == NodeAccessUnion::Write {
@@ -1232,6 +1232,19 @@ fn record_gpu_command(
     Ok(())
 }
 
+struct SubmitFinish {
+    device_handle: DeviceHandle,
+    fence_value: u64,
+    slot_idx: usize,
+    retain_key: Option<u64>,
+}
+
+struct StagingFinish {
+    texture_uploads: Vec<super::texture::StagedTextureUpload>,
+    belt_slices_len: usize,
+    belt_idx: usize,
+}
+
 /// Close the command list, execute, signal, update the pool slot, and finish staging.
 ///
 /// `retain_key`: when `Some(k)`, stores the closed command list in
@@ -1239,16 +1252,23 @@ fn record_gpu_command(
 /// [`try_resubmit_retained`].
 fn execute_signal_and_finish(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
     command_list: &ID3D12GraphicsCommandList,
     gpu_profile: Option<Dx12GpuProfileResources>,
-    fence_value: u64,
-    slot_idx: usize,
-    retain_key: Option<u64>,
-    staged_texture_uploads: Vec<super::texture::StagedTextureUpload>,
-    belt_slices_len: usize,
-    belt_idx: usize,
+    submit: SubmitFinish,
+    staging_finish: StagingFinish,
 ) -> Result<TimelineValue> {
+    let SubmitFinish {
+        device_handle,
+        fence_value,
+        slot_idx,
+        retain_key,
+    } = submit;
+    let StagingFinish {
+        texture_uploads: staged_texture_uploads,
+        belt_slices_len,
+        belt_idx,
+    } = staging_finish;
+
     debug_assert_eq!(
         belt_idx, belt_slices_len,
         "WriteBuffer storage count mismatch vs belt prepass"
@@ -1393,7 +1413,7 @@ pub(super) fn submit(
         let mut pool = state
             .texture_staging_pools
             .remove(&device_handle)
-            .unwrap_or_else(|| super::staging::TextureStagingPool::new());
+            .unwrap_or_else(super::staging::TextureStagingPool::new);
 
         let _tz_prepass = tracy_zone!("dx12.submit.upload_prepass");
         for command in commands {
@@ -1448,12 +1468,14 @@ pub(super) fn submit(
                         &state.devices,
                         &state.textures,
                         &mut pool,
-                        *texture,
-                        *x,
-                        *y,
-                        *width,
-                        *height,
-                        data,
+                        super::texture::TextureUploadRegion {
+                            texture_handle: *texture,
+                            x: *x,
+                            y: *y,
+                            width: *width,
+                            height: *height,
+                            data,
+                        },
                     )?);
                 }
                 _ => {}
@@ -1493,7 +1515,7 @@ pub(super) fn submit(
         prof
     };
 
-    {
+    let belt_idx_final = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
         let mut ctx = CmdCtx {
             command_list: &command_list,
@@ -1515,49 +1537,52 @@ pub(super) fn submit(
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        let belt_idx_final = ctx.belt_idx;
-        drop(ctx); // release borrows on command_list / command_list7
+        ctx.belt_idx
+    };
 
-        // Tail barrier: make UAV and copy writes visible to subsequent operations.
-        let tail = D3D12_GLOBAL_BARRIER {
-            SyncBefore: D3D12_BARRIER_SYNC(
-                D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,
-            ),
-            SyncAfter: D3D12_BARRIER_SYNC_ALL,
-            AccessBefore: D3D12_BARRIER_ACCESS(
-                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0,
-            ),
-            AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
-        };
-        unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
+    // Tail barrier: make UAV and copy writes visible to subsequent operations.
+    let tail = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC(
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0,
+        ),
+        SyncAfter: D3D12_BARRIER_SYNC_ALL,
+        AccessBefore: D3D12_BARRIER_ACCESS(
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0,
+        ),
+        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+    };
+    unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
-        if let Some(ref prof) = dx_gpu_profile {
-            unsafe {
-                command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
-                command_list.ResolveQueryData(
-                    &prof.heap,
-                    D3D12_QUERY_TYPE_TIMESTAMP,
-                    0,
-                    prof.query_count,
-                    &prof.readback,
-                    0,
-                );
-            }
+    if let Some(ref prof) = dx_gpu_profile {
+        unsafe {
+            command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+            command_list.ResolveQueryData(
+                &prof.heap,
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                0,
+                prof.query_count,
+                &prof.readback,
+                0,
+            );
         }
+    }
 
-        execute_signal_and_finish(
-            state,
+    execute_signal_and_finish(
+        state,
+        &command_list,
+        dx_gpu_profile.take(),
+        SubmitFinish {
             device_handle,
-            &command_list,
-            dx_gpu_profile.take(),
             fence_value,
             slot_idx,
-            None,
-            staged_texture_uploads,
-            belt_slices.len(),
-            belt_idx_final,
-        )
-    }
+            retain_key: None,
+        },
+        StagingFinish {
+            texture_uploads: staged_texture_uploads,
+            belt_slices_len: belt_slices.len(),
+            belt_idx: belt_idx_final,
+        },
+    )
 }
 
 /// Submit mixed compute + render graph commands in a single command list.
@@ -1618,7 +1643,7 @@ pub(super) fn submit_graph(
         let mut pool = state
             .texture_staging_pools
             .remove(&device_handle)
-            .unwrap_or_else(|| super::staging::TextureStagingPool::new());
+            .unwrap_or_else(super::staging::TextureStagingPool::new);
 
         let _tz_prepass = tracy_zone!("dx12.submit_graph.upload_prepass");
         for graph_cmd in commands {
@@ -1674,12 +1699,14 @@ pub(super) fn submit_graph(
                             &state.devices,
                             &state.textures,
                             &mut pool,
-                            *texture,
-                            *x,
-                            *y,
-                            *width,
-                            *height,
-                            data,
+                            super::texture::TextureUploadRegion {
+                                texture_handle: *texture,
+                                x: *x,
+                                y: *y,
+                                width: *width,
+                                height: *height,
+                                data,
+                            },
                         )?);
                     }
                     _ => {}
@@ -1836,15 +1863,19 @@ pub(super) fn submit_graph(
 
     let result = execute_signal_and_finish(
         state,
-        device_handle,
         &command_list,
         dx_gpu_profile.take(),
-        fence_value,
-        slot_idx,
-        retain_key,
-        staged_texture_uploads,
-        belt_slices.len(),
-        belt_idx_final,
+        SubmitFinish {
+            device_handle,
+            fence_value,
+            slot_idx,
+            retain_key,
+        },
+        StagingFinish {
+            texture_uploads: staged_texture_uploads,
+            belt_slices_len: belt_slices.len(),
+            belt_idx: belt_idx_final,
+        },
     )?;
 
     for t in rendered_targets {

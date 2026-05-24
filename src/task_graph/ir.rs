@@ -2,7 +2,7 @@
 //!
 //! These types form the shared IR consumed by [`analysis`](super::analysis).
 //! The [`analysis`](super::analysis) module consumes a [`GraphIR`] and produces a
-//! [`CompiledSchedule`] of [`Wave`]s with [`BarrierSet`]s.
+//! [`CompiledSchedule`] of [`Wave`]s with `BarrierSet`s.
 //!
 //! A [`TaskNode`] may be a compute dispatch, a buffer clear, or a buffer write.
 //! The analyzer operates only on [`TaskNode::bindings`] and is node-kind-agnostic;
@@ -22,7 +22,7 @@ bitflags::bitflags! {
     /// - `TRANSFER` — clears, host-uploads, and GPU-side copies (DMA / copy engine)
     /// - `RENDER` — offscreen render passes (graphics pipeline)
     ///
-    /// Flags are unioned across all edges contributing to a given [`BarrierSet`].
+    /// Flags are unioned across all edges contributing to a given `BarrierSet`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct UsageKindFlags: u8 {
         const COMPUTE  = 0b001;
@@ -34,7 +34,7 @@ bitflags::bitflags! {
 /// Access semantics on one side of a barrier edge, in Koubaa-level terms.
 ///
 /// Pairs with [`NodeAccess`] to fully describe what a wave did (src) or will do
-/// (dst) to the slots covered by a [`BarrierSet`].  Each backend lowers this to
+/// (dst) to the slots covered by a `BarrierSet`.  Each backend lowers this to
 /// its native synchronization primitives (DX12 enhanced-barrier sync/access flags,
 /// Vulkan `VkPipelineStageFlags2` / `VkAccessFlags2`, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

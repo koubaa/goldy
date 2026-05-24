@@ -20,6 +20,15 @@ pub(super) struct StagedTextureUpload {
     pub layout_before: D3D12_BARRIER_LAYOUT,
 }
 
+pub(super) struct TextureUploadRegion<'a> {
+    pub texture_handle: TextureHandle,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub data: &'a [u8],
+}
+
 /// [`D3D12_BARRIER_ACCESS`] that matches `layout` for texture barriers.
 fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
     if layout == D3D12_BARRIER_LAYOUT_COMMON {
@@ -403,13 +412,16 @@ pub(super) fn stage_texture_upload_region(
     devices: &std::collections::HashMap<DeviceHandle, super::types::LogicalDevice>,
     textures: &std::collections::HashMap<TextureHandle, super::types::TextureState>,
     pool: &mut super::staging::TextureStagingPool,
-    texture_handle: TextureHandle,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    data: &[u8],
+    region: TextureUploadRegion<'_>,
 ) -> Result<StagedTextureUpload> {
+    let TextureUploadRegion {
+        texture_handle,
+        x,
+        y,
+        width,
+        height,
+        data,
+    } = region;
     let texture = textures
         .get(&texture_handle)
         .context("Invalid texture handle")?;
@@ -585,11 +597,25 @@ pub(super) fn write(
     width: u32,
     height: u32,
 ) -> Result<()> {
-    let texture = state.textures.get(&texture_handle).context("Invalid texture")?;
+    let texture = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture")?;
     let device_handle = texture.device_handle;
     let staged = {
-        let pool = state.texture_staging_pools.entry(device_handle).or_insert_with(super::staging::TextureStagingPool::new);
-        stage_texture_upload_full(&state.devices, &state.textures, pool, texture_handle, data, width, height)?
+        let pool = state
+            .texture_staging_pools
+            .entry(device_handle)
+            .or_insert_with(super::staging::TextureStagingPool::new);
+        stage_texture_upload_full(
+            &state.devices,
+            &state.textures,
+            pool,
+            texture_handle,
+            data,
+            width,
+            height,
+        )?
     };
     execute_staged_uploads_sync(state, vec![staged])?;
     tracing::debug!("Wrote {}x{} texture (sync upload)", width, height);
@@ -606,11 +632,29 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
-    let texture = state.textures.get(&texture_handle).context("Invalid texture")?;
+    let texture = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture")?;
     let device_handle = texture.device_handle;
     let staged = {
-        let pool = state.texture_staging_pools.entry(device_handle).or_insert_with(super::staging::TextureStagingPool::new);
-        stage_texture_upload_region(&state.devices, &state.textures, pool, texture_handle, x, y, width, height, data)?
+        let pool = state
+            .texture_staging_pools
+            .entry(device_handle)
+            .or_insert_with(super::staging::TextureStagingPool::new);
+        stage_texture_upload_region(
+            &state.devices,
+            &state.textures,
+            pool,
+            TextureUploadRegion {
+                texture_handle,
+                x,
+                y,
+                width,
+                height,
+                data,
+            },
+        )?
     };
     execute_staged_uploads_sync(state, vec![staged])?;
     tracing::debug!(
@@ -776,10 +820,8 @@ pub(super) fn execute_staged_uploads_sync(
 
     // Release and reclaim the staging entries back to the pool immediately.
     if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-        let entries: Vec<super::staging::TextureStagingEntry> = copies
-            .into_iter()
-            .map(|c| c.staging_entry)
-            .collect();
+        let entries: Vec<super::staging::TextureStagingEntry> =
+            copies.into_iter().map(|c| c.staging_entry).collect();
         pool.release(fence_value, entries);
         pool.reclaim(fence_value);
     }

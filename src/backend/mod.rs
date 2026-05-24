@@ -348,7 +348,7 @@ pub enum GpuCommand {
         arg_data: Arc<[u8]>,
         count: u32,
     },
-    /// Manual memory barrier inserted via [`crate::ComputeEncoder::barrier`].
+    /// Manual memory barrier inserted via [`crate::ComputePass::barrier`].
     ///
     /// This is the non-graph path: it carries no Koubaa-level access semantics,
     /// so backends emit a conservative global sync covering all prior work.
