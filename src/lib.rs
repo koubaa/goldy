@@ -72,7 +72,7 @@ pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
-pub use surface::{Frame, Surface};
+pub use surface::{Frame, PendingPresent, Surface};
 pub use task_graph::{
     GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId,
 };

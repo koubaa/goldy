@@ -422,21 +422,24 @@ pub(super) fn create(
         Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
     };
 
-    let pipeline_state: ID3D12PipelineState = loop {
-        match unsafe { logical_device.device.CreateComputePipelineState(&pso_desc) } {
-            Ok(p) => break p,
-            Err(e) if try_drop_stale_cached_blob => {
-                tracing::warn!(
-                    device = device_handle,
-                    error = ?e,
-                    "discarding stale DX12 compute PSO blob; rebuilding without cache entry"
-                );
-                logical_device.compute_pso_blobs.remove(&key);
-                logical_device.pso_disk_cache_dirty = true;
-                pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
-                try_drop_stale_cached_blob = false;
+    let pipeline_state: ID3D12PipelineState = {
+        let _tz = crate::tracy_zone!("goldy.dx12.CreateComputePipelineState");
+        loop {
+            match unsafe { logical_device.device.CreateComputePipelineState(&pso_desc) } {
+                Ok(p) => break p,
+                Err(e) if try_drop_stale_cached_blob => {
+                    tracing::warn!(
+                        device = device_handle,
+                        error = ?e,
+                        "discarding stale DX12 compute PSO blob; rebuilding without cache entry"
+                    );
+                    logical_device.compute_pso_blobs.remove(&key);
+                    logical_device.pso_disk_cache_dirty = true;
+                    pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
+                    try_drop_stale_cached_blob = false;
+                }
+                Err(e) => anyhow::bail!("Failed to create compute pipeline state: {:?}", e),
             }
-            Err(e) => anyhow::bail!("Failed to create compute pipeline state: {:?}", e),
         }
     };
 

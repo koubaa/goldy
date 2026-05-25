@@ -46,7 +46,10 @@ impl ComputePipeline {
         tracing::debug!("Creating compute pipeline");
         let mut backend = device.inner.backend.lock().unwrap();
 
-        let handle = backend.create_compute_pipeline(device.inner.handle, compute_shader.handle)?;
+        let handle = {
+            let _tz = crate::tracy_zone!("goldy.compute_pipeline.create_pso");
+            backend.create_compute_pipeline(device.inner.handle, compute_shader.handle)?
+        };
 
         tracing::debug!("Compute pipeline created");
 

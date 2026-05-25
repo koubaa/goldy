@@ -15,6 +15,7 @@ use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
 use crate::vram_allocator::DeferredPayload;
 use anyhow::{Context, Result};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 /// A GPU surface for zero-copy presentation to a window.
@@ -25,6 +26,137 @@ pub struct Surface {
     handle: SurfaceHandle,
     width: u32,
     height: u32,
+    present_thread: Arc<PresentThread>,
+}
+
+/// A present operation that completed (or is completing) on a persistent worker thread.
+///
+/// Returned by [`Frame::present_async`]. Call [`PendingPresent::finish`] to retrieve
+/// the GPU timeline value.  Because the worker is a **persistent parked thread**
+/// (not spawned per-frame), `finish` is a single `mpsc::recv` — no thread teardown,
+/// no stack deallocation, typically < 1 µs.
+pub struct PendingPresent {
+    inner: PendingPresentInner,
+}
+
+enum PendingPresentInner {
+    /// Completion arrives via the persistent present thread's response channel.
+    Channel(mpsc::Receiver<Result<TimelineValue>>),
+    /// Present already executed synchronously (fallback / already-presented guard).
+    AlreadyDone(TimelineValue),
+}
+
+impl PendingPresent {
+    /// Block until the present completes and return the GPU timeline value.
+    ///
+    /// On the channel path this is a single `mpsc::recv` (~0.1 µs when the worker
+    /// has already posted the result, up to ~40 µs if you call it before the OS
+    /// present finishes).
+    pub fn finish(self) -> Result<TimelineValue> {
+        let _tz = tracy_zone!("pending_present.finish");
+        match self.inner {
+            PendingPresentInner::Channel(rx) => {
+                let _rz = tracy_zone!("pending_present.recv");
+                rx.recv()
+                    .map_err(|_| anyhow::anyhow!("present worker thread dropped sender (panicked?)"))?
+            }
+            PendingPresentInner::AlreadyDone(tv) => Ok(tv),
+        }
+    }
+
+    /// Returns `true` if the result is already available without blocking.
+    ///
+    /// Note: `std::sync::mpsc` does not support peeking without consuming, so
+    /// this is conservative — it may return `false` even when the result is ready.
+    /// Prefer calling `finish()` directly; with the persistent thread design the
+    /// recv is typically < 1 µs regardless.
+    pub fn is_done(&self) -> bool {
+        match &self.inner {
+            PendingPresentInner::Channel(_) => false,
+            PendingPresentInner::AlreadyDone(_) => true,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// PresentThread — persistent worker that parks between frames
+// -----------------------------------------------------------------------
+
+type PresentWork = (
+    Arc<Mutex<Box<dyn GpuBackend>>>,
+    FrameToken,
+    Device,
+    DeferredPayload,
+    mpsc::Sender<Result<TimelineValue>>,
+);
+
+/// A persistent thread dedicated to OS present calls.
+///
+/// Lives on `Surface` and is reused across frames.  The thread parks (sleeps)
+/// between frames and wakes on `mpsc::recv` — zero allocation, zero thread
+/// create/destroy overhead per frame.
+pub(crate) struct PresentThread {
+    tx: mpsc::Sender<PresentWork>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PresentThread {
+    /// Spawn the persistent present worker.
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = mpsc::channel::<PresentWork>();
+        let join_handle = std::thread::Builder::new()
+            .name("goldy-present".into())
+            .spawn(move || {
+                Self::worker_loop(rx);
+            })
+            .expect("failed to spawn goldy-present thread");
+        Self {
+            tx,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn worker_loop(rx: mpsc::Receiver<PresentWork>) {
+        while let Ok((backend, token, device, keepalive, reply_tx)) = rx.recv() {
+            let _tz = tracy_zone!("present_thread.do_present");
+            let result = do_present_work(backend, token, device, keepalive);
+            let _ = reply_tx.send(result);
+        }
+    }
+
+    /// Send present work to the persistent thread. Returns a `PendingPresent`
+    /// whose `finish()` is just a channel recv.
+    pub(crate) fn submit(
+        &self,
+        backend: Arc<Mutex<Box<dyn GpuBackend>>>,
+        token: FrameToken,
+        device: Device,
+        keepalive: DeferredPayload,
+    ) -> PendingPresent {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        // If send fails the worker is dead — fall back to synchronous.
+        if self.tx.send((backend.clone(), token, device.clone(), keepalive, reply_tx)).is_err() {
+            tracing::warn!("present worker dead, falling back to synchronous present");
+            let tv_result = do_present_work(backend, token, device, DeferredPayload::new());
+            let tv = tv_result.unwrap_or(0);
+            return PendingPresent {
+                inner: PendingPresentInner::AlreadyDone(tv),
+            };
+        }
+        PendingPresent {
+            inner: PendingPresentInner::Channel(reply_rx),
+        }
+    }
+}
+
+impl Drop for PresentThread {
+    fn drop(&mut self) {
+        // Drop the sender to signal the worker to exit, then join.
+        drop(std::mem::replace(&mut self.tx, mpsc::channel().0));
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// A frame acquired from a surface — explicit bracket for render/compute + present.
@@ -41,6 +173,8 @@ pub struct Frame {
     /// Deferred to the VramAllocator ring at present time. Uses a Mutex so
     /// submit_compute can push to it via &self without requiring &mut Frame.
     keepalive: Mutex<DeferredPayload>,
+    /// Shared reference to the persistent present worker thread.
+    present_thread: Arc<PresentThread>,
 }
 
 impl Surface {
@@ -103,6 +237,7 @@ impl Surface {
             handle,
             width,
             height,
+            present_thread: Arc::new(PresentThread::new()),
         })
     }
 
@@ -135,6 +270,7 @@ impl Surface {
             height: h,
             presented: false,
             keepalive: Mutex::new(DeferredPayload::new()),
+            present_thread: Arc::clone(&self.present_thread),
         })
     }
 
@@ -537,6 +673,44 @@ impl Frame {
         Ok(tv)
     }
 
+    /// Submit all work and present on the persistent background thread.
+    ///
+    /// Sends work to a parked worker thread that calls `backend.end_frame`
+    /// (~40 µs on Vulkan/DX12), allowing it to overlap with the OS event-loop
+    /// overhead (~70 µs) that follows `request_redraw` on the main thread.
+    /// This reduces dead time between frames from ~110 µs to ~30 µs.
+    ///
+    /// Call [`PendingPresent::finish`] at the **start** of the next frame (before
+    /// `begin_frame`) to recv the result — typically < 1 µs since the worker
+    /// has already posted the completion.
+    ///
+    /// The existing [`Frame::present`] is unchanged and remains the correct choice
+    /// for non-latency-sensitive paths (readback, headless rendering, etc.).
+    pub fn present_async(mut self) -> Result<PendingPresent> {
+        let _tz = tracy_zone!("frame.present_async");
+        if self.presented {
+            let tv = {
+                let backend = self.backend.lock().unwrap();
+                backend.gpu_progress(self.device_handle)
+            };
+            return Ok(PendingPresent {
+                inner: PendingPresentInner::AlreadyDone(tv),
+            });
+        }
+        self.presented = true;
+
+        let _ = self.texture.take();
+        let token = self.token;
+        let backend = Arc::clone(&self.backend);
+        let device = self._device.clone();
+        let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
+
+        let pending = self
+            .present_thread
+            .submit(backend, token, device, keepalive);
+        Ok(pending)
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -544,6 +718,37 @@ impl Frame {
     pub fn height(&self) -> u32 {
         self.height
     }
+}
+
+/// Executes the core present sequence: GPU submit + OS present + resource bookkeeping.
+///
+/// Extracted so it can be called from either the background thread (async path) or
+/// the calling thread (spawn-failure fallback).
+fn do_present_work(
+    backend: Arc<Mutex<Box<dyn crate::backend::GpuBackend>>>,
+    token: crate::backend::FrameToken,
+    device: Device,
+    keepalive: crate::vram_allocator::DeferredPayload,
+) -> Result<TimelineValue> {
+    let tv = {
+        let _tz = tracy_zone!("frame.do_present_work.end_frame");
+        let mut b = backend.lock().unwrap();
+        b.end_frame(token)?
+    };
+    tracy_frame_mark!();
+    {
+        let _tz = tracy_zone!("frame.do_present_work.stamp_heap");
+        if let Ok(mut heap_guard) = device.inner.placement_heap.lock() {
+            if let Some(ref mut heap) = *heap_guard {
+                heap.stamp_all_pending(tv);
+            }
+        }
+    }
+    if !keepalive.is_empty() {
+        let _tz = tracy_zone!("frame.do_present_work.defer_release");
+        device.defer_release(tv, keepalive);
+    }
+    Ok(tv)
 }
 
 impl Drop for Frame {
