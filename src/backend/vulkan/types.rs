@@ -542,20 +542,21 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 /// Per-frame synchronization resources for proper swapchain pipelining.
 pub(crate) struct FrameSync {
     pub command_buffer: vk::CommandBuffer,
-    /// Dedicated command buffer for the acquire-time "prep" submit that transitions
-    /// the newly-acquired swapchain image to `GENERAL` (`UNDEFINED → GENERAL` on first
-    /// use, `PRESENT_SRC_KHR → GENERAL` after that image has been presented). Consumes
-    /// `image_available_semaphore` and signals `image_ready_semaphore`; later render/present
-    /// submits wait on the latter.
-    pub prep_command_buffer: vk::CommandBuffer,
     pub image_available_semaphore: vk::Semaphore,
-    /// Signaled by the acquire-time prep submit once the swapchain image is in
-    /// `GENERAL` layout. The graphics render path and the compute-only flush
-    /// submit wait on this so the swapchain image is always in a
-    /// compute-writable layout by the time any downstream submit touches it.
-    pub image_ready_semaphore: vk::Semaphore,
+    /// Signaled by Submit 1 (compute work) and consumed by Submit 2 (present
+    /// barrier).  Separates the `in_flight_fence` signal from the present
+    /// barrier so the fence fires as soon as GPU compute is done, matching
+    /// DX12's per-slot fence semantics.
+    pub work_done_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
+    /// CPU-side fence signaled by the presentation engine when the swapchain
+    /// image is truly available for write.  Passed to `vkAcquireNextImageKHR`
+    /// alongside `image_available_semaphore`; waited in a separate
+    /// `vk.surface.wait_acquire` tracy zone so the flame graph can distinguish
+    /// GPU-compute stalls (`vk.surface.wait_compute`) from WSI / presentation-
+    /// engine latency (`vk.surface.wait_acquire`).
+    pub acquire_fence: vk::Fence,
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
     /// presentation uses a barrier submit in `present` instead (see `surface::present`).
     pub render_pass_submitted: bool,
@@ -569,10 +570,6 @@ pub(crate) struct FrameSync {
     /// the per-device `TextureStagingPool` under the frame's timeline signal value
     /// at present time.
     pub pending_compute_texture_staging: Vec<crate::backend::vulkan::staging::TextureStagingEntry>,
-    /// Surface texture handle whose VkImageView + bindless descriptor must stay
-    /// alive until the GPU finishes this frame slot's work.  Unregistered in
-    /// `acquire()` after `in_flight_fence` has been waited on.
-    pub pending_surface_texture: Option<super::TextureHandle>,
 }
 
 /// Surface (swapchain) state for window presentation.
@@ -581,19 +578,32 @@ pub(crate) struct SurfaceState {
     pub surface: vk::SurfaceKHR,
     pub swapchain: vk::SwapchainKHR,
     pub swapchain_images: Vec<vk::Image>,
-    /// After an image is successfully presented, the next acquire sees it in
-    /// `PRESENT_SRC_KHR` and must use that as `oldLayout` in the prep barrier.
-    pub swapchain_image_was_presented: Vec<bool>,
     pub swapchain_image_views: Vec<vk::ImageView>,
+    /// One pre-recorded command buffer per swapchain image. Each records a
+    /// single `UNDEFINED → GENERAL` barrier for that image. Always using
+    /// `UNDEFINED` as `old_layout` lets the driver discard prior contents and
+    /// avoids per-frame re-recording. Rebuilt on swapchain recreation.
+    pub swapchain_prep_command_buffers: Vec<vk::CommandBuffer>,
+    /// Pre-recorded `GENERAL → PRESENT_SRC_KHR` barrier, one per swapchain image.
+    /// Used as the second submit in the compute path so the fence can fire
+    /// before the present barrier executes.
+    pub swapchain_compute_present_command_buffers: Vec<vk::CommandBuffer>,
+    /// Pre-recorded `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` barrier, one per
+    /// swapchain image.  Used as the second submit in the graphics (render) path.
+    pub swapchain_render_present_command_buffers: Vec<vk::CommandBuffer>,
+    /// Persistent bindless texture handles, one per swapchain image, registered
+    /// at swapchain creation. Avoids per-frame `vkCreateImageView` /
+    /// `vkUpdateDescriptorSets` / `vkDestroyImageView`. Rebuilt on resize.
+    pub swapchain_texture_handles: Vec<super::TextureHandle>,
     pub width: u32,
     pub height: u32,
     pub format: vk::Format,
-    /// Desired present mode (may differ from `swapchain_present_mode` until
-    /// the swapchain is recreated).
+    /// Desired present mode. When changed by `set_present_mode`, `present_mode_dirty`
+    /// is set so `resize()` knows to recreate the swapchain even if dimensions match.
     pub present_mode: vk::PresentModeKHR,
-    /// Present mode the live swapchain was actually created with.  Used by
-    /// `resize()` to detect when a mode change requires swapchain recreation.
-    pub swapchain_present_mode: vk::PresentModeKHR,
+    /// True when `present_mode` was updated but the swapchain has not yet been
+    /// recreated with the new mode.
+    pub present_mode_dirty: bool,
     /// Depth buffer (when depth_format is Some)
     pub depth_format: Option<DepthFormat>,
     pub depth_image: Option<vk::Image>,
@@ -605,9 +615,8 @@ pub(crate) struct SurfaceState {
     pub current_image_index: Option<u32>,
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
-    /// Transient texture handle for the currently acquired swapchain image,
-    /// registered in the bindless descriptor set as a storage image so compute
-    /// shaders can write directly to the swapchain image.
+    /// Handle of the swapchain image acquired this frame (an alias into
+    /// `swapchain_texture_handles`). Cleared at present; never freed here.
     pub current_texture_handle: Option<super::TextureHandle>,
     /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`](crate::backend::GpuBackend::record_gpu_work)).
     pub frame_pending_gpu_commands: Vec<super::GpuCommand>,

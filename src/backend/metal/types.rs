@@ -17,10 +17,10 @@ use super::super::{
 use crate::backend::DataAccess;
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
-use ::metal as mtl;
+use metal as mtl;
 use mtl::{
     ArgumentEncoder, Buffer as MTLBuffer, CommandQueue,
     ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState,
@@ -162,6 +162,26 @@ impl HeapAllocator {
 
     pub fn has_buffers(&self) -> bool {
         self.buffer_count > 0
+    }
+
+    /// Number of live buffers allocated from this heap hierarchy.
+    pub fn buffer_count(&self) -> u32 {
+        self.buffer_count
+    }
+
+    /// Number of overflow heaps currently alive.
+    pub fn overflow_count(&self) -> usize {
+        self.overflow.len()
+    }
+
+    /// Peak total bytes used since last reset.
+    pub fn high_water_mark(&self) -> u64 {
+        self.high_water_mark
+    }
+
+    /// Size of the primary heap in bytes.
+    pub fn primary_size(&self) -> u64 {
+        self.primary_size
     }
 
     /// Declare all buffer heaps resident for a compute encoder.
@@ -371,6 +391,16 @@ impl TextureHeapAllocator {
         self.texture_count > 0
     }
 
+    /// Number of live textures allocated from this heap hierarchy.
+    pub fn texture_count(&self) -> u32 {
+        self.texture_count
+    }
+
+    /// Number of overflow heaps currently alive.
+    pub fn overflow_count(&self) -> usize {
+        self.overflow.len()
+    }
+
     /// Declare all texture heaps resident for a compute encoder.
     pub fn use_heaps_for_compute(&self, encoder: &mtl::ComputeCommandEncoderRef) {
         if !self.has_textures() {
@@ -544,6 +574,14 @@ pub(crate) struct LogicalDevice {
     pub staging_belt: super::staging::StagingBelt,
     /// Pooled staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
     pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// In-flight command buffers indexed by timeline value, ordered by submission.
+    ///
+    /// Used in `wait_until` to call `waitUntilCompleted()` — the Metal-native Mach-semaphore
+    /// wait — instead of routing through the `completedHandler` → condvar chain.  Since the
+    /// command queue is serial, waiting on the CB at value N guarantees all CBs at values < N
+    /// are also complete.  Entries are drained lazily from the front as timeline values are
+    /// confirmed signaled.
+    pub in_flight_command_buffers: VecDeque<(crate::timeline::TimelineValue, mtl::CommandBuffer)>,
 }
 
 impl LogicalDevice {
@@ -750,25 +788,8 @@ impl ResourceRegistry {
         local_index
     }
 
-    /// Reserve a storage-image LOCAL index without binding it to a TextureHandle.
-    ///
-    /// Used for transient bindless slots that outlive any single `TextureHandle`
-    /// but belong to a long-lived owner (e.g. a `Surface` that re-encodes a
-    /// fresh drawable into the same slot every frame). The owner must release
-    /// the slot via [`Self::release_storage_image_slot`] when destroyed.
-    pub fn reserve_storage_image_slot(&mut self) -> u32 {
-        self.storage_image.alloc()
-    }
-
-    /// Associate a TextureHandle with a previously-reserved storage-image
-    /// LOCAL index so `texture_bindless_index()` / `Texture::bindless_index()`
-    /// resolves to the right slot. Does not bump any counters.
-    pub fn bind_storage_image_slot(&mut self, handle: TextureHandle, local_index: u32) {
-        self.texture_indices.insert(handle, local_index);
-    }
-
     /// Return a storage-image LOCAL index to the free list so it can be
-    /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
+    /// reused by a subsequent `register_storage_image`.
     ///
     /// See [`Self::release_texture_slot`] for the `barrier` semantics.
     pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
@@ -1056,13 +1077,13 @@ pub(crate) struct SurfaceState {
     pub layer: *mut std::ffi::c_void,
     /// The currently acquired CAMetalDrawable (set during acquire, cleared on present)
     pub current_drawable: Option<*mut std::ffi::c_void>,
-    /// Texture handle for the current drawable's texture (registered for bindless access)
+    /// Texture handle for the current frame's compute scratch target.
     pub current_texture_handle: Option<TextureHandle>,
-    /// Triple-buffered storage-image LOCAL indices reserved at surface create.
-    /// Each frame uses `bindless_storage_slots[current_frame]` so the CPU never
-    /// re-encodes a slot that the GPU is still reading from a previous frame.
-    /// Released back to the device's `ResourceRegistry` free list on surface destroy.
-    pub bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT],
+    /// Persistent storage-image scratch textures keyed by frame index.
+    ///
+    /// Compute presentation writes into these heap-backed textures; `present`
+    /// blits the current scratch texture into the CAMetalDrawable.
+    pub compute_scratch_textures: [Option<TextureHandle>; MAX_FRAMES_IN_FLIGHT],
     /// Current present mode
     pub present_mode: crate::types::PresentMode,
     /// Frame-scoped GPU commands ([`crate::backend::GpuBackend::record_gpu_work`]).

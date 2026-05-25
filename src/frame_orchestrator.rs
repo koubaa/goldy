@@ -367,6 +367,35 @@ impl<T> FrameOrchestrator<T> {
         Ok(frame)
     }
 
+    /// End a surface frame using a frame that was acquired before graph recording began.
+    ///
+    /// This keeps the same retirement semantics as [`Self::end_frame_for_surface`] while allowing
+    /// callers to overlap WSI image acquisition with CPU graph construction and early GPU work.
+    pub fn end_frame_for_acquired_surface(
+        &mut self,
+        handle: FrameHandle,
+        graph: &mut TaskGraph,
+        surface: &Surface,
+        frame: Frame,
+        cleanup: T,
+    ) -> Result<Frame, GoldyError> {
+        let _tz = tracy_zone!("orchestrator.end_frame_for_acquired_surface");
+        self.expect_open(handle)?;
+        let frame = if graph.is_empty() {
+            frame
+        } else {
+            surface
+                .submit_graph_to_frame(graph, frame)
+                .map_err(GoldyError::from)?
+        };
+        self.ring.push_back(FrameSlot {
+            timeline: None,
+            data: cleanup,
+        });
+        self.open = None;
+        Ok(frame)
+    }
+
     /// After [`Frame::present`], stamp the most recent surface slot with the returned timeline.
     pub fn note_presented(&mut self, tv: TimelineValue) {
         if let Some(back) = self.ring.back_mut() {
@@ -427,7 +456,10 @@ impl<T> FrameOrchestrator<T> {
         F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
     {
         let _tz = tracy_zone!("orchestrator.drain_ring");
-        let mut progress = self.device.gpu_progress();
+        let mut progress = {
+            let _pg = tracy_zone!("orchestrator.drain_ring.gpu_progress");
+            self.device.gpu_progress()
+        };
         while let Some(front) = self.ring.front() {
             let done = match front.timeline {
                 Some(tv) => progress >= tv,

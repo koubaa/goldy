@@ -5,8 +5,57 @@ use super::types::{MetalState, ResourceRegistry, TextureState, ARGUMENT_BUFFER_S
 use super::utils::format_to_mtl;
 use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use ::metal as mtl;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use mtl::{MTLOrigin, MTLRegion, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
+
+/// Texture heap allocation with drain-and-retry self-regulation.
+///
+/// When the texture heap is saturated (overflow cap reached), performs a non-blocking
+/// drain-and-retry first, then if still full, waits for the oldest in-flight command
+/// buffer to complete, drains again, and retries. Mirrors the buffer heap self-regulation
+/// in `allocate_mtl_storage_buffer`.
+fn allocate_mtl_texture(
+    logical_device: &mut super::types::LogicalDevice,
+    descriptor: &mtl::TextureDescriptorRef,
+) -> Result<mtl::Texture> {
+    // Attempt 1: fast path.
+    if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        return Ok(tex);
+    }
+
+    // Attempt 2 (non-blocking): drain signaled work, compact empty overflow heaps.
+    {
+        let _tz = crate::tracy_zone!("mtl.texture_heap_allocator.drain_reclaim");
+        logical_device.process_deletion_queue_up_to_signaled();
+        logical_device.texture_heap.compact_overflow();
+    }
+    if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        return Ok(tex);
+    }
+
+    // Attempt 3 (blocking): wait on the oldest in-flight CB to reclaim one frame's
+    // worth of archive — a runtime boundary action, invisible to the caller.
+    let oldest_cb = logical_device
+        .in_flight_command_buffers
+        .front()
+        .map(|(_, cb)| cb.to_owned());
+
+    if let Some(cb) = oldest_cb {
+        let _tz = crate::tracy_zone!("mtl.texture_heap_allocator.wait_reclaim");
+        tracing::debug!(
+            "Metal texture heap saturated — waiting for oldest in-flight command buffer \
+             to reclaim archive",
+        );
+        cb.wait_until_completed();
+        logical_device.process_deletion_queue_up_to_signaled();
+        logical_device.texture_heap.compact_overflow();
+        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+            return Ok(tex);
+        }
+    }
+
+    bail!("Metal texture heap is full — all overflow heaps exhausted");
+}
 
 /// Create a texture.
 pub(super) fn create(
@@ -59,10 +108,7 @@ pub(super) fn create(
     descriptor.set_usage(mtl_usage);
     descriptor.set_storage_mode(MTLStorageMode::Shared);
 
-    let texture = logical_device
-        .texture_heap
-        .allocate(&descriptor)
-        .context("Metal texture heap is full — all overflow heaps exhausted")?;
+    let texture = allocate_mtl_texture(logical_device, &descriptor)?;
 
     let is_storage_image = matches!(
         access,

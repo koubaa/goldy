@@ -555,7 +555,11 @@ impl Device {
     /// `gpu_progress() >= value`).
     pub fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("device.gpu_progress");
-        let backend = self.inner.backend.lock().unwrap();
+        let backend = {
+            let _lock = crate::tracy_zone!("device.gpu_progress.lock");
+            self.inner.backend.lock().unwrap()
+        };
+        let _query = crate::tracy_zone!("device.gpu_progress.query");
         backend.gpu_progress(self.inner.handle)
     }
 
@@ -590,7 +594,12 @@ impl Device {
 
     /// Block until the device timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
-        let mut backend = self.inner.backend.lock().unwrap();
+        let _tz = crate::tracy_zone!("device.wait_until");
+        let mut backend = {
+            let _lock = crate::tracy_zone!("device.wait_until.lock");
+            self.inner.backend.lock().unwrap()
+        };
+        let _backend = crate::tracy_zone!("device.wait_until.backend");
         backend.wait_until(self.inner.handle, value).map_err(|e| {
             drop(backend);
             self.classify(e)
@@ -663,6 +672,25 @@ impl Device {
         self.inner.vram_allocator.reclaim(progress);
     }
 
+    /// Returns `true` if the device's [`VramAllocator`] holds deferred payloads that
+    /// have not yet been reclaimed (i.e. their GPU epoch has not been reached).
+    ///
+    /// Useful as a precondition before calling [`wait_until`](Self::wait_until) to avoid
+    /// blocking indefinitely when there is nothing to wait for.
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    pub fn has_deferred_payloads(&self) -> bool {
+        self.inner.vram_allocator.has_deferred_payloads()
+    }
+
+    /// The oldest GPU epoch currently in the deferred payload ring, if any.
+    ///
+    /// Calling `wait_until(oldest_deferred_epoch())` followed by
+    /// `flush_deferred_deletions()` will reclaim the oldest batch of deferred resources.
+    pub fn oldest_deferred_epoch(&self) -> Option<crate::timeline::TimelineValue> {
+        self.inner.vram_allocator.oldest_deferred_epoch()
+    }
+
     /// Register a [`DeferredPayload`] for deferred dropping after GPU timeline `epoch` retires.
     ///
     /// The device's [`VramAllocator`] holds the payload alive until a subsequent call to
@@ -700,6 +728,30 @@ impl Device {
     pub fn deferred_deletion_pending_count(&self) -> usize {
         let backend = self.inner.backend.lock().unwrap();
         backend.deferred_deletion_pending_count(self.inner.handle)
+    }
+
+    /// Snapshot of the Metal buffer heap allocator state.
+    /// Returns `None` on non-Metal backends.
+    #[doc(hidden)]
+    pub fn buffer_heap_stats(&self) -> Option<crate::backend::BufferHeapStats> {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.buffer_heap_stats(self.inner.handle)
+    }
+
+    /// Snapshot of the Metal texture heap allocator state.
+    /// Returns `None` on non-Metal backends.
+    #[doc(hidden)]
+    pub fn texture_heap_stats(&self) -> Option<crate::backend::TextureHeapStats> {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.texture_heap_stats(self.inner.handle)
+    }
+
+    /// Number of in-flight command buffers tracked for wait-reclaim.
+    /// Returns 0 on non-Metal backends.
+    #[doc(hidden)]
+    pub fn in_flight_command_buffer_count(&self) -> usize {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.in_flight_command_buffer_count(self.inner.handle)
     }
 
     /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).

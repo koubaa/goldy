@@ -902,7 +902,33 @@ impl TaskGraph {
             ],
             kind: NodeKind::CopyTexture {
                 src: src_h,
-                dst: dst_h,
+                dst: ResourceId::Texture(dst_h),
+            },
+        });
+    }
+
+    /// Add a GPU-side full-texture copy node from `src` to the late-bound swapchain output.
+    ///
+    /// The concrete swapchain image is resolved by [`Surface::submit_graph`](crate::Surface::submit_graph)
+    /// after acquire. This keeps swapchain presentation as an abstract graph resource while allowing
+    /// expensive producer work to run before WSI image availability.
+    pub fn copy_texture_to_swapchain(&mut self, src: &Texture, _dst: SwapchainOutputHandle) {
+        let src_h = src.handle();
+        self.ir.nodes.push(TaskNode {
+            label: "copy_texture_to_swapchain",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Texture(src_h),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::SwapchainOutput,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyTexture {
+                src: src_h,
+                dst: ResourceId::SwapchainOutput,
             },
         });
     }

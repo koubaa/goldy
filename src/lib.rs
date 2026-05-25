@@ -61,6 +61,7 @@ pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use timeline::TimelineValue;
 
 pub use backend::GraphCommand;
+pub use backend::{BufferHeapStats, TextureHeapStats};
 pub use device::{Adapter, Device, DeviceCapabilities, Instance};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;

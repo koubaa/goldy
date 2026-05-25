@@ -2,7 +2,7 @@
 //!
 //! These types form the shared IR consumed by [`analysis`](super::analysis).
 //! The [`analysis`](super::analysis) module consumes a [`GraphIR`] and produces a
-//! [`CompiledSchedule`] of [`Wave`]s with [`BarrierSet`]s.
+//! [`CompiledSchedule`] of [`Wave`]s with `BarrierSet`s.
 //!
 //! A [`TaskNode`] may be a compute dispatch, a buffer clear, or a buffer write.
 //! The analyzer operates only on [`TaskNode::bindings`] and is node-kind-agnostic;
@@ -12,6 +12,80 @@
 use super::ResourceId;
 use crate::backend::{BufferHandle, ComputePipelineHandle, RenderTargetHandle, TextureHandle};
 use std::sync::Arc;
+
+bitflags::bitflags! {
+    /// Which GPU operation categories are active on a side of a barrier.
+    ///
+    /// The Koubaa machine distinguishes three dispatch categories that map to
+    /// distinct hardware pipeline stages on all supported backends:
+    /// - `COMPUTE` — shader dispatches (compute pipeline)
+    /// - `TRANSFER` — clears, host-uploads, and GPU-side copies (DMA / copy engine)
+    /// - `RENDER` — offscreen render passes (graphics pipeline)
+    ///
+    /// Flags are unioned across all edges contributing to a given `BarrierSet`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct UsageKindFlags: u8 {
+        const COMPUTE  = 0b001;
+        const TRANSFER = 0b010;
+        const RENDER   = 0b100;
+    }
+}
+
+/// Access semantics on one side of a barrier edge, in Koubaa-level terms.
+///
+/// Pairs with [`NodeAccess`] to fully describe what a wave did (src) or will do
+/// (dst) to the slots covered by a `BarrierSet`.  Each backend lowers this to
+/// its native synchronization primitives (DX12 enhanced-barrier sync/access flags,
+/// Vulkan `VkPipelineStageFlags2` / `VkAccessFlags2`, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SlotUsageSet {
+    /// Union of read/write access across all contributing edges.
+    ///
+    /// `Write` or `ReadWrite` means a UAV / storage write was in flight;
+    /// `Read` means only shader reads.  Backends use this to narrow the
+    /// `AccessBefore` / `AccessAfter` flags.
+    pub access: NodeAccessUnion,
+    /// Which pipeline categories (compute / transfer / render) contributed.
+    pub kinds: UsageKindFlags,
+}
+
+/// The most permissive read/write access seen across a set of edges.
+///
+/// Distinct from [`NodeAccess`] (which is per-binding) because a wave may
+/// contain both read-only and read-write bindings to the same resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum NodeAccessUnion {
+    /// Only reads observed — no storage write in flight.
+    #[default]
+    ReadOnly,
+    /// At least one write (or read-write) observed.
+    Write,
+}
+
+impl NodeAccessUnion {
+    pub fn widen(self, access: NodeAccess) -> Self {
+        if access.writes() {
+            Self::Write
+        } else {
+            self
+        }
+    }
+    pub fn writes(self) -> bool {
+        matches!(self, Self::Write)
+    }
+}
+
+impl SlotUsageSet {
+    /// Absorb the access/kind of one more node into this set.
+    pub fn merge(&mut self, access: NodeAccess, kind: UsageKindFlags) {
+        self.access = self.access.widen(access);
+        self.kinds |= kind;
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.kinds.is_empty()
+    }
+}
 
 /// Logical access a task node has on a resource, orthogonal to the
 /// resource's physical [`DataAccess`](crate::DataAccess) /
@@ -58,6 +132,7 @@ pub enum DispatchDim {
 /// The analyzer only looks at [`TaskNode::bindings`]; `NodeKind` is used by
 /// [`emit_commands`](super::analysis::emit_commands) to produce the final command stream.
 #[derive(Debug, Clone)]
+#[allow(private_interfaces)]
 pub enum NodeKind {
     /// Execute a compute shader.
     Dispatch {
@@ -99,10 +174,7 @@ pub enum NodeKind {
     /// Both textures must have compatible formats and identical dimensions.
     /// `src` must have [`crate::types::TextureFlags::COPY_SRC`] and
     /// `dst` must have [`crate::types::TextureFlags::COPY_DST`].
-    CopyTexture {
-        src: TextureHandle,
-        dst: TextureHandle,
-    },
+    CopyTexture { src: TextureHandle, dst: ResourceId },
     /// Offscreen render pass targeting a [`crate::RenderTarget`].
     ///
     /// Declare all buffers and textures read by draw commands via
@@ -155,7 +227,15 @@ impl GraphIR {
     }
 }
 
-/// Resources that need a barrier before a wave executes.
+/// Resources that need a barrier before a wave executes, with full access semantics.
+///
+/// `src_usage` and `dst_usage` describe *what kind of GPU work* produced and will
+/// consume the listed resources.  Backends lower these to native synchronization
+/// primitives (DX12 enhanced-barrier sync/access flags, Vulkan stage/access masks).
+///
+/// Both fields are the *union* across all dependency edges that feed this barrier:
+/// if wave N depends on both a `ClearBuffer` (Transfer/Write) and a `Dispatch`
+/// (Compute/Write), then `src_usage.kinds` contains `TRANSFER | COMPUTE`.
 #[derive(Debug, Clone, Default)]
 pub struct BarrierSet {
     pub buffers: Vec<BufferHandle>,
@@ -164,6 +244,10 @@ pub struct BarrierSet {
     /// emission time (after slot resolution).  Resolved and folded into the
     /// `ResourceBarrier` command inside `emit_waves_to_commands`.
     pub transient_ids: Vec<u32>,
+    /// What the producer side did to the listed resources.
+    pub src_usage: SlotUsageSet,
+    /// What the consumer side will do to the listed resources.
+    pub dst_usage: SlotUsageSet,
 }
 
 impl BarrierSet {

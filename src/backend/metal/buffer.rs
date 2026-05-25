@@ -7,7 +7,7 @@ use super::types::{
 use crate::backend::DataAccess;
 use crate::types::BufferFlags;
 use ::metal as mtl;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use mtl::MTLResourceOptions;
 
 fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
@@ -19,6 +19,11 @@ fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
 }
 
 /// Heap allocation, direct device buffer for GPU-only / jumbo sizes ([`MAX_HEAP_SIZE`]).
+///
+/// When the heap is saturated (overflow cap reached), performs a non-blocking
+/// drain-and-retry first, then if still full, waits for the oldest in-flight command
+/// buffer to complete, drains again, and retries. This makes the Metal backend
+/// self-regulating: the caller never sees heap exhaustion in steady state.
 fn allocate_mtl_storage_buffer(
     logical_device: &mut super::types::LogicalDevice,
     allocation_size: u64,
@@ -30,11 +35,58 @@ fn allocate_mtl_storage_buffer(
         let buf = logical_device.device.new_buffer(allocation_size, options);
         return Ok((buf, true));
     }
-    let buf = logical_device
+
+    // Attempt 1: fast path — heap has space.
+    if let Some(buf) = logical_device
         .heap_allocator
         .allocate(allocation_size, options)
-        .context("Metal buffer heap allocation failed — all heaps exhausted")?;
-    Ok((buf, false))
+    {
+        return Ok((buf, false));
+    }
+
+    // Attempt 2 (non-blocking): drain any GPU work that has already signaled,
+    // compact empty overflow heaps, then retry. Handles the common case where
+    // the GPU finished a frame between the last flush and this allocation.
+    {
+        let _tz = crate::tracy_zone!("mtl.heap_allocator.drain_reclaim");
+        logical_device.process_deletion_queue_up_to_signaled();
+        logical_device.heap_allocator.compact_overflow();
+    }
+    if let Some(buf) = logical_device
+        .heap_allocator
+        .allocate(allocation_size, options)
+    {
+        return Ok((buf, false));
+    }
+
+    // Attempt 3 (blocking): wait for the oldest in-flight command buffer to
+    // complete — a runtime boundary action that reclaims one frame's worth of
+    // archive. Invisible to the caller; fires only during warmup when the CPU
+    // races ahead of the GPU before caches are warm.
+    let oldest_cb = logical_device
+        .in_flight_command_buffers
+        .front()
+        .map(|(_, cb)| cb.to_owned());
+
+    if let Some(cb) = oldest_cb {
+        let _tz = crate::tracy_zone!("mtl.heap_allocator.wait_reclaim");
+        tracing::debug!(
+            "Metal buffer heap saturated — waiting for oldest in-flight command buffer \
+             to reclaim archive ({}MB requested)",
+            allocation_size / 1024 / 1024,
+        );
+        cb.wait_until_completed();
+        logical_device.process_deletion_queue_up_to_signaled();
+        logical_device.heap_allocator.compact_overflow();
+        if let Some(buf) = logical_device
+            .heap_allocator
+            .allocate(allocation_size, options)
+        {
+            return Ok((buf, false));
+        }
+    }
+
+    bail!("Metal buffer heap allocation failed — all heaps exhausted");
 }
 
 #[allow(clippy::too_many_arguments)]

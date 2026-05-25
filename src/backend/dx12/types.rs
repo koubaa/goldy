@@ -805,6 +805,8 @@ pub(super) struct Dx12State {
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-device upload belts for `GpuCommand::WriteBuffer`.
     pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
+    /// Per-device pools that recycle texture-upload staging buffers across frames.
+    pub(super) texture_staging_pools: HashMap<DeviceHandle, super::staging::TextureStagingPool>,
     /// Set to `true` when a TDR / device-removal is detected (fence completed with `u64::MAX`
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.

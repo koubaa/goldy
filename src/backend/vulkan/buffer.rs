@@ -1541,7 +1541,9 @@ pub(super) fn read_to_cpu(
     buffer_handle: BufferHandle,
     output: &mut [u8],
 ) -> Result<()> {
+    let _tz = crate::tracy_zone!("vk.buffer.read_to_cpu");
     {
+        let _validate = crate::tracy_zone!("vk.buffer.read_to_cpu.validate");
         let buffer = buffers
             .get(&buffer_handle)
             .context("Invalid buffer handle")?;
@@ -1553,6 +1555,7 @@ pub(super) fn read_to_cpu(
             anyhow::bail!("Read would exceed buffer bounds");
         }
         if let Some(base) = buffer.host_mapped {
+            let _copy = crate::tracy_zone!("vk.buffer.read_to_cpu.host_mapped_copy");
             let p = base as *const u8;
             unsafe {
                 std::ptr::copy_nonoverlapping(p, output.as_mut_ptr(), output.len());
@@ -1562,11 +1565,17 @@ pub(super) fn read_to_cpu(
     }
 
     // Lazily create staging buffer for storage buffers
-    ensure_staging(instance, devices, buffers, buffer_handle)?;
+    {
+        let _staging = crate::tracy_zone!("vk.buffer.read_to_cpu.ensure_staging");
+        ensure_staging(instance, devices, buffers, buffer_handle)?;
+    }
 
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = {
+        let _lookup = crate::tracy_zone!("vk.buffer.read_to_cpu.lookup_after_staging");
+        buffers
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?
+    };
 
     let device = devices
         .get(&device_handle)
@@ -1583,9 +1592,13 @@ pub(super) fn read_to_cpu(
 
     if let (Some(stg_buf), Some(stg_mem)) = (buffer.staging_buffer, buffer.staging_memory) {
         // DEVICE_LOCAL path: GPU copy to staging, then map staging
-        submit_copy(device, buffer.buffer, stg_buf, 0, 0, len)?;
+        {
+            let _copy = crate::tracy_zone!("vk.buffer.read_to_cpu.submit_copy");
+            submit_copy(device, buffer.buffer, stg_buf, 0, 0, len)?;
+        }
 
         unsafe {
+            let _map = crate::tracy_zone!("vk.buffer.read_to_cpu.staging_map_copy_unmap");
             let ptr = device
                 .map_memory2(stg_mem, 0, len)
                 .context("Failed to map staging buffer for readback")?;
@@ -1597,6 +1610,7 @@ pub(super) fn read_to_cpu(
     } else {
         // HOST_VISIBLE path: direct map
         unsafe {
+            let _map = crate::tracy_zone!("vk.buffer.read_to_cpu.direct_map_copy_unmap");
             let ptr = device
                 .map_memory2(buffer.memory, 0, len)
                 .context("Failed to map buffer memory")?;

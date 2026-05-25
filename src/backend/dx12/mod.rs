@@ -334,6 +334,7 @@ impl Dx12Backend {
             free_dsv_offsets: Vec::new(),
             slang_compiler,
             staging_belts: HashMap::new(),
+            texture_staging_pools: HashMap::new(),
             device_removed: std::sync::atomic::AtomicBool::new(false),
         };
 
@@ -383,6 +384,12 @@ impl Dx12Backend {
             if let Some(mut belt) = self.state.staging_belts.remove(&device_handle) {
                 unsafe {
                     belt.destroy_all();
+                }
+            }
+
+            if let Some(mut pool) = self.state.texture_staging_pools.remove(&device_handle) {
+                unsafe {
+                    pool.destroy_all();
                 }
             }
 

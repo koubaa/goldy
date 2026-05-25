@@ -115,6 +115,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             last_committed_timeline: None,
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),
+            in_flight_command_buffers: std::collections::VecDeque::new(),
         },
     );
 
