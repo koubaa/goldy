@@ -164,6 +164,26 @@ impl HeapAllocator {
         self.buffer_count > 0
     }
 
+    /// Number of live buffers allocated from this heap hierarchy.
+    pub fn buffer_count(&self) -> u32 {
+        self.buffer_count
+    }
+
+    /// Number of overflow heaps currently alive.
+    pub fn overflow_count(&self) -> usize {
+        self.overflow.len()
+    }
+
+    /// Peak total bytes used since last reset.
+    pub fn high_water_mark(&self) -> u64 {
+        self.high_water_mark
+    }
+
+    /// Size of the primary heap in bytes.
+    pub fn primary_size(&self) -> u64 {
+        self.primary_size
+    }
+
     /// Declare all buffer heaps resident for a compute encoder.
     pub fn use_heaps_for_compute(&self, encoder: &mtl::ComputeCommandEncoderRef) {
         if !self.has_buffers() {
@@ -369,6 +389,16 @@ impl TextureHeapAllocator {
 
     pub fn has_textures(&self) -> bool {
         self.texture_count > 0
+    }
+
+    /// Number of live textures allocated from this heap hierarchy.
+    pub fn texture_count(&self) -> u32 {
+        self.texture_count
+    }
+
+    /// Number of overflow heaps currently alive.
+    pub fn overflow_count(&self) -> usize {
+        self.overflow.len()
     }
 
     /// Declare all texture heaps resident for a compute encoder.

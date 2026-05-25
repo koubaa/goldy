@@ -232,6 +232,26 @@ pub trait VramAllocator: Send + Sync {
         0
     }
 
+    /// Returns `true` if there are deferred payloads waiting for GPU retirement.
+    ///
+    /// Callers that call `flush_deferred_deletions` and find that it reclaimed nothing
+    /// can use this to decide whether a GPU wait would be productive.
+    ///
+    /// The default implementation always returns `false`.
+    fn has_deferred_payloads(&self) -> bool {
+        false
+    }
+
+    /// The oldest epoch currently in the deferred ring, if any.
+    ///
+    /// If non-`None`, waiting for this timeline value then calling
+    /// [`reclaim`](Self::reclaim) would free the oldest batch of deferred resources.
+    ///
+    /// The default implementation returns `None`.
+    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
+        None
+    }
+
     /// Drop all deferred payloads unconditionally, regardless of their epoch.
     ///
     /// Called by the device on shutdown, after waiting for the high-water timeline,
@@ -295,6 +315,14 @@ impl VramAllocator for DefaultVramAllocator {
             }
         }
         count
+    }
+
+    fn has_deferred_payloads(&self) -> bool {
+        !self.deferred.lock().unwrap().is_empty()
+    }
+
+    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
+        self.deferred.lock().unwrap().front().map(|(epoch, _)| *epoch)
     }
 
     fn drain(&self) {
@@ -452,6 +480,14 @@ impl VramAllocator for TrackingVramAllocator {
 
     fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
         self.inner.reclaim(gpu_progress)
+    }
+
+    fn has_deferred_payloads(&self) -> bool {
+        self.inner.has_deferred_payloads()
+    }
+
+    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
+        self.inner.oldest_deferred_epoch()
     }
 
     fn drain(&self) {

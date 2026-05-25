@@ -787,6 +787,30 @@ impl GpuBackend for MetalBackend {
             .map(|d| d.deletion_queue.pending_len())
             .unwrap_or(0)
     }
+
+    fn buffer_heap_stats(&self, device: DeviceHandle) -> Option<super::BufferHeapStats> {
+        self.state.devices.get(&device).map(|ld| super::BufferHeapStats {
+            buffer_count: ld.heap_allocator.buffer_count(),
+            overflow_count: ld.heap_allocator.overflow_count(),
+            high_water_bytes: ld.heap_allocator.high_water_mark(),
+            primary_heap_bytes: ld.heap_allocator.primary_size(),
+        })
+    }
+
+    fn texture_heap_stats(&self, device: DeviceHandle) -> Option<super::TextureHeapStats> {
+        self.state.devices.get(&device).map(|ld| super::TextureHeapStats {
+            texture_count: ld.texture_heap.texture_count(),
+            overflow_count: ld.texture_heap.overflow_count(),
+        })
+    }
+
+    fn in_flight_command_buffer_count(&self, device: DeviceHandle) -> usize {
+        self.state
+            .devices
+            .get(&device)
+            .map(|ld| ld.in_flight_command_buffers.len())
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
