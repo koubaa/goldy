@@ -677,6 +677,8 @@ impl Device {
     ///
     /// Useful as a precondition before calling [`wait_until`](Self::wait_until) to avoid
     /// blocking indefinitely when there is nothing to wait for.
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     pub fn has_deferred_payloads(&self) -> bool {
         self.inner.vram_allocator.has_deferred_payloads()
     }

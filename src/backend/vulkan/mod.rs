@@ -796,16 +796,7 @@ impl GpuBackend for VulkanBackend {
         surface_handle: SurfaceHandle,
         mode: crate::types::PresentMode,
     ) -> Result<()> {
-        surface::set_present_mode(
-            &self.state.entry,
-            &self.state.instance,
-            &mut self.state.devices,
-            &mut self.state.surfaces,
-            &mut self.state.textures,
-            &mut self.state.next_texture_handle,
-            surface_handle,
-            mode,
-        )
+        surface::set_present_mode(&mut self.state, surface_handle, mode)
     }
 
     fn surface_present_mode(&self, surface_handle: SurfaceHandle) -> crate::types::PresentMode {
