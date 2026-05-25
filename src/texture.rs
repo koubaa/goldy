@@ -385,6 +385,11 @@ impl Drop for Texture {
         if let Ok(mut backend) = self.backend.lock() {
             backend.destroy_texture(self.handle);
         }
+        if let Some(device) = &self._device {
+            device
+                .vram_allocator()
+                .notify_texture_freed(self.byte_size());
+        }
     }
 }
 

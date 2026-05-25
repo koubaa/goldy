@@ -494,8 +494,7 @@ impl PlacementHeap {
                         let mut payload = DeferredPayload::new();
                         // We can't remove from the middle of a Vec cheaply, so we
                         // replace the element after creating the new one.
-                        let new_tex = Texture::new(
-                            device,
+                        let new_tex = device.alloc_texture(
                             key.width,
                             key.height,
                             key.format,
@@ -516,8 +515,7 @@ impl PlacementHeap {
                         handles.push(h);
                     } else {
                         // No in-flight work; safe to replace synchronously.
-                        let new_tex = Texture::new(
-                            device,
+                        let new_tex = device.alloc_texture(
                             key.width,
                             key.height,
                             key.format,
@@ -534,8 +532,7 @@ impl PlacementHeap {
                     }
                 } else {
                     // New slot (cache is growing): just create.
-                    let new_tex = Texture::new(
-                        device,
+                    let new_tex = device.alloc_texture(
                         key.width,
                         key.height,
                         key.format,

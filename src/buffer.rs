@@ -424,11 +424,16 @@ impl Buffer {
             self.size = new_size;
             return Ok(());
         }
+        let old_allocated = self.allocated_size;
         let mut backend = self.backend.lock().unwrap();
         backend.resize_buffer(self.device.inner.handle, self.handle, new_size, true)?;
         self.allocated_size = backend.buffer_capacity(self.handle);
         self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
         self.size = new_size;
+        drop(backend);
+        self.device
+            .vram_allocator()
+            .notify_buffer_resized(old_allocated, self.allocated_size);
         Ok(())
     }
 
@@ -445,11 +450,16 @@ impl Buffer {
             self.size = new_size;
             return Ok(());
         }
+        let old_allocated = self.allocated_size;
         let mut backend = self.backend.lock().unwrap();
         backend.resize_buffer(self.device.inner.handle, self.handle, new_size, false)?;
         self.allocated_size = backend.buffer_capacity(self.handle);
         self.peak_committed_bytes = self.peak_committed_bytes.max(self.allocated_size);
         self.size = new_size;
+        drop(backend);
+        self.device
+            .vram_allocator()
+            .notify_buffer_resized(old_allocated, self.allocated_size);
         Ok(())
     }
 
@@ -578,6 +588,10 @@ impl Drop for Buffer {
         tracing::trace!(size = self.size, access = ?self.access, "Destroying buffer");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_buffer(self.handle);
+        drop(backend);
+        self.device
+            .vram_allocator()
+            .notify_buffer_freed(self.allocated_size);
     }
 }
 

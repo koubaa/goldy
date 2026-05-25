@@ -198,6 +198,15 @@ pub trait VramAllocator: Send + Sync {
     /// The `size` is the buffer's allocated size at the time of destruction.
     fn notify_buffer_freed(&self, _size: u64) {}
 
+    /// Notify the allocator that a buffer was resized beyond its previous GPU allocation.
+    ///
+    /// Called by [`Buffer::resize_to`] / [`Buffer::resize_to_uninitialized`] when the
+    /// backend grows the allocation in place (`new_size > self.allocated_size`).
+    /// `old_allocated` and `new_allocated` are the backend `buffer_capacity()` values
+    /// before and after the resize. Implementations should adjust their tracked byte
+    /// counts by the delta.
+    fn notify_buffer_resized(&self, _old_allocated: u64, _new_allocated: u64) {}
+
     /// Notify the allocator that a texture has been freed.
     ///
     /// Called automatically by [`Texture::drop`] when the allocator is installed on the
@@ -479,6 +488,14 @@ impl VramAllocator for TrackingVramAllocator {
         self.inner.notify_texture_freed(byte_size);
     }
 
+    fn notify_buffer_resized(&self, old_allocated: u64, new_allocated: u64) {
+        self.live_bytes.fetch_add(
+            (new_allocated as i64).wrapping_sub(old_allocated as i64),
+            Ordering::Relaxed,
+        );
+        self.inner.notify_buffer_resized(old_allocated, new_allocated);
+    }
+
     fn allocated_bytes(&self) -> u64 {
         self.live_bytes.load(Ordering::Relaxed).max(0) as u64
     }
@@ -573,25 +590,18 @@ mod tests {
 
     #[test]
     fn tracking_allocator_tracks_bytes() {
-        let device = test_device();
-        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
+        let alloc = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
+        let base = test_device();
+        let device = base.with_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
 
         assert_eq!(alloc.allocated_bytes(), 0);
 
-        let buf = alloc
-            .alloc_buffer(
-                &device,
-                4096,
-                DataAccess::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+        let buf = device
+            .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
             .unwrap();
         assert!(alloc.allocated_bytes() >= 4096);
 
-        let size = buf.allocated_size();
         drop(buf);
-        alloc.notify_buffer_freed(size);
         assert_eq!(alloc.allocated_bytes(), 0);
     }
 
@@ -622,12 +632,12 @@ mod tests {
 
     #[test]
     fn tracking_allocator_texture_tracking() {
-        let device = test_device();
-        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
+        let alloc = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
+        let base = test_device();
+        let device = base.with_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
 
-        let tex = alloc
+        let tex = device
             .alloc_texture(
-                &device,
                 32,
                 32,
                 TextureFormat::Rgba8Unorm,
@@ -635,11 +645,9 @@ mod tests {
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .unwrap();
-        let byte_size = tex.byte_size();
         assert!(alloc.allocated_bytes() > 0);
 
         drop(tex);
-        alloc.notify_texture_freed(byte_size);
         assert_eq!(alloc.allocated_bytes(), 0);
     }
 
@@ -793,5 +801,42 @@ mod tests {
 
         tracking.drain();
         assert!(weak.upgrade().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 0 end-to-end routing test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tracking_routes_through_transient_allocator() {
+        use crate::transient_allocator::{TransientAllocatorConfig, TransientAllocatorStrategy};
+
+        let tracking = Arc::new(TrackingVramAllocator::new(
+            Arc::new(DefaultVramAllocator::new()) as Arc<dyn VramAllocator>,
+        ));
+        let base = test_device();
+        let device =
+            base.with_vram_allocator(Arc::clone(&tracking) as Arc<dyn VramAllocator>);
+
+        let mut ta = TransientAllocatorStrategy::EpochRegions
+            .create(&device, TransientAllocatorConfig::default())
+            .unwrap();
+        ta.begin_frame(&device, 65536).unwrap();
+        let _view = ta.alloc(&device, 4096, None).unwrap();
+        let bytes_after_alloc = tracking.allocated_bytes();
+        assert!(
+            bytes_after_alloc >= 4096,
+            "transient alloc must be tracked; got {bytes_after_alloc}"
+        );
+
+        ta.end_frame(&device, 0);
+        device.flush_deferred_deletions();
+        drop(ta);
+
+        assert_eq!(
+            tracking.allocated_bytes(),
+            0,
+            "all transient bytes must be freed after epoch retirement"
+        );
     }
 }
