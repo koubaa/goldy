@@ -878,6 +878,50 @@ pub trait GpuBackend: Send + Sync {
     fn deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {
         0
     }
+
+    /// Snapshot of the buffer heap allocator state (overflow count, buffer count, etc.).
+    /// Only meaningful on Metal; other backends return `None`.
+    #[doc(hidden)]
+    fn buffer_heap_stats(&self, _device: DeviceHandle) -> Option<BufferHeapStats> {
+        None
+    }
+
+    /// Snapshot of the texture heap allocator state.
+    /// Only meaningful on Metal; other backends return `None`.
+    #[doc(hidden)]
+    fn texture_heap_stats(&self, _device: DeviceHandle) -> Option<TextureHeapStats> {
+        None
+    }
+
+    /// Number of in-flight command buffers tracked by the backend for wait-reclaim.
+    /// Only meaningful on Metal; other backends return 0.
+    #[doc(hidden)]
+    fn in_flight_command_buffer_count(&self, _device: DeviceHandle) -> usize {
+        0
+    }
+}
+
+/// Snapshot of a Metal buffer heap allocator's state.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BufferHeapStats {
+    /// Total number of buffers ever allocated from the heap hierarchy (monotonically increasing).
+    /// This counter does NOT decrease when buffers are freed.
+    pub buffer_count: u32,
+    /// Number of overflow heaps currently alive (0 in steady state).
+    pub overflow_count: usize,
+    /// Peak total bytes used across all heaps since last reset.
+    pub high_water_bytes: u64,
+    /// Size of the primary heap in bytes.
+    pub primary_heap_bytes: u64,
+}
+
+/// Snapshot of a Metal texture heap allocator's state.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextureHeapStats {
+    /// Number of live textures currently allocated from the heap hierarchy.
+    pub texture_count: u32,
+    /// Number of overflow heaps currently alive (0 in steady state).
+    pub overflow_count: usize,
 }
 
 /// Create the default backend for the current platform.
