@@ -154,7 +154,7 @@ impl Instance {
                 adapter_id,
                 device_type,
                 library_registry: Arc::new(Mutex::new(registry)),
-                vram_allocator,
+                vram_allocator: Mutex::new(vram_allocator),
                 placement_heap: Mutex::new(None),
                 high_water_timeline: AtomicU64::new(0),
             }),
@@ -297,7 +297,9 @@ pub(crate) struct DeviceInner {
     adapter_id: u32,
     device_type: DeviceType,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
-    vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
+    /// Interior-mutable so the allocator can be swapped in place via
+    /// [`Device::set_vram_allocator`] without creating a second `DeviceInner`.
+    vram_allocator: Mutex<Arc<dyn crate::vram_allocator::VramAllocator>>,
     pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
     /// Largest TimelineValue ever returned from submit(). Used in Drop to ensure
     /// all submitted GPU work has completed before destroying the device.
@@ -428,47 +430,37 @@ impl Device {
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
-    pub fn vram_allocator(&self) -> &dyn crate::vram_allocator::VramAllocator {
-        &*self.inner.vram_allocator
+    pub fn vram_allocator(&self) -> Arc<dyn crate::vram_allocator::VramAllocator> {
+        self.inner.vram_allocator.lock().unwrap().clone()
     }
 
     /// Returns a clone of the [`Arc`] holding the current [`VramAllocator`].
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     pub fn vram_allocator_arc(&self) -> Arc<dyn crate::vram_allocator::VramAllocator> {
-        Arc::clone(&self.inner.vram_allocator)
+        self.inner.vram_allocator.lock().unwrap().clone()
     }
 
-    /// Create a new `Device` handle sharing the same GPU device but using
-    /// a different [`VramAllocator`].
+    /// Install a new [`VramAllocator`] on this device.
     ///
-    /// All resources created through the returned handle will go through the
-    /// new allocator. Resources created through the original handle are
-    /// unaffected.
+    /// Swaps the allocator in place on the single shared [`DeviceInner`] — no
+    /// new device handle is created, so `high_water_timeline`, `placement_heap`,
+    /// and all other state remain unified. All future allocations through any
+    /// clone of this `Device` will route through the new allocator.
+    ///
+    /// Prefer passing a configured allocator before any resources are created
+    /// (e.g. just after device construction) to ensure all allocations are
+    /// captured by it.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn with_vram_allocator(
-        &self,
-        allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
-    ) -> Self {
-        // Register the allocator with the backend so completion handlers can call
-        // boundary_crossed on it.
+    /// [`DeviceInner`]: DeviceInner
+    pub fn set_vram_allocator(&self, allocator: Arc<dyn crate::vram_allocator::VramAllocator>) {
+        // Register with backend so GPU-completion callbacks invoke boundary_crossed.
         {
             let mut backend = self.inner.backend.lock().unwrap();
             backend.set_vram_allocator(self.inner.handle, Arc::clone(&allocator));
         }
-        Self {
-            inner: Arc::new(DeviceInner {
-                backend: Arc::clone(&self.inner.backend),
-                handle: self.inner.handle,
-                adapter_id: self.inner.adapter_id,
-                device_type: self.inner.device_type,
-                library_registry: Arc::clone(&self.inner.library_registry),
-                vram_allocator: allocator,
-                placement_heap: Mutex::new(None),
-                high_water_timeline: AtomicU64::new(0),
-            }),
-        }
+        *self.inner.vram_allocator.lock().unwrap() = allocator;
     }
 
     /// Allocate a GPU buffer through the device's [`VramAllocator`].
@@ -489,6 +481,9 @@ impl Device {
     ) -> anyhow::Result<crate::buffer::Buffer> {
         self.inner
             .vram_allocator
+            .lock()
+            .unwrap()
+            .clone()
             .alloc_buffer(self, size, access, element_stride, flags)
     }
 
@@ -502,7 +497,7 @@ impl Device {
         access: DataAccess,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        self.inner.vram_allocator.alloc_buffer_with_capacity(
+        self.inner.vram_allocator.lock().unwrap().clone().alloc_buffer_with_capacity(
             self,
             initial_size,
             expected_max,
@@ -530,6 +525,9 @@ impl Device {
     ) -> anyhow::Result<crate::texture::Texture> {
         self.inner
             .vram_allocator
+            .lock()
+            .unwrap()
+            .clone()
             .alloc_texture(self, width, height, format, access, flags)
     }
 
@@ -618,7 +616,11 @@ impl Device {
         // for all epochs <= value, then flush the deletion queue so that Metal heap
         // allocations freed by Buffer::drop (inside boundary_crossed) are immediately
         // returned to the heap.
-        self.inner.vram_allocator.boundary_crossed(value);
+        // Clone the Arc and release the lock BEFORE calling boundary_crossed.
+        // boundary_crossed drops deferred Buffers, whose Drop impl calls device.vram_allocator(),
+        // which would deadlock if we still held the MutexGuard here.
+        let alloc = self.inner.vram_allocator.lock().unwrap().clone();
+        alloc.boundary_crossed(value);
         {
             let mut backend = self.inner.backend.lock().unwrap();
             backend.flush_deferred_deletions(self.inner.handle);
@@ -645,7 +647,8 @@ impl Device {
         };
         match result {
             Ok(true) => {
-                self.inner.vram_allocator.boundary_crossed(value);
+                let alloc = self.inner.vram_allocator.lock().unwrap().clone();
+                alloc.boundary_crossed(value);
                 {
                     let mut backend = self.inner.backend.lock().unwrap();
                     backend.flush_deferred_deletions(self.inner.handle);
@@ -704,7 +707,11 @@ impl Device {
         // boundary_crossed) pushes entries into the backend's deletion queue with a barrier
         // equal to the reclamation epoch (already GPU-completed), so they are immediately
         // eligible for the second flush_deferred_deletions call below.
-        self.inner.vram_allocator.boundary_crossed(epoch);
+        // Clone the Arc and release the lock BEFORE calling boundary_crossed.
+        // boundary_crossed drops deferred Buffers, whose Drop impl calls device.vram_allocator(),
+        // which would deadlock if we still held the MutexGuard here.
+        let alloc = self.inner.vram_allocator.lock().unwrap().clone();
+        alloc.boundary_crossed(epoch);
         // Process deletion queue entries that Buffer::drop just added above.
         {
             let mut backend = self.inner.backend.lock().unwrap();
@@ -725,7 +732,7 @@ impl Device {
     /// payload was reclaimed, or `Ok(())` with no reclamation if the ring is empty
     /// (degenerate case: the heap is full but there are no deferred payloads to free).
     pub fn reclaim_on_heap_pressure(&self) -> Result<(), crate::error::GoldyError> {
-        if let Some(oldest_epoch) = self.inner.vram_allocator.peek_oldest_deferred_epoch() {
+        if let Some(oldest_epoch) = self.inner.vram_allocator.lock().unwrap().clone().peek_oldest_deferred_epoch() {
             // Block until the GPU has completed at least the oldest pending epoch.
             // After this returns, boundary_crossed(oldest_epoch) is guaranteed to free
             // at least one payload, reclaiming heap space for the retry.
@@ -752,7 +759,7 @@ impl Device {
         epoch: TimelineValue,
         payload: crate::vram_allocator::DeferredPayload,
     ) {
-        self.inner.vram_allocator.defer_release(epoch, payload);
+        self.inner.vram_allocator.lock().unwrap().clone().defer_release(epoch, payload);
     }
 
     /// Convenience wrapper around [`defer_release`]: defer a single resource until `epoch` retires.
@@ -765,7 +772,7 @@ impl Device {
     pub fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
         let mut payload = crate::vram_allocator::DeferredPayload::new();
         payload.push(resource);
-        self.inner.vram_allocator.defer_release(epoch, payload);
+        self.inner.vram_allocator.lock().unwrap().clone().defer_release(epoch, payload);
     }
 
     #[doc(hidden)]
@@ -1298,7 +1305,7 @@ impl Device {
                 adapter_id: 0,
                 device_type: DeviceType::Other,
                 library_registry: Arc::new(Mutex::new(registry)),
-                vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
+                vram_allocator: Mutex::new(Arc::new(crate::vram_allocator::DefaultVramAllocator::new())),
                 placement_heap: Mutex::new(None),
                 high_water_timeline: AtomicU64::new(0),
             }),
@@ -1326,14 +1333,20 @@ impl Drop for DeviceInner {
         }
         // Drop all deferred payloads. The GPU has completed all submitted work (high-water
         // wait above), so it is safe to release any resources that were deferred.
-        self.vram_allocator.drain();
+        // Clone the Arc and release the lock BEFORE calling drain.
+        // drain() drops all deferred Buffers, whose Drop impl calls device.vram_allocator(),
+        // which would deadlock if we still held the MutexGuard here.
+        let alloc = self.vram_allocator.lock().unwrap().clone();
+        alloc.drain();
         // Drop the placement heap (and its views/buffer) while the device is still alive.
         // The heap's in-flight work is already covered by the high-water wait above.
         if let Ok(mut heap_guard) = self.placement_heap.lock() {
             *heap_guard = None;
         }
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_device(self.handle);
+        {
+            let mut backend = self.backend.lock().unwrap();
+            backend.destroy_device(self.handle);
+        }
     }
 }
 

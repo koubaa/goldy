@@ -43,7 +43,7 @@
 //! # Usage
 //!
 //! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. Call
-//! [`Device::with_vram_allocator`] before creating any GPU resources to install
+//! [`Device::set_vram_allocator`] before creating any GPU resources to install
 //! a custom allocator. The default ([`DefaultVramAllocator`]) delegates directly
 //! to the backend with zero overhead.
 //!
@@ -53,7 +53,7 @@
 //! [`Texture::new`]: crate::texture::Texture::new
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
-//! [`Device::with_vram_allocator`]: crate::device::Device::with_vram_allocator
+//! [`Device::set_vram_allocator`]: crate::device::Device::set_vram_allocator
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
 
@@ -61,12 +61,13 @@ use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
+use crate::tracy_plot;
 use crate::types::*;
 use anyhow::Result;
 use std::any::Any;
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 // The GPU epoch that is currently being reclaimed on this thread by `boundary_crossed`.
@@ -318,6 +319,13 @@ impl VramAllocator for DefaultVramAllocator {
         if payload.is_empty() {
             return;
         }
+        let payload_len = payload.len();
+        tracing::debug!(
+            target: "goldy::vram",
+            epoch,
+            payload_len,
+            "defer_release",
+        );
         self.deferred.lock().unwrap().push_back((epoch, payload));
     }
 
@@ -336,6 +344,12 @@ impl VramAllocator for DefaultVramAllocator {
             drained
         };
         let count = drained.len();
+        tracing::debug!(
+            target: "goldy::vram",
+            epoch,
+            reclaimed = count,
+            "boundary_crossed",
+        );
         // Drop payloads with RECLAMATION_EPOCH set so that backend destroy paths (e.g.
         // Metal's destroy_buffer) can use the epoch as a lower deletion-queue barrier.
         // This allows freed Metal heap allocations to become available on the very next
@@ -382,6 +396,10 @@ pub struct TrackingVramAllocator {
     /// without panicking. Steady-state value is non-negative.
     live_bytes: AtomicI64,
     budget_bytes: Option<u64>,
+    /// Monotonically increasing counter incremented on every `alloc_buffer` /
+    /// `alloc_texture` call.  Captured as the `seq` field in every `goldy::vram`
+    /// tracing event, giving every allocation a stable identity across log lines.
+    alloc_seq: AtomicU64,
 }
 
 impl TrackingVramAllocator {
@@ -391,6 +409,7 @@ impl TrackingVramAllocator {
             inner,
             live_bytes: AtomicI64::new(0),
             budget_bytes: None,
+            alloc_seq: AtomicU64::new(0),
         }
     }
 
@@ -400,13 +419,33 @@ impl TrackingVramAllocator {
             inner,
             live_bytes: AtomicI64::new(0),
             budget_bytes: Some(budget_bytes),
+            alloc_seq: AtomicU64::new(0),
         }
+    }
+
+    /// Total number of `alloc_buffer` / `alloc_texture` calls issued through this
+    /// allocator.  The value equals the `seq` that will be assigned to the *next*
+    /// allocation, so after the first allocation it is `1` and the emitted event had
+    /// `seq=0`.
+    ///
+    /// Useful in tests to assert that a known number of allocations occurred, and as
+    /// a correlation handle when reading `RUST_LOG=goldy::vram=debug` output.
+    pub fn alloc_count(&self) -> u64 {
+        self.alloc_seq.load(Ordering::Relaxed)
     }
 
     fn check_budget(&self, additional: u64) -> Result<()> {
         if let Some(cap) = self.budget_bytes {
             let current = self.live_bytes.load(Ordering::Relaxed) as u64;
             if current.saturating_add(additional) > cap {
+                tracing::warn!(
+                    target: "goldy::vram",
+                    current,
+                    additional,
+                    budget = cap,
+                    allocator = self.inner.name(),
+                    "budget_exceeded",
+                );
                 anyhow::bail!(
                     "VramAllocator budget exceeded: {current} + {additional} > {cap} \
                      (allocator={}, budget={})",
@@ -429,11 +468,21 @@ impl VramAllocator for TrackingVramAllocator {
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(size)?;
+        let seq = self.alloc_seq.fetch_add(1, Ordering::Relaxed);
         let buf = self
             .inner
             .alloc_buffer(device, size, access, element_stride, flags)?;
-        self.live_bytes
-            .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
+        let live = self.live_bytes.fetch_add(buf.allocated_size() as i64, Ordering::Relaxed)
+            + buf.allocated_size() as i64;
+        tracing::debug!(
+            target: "goldy::vram",
+            seq,
+            size,
+            live,
+            budget = self.budget_bytes,
+            "alloc_buffer",
+        );
+        tracy_plot!("goldy.vram.live_bytes", live as f64);
         Ok(buf)
     }
 
@@ -446,6 +495,7 @@ impl VramAllocator for TrackingVramAllocator {
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(expected_max.max(initial_size))?;
+        let seq = self.alloc_seq.fetch_add(1, Ordering::Relaxed);
         let buf = self.inner.alloc_buffer_with_capacity(
             device,
             initial_size,
@@ -453,8 +503,18 @@ impl VramAllocator for TrackingVramAllocator {
             access,
             flags,
         )?;
-        self.live_bytes
-            .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
+        let live = self.live_bytes.fetch_add(buf.allocated_size() as i64, Ordering::Relaxed)
+            + buf.allocated_size() as i64;
+        tracing::debug!(
+            target: "goldy::vram",
+            seq,
+            initial_size,
+            expected_max,
+            live,
+            budget = self.budget_bytes,
+            "alloc_buffer_with_capacity",
+        );
+        tracy_plot!("goldy.vram.live_bytes", live as f64);
         Ok(buf)
     }
 
@@ -469,30 +529,63 @@ impl VramAllocator for TrackingVramAllocator {
     ) -> Result<Texture> {
         let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
         self.check_budget(estimated)?;
+        let seq = self.alloc_seq.fetch_add(1, Ordering::Relaxed);
         let tex = self
             .inner
             .alloc_texture(device, width, height, format, access, flags)?;
-        self.live_bytes
-            .fetch_add(tex.byte_size() as i64, Ordering::Relaxed);
+        let live = self.live_bytes.fetch_add(tex.byte_size() as i64, Ordering::Relaxed)
+            + tex.byte_size() as i64;
+        tracing::debug!(
+            target: "goldy::vram",
+            seq,
+            width,
+            height,
+            ?format,
+            live,
+            budget = self.budget_bytes,
+            "alloc_texture",
+        );
+        tracy_plot!("goldy.vram.live_bytes", live as f64);
         Ok(tex)
     }
 
     fn notify_buffer_freed(&self, size: u64) {
-        self.live_bytes.fetch_sub(size as i64, Ordering::Relaxed);
+        let live = self.live_bytes.fetch_sub(size as i64, Ordering::Relaxed) - size as i64;
+        tracing::debug!(
+            target: "goldy::vram",
+            size,
+            live,
+            "notify_buffer_freed",
+        );
+        tracy_plot!("goldy.vram.live_bytes", live as f64);
         self.inner.notify_buffer_freed(size);
     }
 
     fn notify_texture_freed(&self, byte_size: usize) {
-        self.live_bytes
-            .fetch_sub(byte_size as i64, Ordering::Relaxed);
+        let live =
+            self.live_bytes.fetch_sub(byte_size as i64, Ordering::Relaxed) - byte_size as i64;
+        tracing::debug!(
+            target: "goldy::vram",
+            byte_size,
+            live,
+            "notify_texture_freed",
+        );
+        tracy_plot!("goldy.vram.live_bytes", live as f64);
         self.inner.notify_texture_freed(byte_size);
     }
 
     fn notify_buffer_resized(&self, old_allocated: u64, new_allocated: u64) {
-        self.live_bytes.fetch_add(
-            (new_allocated as i64).wrapping_sub(old_allocated as i64),
-            Ordering::Relaxed,
+        let delta = (new_allocated as i64).wrapping_sub(old_allocated as i64);
+        let live = self.live_bytes.fetch_add(delta, Ordering::Relaxed) + delta;
+        tracing::debug!(
+            target: "goldy::vram",
+            old_allocated,
+            new_allocated,
+            delta,
+            live,
+            "notify_buffer_resized",
         );
+        tracy_plot!("goldy.vram.live_bytes", live as f64);
         self.inner.notify_buffer_resized(old_allocated, new_allocated);
     }
 
@@ -550,6 +643,44 @@ mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
 
+    /// Install a process-wide "permissive" tracing subscriber exactly once.
+    ///
+    /// The default `NoSubscriber` has `max_level_hint = Some(OFF)`.  When
+    /// `rebuild_interest_cache` runs with no real subscriber registered, it sets
+    /// `LevelFilter::current()` to OFF globally, causing every `tracing::debug!`
+    /// macro invocation to short-circuit before the thread-local subscriber
+    /// installed by `with_default` ever sees the event.
+    ///
+    /// This stub subscriber has `max_level_hint = None` (treated as TRACE) and
+    /// `register_callsite = Interest::sometimes()`, so MAX_LEVEL stays at TRACE
+    /// for the entire test binary, and `with_default` can capture events normally.
+    fn init_test_tracing() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            struct PermissiveStub;
+            impl tracing::Subscriber for PermissiveStub {
+                fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { false }
+                fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> { None }
+                fn register_callsite(
+                    &self,
+                    _: &'static tracing::Metadata<'static>,
+                ) -> tracing::subscriber::Interest {
+                    tracing::subscriber::Interest::sometimes()
+                }
+                fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                    tracing::span::Id::from_u64(1)
+                }
+                fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+                fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+                fn event(&self, _: &tracing::Event<'_>) {}
+                fn enter(&self, _: &tracing::span::Id) {}
+                fn exit(&self, _: &tracing::span::Id) {}
+            }
+            let _ = tracing::subscriber::set_global_default(PermissiveStub);
+        });
+    }
+
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
     }
@@ -591,8 +722,8 @@ mod tests {
     #[test]
     fn tracking_allocator_tracks_bytes() {
         let alloc = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
-        let base = test_device();
-        let device = base.with_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
+        let device = test_device();
+        device.set_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
 
         assert_eq!(alloc.allocated_bytes(), 0);
 
@@ -633,8 +764,8 @@ mod tests {
     #[test]
     fn tracking_allocator_texture_tracking() {
         let alloc = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
-        let base = test_device();
-        let device = base.with_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
+        let device = test_device();
+        device.set_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
 
         let tex = device
             .alloc_texture(
@@ -804,6 +935,126 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 1a: diagnostic logging tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tracking_allocator_alloc_count_increments() {
+        let alloc = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
+        let device = test_device();
+        device.set_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
+
+        assert_eq!(alloc.alloc_count(), 0, "alloc_count starts at zero");
+
+        let _buf1 = device
+            .alloc_buffer(1024, DataAccess::Scattered, None, BufferFlags::empty())
+            .unwrap();
+        assert_eq!(alloc.alloc_count(), 1, "first alloc increments count to 1");
+
+        let _buf2 = device
+            .alloc_buffer(2048, DataAccess::Scattered, None, BufferFlags::empty())
+            .unwrap();
+        assert_eq!(alloc.alloc_count(), 2, "second alloc increments count to 2");
+
+        let _tex = device
+            .alloc_texture(
+                16,
+                16,
+                TextureFormat::Rgba8Unorm,
+                SpatialAccess::Interpolated,
+                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+            )
+            .unwrap();
+        assert_eq!(alloc.alloc_count(), 3, "texture alloc also increments count");
+    }
+
+    /// Installs a minimal tracing subscriber and verifies that `alloc_buffer`
+    /// emits a `goldy::vram` event carrying `seq=0` and the correct `size`.
+    ///
+    /// Requires the process-wide permissive subscriber (see `init_test_tracing`)
+    /// to keep `LevelFilter::current()` at TRACE so that `tracing::debug!`
+    /// events are not silently discarded.
+    #[test]
+    fn tracing_alloc_buffer_emits_vram_event() {
+        init_test_tracing();
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+
+        /// Captures (name, u64) pairs from tracing events targeting "goldy::vram".
+        #[derive(Default)]
+        struct Capture {
+            fields: Mutex<Vec<(String, u64)>>,
+        }
+
+        struct FieldVisitor<'a>(&'a Mutex<Vec<(String, u64)>>);
+
+        impl Visit for FieldVisitor<'_> {
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((field.name().to_owned(), value));
+            }
+            fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+        }
+
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+                meta.target() == "goldy::vram"
+            }
+            // Return `sometimes` so tracing does NOT permanently cache this callsite
+            // as NEVER when other tests run first without a goldy::vram subscriber.
+            fn register_callsite(
+                &self,
+                meta: &'static tracing::Metadata<'static>,
+            ) -> tracing::subscriber::Interest {
+                if meta.target() == "goldy::vram" {
+                    tracing::subscriber::Interest::sometimes()
+                } else {
+                    tracing::subscriber::Interest::never()
+                }
+            }
+            fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _id: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+            fn record_follows_from(
+                &self,
+                _id: &tracing::span::Id,
+                _follows: &tracing::span::Id,
+            ) {
+            }
+            fn event(&self, event: &tracing::Event<'_>) {
+                event.record(&mut FieldVisitor(&self.fields));
+            }
+            fn enter(&self, _id: &tracing::span::Id) {}
+            fn exit(&self, _id: &tracing::span::Id) {}
+        }
+
+        let capture = Arc::new(Capture::default());
+        let alloc = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
+        let device = test_device();
+        device.set_vram_allocator(Arc::clone(&alloc) as Arc<dyn VramAllocator>);
+
+        tracing::subscriber::with_default(Arc::clone(&capture), || {
+            // Force callsite re-registration under the Capture subscriber.
+            // In a parallel test run, other tests may have rebuilt the global
+            // callsite-interest cache (resetting "goldy::vram" to NEVER) after
+            // Dispatch::new triggered the rebuild in with_default's preamble.
+            tracing::callsite::rebuild_interest_cache();
+            let _buf = device
+                .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
+                .unwrap();
+        });
+
+        let fields = capture.fields.lock().unwrap();
+        let seq = fields.iter().find(|(k, _)| k == "seq").map(|(_, v)| *v);
+        let size = fields.iter().find(|(k, _)| k == "size").map(|(_, v)| *v);
+        assert_eq!(seq, Some(0), "first alloc must have seq=0");
+        assert_eq!(size, Some(4096), "emitted size must match requested size");
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 0 end-to-end routing test
     // -----------------------------------------------------------------------
 
@@ -814,9 +1065,8 @@ mod tests {
         let tracking = Arc::new(TrackingVramAllocator::new(
             Arc::new(DefaultVramAllocator::new()) as Arc<dyn VramAllocator>,
         ));
-        let base = test_device();
-        let device =
-            base.with_vram_allocator(Arc::clone(&tracking) as Arc<dyn VramAllocator>);
+        let device = test_device();
+        device.set_vram_allocator(Arc::clone(&tracking) as Arc<dyn VramAllocator>);
 
         let mut ta = TransientAllocatorStrategy::EpochRegions
             .create(&device, TransientAllocatorConfig::default())
