@@ -1003,6 +1003,8 @@ pub(super) fn submit(
         ld.texture_staging_pool
             .release(signal_value, texture_scratches);
         ld.last_committed_timeline = Some(signal_value);
+        ld.in_flight_command_buffers
+            .push_back((signal_value, owned_command_buffer));
         ld.process_deletion_queue_up_to_signaled();
 
         if metal_memory_log_enabled() {
@@ -1191,6 +1193,8 @@ pub(super) fn submit_graph(
         ld.texture_staging_pool
             .release(signal_value, texture_scratches);
         ld.last_committed_timeline = Some(signal_value);
+        ld.in_flight_command_buffers
+            .push_back((signal_value, owned_command_buffer));
         ld.process_deletion_queue_up_to_signaled();
     }
 
