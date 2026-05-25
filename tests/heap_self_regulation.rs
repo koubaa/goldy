@@ -47,7 +47,10 @@ fn buffer_heap_stats_available_on_metal() {
 fn texture_heap_stats_available_on_metal() {
     let device = make_device();
     let stats = device.texture_heap_stats();
-    assert!(stats.is_some(), "texture_heap_stats should be Some on Metal");
+    assert!(
+        stats.is_some(),
+        "texture_heap_stats should be Some on Metal"
+    );
     let s = stats.unwrap();
     assert_eq!(s.texture_count, 0);
     assert_eq!(s.overflow_count, 0);
@@ -114,7 +117,10 @@ fn buffer_drop_frees_heap_space_after_flush() {
         })
         .collect();
     let overflow_during = device.buffer_heap_stats().unwrap().overflow_count;
-    assert!(overflow_during > 0, "should have overflow with 3×32MB buffers");
+    assert!(
+        overflow_during > 0,
+        "should have overflow with 3×32MB buffers"
+    );
 
     // Drop the big buffers.
     drop(big_bufs);

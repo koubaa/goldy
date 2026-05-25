@@ -553,7 +553,14 @@ pub(super) fn acquire(
     let _tz = crate::tracy_zone!("vk.surface.acquire");
 
     // Get surface state and current frame index.
-    let (device_handle, current_frame, swapchain, in_flight_fence, acquire_fence, image_available_semaphore) = {
+    let (
+        device_handle,
+        current_frame,
+        swapchain,
+        in_flight_fence,
+        acquire_fence,
+        image_available_semaphore,
+    ) = {
         let _fz = crate::tracy_zone!("vk.surface.acquire.frame_state");
         let surface_state = state
             .surfaces
@@ -714,8 +721,10 @@ pub(super) fn acquire(
             // for this swapchain image — no view creation or descriptor write needed.
             let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
             surface_state.current_image_index = Some(image_index);
-            surface_state.current_texture_handle =
-                surface_state.swapchain_texture_handles.get(image_index as usize).copied();
+            surface_state.current_texture_handle = surface_state
+                .swapchain_texture_handles
+                .get(image_index as usize)
+                .copied();
 
             Ok(image_index as SwapchainImageHandle)
         }
@@ -1050,8 +1059,7 @@ where
         .command_buffer_infos(&cmd_infos_1)
         .signal_semaphore_infos(&signals_1);
 
-    let cmd_info_2 =
-        vk::CommandBufferSubmitInfo::default().command_buffer(render_present_cmd);
+    let cmd_info_2 = vk::CommandBufferSubmitInfo::default().command_buffer(render_present_cmd);
     let wait_work_done = vk::SemaphoreSubmitInfo::default()
         .semaphore(work_done_semaphore)
         .value(0)
@@ -1248,8 +1256,7 @@ pub(super) fn present(
             .signal_semaphore_infos(&signals_1);
 
         // --- Submit 2 ---
-        let cmd_info_2 =
-            vk::CommandBufferSubmitInfo::default().command_buffer(compute_present_cmd);
+        let cmd_info_2 = vk::CommandBufferSubmitInfo::default().command_buffer(compute_present_cmd);
         let wait_work_done = vk::SemaphoreSubmitInfo::default()
             .semaphore(work_done_sem_present)
             .value(0)
@@ -1667,8 +1674,7 @@ pub(super) fn resize(
         )
     };
 
-    let goldy_format =
-        super::utils::vk_to_format(format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
+    let goldy_format = super::utils::vk_to_format(format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
     let mut new_texture_handles = Vec::with_capacity(swapchain_images.len());
     for &image in &swapchain_images {
         let th = register_surface_texture(

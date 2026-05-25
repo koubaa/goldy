@@ -596,16 +596,12 @@ impl GpuBackend for MetalBackend {
         // that CB guarantees all earlier CBs (and timeline values) are also done.
         // This uses the Metal runtime's native Mach-semaphore wait rather than
         // routing through completedHandler -> condvar, eliminating GCD dispatch latency.
-        let cb_to_wait = self
-            .state
-            .devices
-            .get(&device)
-            .and_then(|ld| {
-                ld.in_flight_command_buffers
-                    .iter()
-                    .find(|(tv, _)| *tv >= value)
-                    .map(|(_, cb)| cb.to_owned())
-            });
+        let cb_to_wait = self.state.devices.get(&device).and_then(|ld| {
+            ld.in_flight_command_buffers
+                .iter()
+                .find(|(tv, _)| *tv >= value)
+                .map(|(_, cb)| cb.to_owned())
+        });
 
         if let Some(cb) = cb_to_wait {
             let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
@@ -789,19 +785,25 @@ impl GpuBackend for MetalBackend {
     }
 
     fn buffer_heap_stats(&self, device: DeviceHandle) -> Option<super::BufferHeapStats> {
-        self.state.devices.get(&device).map(|ld| super::BufferHeapStats {
-            buffer_count: ld.heap_allocator.buffer_count(),
-            overflow_count: ld.heap_allocator.overflow_count(),
-            high_water_bytes: ld.heap_allocator.high_water_mark(),
-            primary_heap_bytes: ld.heap_allocator.primary_size(),
-        })
+        self.state
+            .devices
+            .get(&device)
+            .map(|ld| super::BufferHeapStats {
+                buffer_count: ld.heap_allocator.buffer_count(),
+                overflow_count: ld.heap_allocator.overflow_count(),
+                high_water_bytes: ld.heap_allocator.high_water_mark(),
+                primary_heap_bytes: ld.heap_allocator.primary_size(),
+            })
     }
 
     fn texture_heap_stats(&self, device: DeviceHandle) -> Option<super::TextureHeapStats> {
-        self.state.devices.get(&device).map(|ld| super::TextureHeapStats {
-            texture_count: ld.texture_heap.texture_count(),
-            overflow_count: ld.texture_heap.overflow_count(),
-        })
+        self.state
+            .devices
+            .get(&device)
+            .map(|ld| super::TextureHeapStats {
+                texture_count: ld.texture_heap.texture_count(),
+                overflow_count: ld.texture_heap.overflow_count(),
+            })
     }
 
     fn in_flight_command_buffer_count(&self, device: DeviceHandle) -> usize {

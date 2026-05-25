@@ -322,7 +322,11 @@ impl VramAllocator for DefaultVramAllocator {
     }
 
     fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.deferred.lock().unwrap().front().map(|(epoch, _)| *epoch)
+        self.deferred
+            .lock()
+            .unwrap()
+            .front()
+            .map(|(epoch, _)| *epoch)
     }
 
     fn drain(&self) {

@@ -7,7 +7,7 @@ use super::types::{
 use crate::backend::DataAccess;
 use crate::types::BufferFlags;
 use ::metal as mtl;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use mtl::MTLResourceOptions;
 
 fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
@@ -37,7 +37,10 @@ fn allocate_mtl_storage_buffer(
     }
 
     // Attempt 1: fast path — heap has space.
-    if let Some(buf) = logical_device.heap_allocator.allocate(allocation_size, options) {
+    if let Some(buf) = logical_device
+        .heap_allocator
+        .allocate(allocation_size, options)
+    {
         return Ok((buf, false));
     }
 
@@ -49,7 +52,10 @@ fn allocate_mtl_storage_buffer(
         logical_device.process_deletion_queue_up_to_signaled();
         logical_device.heap_allocator.compact_overflow();
     }
-    if let Some(buf) = logical_device.heap_allocator.allocate(allocation_size, options) {
+    if let Some(buf) = logical_device
+        .heap_allocator
+        .allocate(allocation_size, options)
+    {
         return Ok((buf, false));
     }
 
@@ -72,7 +78,10 @@ fn allocate_mtl_storage_buffer(
         cb.wait_until_completed();
         logical_device.process_deletion_queue_up_to_signaled();
         logical_device.heap_allocator.compact_overflow();
-        if let Some(buf) = logical_device.heap_allocator.allocate(allocation_size, options) {
+        if let Some(buf) = logical_device
+            .heap_allocator
+            .allocate(allocation_size, options)
+        {
             return Ok((buf, false));
         }
     }

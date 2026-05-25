@@ -5,7 +5,7 @@ use super::types::{MetalState, ResourceRegistry, TextureState, ARGUMENT_BUFFER_S
 use super::utils::format_to_mtl;
 use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
 use ::metal as mtl;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use mtl::{MTLOrigin, MTLRegion, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 
 /// Texture heap allocation with drain-and-retry self-regulation.
