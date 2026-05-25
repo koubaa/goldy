@@ -17,7 +17,7 @@ use super::super::{
 use crate::backend::DataAccess;
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
 use metal as mtl;
@@ -544,6 +544,14 @@ pub(crate) struct LogicalDevice {
     pub staging_belt: super::staging::StagingBelt,
     /// Pooled staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
     pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// In-flight command buffers indexed by timeline value, ordered by submission.
+    ///
+    /// Used in `wait_until` to call `waitUntilCompleted()` — the Metal-native Mach-semaphore
+    /// wait — instead of routing through the `completedHandler` → condvar chain.  Since the
+    /// command queue is serial, waiting on the CB at value N guarantees all CBs at values < N
+    /// are also complete.  Entries are drained lazily from the front as timeline values are
+    /// confirmed signaled.
+    pub in_flight_command_buffers: VecDeque<(crate::timeline::TimelineValue, mtl::CommandBuffer)>,
 }
 
 impl LogicalDevice {

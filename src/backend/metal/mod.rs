@@ -48,6 +48,19 @@ pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState)
     }
 }
 
+/// Drop all entries from the front of the in-flight CB deque whose timeline
+/// value is <= the current signaled value.  Safe to call at any time.
+pub(in crate::backend::metal) fn drain_completed_cbs(ld: &mut types::LogicalDevice) {
+    let signaled = ld.timeline_event.as_ref().signaled_value();
+    while ld
+        .in_flight_command_buffers
+        .front()
+        .is_some_and(|(tv, _)| *tv <= signaled)
+    {
+        ld.in_flight_command_buffers.pop_front();
+    }
+}
+
 /// Block until scheduled timeline values have been signaled on every device, or timeout.
 pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Result<()> {
     use std::sync::atomic::Ordering;
@@ -561,31 +574,76 @@ impl GpuBackend for MetalBackend {
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
+        let _tz = crate::tracy_zone!("mtl.wait_until");
 
         if self.state.device_lost.load(Ordering::Relaxed) {
             anyhow::bail!("Metal device lost");
         }
 
-        let waiter = self
+        // Fast path: GPU has already passed this timeline value.
+        if self.gpu_progress(device) >= value {
+            let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
+            if let Some(ld) = self.state.devices.get_mut(&device) {
+                drain_completed_cbs(ld);
+                ld.process_deletion_queue_up_to_signaled();
+            }
+            drain_all_pending_slots(&mut self.state);
+            return Ok(());
+        }
+
+        // Find the MTLCommandBuffer whose timeline value is >= `value` and call
+        // waitUntilCompleted() on it.  Since the command queue is serial, completing
+        // that CB guarantees all earlier CBs (and timeline values) are also done.
+        // This uses the Metal runtime's native Mach-semaphore wait rather than
+        // routing through completedHandler -> condvar, eliminating GCD dispatch latency.
+        let cb_to_wait = self
             .state
             .devices
             .get(&device)
-            .context("Invalid device handle")?
-            .timeline_waiter
-            .clone();
+            .and_then(|ld| {
+                ld.in_flight_command_buffers
+                    .iter()
+                    .find(|(tv, _)| *tv >= value)
+                    .map(|(_, cb)| cb.to_owned())
+            });
 
-        let timeout = std::time::Duration::from_secs(300);
-        if !waiter.wait_until(value, timeout) {
-            if self.state.device_lost.load(Ordering::Relaxed) {
-                anyhow::bail!("Metal device lost");
+        if let Some(cb) = cb_to_wait {
+            let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
+            cb.wait_until_completed();
+        } else {
+            // No CB in the deque for this value (value already retired or this is a
+            // future value with no submit yet). Fall back to condvar.
+            let waiter = self
+                .state
+                .devices
+                .get(&device)
+                .context("Invalid device handle")?
+                .timeline_waiter
+                .clone();
+            let timeout = std::time::Duration::from_secs(300);
+            let reached = {
+                let _wz = crate::tracy_zone!("mtl.wait_until.condvar_fallback");
+                waiter.wait_until(value, timeout)
+            };
+            if !reached {
+                if self.state.device_lost.load(Ordering::Relaxed) {
+                    anyhow::bail!("Metal device lost");
+                }
+                anyhow::bail!("wait_until exceeded 300s");
             }
-            anyhow::bail!("wait_until exceeded 300s");
         }
 
-        if let Some(ld) = self.state.devices.get_mut(&device) {
-            ld.process_deletion_queue_up_to_signaled();
+        {
+            let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
+            if let Some(ld) = self.state.devices.get_mut(&device) {
+                drain_completed_cbs(ld);
+                ld.process_deletion_queue_up_to_signaled();
+            }
         }
-        drain_all_pending_slots(&mut self.state);
+        {
+            let _pz = crate::tracy_zone!("mtl.wait_until.drain_pending_slots");
+            drain_all_pending_slots(&mut self.state);
+        }
         Ok(())
     }
 

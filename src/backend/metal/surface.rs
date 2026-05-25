@@ -134,6 +134,7 @@ pub(super) fn acquire(
     state: &mut MetalState,
     surface: SurfaceHandle,
 ) -> Result<SwapchainImageHandle> {
+    let _tz = crate::tracy_zone!("mtl.surface.acquire");
     let (device_handle, frame_idx, width, height, format) = {
         let surface_state = state
             .surfaces
@@ -154,7 +155,10 @@ pub(super) fn acquire(
         surface_state.height = (size.height as u32).max(1);
         surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
-        let drawable: id = unsafe { msg_send![layer, nextDrawable] };
+        let drawable: id = {
+            let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
+            unsafe { msg_send![layer, nextDrawable] }
+        };
         if drawable == nil {
             anyhow::bail!("Failed to get next drawable from CAMetalLayer");
         }
@@ -344,7 +348,8 @@ pub(super) fn present(
         .get(&device_handle)
         .context("Device no longer valid")?;
 
-    let command_buffer = logical_device.command_queue.new_command_buffer();
+    let owned_command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
+    let command_buffer = owned_command_buffer.as_ref();
 
     let drawable = drawable_ptr as id;
     let drawable_texture = if copy_scratch_to_drawable {
@@ -378,6 +383,11 @@ pub(super) fn present(
         blit.end_encoding();
     }
 
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Device no longer valid")?;
+
     command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
 
     let waiter = logical_device.timeline_waiter.clone();
@@ -405,6 +415,8 @@ pub(super) fn present(
     surface_state.current_texture_handle = None;
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.in_flight_command_buffers
+            .push_back((signal_value, owned_command_buffer));
         ld.process_deletion_queue_up_to_signaled();
     }
 
