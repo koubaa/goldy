@@ -345,6 +345,8 @@ pub(crate) struct LogicalDevice {
     /// At `cleanup_depth=1` the CB is guaranteed to be in executable state at
     /// the start of the next frame (GPU has completed it via `wait_until`).
     pub retained_compute_cb: Option<RetainedVkCb>,
+    /// VramAllocator to notify when the timeline semaphore signals dispatch-boundary completion.
+    pub vram_allocator: Option<std::sync::Arc<dyn crate::vram_allocator::VramAllocator>>,
 }
 
 /// A Vulkan command buffer retained for resubmission.

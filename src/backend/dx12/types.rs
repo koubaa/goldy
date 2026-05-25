@@ -463,6 +463,8 @@ pub(crate) struct LogicalDevice {
     pub compute_pso_blobs: HashMap<u64, Vec<u8>>,
     /// `true` if either blob map changed since loading from [`super::pso_cache`] disk file.
     pub pso_disk_cache_dirty: bool,
+    /// VramAllocator to notify when fence signals dispatch-boundary completion.
+    pub vram_allocator: Option<std::sync::Arc<dyn crate::vram_allocator::VramAllocator>>,
 }
 
 impl LogicalDevice {

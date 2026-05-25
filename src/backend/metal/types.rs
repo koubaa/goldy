@@ -582,6 +582,13 @@ pub(crate) struct LogicalDevice {
     /// are also complete.  Entries are drained lazily from the front as timeline values are
     /// confirmed signaled.
     pub in_flight_command_buffers: VecDeque<(crate::timeline::TimelineValue, mtl::CommandBuffer)>,
+    /// VramAllocator to notify at GPU dispatch-boundary completion.
+    /// Set via [`GpuBackend::set_vram_allocator`] and captured by Metal completion handlers.
+    pub vram_allocator: Option<std::sync::Arc<dyn crate::vram_allocator::VramAllocator>>,
+    /// Latest timeline epoch that a completion handler has signaled as finished.
+    /// Updated atomically by the Metal completion-handler dispatch thread so the
+    /// host can read it outside the backend lock (avoiding deadlock with Buffer::drop).
+    pub completed_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl LogicalDevice {

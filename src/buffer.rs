@@ -168,9 +168,47 @@ impl Buffer {
                 "BufferFlags::GPU_ONLY cannot be combined with BufferFlags::CPU_READABLE"
             );
         }
-        let mut backend = device.inner.backend.lock().unwrap();
-        let handle =
-            backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
+
+        // Helper: attempt allocation under the backend lock.
+        let try_alloc = |device: &Device| -> Result<crate::backend::BufferHandle> {
+            device
+                .inner
+                .backend
+                .lock()
+                .unwrap()
+                .create_buffer(device.inner.handle, size, access, element_stride, flags)
+        };
+
+        let handle = match try_alloc(device) {
+            Ok(h) => h,
+            Err(first_err) => {
+                // On Metal heap exhaustion the lock has already been released when
+                // `create_buffer` returns Err. We now reclaim the oldest pending
+                // deferred epoch (blocking on the GPU if necessary) and retry once.
+                // This is the self-healing path for the Balanced frame strategy and
+                // headless test loops that don't issue explicit `wait_until` calls.
+                let err_str = first_err.to_string();
+                let is_heap_pressure = err_str.contains("heap allocation failed")
+                    || err_str.contains("heap is full")
+                    || err_str.contains("all heaps exhausted");
+                if is_heap_pressure {
+                    tracing::debug!(
+                        "Buffer heap pressure on {}B allocation — reclaiming oldest deferred \
+                         epoch and retrying",
+                        size
+                    );
+                    // Wait for the oldest pending epoch and flush — this frees at least
+                    // one payload's worth of Metal heap space before we retry.
+                    if let Err(e) = device.reclaim_on_heap_pressure() {
+                        tracing::warn!("reclaim_on_heap_pressure failed: {e}; returning original error");
+                        return Err(first_err);
+                    }
+                    try_alloc(device).map_err(|_| first_err)?
+                } else {
+                    return Err(first_err);
+                }
+            }
+        };
 
         Ok(Self {
             device: device.clone(),

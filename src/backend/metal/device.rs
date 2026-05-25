@@ -116,6 +116,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),
             in_flight_command_buffers: std::collections::VecDeque::new(),
+            vram_allocator: None,
+            completed_epoch: std::sync::atomic::AtomicU64::new(0),
         },
     );
 

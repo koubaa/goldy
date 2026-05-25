@@ -17,6 +17,7 @@
 use goldy::task_graph::TaskGraph;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{Buffer, DataAccess, Device, DeviceType, Instance};
+use std::sync::Arc;
 
 fn make_device() -> Device {
     let instance = Instance::new().expect("Instance::new");
@@ -506,59 +507,78 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
 // ===========================================================================
 
 #[test]
-fn flush_deferred_deletions_advances_with_gpu_progress() {
+fn boundary_crossed_reclaims_deferred_payload_after_wait() {
     let device = make_device();
 
-    // Submit 3 frames worth of work.
+    // Submit 3 frames worth of work and defer a tracked resource per frame.
+    let alive: Vec<Arc<()>> = (0..3).map(|_| Arc::new(())).collect();
+    let weaks: Vec<_> = alive.iter().map(Arc::downgrade).collect();
+
     let mut timelines = Vec::new();
-    for _ in 0..3 {
+    for arc in &alive {
         let mut graph = TaskGraph::new();
         let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = device.submit_pipelined(&mut graph).unwrap();
-        device.defer_until(tv, buf);
+        // Defer both the buffer and the Arc so we can track when they're dropped.
+        let mut payload = goldy::vram_allocator::DeferredPayload::new();
+        payload.push(buf).push(Arc::clone(arc));
+        device.defer_release(tv, payload);
         timelines.push(tv);
     }
+    drop(alive); // only the deferred ring holds refs now
 
-    assert!(device.has_deferred_payloads());
-    let oldest_before = device.oldest_deferred_epoch().unwrap();
+    // Resources still alive — GPU hasn't completed yet.
+    // (Mac: completion handler fires async; all 3 frames may or may not be done)
 
-    // Wait for the first frame and flush.
+    // Wait for the first frame → boundary_crossed fires synchronously.
     device.wait_until(timelines[0]).unwrap();
-    device.flush_deferred_deletions();
+    // At least the first payload must be gone.
+    assert!(
+        weaks[0].upgrade().is_none(),
+        "payload for frame 0 should be reclaimed after wait_until"
+    );
 
-    let oldest_after = device.oldest_deferred_epoch();
-    if let Some(after) = oldest_after {
+    // Wait for all frames.
+    device.wait_until(*timelines.last().unwrap()).unwrap();
+    for (i, w) in weaks.iter().enumerate() {
         assert!(
-            after > oldest_before,
-            "oldest_deferred_epoch should advance: before={oldest_before} after={after}"
+            w.upgrade().is_none(),
+            "payload for frame {i} should be reclaimed after final wait_until"
         );
     }
 }
 
 #[test]
-fn oldest_deferred_epoch_is_none_when_empty() {
+fn deferred_ring_is_empty_when_no_payloads_registered() {
     let device = make_device();
-    assert_eq!(device.oldest_deferred_epoch(), None);
-    assert!(!device.has_deferred_payloads());
+    // With no deferred payloads, boundary_crossed should be a no-op.
+    let alloc = device.vram_allocator_arc();
+    assert_eq!(alloc.boundary_crossed(9999), 0);
 }
 
 #[test]
 fn wait_and_flush_reclaims_all_deferred() {
     let device = make_device();
 
+    let alive = Arc::new(42u32);
+    let weak = Arc::downgrade(&alive);
+
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = device.submit_pipelined(&mut graph).unwrap();
 
-    device.defer_until(tv, buf);
-    assert!(device.has_deferred_payloads());
+    let mut payload = goldy::vram_allocator::DeferredPayload::new();
+    payload.push(buf).push(alive);
+    device.defer_release(tv, payload);
 
     device.wait_until(tv).unwrap();
-    device.flush_deferred_deletions();
 
-    assert!(!device.has_deferred_payloads());
+    assert!(
+        weak.upgrade().is_none(),
+        "payload should be dropped after wait_until"
+    );
 }
 
 // ===========================================================================
@@ -734,7 +754,6 @@ fn rapid_submit_without_explicit_wait_survives_50_frames() {
 }
 
 #[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn rapid_submit_large_buffers_50_frames() {
     let device = make_device();
     let alloc_size = 4 * 1024 * 1024u64;
@@ -966,7 +985,8 @@ fn zero_byte_flush_is_no_op() {
     let device = make_device();
     // Calling flush with no deferred work should not panic or error.
     device.flush_deferred_deletions();
-    assert!(!device.has_deferred_payloads());
+    // With no payloads registered, boundary_crossed is a no-op.
+    assert_eq!(device.vram_allocator_arc().boundary_crossed(9999), 0);
 }
 
 #[test]
@@ -982,7 +1002,8 @@ fn double_flush_is_idempotent() {
     device.flush_deferred_deletions();
     // Second flush should be safe and not crash.
     device.flush_deferred_deletions();
-    assert!(!device.has_deferred_payloads());
+    // Deferred ring drained by wait_until — boundary_crossed idempotent.
+    assert_eq!(device.vram_allocator_arc().boundary_crossed(tv), 0);
 }
 
 #[test]

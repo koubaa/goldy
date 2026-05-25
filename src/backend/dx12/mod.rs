@@ -822,6 +822,16 @@ impl GpuBackend for Dx12Backend {
             .unwrap_or(0)
     }
 
+    fn set_vram_allocator(
+        &mut self,
+        device: DeviceHandle,
+        allocator: std::sync::Arc<dyn crate::vram_allocator::VramAllocator>,
+    ) {
+        if let Some(ld) = self.state.devices.get_mut(&device) {
+            ld.vram_allocator = Some(allocator);
+        }
+    }
+
     fn wait_until(
         &mut self,
         device_handle: DeviceHandle,

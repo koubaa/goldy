@@ -421,6 +421,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             vk_timestamp_period_ns: physical_device.properties.limits.timestamp_period,
             free_cmd_buffers: Vec::new(),
             retained_compute_cb: None,
+            vram_allocator: None,
         },
     );
 

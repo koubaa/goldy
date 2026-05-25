@@ -790,6 +790,35 @@ pub trait GpuBackend: Send + Sync {
     /// as available for re-use.  No-op if no retained list exists.
     fn evict_retained(&mut self, _device: DeviceHandle, _key: u64) {}
 
+    /// Register the [`VramAllocator`] associated with `device` so the backend can call
+    /// [`boundary_crossed`](crate::vram_allocator::VramAllocator::boundary_crossed) from
+    /// GPU completion handlers or fence-wait paths.
+    ///
+    /// Called by [`Device::with_vram_allocator`] and at device-creation time so the
+    /// backend always has a reference to the allocator that owns the deferred ring.
+    ///
+    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    fn set_vram_allocator(
+        &mut self,
+        _device: DeviceHandle,
+        _allocator: std::sync::Arc<dyn crate::vram_allocator::VramAllocator>,
+    ) {}
+
+    /// The latest GPU timeline epoch that this backend has observed as completed.
+    ///
+    /// For Metal: the maximum value atomically updated by the completion-handler dispatch
+    /// thread, reflecting true asynchronous GPU completion.
+    /// For DX12/Vulkan: equivalent to [`gpu_progress`](Self::gpu_progress) — the current
+    /// fence/semaphore signaled value.
+    ///
+    /// Called by [`Device::flush_deferred_deletions`] **outside** the backend lock so that
+    /// the [`VramAllocator::boundary_crossed`](crate::vram_allocator::VramAllocator::boundary_crossed)
+    /// call that follows can safely drop GPU resources (which re-acquire the backend lock
+    /// via [`Buffer::drop`]).
+    fn completed_epoch(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+        self.gpu_progress(device)
+    }
+
     /// Acquire the next swapchain image and begin a frame bracket.
     fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)>;
 

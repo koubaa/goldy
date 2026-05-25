@@ -143,6 +143,10 @@ impl Instance {
 
         tracing::info!(adapter_id, ?device_type, "GPU device created");
 
+        let vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator> =
+            Arc::new(crate::vram_allocator::DefaultVramAllocator::new());
+        backend.set_vram_allocator(handle, Arc::clone(&vram_allocator));
+
         Ok(Device {
             inner: Arc::new(DeviceInner {
                 backend: Arc::clone(&self.backend),
@@ -150,7 +154,7 @@ impl Instance {
                 adapter_id,
                 device_type,
                 library_registry: Arc::new(Mutex::new(registry)),
-                vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
+                vram_allocator,
                 placement_heap: Mutex::new(None),
                 high_water_timeline: AtomicU64::new(0),
             }),
@@ -447,6 +451,12 @@ impl Device {
         &self,
         allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
     ) -> Self {
+        // Register the allocator with the backend so completion handlers can call
+        // boundary_crossed on it.
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.set_vram_allocator(self.inner.handle, Arc::clone(&allocator));
+        }
         Self {
             inner: Arc::new(DeviceInner {
                 backend: Arc::clone(&self.inner.backend),
@@ -595,15 +605,25 @@ impl Device {
     /// Block until the device timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("device.wait_until");
-        let mut backend = {
+        {
             let _lock = crate::tracy_zone!("device.wait_until.lock");
-            self.inner.backend.lock().unwrap()
-        };
-        let _backend = crate::tracy_zone!("device.wait_until.backend");
-        backend.wait_until(self.inner.handle, value).map_err(|e| {
-            drop(backend);
-            self.classify(e)
-        })
+            let mut backend = self.inner.backend.lock().unwrap();
+            let _backend = crate::tracy_zone!("device.wait_until.backend");
+            backend.wait_until(self.inner.handle, value).map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })?;
+        }
+        // After the blocking wait, the GPU has completed epoch `value`. Reclaim payloads
+        // for all epochs <= value, then flush the deletion queue so that Metal heap
+        // allocations freed by Buffer::drop (inside boundary_crossed) are immediately
+        // returned to the heap.
+        self.inner.vram_allocator.boundary_crossed(value);
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+        }
+        Ok(())
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
@@ -612,14 +632,28 @@ impl Device {
         value: TimelineValue,
         timeout_ms: u32,
     ) -> Result<(), GoldyError> {
-        let mut backend = self.inner.backend.lock().unwrap();
-        match backend.wait_until_timeout(self.inner.handle, value, timeout_ms) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(GoldyError::SubmitTimeout),
-            Err(e) => {
-                drop(backend);
-                Err(self.classify(e))
+        let result = {
+            let mut backend = self.inner.backend.lock().unwrap();
+            match backend.wait_until_timeout(self.inner.handle, value, timeout_ms) {
+                Ok(true) => Ok(true),
+                Ok(false) => Ok(false),
+                Err(e) => {
+                    drop(backend);
+                    return Err(self.classify(e));
+                }
             }
+        };
+        match result {
+            Ok(true) => {
+                self.inner.vram_allocator.boundary_crossed(value);
+                {
+                    let mut backend = self.inner.backend.lock().unwrap();
+                    backend.flush_deferred_deletions(self.inner.handle);
+                }
+                Ok(())
+            }
+            Ok(false) => Err(GoldyError::SubmitTimeout),
+            Err(e) => Err(e),
         }
     }
 
@@ -653,42 +687,52 @@ impl Device {
     /// non-blocking frame drain) can call this to reclaim slots immediately
     /// rather than waiting for the next internal call.
     ///
-    /// Drives all epoch-based reclamation: `VramAllocator::reclaim` drops any
-    /// [`DeferredPayload`]s registered via [`defer_release`] whose epoch has been
-    /// reached. This includes:
-    /// - `BufferView`s from the placement heap (for transient buffer lifetimes)
-    /// - `RegionReclaimToken`s from `EpochRegionsAllocator`
-    /// - `FreeRangeToken`s from `HeapTransientAllocator`
-    /// - `ResetToken`s from `BumpResetAllocator`
+    /// Drives backend-level reclamation (Metal DeletionQueue, DX12/Vulkan deletion
+    /// queues). VramAllocator payloads are reclaimed event-driven via GPU completion
+    /// handlers — no polling required.
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
     pub fn flush_deferred_deletions(&self) {
         let _tz = crate::tracy_zone!("device.flush_deferred_deletions");
-        let mut backend = self.inner.backend.lock().unwrap();
-        backend.flush_deferred_deletions(self.inner.handle);
-        let progress = backend.gpu_progress(self.inner.handle);
-        drop(backend);
-        self.inner.vram_allocator.reclaim(progress);
+        let epoch = {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+            backend.completed_epoch(self.inner.handle)
+        };
+        // Drop deferred payloads for completed epochs. Buffer::drop (called inside
+        // boundary_crossed) pushes entries into the backend's deletion queue with a barrier
+        // equal to the reclamation epoch (already GPU-completed), so they are immediately
+        // eligible for the second flush_deferred_deletions call below.
+        self.inner.vram_allocator.boundary_crossed(epoch);
+        // Process deletion queue entries that Buffer::drop just added above.
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+        }
     }
 
-    /// Returns `true` if the device's [`VramAllocator`] holds deferred payloads that
-    /// have not yet been reclaimed (i.e. their GPU epoch has not been reached).
+    /// Wait for the oldest pending deferred epoch to complete, then reclaim it.
     ///
-    /// Useful as a precondition before calling [`wait_until`](Self::wait_until) to avoid
-    /// blocking indefinitely when there is nothing to wait for.
+    /// Called when a buffer or texture allocation fails due to heap exhaustion.
+    /// This is the self-healing path for scenarios where the GPU is lagging
+    /// behind the CPU (common in headless tests and the `Balanced` frame strategy
+    /// where no explicit `wait_until` is issued by the caller).
     ///
-    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn has_deferred_payloads(&self) -> bool {
-        self.inner.vram_allocator.has_deferred_payloads()
-    }
-
-    /// The oldest GPU epoch currently in the deferred payload ring, if any.
-    ///
-    /// Calling `wait_until(oldest_deferred_epoch())` followed by
-    /// `flush_deferred_deletions()` will reclaim the oldest batch of deferred resources.
-    pub fn oldest_deferred_epoch(&self) -> Option<crate::timeline::TimelineValue> {
-        self.inner.vram_allocator.oldest_deferred_epoch()
+    /// Waits for the OLDEST epoch still in the deferred ring — exactly enough GPU
+    /// progress to unblock reclamation — then calls `flush_deferred_deletions` to
+    /// free those payloads and compact the heap.  Returns `Ok(())` if at least one
+    /// payload was reclaimed, or `Ok(())` with no reclamation if the ring is empty
+    /// (degenerate case: the heap is full but there are no deferred payloads to free).
+    pub fn reclaim_on_heap_pressure(&self) -> Result<(), crate::error::GoldyError> {
+        if let Some(oldest_epoch) = self.inner.vram_allocator.peek_oldest_deferred_epoch() {
+            // Block until the GPU has completed at least the oldest pending epoch.
+            // After this returns, boundary_crossed(oldest_epoch) is guaranteed to free
+            // at least one payload, reclaiming heap space for the retry.
+            self.wait_until(oldest_epoch)?;
+            // wait_until already called boundary_crossed + double-flush internally.
+        }
+        Ok(())
     }
 
     /// Register a [`DeferredPayload`] for deferred dropping after GPU timeline `epoch` retires.

@@ -64,9 +64,23 @@ use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::Result;
 use std::any::Any;
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+
+// The GPU epoch that is currently being reclaimed on this thread by `boundary_crossed`.
+//
+// Set before dropping `DeferredPayload` entries so that `Buffer::drop` (→ the Metal
+// `destroy_buffer` path) can use the reclamation epoch as the deletion-queue barrier
+// instead of the conservative `timeline_scheduled_max`.  This allows the Metal heap
+// allocator to free those buffers on the very next `process_deletion_queue_up_to_signaled`
+// call, since `signaled_value >= reclamation_epoch` is already true by definition.
+//
+// `None` means we are NOT in a reclamation context; normal deletion semantics apply.
+thread_local! {
+    pub static RECLAMATION_EPOCH: Cell<Option<u64>> = const { Cell::new(None) };
+}
 
 // -----------------------------------------------------------------------
 // DeferredPayload
@@ -210,10 +224,10 @@ pub trait VramAllocator: Send + Sync {
 
     /// Register `payload` for deferred dropping after GPU timeline `epoch` retires.
     ///
-    /// The allocator holds all resources in the payload alive until a subsequent call to
-    /// [`reclaim`](Self::reclaim) observes `gpu_progress >= epoch`, at which point the
-    /// payload is dropped. Entries are expected to arrive roughly in epoch order; calling
-    /// [`reclaim`](Self::reclaim) drains from the front.
+    /// The allocator holds all resources in the payload alive until
+    /// [`boundary_crossed`](Self::boundary_crossed) is called with an epoch >= the
+    /// registered value, at which point the payload is dropped. Entries are expected to
+    /// arrive roughly in epoch order.
     ///
     /// Custom allocators that manage their own memory (e.g. PTX slab allocators) should
     /// override this to integrate with their internal reclamation pipeline.
@@ -221,34 +235,29 @@ pub trait VramAllocator: Send + Sync {
     /// The default implementation is a no-op: payloads are dropped immediately.
     fn defer_release(&self, _epoch: TimelineValue, _payload: DeferredPayload) {}
 
-    /// Reclaim all deferred payloads whose epoch is `<= gpu_progress`, dropping them.
+    /// Notify the allocator that the GPU has crossed dispatch boundary `epoch`.
     ///
-    /// Returns the number of entries reclaimed. Typically called from
-    /// [`Device::flush_deferred_deletions`](crate::device::Device::flush_deferred_deletions)
-    /// at frame boundaries.
+    /// All deferred payloads registered at epochs `<= epoch` are immediately dropped.
+    /// Returns the number of entries reclaimed.
+    ///
+    /// This is the event-driven reclamation entry point. It is called:
+    /// - From the Metal completion handler (asynchronously, when a command buffer finishes)
+    /// - From the host after `wait_until(epoch)` returns (synchronous safety net)
+    /// - From DX12/Vulkan backend flush/wait paths with the current fence/semaphore value
+    ///
+    /// The call is idempotent: invoking it multiple times for the same epoch is safe.
     ///
     /// The default implementation is a no-op and returns 0.
-    fn reclaim(&self, _gpu_progress: TimelineValue) -> usize {
+    fn boundary_crossed(&self, _epoch: TimelineValue) -> usize {
         0
     }
 
-    /// Returns `true` if there are deferred payloads waiting for GPU retirement.
+    /// Peek at the oldest deferred epoch without freeing anything.
     ///
-    /// Callers that call `flush_deferred_deletions` and find that it reclaimed nothing
-    /// can use this to decide whether a GPU wait would be productive.
-    ///
-    /// The default implementation always returns `false`.
-    fn has_deferred_payloads(&self) -> bool {
-        false
-    }
-
-    /// The oldest epoch currently in the deferred ring, if any.
-    ///
-    /// If non-`None`, waiting for this timeline value then calling
-    /// [`reclaim`](Self::reclaim) would free the oldest batch of deferred resources.
-    ///
-    /// The default implementation returns `None`.
-    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
+    /// Returns `None` if the deferred ring is empty. Used by the heap-pressure
+    /// reclamation path to determine which epoch to wait on before retrying
+    /// an allocation that failed due to heap exhaustion.
+    fn peek_oldest_deferred_epoch(&self) -> Option<TimelineValue> {
         None
     }
 
@@ -270,7 +279,7 @@ pub trait VramAllocator: Send + Sync {
 /// with no tracking, budgeting, or overhead.
 ///
 /// Installed automatically when a [`Device`] is created. Implements the full
-/// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::reclaim`],
+/// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::boundary_crossed`],
 /// and [`VramAllocator::drain`].
 pub struct DefaultVramAllocator {
     deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
@@ -303,34 +312,38 @@ impl VramAllocator for DefaultVramAllocator {
         self.deferred.lock().unwrap().push_back((epoch, payload));
     }
 
-    fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
-        let mut ring = self.deferred.lock().unwrap();
-        let mut count = 0;
-        while let Some((epoch, _)) = ring.front() {
-            if *epoch <= gpu_progress {
-                ring.pop_front();
-                count += 1;
-            } else {
-                break;
+    fn boundary_crossed(&self, epoch: TimelineValue) -> usize {
+        // Drain payloads whose epoch has completed.
+        let drained: Vec<(TimelineValue, DeferredPayload)> = {
+            let mut ring = self.deferred.lock().unwrap();
+            let mut drained = Vec::new();
+            while let Some((entry_epoch, _)) = ring.front() {
+                if *entry_epoch <= epoch {
+                    drained.push(ring.pop_front().unwrap());
+                } else {
+                    break;
+                }
             }
-        }
+            drained
+        };
+        let count = drained.len();
+        // Drop payloads with RECLAMATION_EPOCH set so that backend destroy paths (e.g.
+        // Metal's destroy_buffer) can use the epoch as a lower deletion-queue barrier.
+        // This allows freed Metal heap allocations to become available on the very next
+        // process_deletion_queue_up_to_signaled call rather than waiting for
+        // timeline_scheduled_max to be GPU-signaled.
+        RECLAMATION_EPOCH.with(|e| e.set(Some(epoch)));
+        drop(drained); // payloads dropped here; Buffer::drop fires for each Buffer inside
+        RECLAMATION_EPOCH.with(|e| e.set(None));
         count
-    }
-
-    fn has_deferred_payloads(&self) -> bool {
-        !self.deferred.lock().unwrap().is_empty()
-    }
-
-    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.deferred
-            .lock()
-            .unwrap()
-            .front()
-            .map(|(epoch, _)| *epoch)
     }
 
     fn drain(&self) {
         self.deferred.lock().unwrap().clear();
+    }
+
+    fn peek_oldest_deferred_epoch(&self) -> Option<TimelineValue> {
+        self.deferred.lock().unwrap().front().map(|(epoch, _)| *epoch)
     }
 }
 
@@ -482,20 +495,16 @@ impl VramAllocator for TrackingVramAllocator {
         self.inner.defer_release(epoch, payload);
     }
 
-    fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
-        self.inner.reclaim(gpu_progress)
-    }
-
-    fn has_deferred_payloads(&self) -> bool {
-        self.inner.has_deferred_payloads()
-    }
-
-    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.inner.oldest_deferred_epoch()
+    fn boundary_crossed(&self, epoch: TimelineValue) -> usize {
+        self.inner.boundary_crossed(epoch)
     }
 
     fn drain(&self) {
         self.inner.drain();
+    }
+
+    fn peek_oldest_deferred_epoch(&self) -> Option<TimelineValue> {
+        self.inner.peek_oldest_deferred_epoch()
     }
 }
 
@@ -678,12 +687,12 @@ mod tests {
         p.push(alive);
         alloc.defer_release(5, p);
 
-        // epoch=5, gpu_progress=4 — should NOT reclaim yet.
-        assert_eq!(alloc.reclaim(4), 0);
+        // epoch=5, boundary=4 — should NOT reclaim yet.
+        assert_eq!(alloc.boundary_crossed(4), 0);
         assert!(weak.upgrade().is_some(), "resource should still be alive");
 
-        // gpu_progress=5 — should reclaim and drop.
-        assert_eq!(alloc.reclaim(5), 1);
+        // boundary=5 — should reclaim and drop.
+        assert_eq!(alloc.boundary_crossed(5), 1);
         assert!(
             weak.upgrade().is_none(),
             "resource should have been dropped"
@@ -708,12 +717,12 @@ mod tests {
         alloc.defer_release(10, p2);
 
         // Reclaim only up to epoch 2.
-        assert_eq!(alloc.reclaim(2), 1);
+        assert_eq!(alloc.boundary_crossed(2), 1);
         assert!(weak_early.upgrade().is_none(), "epoch=2 should be dropped");
         assert!(weak_late.upgrade().is_some(), "epoch=10 should survive");
 
         // Reclaim the rest.
-        assert_eq!(alloc.reclaim(10), 1);
+        assert_eq!(alloc.boundary_crossed(10), 1);
         assert!(
             weak_late.upgrade().is_none(),
             "epoch=10 should now be dropped"
@@ -741,8 +750,8 @@ mod tests {
         let alloc = DefaultVramAllocator::new();
         // Deferring an empty payload should not add an entry.
         alloc.defer_release(1, DeferredPayload::new());
-        // reclaim returns 0 (nothing was added).
-        assert_eq!(alloc.reclaim(100), 0);
+        // boundary_crossed returns 0 (nothing was added).
+        assert_eq!(alloc.boundary_crossed(100), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -762,11 +771,11 @@ mod tests {
         tracking.defer_release(3, p);
 
         // Not yet retired.
-        assert_eq!(tracking.reclaim(2), 0);
+        assert_eq!(tracking.boundary_crossed(2), 0);
         assert!(weak.upgrade().is_some());
 
         // Retired.
-        assert_eq!(tracking.reclaim(3), 1);
+        assert_eq!(tracking.boundary_crossed(3), 1);
         assert!(weak.upgrade().is_none());
     }
 

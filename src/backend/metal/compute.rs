@@ -965,6 +965,24 @@ pub(super) fn submit(
         .timeline_waiter
         .clone();
 
+    let completed_epoch = state
+        .devices
+        .get(&device_handle)
+        .map(|ld| {
+            // SAFETY: AtomicU64 is Sync; we share the pointer-equivalent Arc<LogicalDevice>.
+            // Use a raw Arc clone so the completion handler can update completed_epoch
+            // without holding the backend lock (which Buffer::drop would re-acquire).
+            // IMPORTANT: Do NOT call vram_allocator.boundary_crossed() directly from the
+            // completion handler — boundary_crossed may drop GPU resources, and Buffer::drop
+            // tries to acquire the backend mutex which may already be held, causing a deadlock.
+            // Instead, atomically record the completed epoch; Device::flush_deferred_deletions
+            // reads this value and calls boundary_crossed outside the backend lock.
+            &ld.completed_epoch as *const std::sync::atomic::AtomicU64
+        })
+        .unwrap();
+    // SAFETY: LogicalDevice lives for the device lifetime, which exceeds any CB lifetime.
+    let completed_epoch = unsafe { &*completed_epoch };
+
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {
@@ -985,6 +1003,9 @@ pub(super) fn submit(
             crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
         }
         waiter.signal(signal_value);
+        // Record the completed epoch atomically. Device::flush_deferred_deletions reads
+        // this and calls vram_allocator.boundary_crossed() outside the backend lock.
+        completed_epoch.fetch_max(signal_value, std::sync::atomic::Ordering::Release);
     })
     .copy();
     command_buffer_ref.add_completed_handler(&handler);
@@ -1155,6 +1176,13 @@ pub(super) fn submit_graph(
         .timeline_waiter
         .clone();
 
+    let completed_epoch = state
+        .devices
+        .get(&device_handle)
+        .map(|ld| &ld.completed_epoch as *const std::sync::atomic::AtomicU64)
+        .unwrap();
+    let completed_epoch = unsafe { &*completed_epoch };
+
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {
@@ -1175,6 +1203,7 @@ pub(super) fn submit_graph(
             crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
         }
         waiter.signal(signal_value);
+        completed_epoch.fetch_max(signal_value, std::sync::atomic::Ordering::Release);
     })
     .copy();
     command_buffer_ref.add_completed_handler(&handler);

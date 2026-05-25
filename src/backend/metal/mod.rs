@@ -568,6 +568,24 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
+    fn completed_epoch(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+        // Read the Metal timeline event directly — this always reflects the latest GPU
+        // completion value and never lags behind the AtomicU64 (which is updated in the
+        // completion handler *after* the event is signaled). The timeline event is safe
+        // to read while holding the backend lock; it does not acquire any inner locks.
+        self.gpu_progress(device)
+    }
+
+    fn set_vram_allocator(
+        &mut self,
+        device: DeviceHandle,
+        allocator: std::sync::Arc<dyn crate::vram_allocator::VramAllocator>,
+    ) {
+        if let Some(ld) = self.state.devices.get_mut(&device) {
+            ld.vram_allocator = Some(allocator);
+        }
+    }
+
     fn wait_until(
         &mut self,
         device: DeviceHandle,
