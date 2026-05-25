@@ -11,9 +11,8 @@
 //! - `process_deletion_queue_up_to_signaled` + `compact_overflow` free resources
 //! - Retry allocation succeeds from reclaimed heap space
 //!
-//! Tests are Metal-only (`cfg(feature = "metal")`) since DX12 and Vulkan use
-//! committed resources without a shared heap cap.
-#![cfg(feature = "metal")]
+//! Heap introspection and overflow tests are macOS + Metal only for now, since
+//! DX12 and Vulkan use committed resources without a shared heap cap.
 
 use goldy::task_graph::TaskGraph;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
@@ -32,6 +31,7 @@ fn make_device() -> Device {
 // Buffer heap introspection
 // ===========================================================================
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn buffer_heap_stats_available_on_metal() {
     let device = make_device();
@@ -43,6 +43,7 @@ fn buffer_heap_stats_available_on_metal() {
     assert!(s.primary_heap_bytes > 0, "primary heap must be non-zero");
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn texture_heap_stats_available_on_metal() {
     let device = make_device();
@@ -60,6 +61,7 @@ fn texture_heap_stats_available_on_metal() {
 // Basic allocation tracking
 // ===========================================================================
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn buffer_allocation_increments_count() {
     let device = make_device();
@@ -72,6 +74,7 @@ fn buffer_allocation_increments_count() {
     );
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn gpu_only_buffer_does_not_use_heap() {
     let device = make_device();
@@ -91,6 +94,7 @@ fn gpu_only_buffer_does_not_use_heap() {
     );
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn buffer_drop_frees_heap_space_after_flush() {
     let device = make_device();
@@ -144,6 +148,7 @@ fn buffer_drop_frees_heap_space_after_flush() {
 // Overflow heap lifecycle
 // ===========================================================================
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn many_buffers_create_overflow_heaps() {
     let device = make_device();
@@ -176,6 +181,7 @@ fn many_buffers_create_overflow_heaps() {
     }
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn compact_overflow_removes_empty_heaps() {
     let device = make_device();
@@ -264,6 +270,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
     .expect("allocation should succeed after reclaiming deferred buffers");
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
     let device = make_device();
@@ -312,6 +319,7 @@ fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
     );
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn steady_state_overflow_stays_bounded() {
     let device = make_device();
@@ -397,6 +405,7 @@ fn steady_state_overflow_stays_bounded() {
 // Texture heap self-regulation
 // ===========================================================================
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn texture_allocation_increments_count() {
     let device = make_device();
@@ -417,6 +426,7 @@ fn texture_allocation_increments_count() {
     );
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn many_textures_create_overflow_then_compact() {
     let device = make_device();
@@ -555,6 +565,7 @@ fn wait_and_flush_reclaims_all_deferred() {
 // In-flight command buffer tracking
 // ===========================================================================
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn in_flight_cb_count_increases_after_submit() {
     let device = make_device();
@@ -571,6 +582,7 @@ fn in_flight_cb_count_increases_after_submit() {
     );
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn in_flight_cbs_drain_after_wait() {
     let device = make_device();
@@ -762,6 +774,7 @@ fn rapid_submit_large_buffers_50_frames() {
 // Overflow heap cap enforcement (raw allocator behavior without self-regulation)
 // ===========================================================================
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[test]
 fn overflow_count_never_exceeds_16() {
     let device = make_device();

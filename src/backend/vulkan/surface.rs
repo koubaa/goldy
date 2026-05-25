@@ -1723,34 +1723,32 @@ pub(super) fn resize(
 
 /// Set swapchain present mode (vsync). Recreates the swapchain when the mode changes.
 pub(super) fn set_present_mode(
-    entry: &Entry,
-    instance: &Instance,
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
-    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
-    next_texture_handle: &mut TextureHandle,
+    state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     mode: crate::types::PresentMode,
 ) -> Result<()> {
     let (w, h, current_vk) = {
-        let s = surfaces
+        let s = state
+            .surfaces
             .get(&surface_handle)
             .context("Invalid surface handle")?;
         (s.width, s.height, s.present_mode)
     };
 
     let (physical_device, vk_surface) = {
-        let surface_state = surfaces
+        let surface_state = state
+            .surfaces
             .get(&surface_handle)
             .context("Invalid surface handle")?;
-        let pd = devices
+        let pd = state
+            .devices
             .get(&surface_state.device_handle)
             .context("Surface's device is invalid")?
             .physical_device;
         (pd, surface_state.surface)
     };
 
-    let surface_loader = khr::surface::Instance::new(entry, instance);
+    let surface_loader = khr::surface::Instance::new(&state.entry, &state.instance);
     let present_modes = unsafe {
         surface_loader.get_physical_device_surface_present_modes(physical_device, vk_surface)
     }
@@ -1762,7 +1760,8 @@ pub(super) fn set_present_mode(
     }
 
     {
-        let surface_state = surfaces
+        let surface_state = state
+            .surfaces
             .get_mut(&surface_handle)
             .context("Invalid surface handle")?;
         surface_state.present_mode = vk_mode;
@@ -1770,12 +1769,12 @@ pub(super) fn set_present_mode(
     }
 
     resize(
-        entry,
-        instance,
-        devices,
-        surfaces,
-        textures,
-        next_texture_handle,
+        &state.entry,
+        &state.instance,
+        &mut state.devices,
+        &mut state.surfaces,
+        &mut state.textures,
+        &mut state.next_texture_handle,
         surface_handle,
         w,
         h,
