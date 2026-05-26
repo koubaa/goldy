@@ -64,9 +64,23 @@ use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::Result;
 use std::any::Any;
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+
+// The GPU epoch that is currently being reclaimed on this thread by `reclaim`.
+//
+// Set before dropping `DeferredPayload` entries so that `Buffer::drop` (→ the Metal
+// `destroy_buffer` path) can use the reclamation epoch as the deletion-queue barrier
+// instead of the conservative `timeline_scheduled_max`.  This allows the Metal heap
+// allocator to free those buffers on the very next `process_deletion_queue_up_to_signaled`
+// call, since `signaled_value >= reclamation_epoch` is already true by definition.
+//
+// `None` means we are NOT in a reclamation context; normal deletion semantics apply.
+thread_local! {
+    pub static RECLAMATION_EPOCH: Cell<Option<u64>> = const { Cell::new(None) };
+}
 
 // -----------------------------------------------------------------------
 // DeferredPayload
@@ -304,16 +318,22 @@ impl VramAllocator for DefaultVramAllocator {
     }
 
     fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
-        let mut ring = self.deferred.lock().unwrap();
-        let mut count = 0;
-        while let Some((epoch, _)) = ring.front() {
-            if *epoch <= gpu_progress {
-                ring.pop_front();
-                count += 1;
-            } else {
-                break;
+        let drained: Vec<(TimelineValue, DeferredPayload)> = {
+            let mut ring = self.deferred.lock().unwrap();
+            let mut drained = Vec::new();
+            while let Some((epoch, _)) = ring.front() {
+                if *epoch <= gpu_progress {
+                    drained.push(ring.pop_front().unwrap());
+                } else {
+                    break;
+                }
             }
-        }
+            drained
+        };
+        let count = drained.len();
+        RECLAMATION_EPOCH.with(|e| e.set(Some(gpu_progress)));
+        drop(drained);
+        RECLAMATION_EPOCH.with(|e| e.set(None));
         count
     }
 

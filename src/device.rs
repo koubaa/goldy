@@ -665,11 +665,21 @@ impl Device {
     /// [`defer_release`]: Self::defer_release
     pub fn flush_deferred_deletions(&self) {
         let _tz = crate::tracy_zone!("device.flush_deferred_deletions");
-        let mut backend = self.inner.backend.lock().unwrap();
-        backend.flush_deferred_deletions(self.inner.handle);
-        let progress = backend.gpu_progress(self.inner.handle);
-        drop(backend);
+        let progress = {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+            backend.gpu_progress(self.inner.handle)
+        };
+        // reclaim drops DeferredPayloads. With RECLAMATION_EPOCH set, Buffer::drop
+        // queues Metal heap buffers into the deletion queue with a barrier equal to
+        // the already-completed reclamation epoch rather than timeline_scheduled_max.
+        // Those entries are immediately eligible, so a second flush processes them and
+        // returns the heap memory before any subsequent allocation attempt.
         self.inner.vram_allocator.reclaim(progress);
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+        }
     }
 
     /// Returns `true` if the device's [`VramAllocator`] holds deferred payloads that
