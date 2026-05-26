@@ -544,14 +544,12 @@ pub(crate) struct FrameSync {
     pub command_buffer: vk::CommandBuffer,
     /// Recorded fresh each present with ONE_TIME_SUBMIT to copy the per-slot
     /// scratch texture into the acquired swapchain image (scratch→swapchain
-    /// blit path).  This CB is the last entry in the compute Submit 1, so it
-    /// is guaranteed complete before the same slot's `in_flight_fence` fires.
+    /// blit path). This is WSI work, separate from runtime-owned compute
+    /// submissions.
     pub copy_command_buffer: vk::CommandBuffer,
     pub image_available_semaphore: vk::Semaphore,
     /// Signaled by Submit 1 (render work) and consumed by Submit 2 (present
-    /// barrier) in the *graphics* (render-pass) present path only.  Not used
-    /// in the compute-scratch path which collapses everything into a single
-    /// submit.
+    /// barrier) in the *graphics* (render-pass) present path only.
     pub work_done_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
@@ -559,16 +557,17 @@ pub(crate) struct FrameSync {
     /// presentation uses the scratch-texture copy path in `present` instead (see
     /// `surface::present`).
     pub render_pass_submitted: bool,
-    /// Device timeline value signaled for this frame slot's last queue submission
-    /// (render or compute+present batch). Consumed when presenting.
+    /// Device timeline value signaled for this frame slot's final frame work.
+    /// Consumed when presenting.
     pub frame_timeline_value: Option<u64>,
-    /// Compute command buffers recorded in [`GpuBackend::end_frame`](crate::backend::GpuBackend::end_frame) and submitted
-    /// with the present-barrier batch in [`super::surface::present`].
-    pub deferred_compute_cbs: Vec<vk::CommandBuffer>,
-    /// Texture upload staging entries for `deferred_compute_cbs`, released into
-    /// the per-device `TextureStagingPool` under the frame's timeline signal value
-    /// at present time.
-    pub pending_compute_texture_staging: Vec<crate::backend::vulkan::staging::TextureStagingEntry>,
+    /// Persistent cache of the last compute timeline value signaled for this frame slot.
+    /// Unlike `frame_timeline_value`, this is not consumed when presenting.
+    pub last_compute_timeline_value: u64,
+    /// Timeline value signaled by the WSI copy submit.  Used by `acquire()` to
+    /// ensure the scratch texture's copy-read has completed before the slot is
+    /// reused for new compute writes.  Higher than `frame_timeline_value` when
+    /// the scratch-texture path is active.
+    pub copy_timeline_value: Option<u64>,
 }
 
 /// A device-local scratch texture used as the compute render target for one

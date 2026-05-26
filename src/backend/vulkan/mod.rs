@@ -1133,7 +1133,7 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&mut self.state, device_handle, commands, None)
+        compute::submit(&mut self.state, device_handle, commands)
     }
 
     fn submit_graph(

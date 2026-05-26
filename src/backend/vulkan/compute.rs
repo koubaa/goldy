@@ -3,7 +3,7 @@
 use super::super::shared;
 use super::staging;
 use super::types::{ComputePipelineState, LogicalDevice, PushLayout};
-use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, SurfaceHandle};
+use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand};
 use crate::gpu_profiler::{self, DispatchGpuNs};
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
@@ -362,11 +362,11 @@ pub(super) fn destroy(
 }
 
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+/// Submit a batch of GPU commands as a single compute submission.
 pub(super) fn submit(
     state: &mut super::types::VulkanState,
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
-    defer_to_present_for_surface: Option<SurfaceHandle>,
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("vk.submit");
     // Detect WriteBuffer up-front so we can skip all the staging-belt /
@@ -576,7 +576,7 @@ pub(super) fn submit(
             .context("Invalid device handle")?;
         create_vulkan_gpu_profile_pool(
             ld,
-            defer_to_present_for_surface.is_some(),
+            false,
             dispatch_count,
             dispatch_labels,
         )?
@@ -1158,30 +1158,6 @@ pub(super) fn submit(
 
         (cmd, belt_idx, texture_upload_idx)
     };
-
-    if let Some(sid) = defer_to_present_for_surface {
-        let surf = state
-            .surfaces
-            .get_mut(&sid)
-            .context("defer compute: invalid surface handle")?;
-        if surf.current_image_index.is_none() {
-            anyhow::bail!("defer compute: surface has no acquired image");
-        }
-        let cf = surf.current_frame;
-        surf.frame_sync[cf].deferred_compute_cbs.push(cmd);
-        if !texture_upload_scratch.is_empty() {
-            let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
-                .into_iter()
-                .map(|s| s.entry)
-                .collect();
-            surf.frame_sync[cf]
-                .pending_compute_texture_staging
-                .extend(entries);
-        }
-        // Staging belt `finish` and texture_staging_pools release happen in
-        // `surface::present` once the timeline signal value for this batch is known.
-        return Ok(0);
-    }
 
     // Standalone submit: signal device timeline semaphore (Vulkan 1.2+).
     let signal_value = {

@@ -13,22 +13,25 @@
 //! only, no CPU fence wait), so CPU recording proceeds without stalling.
 //! The GPU-side `image_available_semaphore` gates the copy submit.
 //!
-//! 1. **`acquire()`** — waits on the per-frame-slot `in_flight_fence`, resets
-//!    it, calls `vkAcquireNextImageKHR` (semaphore-only, no CPU fence).  CPU
-//!    bookkeeping runs next.  The slot's `ScratchTextureSlot` is lazily
+//! 1. **`acquire()`** — waits on the per-frame-slot timeline value (via
+//!    `vkWaitSemaphores`, near-zero cost since the value from N frames ago is
+//!    long past), calls `vkAcquireNextImageKHR` (semaphore-only, no CPU fence).
+//!    CPU bookkeeping runs next.  The slot's `ScratchTextureSlot` is lazily
 //!    created and its `TextureHandle` is returned as the frame texture.
 //!
-//! 2. **Middle of frame** — compute CBs are accumulated in
-//!    `FrameSync::deferred_compute_cbs`.  They write to the scratch image
-//!    in `GENERAL` layout.  The swapchain image is not touched.
+//! 2. **Middle of frame** — Goldy's runtime submits compute work normally.
+//!    Task-graph splitting/fusion remains a runtime decision; surface WSI
+//!    only observes the final timeline value. Compute writes to the scratch
+//!    image in `GENERAL` layout. The swapchain image is not touched.
 //!
 //! 3. **`present()`** — records a one-shot copy CB:
 //!    `scratch GENERAL→TRANSFER_SRC`, `swapchain UNDEFINED→TRANSFER_DST`,
 //!    `vkCmdCopyImage`, `scratch TRANSFER_SRC→GENERAL`,
 //!    `swapchain TRANSFER_DST→PRESENT_SRC_KHR`.  All deferred CBs plus the
 //!    copy CB are submitted in a **single `vkQueueSubmit2`** waiting on
-//!    `image_available_semaphore`, signalling `in_flight_fence` and
-//!    `render_finished_semaphore`.  Then `vkQueuePresentKHR`.
+//!    `image_available_semaphore` and the runtime's final timeline value,
+//!    signalling `render_finished_semaphore` and advancing the timeline. Then
+//!    `vkQueuePresentKHR`.
 //!
 //! NOTE: making the scratch-texture strategy opt-in / configurable (e.g. for
 //! a latency-sensitive mode that sacrifices throughput for lower frame
@@ -301,8 +304,8 @@ pub(super) fn create(
             in_flight_fence,
             render_pass_submitted: false,
             frame_timeline_value: None,
-            deferred_compute_cbs: Vec::new(),
-            pending_compute_texture_staging: Vec::new(),
+            last_compute_timeline_value: 0,
+            copy_timeline_value: None,
         });
     }
 
@@ -489,22 +492,9 @@ pub(super) fn destroy(
             unsafe {
                 let _ = logical_device.device.device_wait_idle();
 
-                // Free deferred compute CBs and remove their tokens from the
-                // pending map BEFORE destroying the fences they reference.
                 for frame in &mut surface_state.frame_sync {
-                    let deferred_cbs = std::mem::take(&mut frame.deferred_compute_cbs);
-                    let pending_tex_staging =
-                        std::mem::take(&mut frame.pending_compute_texture_staging);
-                    if !deferred_cbs.is_empty() {
-                        logical_device
-                            .device
-                            .free_command_buffers(logical_device.command_pool, &deferred_cbs);
-                    }
-                    // Orphaned pending entries were never submitted; device is
-                    // idle after device_wait_idle above, so destroy directly.
-                    for entry in pending_tex_staging {
-                        entry.destroy(logical_device);
-                    }
+                    frame.frame_timeline_value = None;
+                    frame.copy_timeline_value = None;
                 }
 
                 // Free pre-recorded per-image barrier command buffers.
@@ -520,8 +510,12 @@ pub(super) fn destroy(
                     }
                 }
 
-                // Destroy per-frame sync resources
+                // Destroy per-frame sync resources and free per-frame CBs.
                 for frame in surface_state.frame_sync {
+                    logical_device.device.free_command_buffers(
+                        logical_device.command_pool,
+                        &[frame.command_buffer, frame.copy_command_buffer],
+                    );
                     logical_device
                         .device
                         .destroy_semaphore(frame.image_available_semaphore, None);
@@ -585,7 +579,6 @@ pub(super) fn acquire(
         device_handle,
         current_frame,
         swapchain,
-        in_flight_fence,
         image_available_semaphore,
     ) = {
         let _fz = crate::tracy_zone!("vk.surface.acquire.frame_state");
@@ -598,12 +591,11 @@ pub(super) fn acquire(
             surface_state.device_handle,
             surface_state.current_frame,
             surface_state.swapchain,
-            frame.in_flight_fence,
             frame.image_available_semaphore,
         )
     };
 
-    let pending_deferred_len = {
+    let _pending_deferred_len = {
         let _dz = crate::tracy_zone!("vk.surface.acquire.deferred_query");
         state
             .devices
@@ -612,44 +604,50 @@ pub(super) fn acquire(
             .unwrap_or(0)
     };
 
-    // ── Zone 1: vk.surface.wait_compute ──────────────────────────────────────
-    // Waits for the previous use of this frame slot to finish GPU compute work.
-    // Long here → GPU is compute-bound.  Near-zero → GPU finished well ahead
-    // of the CPU (well-pipelined or CPU-bound frame).
-    let wait_result = {
+    // ── Zone 1: vk.surface.wait_slot ───────────────────────────────────────
+    // Waits until the GPU has reached a timeline value that satisfies both:
+    //   • Current slot reuse — copy_timeline_value from this slot's previous
+    //     use (N-3 frames): image_available_semaphore, copy_command_buffer,
+    //     scratch texture write-after-read.
+    //   • RT cache eligibility — frame_timeline_value from the *next* slot
+    //     (N-2 frames): late compute from that frame must be done so
+    //     gpu_progress() >= cached_rt_timelines[i] for the older cache slot.
+    //
+    // max(copy, next_compute) is monotonic; no WSI dependency on this wait.
+    {
         let _wz = crate::tracy_zone!("vk.surface.wait_compute");
         let logical_device = state
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        unsafe {
-            logical_device
-                .device
-                .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+        let surface_state = state
+            .surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?;
+        let slot_copy = surface_state.frame_sync[current_frame]
+            .copy_timeline_value
+            .unwrap_or(0);
+        let next_slot = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        let next_compute = surface_state.frame_sync[next_slot]
+            .last_compute_timeline_value;
+        let slot_timeline = slot_copy.max(next_compute);
+        if slot_timeline > 0 {
+            let sems = [logical_device.timeline_semaphore];
+            let vals = [slot_timeline];
+            let wait = vk::SemaphoreWaitInfo::default()
+                .semaphores(&sems)
+                .values(&vals);
+            unsafe { logical_device.device.wait_semaphores(&wait, u64::MAX) }
+                .context("Failed to wait on frame slot timeline value")?;
         }
-    };
-    if let Err(e) = &wait_result {
         tracing::warn!(
-            surface_handle,
-            %device_handle,
             current_frame,
-            pending_deferred = pending_deferred_len,
-            result = ?e,
-            "surface acquire: wait_for_fences (compute fence) failed"
+            next_slot,
+            slot_copy,
+            next_compute,
+            slot_timeline,
+            "vk.acquire: waited on timeline"
         );
-    }
-    wait_result.context("Failed to wait for compute fence")?;
-
-    // Reset the in-flight fence for this slot.  (There is no separate acquire
-    // fence — WSI synchronisation is GPU-side via image_available_semaphore.)
-    {
-        let _rz = crate::tracy_zone!("vk.surface.reset_fences");
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
-        unsafe { ld.device.reset_fences(&[in_flight_fence]) }
-            .context("Failed to reset in-flight fence")?;
     }
 
     // CPU cleanup: drain the GPU timeline and reset the frame slot.
@@ -672,15 +670,9 @@ pub(super) fn acquire(
         let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
         let cf = surface_state.current_frame;
         surface_state.frame_sync[cf].render_pass_submitted = false;
+        surface_state.frame_sync[cf].frame_timeline_value = None;
+        surface_state.frame_sync[cf].last_compute_timeline_value = 0;
         surface_state.frame_pending_gpu_commands.clear();
-
-        let orphaned_tex_staging =
-            std::mem::take(&mut surface_state.frame_sync[cf].pending_compute_texture_staging);
-        let _ = std::mem::take(&mut surface_state.frame_sync[cf].deferred_compute_cbs);
-        debug_assert!(
-            orphaned_tex_staging.is_empty(),
-            "orphaned texture staging entries in frame slot {cf} — present did not flush uploads"
-        );
     }
 
     {
@@ -1117,6 +1109,7 @@ where
         let fs = &mut surface_state.frame_sync[current_frame];
         fs.render_pass_submitted = true;
         fs.frame_timeline_value = Some(signal_timeline_value);
+        fs.last_compute_timeline_value = signal_timeline_value;
     }
 
     Ok(())
@@ -1141,11 +1134,22 @@ pub(super) fn end_frame(
         std::mem::take(&mut surf.frame_pending_gpu_commands)
     };
 
-    if !pending.is_empty() {
-        super::compute::submit(state, dh, &pending, Some(frame.surface))?;
-    }
+    let frame_compute_timeline_value = if !pending.is_empty() {
+        super::compute::submit(state, dh, &pending)?
+    } else {
+        let ld = state
+            .devices
+            .get(&dh)
+            .context("Surface's device is invalid")?;
+        ld.timeline_next.saturating_sub(1)
+    };
 
-    present(state, frame.surface, frame.image)
+    present(
+        state,
+        frame.surface,
+        frame.image,
+        frame_compute_timeline_value,
+    )
 }
 
 /// Present the rendered image to the screen.
@@ -1156,6 +1160,7 @@ pub(super) fn present(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
+    frame_compute_timeline_value: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
     let _tz = crate::tracy_zone!("vk.surface.present");
     // Take the surface texture handle but do NOT unregister yet — the deferred
@@ -1169,7 +1174,6 @@ pub(super) fn present(
         render_pass_submitted,
         device_handle,
         render_finished_sem_present,
-        in_flight_fence_present,
         swapchain,
     ) = {
         let s = state
@@ -1190,36 +1194,31 @@ pub(super) fn present(
             rp,
             dh,
             fr.render_finished_semaphore,
-            fr.in_flight_fence,
             s.swapchain,
         )
     };
 
-    // These are only referenced by the graphics (render-pass) present path.
-    let (prep_cmd, compute_present_cmd, image_available_sem_present, work_done_sem_present) = {
+    let image_available_sem_present = {
         let s = state.surfaces.get(&surface_handle).unwrap();
-        let cf = current_frame;
-        (
-            s.swapchain_prep_command_buffers[image_index as usize],
-            s.swapchain_compute_present_command_buffers[image_index as usize],
-            s.frame_sync[cf].image_available_semaphore,
-            s.frame_sync[cf].work_done_semaphore,
-        )
+        s.frame_sync[current_frame].image_available_semaphore
     };
-    let _ = (prep_cmd, compute_present_cmd, work_done_sem_present); // used only by render path
 
     if !render_pass_submitted {
         // ── Compute path (scratch-texture) ─────────────────────────────────
         //
-        // Submit 1 (only submit): [deferred_cbs..., copy_cb]
-        //   waits:   image_available_sem  (GPU gate on WSI image release)
-        //   signals: in_flight_fence      (CPU: slot reuse protection)
-        //            render_finished_sem  (consumed by queue_present)
-        //            timeline_sem         (staging-buffer / CB recycling)
+        // WSI submit: [copy_cb]
+        //   waits:   runtime timeline value (compute finished writing scratch)
+        //            image_available_sem  (GPU gate on WSI image release)
+        //   signals: render_finished_sem  (consumed by queue_present)
+        //            timeline_sem         (frame boundary value — used by
+        //                                  acquire() for slot reuse protection
+        //                                  via vkWaitSemaphores, NOT a binary
+        //                                  fence, to avoid transitive WSI stall)
         //
         // The copy CB transitions scratch GENERAL→TRANSFER_SRC, copies into
         // swapchain[image_index], then leaves scratch GENERAL and swapchain
-        // PRESENT_SRC_KHR so no second submit is needed.
+        // PRESENT_SRC_KHR. Compute submissions are owned by the runtime and may
+        // be split/fused independently of this WSI copy.
 
         let (scratch_image, copy_cb) = {
             let s = state.surfaces.get(&surface_handle).unwrap();
@@ -1371,14 +1370,6 @@ pub(super) fn present(
             }
         }
 
-        let deferred = {
-            let s = state.surfaces.get_mut(&surface_handle).unwrap();
-            std::mem::take(&mut s.frame_sync[current_frame].deferred_compute_cbs)
-        };
-        let pending_tex_upload_staging = {
-            let s = state.surfaces.get_mut(&surface_handle).unwrap();
-            std::mem::take(&mut s.frame_sync[current_frame].pending_compute_texture_staging)
-        };
         let signal_timeline_value = {
             let ld = state
                 .devices
@@ -1393,26 +1384,23 @@ pub(super) fn present(
             .context("Surface's device is invalid")?
             .timeline_semaphore;
 
-        // Single submit: [deferred..., copy_cb]
-        //   waits:   image_available_sem  (WSI releases swapchain image for copy)
-        //   signals: in_flight_fence      (CPU slot reuse guard)
-        //            render_finished_sem  (presentation gate)
-        //            timeline_sem         (staging-buffer / CB recycling)
-        let mut cmd_infos: Vec<vk::CommandBufferSubmitInfo> =
-            Vec::with_capacity(deferred.len() + 1);
-        cmd_infos.extend(
-            deferred
-                .iter()
-                .copied()
-                .map(|cb| vk::CommandBufferSubmitInfo::default().command_buffer(cb)),
-        );
-        cmd_infos.push(vk::CommandBufferSubmitInfo::default().command_buffer(copy_cb));
+        // WSI submit: [copy_cb]
+        //   waits:   timeline_sem@frame_compute_timeline_value (runtime work done)
+        //            image_available_sem                       (WSI image released)
+        //   signals: render_finished_sem                       (presentation gate)
+        //            timeline_sem@signal_timeline_value        (frame boundary)
+        let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(copy_cb);
 
+        let wait_compute_done = vk::SemaphoreSubmitInfo::default()
+            .semaphore(timeline_sem)
+            .value(frame_compute_timeline_value)
+            .stage_mask(vk::PipelineStageFlags2::TRANSFER);
         let wait_acq = vk::SemaphoreSubmitInfo::default()
             .semaphore(image_available_sem_present)
             .value(0)
             .stage_mask(vk::PipelineStageFlags2::TRANSFER);
-        let sig_in_flight = vk::SemaphoreSubmitInfo::default()
+        let waits = [wait_compute_done, wait_acq];
+        let sig_render_finished = vk::SemaphoreSubmitInfo::default()
             .semaphore(render_finished_sem_present)
             .value(0)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
@@ -1420,10 +1408,10 @@ pub(super) fn present(
             .semaphore(timeline_sem)
             .value(signal_timeline_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let signals = [sig_in_flight, sig_timeline];
+        let signals = [sig_render_finished, sig_timeline];
         let submit = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(std::slice::from_ref(&wait_acq))
-            .command_buffer_infos(&cmd_infos)
+            .wait_semaphore_infos(&waits)
+            .command_buffer_infos(std::slice::from_ref(&cmd_info))
             .signal_semaphore_infos(&signals);
 
         let submit_ld = state
@@ -1432,12 +1420,12 @@ pub(super) fn present(
             .context("Surface's device is invalid")?;
 
         let r = {
-            let _sz = crate::tracy_zone!("vk.present.queue_submit2_compute");
+            let _sz = crate::tracy_zone!("vk.present.queue_submit2_copy");
             unsafe {
                 submit_ld.device.queue_submit2(
                     submit_ld.queue,
                     std::slice::from_ref(&submit),
-                    in_flight_fence_present,
+                    vk::Fence::null(),
                 )
             }
         };
@@ -1448,13 +1436,9 @@ pub(super) fn present(
                 current_frame,
                 image_index,
                 result = ?e,
-                "compute queue_submit2 failed"
+                "present copy queue_submit2 failed"
             );
-            let s = state.surfaces.get_mut(&surface_handle).unwrap();
-            s.frame_sync[current_frame].deferred_compute_cbs = deferred;
-            s.frame_sync[current_frame].pending_compute_texture_staging =
-                pending_tex_upload_staging;
-            anyhow::bail!("Failed to submit compute work: {:?}", e);
+            anyhow::bail!("Failed to submit present copy work: {:?}", e);
         }
 
         {
@@ -1462,34 +1446,23 @@ pub(super) fn present(
             let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
             ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
 
-            if !deferred.is_empty() {
-                state
-                    .staging_belts
-                    .entry(device_handle)
-                    .or_insert_with(|| {
-                        super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE)
-                    })
-                    .finish(signal_timeline_value);
-            }
-            if !pending_tex_upload_staging.is_empty() {
-                state
-                    .texture_staging_pools
-                    .entry(device_handle)
-                    .or_insert_with(super::staging::TextureStagingPool::new)
-                    .release(signal_timeline_value, pending_tex_upload_staging);
-            }
-
-            for cb in &deferred {
-                state
-                    .timeline_cmd_buffers
-                    .entry(signal_timeline_value)
-                    .or_default()
-                    .push((device_handle, *cb));
-            }
-
+            // Expose the *compute* timeline value to callers (not the copy's).
+            // Render targets and other resources are safe to reuse once compute
+            // finishes — the copy only reads the scratch texture, so there's no
+            // need for callers to wait for the WSI copy before reclaiming RTs.
             let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
             surface_state_mut.frame_sync[current_frame].frame_timeline_value =
+                Some(frame_compute_timeline_value);
+            surface_state_mut.frame_sync[current_frame].last_compute_timeline_value =
+                frame_compute_timeline_value;
+            surface_state_mut.frame_sync[current_frame].copy_timeline_value =
                 Some(signal_timeline_value);
+            tracing::warn!(
+                current_frame,
+                frame_compute_timeline_value,
+                signal_timeline_value,
+                "vk.present: stored timeline values"
+            );
         }
     }
 
@@ -2079,7 +2052,11 @@ fn ensure_scratch_texture_slot(
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)
+            .usage(
+                vk::ImageUsageFlags::STORAGE
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
