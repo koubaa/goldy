@@ -574,12 +574,7 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        create_vulkan_gpu_profile_pool(
-            ld,
-            false,
-            dispatch_count,
-            dispatch_labels,
-        )?
+        create_vulkan_gpu_profile_pool(ld, false, dispatch_count, dispatch_labels)?
     };
 
     let mut vk_gpu_profile = vk_gpu_profile;

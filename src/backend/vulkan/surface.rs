@@ -643,12 +643,7 @@ pub(super) fn acquire(
     let _tz = crate::tracy_zone!("vk.surface.acquire");
 
     // Get surface state and current frame index.
-    let (
-        device_handle,
-        current_frame,
-        swapchain,
-        image_available_semaphore,
-    ) = {
+    let (device_handle, current_frame, swapchain, image_available_semaphore) = {
         let _fz = crate::tracy_zone!("vk.surface.acquire.frame_state");
         let surface_state = state
             .surfaces
@@ -696,8 +691,7 @@ pub(super) fn acquire(
             .copy_timeline_value
             .unwrap_or(0);
         let next_slot = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-        let next_compute = surface_state.frame_sync[next_slot]
-            .last_compute_timeline_value;
+        let next_compute = surface_state.frame_sync[next_slot].last_compute_timeline_value;
         let slot_timeline = slot_copy.max(next_compute);
         if slot_timeline > 0 {
             let sems = [logical_device.timeline_semaphore];
@@ -814,12 +808,8 @@ pub(super) fn acquire(
             // Ensure the per-slot scratch texture exists and is the right size.
             // Compute shaders write here; the swapchain image is never touched
             // until the copy in `present()`.
-            let scratch_handle = ensure_scratch_texture_slot(
-                state,
-                surface_handle,
-                device_handle,
-                current_frame,
-            )?;
+            let scratch_handle =
+                ensure_scratch_texture_slot(state, surface_handle, device_handle, current_frame)?;
 
             let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
             surface_state.current_texture_handle = Some(scratch_handle);
@@ -1317,7 +1307,10 @@ pub(super) fn present(
             let scratch = s.scratch_texture_slots[current_frame]
                 .as_ref()
                 .expect("scratch texture slot not initialized before present");
-            (scratch.image, s.frame_sync[current_frame].copy_command_buffer)
+            (
+                scratch.image,
+                s.frame_sync[current_frame].copy_command_buffer,
+            )
         };
         let swapchain_image = {
             let s = state.surfaces.get(&surface_handle).unwrap();
@@ -1381,8 +1374,7 @@ pub(super) fn present(
                     });
 
                 let pre_barriers = [scratch_to_src, swapchain_to_dst];
-                let dep_pre =
-                    vk::DependencyInfo::default().image_memory_barriers(&pre_barriers);
+                let dep_pre = vk::DependencyInfo::default().image_memory_barriers(&pre_barriers);
                 ld.device.cmd_pipeline_barrier2(copy_cb, &dep_pre);
 
                 // Copy scratch → swapchain (full image)
@@ -1420,9 +1412,7 @@ pub(super) fn present(
                     .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                     .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
                     .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .dst_access_mask(
-                        vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                    )
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE)
                     .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                     .new_layout(vk::ImageLayout::GENERAL)
                     .image(scratch_image)
@@ -1452,8 +1442,7 @@ pub(super) fn present(
                     });
 
                 let post_barriers = [scratch_back, swapchain_to_present];
-                let dep_post =
-                    vk::DependencyInfo::default().image_memory_barriers(&post_barriers);
+                let dep_post = vk::DependencyInfo::default().image_memory_barriers(&post_barriers);
                 ld.device.cmd_pipeline_barrier2(copy_cb, &dep_post);
 
                 ld.device
@@ -2123,7 +2112,10 @@ fn ensure_scratch_texture_slot(
         .and_then(|slot| slot.take())
     {
         unregister_surface_texture(&mut state.devices, &mut state.textures, old.texture_handle);
-        let ld = state.devices.get(&device_handle).context("Device invalid")?;
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Device invalid")?;
         unsafe {
             ld.device.destroy_image(old.image, None);
             ld.device.free_memory(old.memory, None);
@@ -2131,7 +2123,10 @@ fn ensure_scratch_texture_slot(
     }
 
     let (image, memory) = {
-        let ld = state.devices.get(&device_handle).context("Device invalid")?;
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Device invalid")?;
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -2179,7 +2174,10 @@ fn ensure_scratch_texture_slot(
     // Transition UNDEFINED → GENERAL via a one-shot submit so compute shaders
     // can write immediately on the first frame that uses this slot.
     {
-        let ld = state.devices.get(&device_handle).context("Device invalid")?;
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Device invalid")?;
         unsafe {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(ld.command_pool)
@@ -2201,9 +2199,7 @@ fn ensure_scratch_texture_slot(
                 .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
                 .src_access_mask(vk::AccessFlags2::NONE)
                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .dst_access_mask(
-                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                )
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::GENERAL)
                 .image(image)
@@ -2214,10 +2210,12 @@ fn ensure_scratch_texture_slot(
                     base_array_layer: 0,
                     layer_count: 1,
                 });
-            let dep = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&barrier));
+            let dep =
+                vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
             ld.device.cmd_pipeline_barrier2(cb, &dep);
-            ld.device.end_command_buffer(cb).context("end scratch init CB")?;
+            ld.device
+                .end_command_buffer(cb)
+                .context("end scratch init CB")?;
 
             let cb_info = vk::CommandBufferSubmitInfo::default().command_buffer(cb);
             let submit =

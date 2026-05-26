@@ -57,8 +57,9 @@ impl PendingPresent {
         match self.inner {
             PendingPresentInner::Channel(rx) => {
                 let _rz = tracy_zone!("pending_present.recv");
-                rx.recv()
-                    .map_err(|_| anyhow::anyhow!("present worker thread dropped sender (panicked?)"))?
+                rx.recv().map_err(|_| {
+                    anyhow::anyhow!("present worker thread dropped sender (panicked?)")
+                })?
             }
             PendingPresentInner::AlreadyDone(tv) => Ok(tv),
         }
@@ -135,7 +136,11 @@ impl PresentThread {
     ) -> PendingPresent {
         let (reply_tx, reply_rx) = mpsc::channel();
         // If send fails the worker is dead — fall back to synchronous.
-        if self.tx.send((backend.clone(), token, device.clone(), keepalive, reply_tx)).is_err() {
+        if self
+            .tx
+            .send((backend.clone(), token, device.clone(), keepalive, reply_tx))
+            .is_err()
+        {
             tracing::warn!("present worker dead, falling back to synchronous present");
             let tv_result = do_present_work(backend, token, device, DeferredPayload::new());
             let tv = tv_result.unwrap_or(0);
