@@ -654,30 +654,26 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 }
             }
 
-            // Remove swapchain image textures from the textures map BEFORE the
-            // generic texture destroy loop.  Swapchain images are owned by the
-            // swapchain — only the VkImageView should be destroyed, NOT the VkImage.
-            // Handles are stored in `swapchain_texture_handles`; `current_texture_handle`
-            // is just a per-frame alias and must not be double-freed.
-            for surface_state in state.surfaces.values_mut() {
-                if surface_state.device_handle != device_handle {
-                    continue;
-                }
-                surface_state.current_texture_handle = None;
-                if !surface_state.swapchain_prep_command_buffers.is_empty() {
-                    let cbs = std::mem::take(&mut surface_state.swapchain_prep_command_buffers);
-                    logical_device
-                        .device
-                        .free_command_buffers(logical_device.command_pool, &cbs);
-                }
-                for th in surface_state.swapchain_texture_handles.drain(..) {
-                    if let Some(tex_state) = state.textures.remove(&th) {
-                        logical_device.resource_registry.unregister_texture(th);
-                        logical_device
-                            .device
-                            .destroy_image_view(tex_state.view, None);
-                    }
-                }
+            // Destroy surfaces owned by this device before the generic texture loop.
+            // A secondary `Device` clone (e.g. GoldyRenderer's tracked allocator device)
+            // may drop before `Surface`, so this path must use the full `surface::destroy`
+            // implementation (work_done semaphores, scratch-slot memory, command buffers).
+            let surface_handles: Vec<_> = state
+                .surfaces
+                .iter()
+                .filter(|(_, s)| s.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in surface_handles {
+                super::surface::destroy_with_logical_device(
+                    &state.entry,
+                    &state.instance,
+                    &mut logical_device,
+                    &mut state.devices,
+                    &mut state.surfaces,
+                    &mut state.textures,
+                    handle,
+                );
             }
 
             // Destroy textures owned by this device
@@ -711,52 +707,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             for handle in sampler_handles {
                 if let Some(sampler) = state.samplers.remove(&handle) {
                     logical_device.device.destroy_sampler(sampler.sampler, None);
-                }
-            }
-
-            // Destroy surfaces owned by this device.
-            // Surface::Drop may run after Device::Drop (Rust struct field order),
-            // so we must clean up here while the VkDevice is still alive.
-            let surface_handles: Vec<_> = state
-                .surfaces
-                .iter()
-                .filter(|(_, s)| s.device_handle == device_handle)
-                .map(|(h, _)| *h)
-                .collect();
-            for handle in surface_handles {
-                if let Some(surface_state) = state.surfaces.remove(&handle) {
-                    for frame in surface_state.frame_sync {
-                        logical_device
-                            .device
-                            .destroy_semaphore(frame.image_available_semaphore, None);
-                        logical_device
-                            .device
-                            .destroy_semaphore(frame.render_finished_semaphore, None);
-                        logical_device
-                            .device
-                            .destroy_fence(frame.in_flight_fence, None);
-                    }
-
-                    for view in surface_state.swapchain_image_views {
-                        logical_device.device.destroy_image_view(view, None);
-                    }
-
-                    if let Some(depth_view) = surface_state.depth_view {
-                        logical_device.device.destroy_image_view(depth_view, None);
-                    }
-                    if let Some(depth_image) = surface_state.depth_image {
-                        logical_device.device.destroy_image(depth_image, None);
-                    }
-                    if let Some(depth_memory) = surface_state.depth_memory {
-                        logical_device.device.free_memory(depth_memory, None);
-                    }
-
-                    let swapchain_loader =
-                        khr::swapchain::Device::new(&state.instance, &logical_device.device);
-                    swapchain_loader.destroy_swapchain(surface_state.swapchain, None);
-
-                    let surface_loader = khr::surface::Instance::new(&state.entry, &state.instance);
-                    surface_loader.destroy_surface(surface_state.surface, None);
                 }
             }
 

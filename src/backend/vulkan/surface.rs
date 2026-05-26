@@ -449,6 +449,20 @@ pub(super) fn create(
     Ok(handle)
 }
 
+enum DestroyDeviceRef<'a> {
+    Owned(&'a mut LogicalDevice),
+    Map(&'a mut HashMap<DeviceHandle, LogicalDevice>),
+}
+
+impl<'a> DestroyDeviceRef<'a> {
+    fn get_mut(&mut self, device_handle: DeviceHandle) -> Option<&mut LogicalDevice> {
+        match self {
+            Self::Owned(ld) => Some(ld),
+            Self::Map(map) => map.get_mut(&device_handle),
+        }
+    }
+}
+
 /// Destroy a surface and all associated resources.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn destroy(
@@ -459,17 +473,65 @@ pub(super) fn destroy(
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
 ) {
+    destroy_impl(
+        entry,
+        instance,
+        DestroyDeviceRef::Map(devices),
+        surfaces,
+        textures,
+        surface_handle,
+    );
+}
+
+/// Like [`destroy`], but uses an already-resolved logical device (required during
+/// `device::destroy`, which removes the device from the map before tearing down surfaces).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn destroy_with_logical_device(
+    entry: &Entry,
+    instance: &Instance,
+    logical_device: &mut LogicalDevice,
+    _devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    surface_handle: SurfaceHandle,
+) {
+    destroy_impl(
+        entry,
+        instance,
+        DestroyDeviceRef::Owned(logical_device),
+        surfaces,
+        textures,
+        surface_handle,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn destroy_impl(
+    entry: &Entry,
+    instance: &Instance,
+    mut device_ref: DestroyDeviceRef<'_>,
+    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    surface_handle: SurfaceHandle,
+) {
     // Clear the per-frame alias first; the real registrations are in swapchain_texture_handles.
     if let Some(s) = surfaces.get_mut(&surface_handle) {
         s.current_texture_handle = None;
     }
+    // Unregister all persistently-registered swapchain image textures.
+    let device_handle = surfaces
+        .get(&surface_handle)
+        .map(|s| s.device_handle)
+        .unwrap_or(0);
     // Unregister all persistently-registered swapchain image textures.
     if let Some(handles) = surfaces
         .get_mut(&surface_handle)
         .map(|s| std::mem::take(&mut s.swapchain_texture_handles))
     {
         for th in handles {
-            unregister_surface_texture(devices, textures, th);
+            if let Some(logical_device) = device_ref.get_mut(device_handle) {
+                unregister_swapchain_texture_with_device(logical_device, textures, th);
+            }
         }
     }
     // Unregister per-slot scratch textures (removes bindless slot + TextureState).
@@ -482,13 +544,19 @@ pub(super) fn destroy(
         .into_iter()
         .flatten()
         .map(|slot| {
-            unregister_surface_texture(devices, textures, slot.texture_handle);
+            if let Some(logical_device) = device_ref.get_mut(device_handle) {
+                unregister_swapchain_texture_with_device(
+                    logical_device,
+                    textures,
+                    slot.texture_handle,
+                );
+            }
             (slot.image, slot.memory)
         })
         .collect();
 
     if let Some(mut surface_state) = surfaces.remove(&surface_handle) {
-        if let Some(logical_device) = devices.get(&surface_state.device_handle) {
+        if let Some(logical_device) = device_ref.get_mut(surface_state.device_handle) {
             unsafe {
                 let _ = logical_device.device.device_wait_idle();
 
@@ -639,8 +707,32 @@ pub(super) fn acquire(
                 .values(&vals);
             unsafe { logical_device.device.wait_semaphores(&wait, u64::MAX) }
                 .context("Failed to wait on frame slot timeline value")?;
+
+            if crate::validation_env::timeline_validation_enabled() {
+                let completed = unsafe {
+                    logical_device
+                        .device
+                        .get_semaphore_counter_value(logical_device.timeline_semaphore)
+                }
+                .unwrap_or(0);
+                assert!(
+                    completed >= slot_timeline,
+                    "vk.acquire: post-wait semaphore counter {completed} < \
+                     slot_timeline {slot_timeline} \
+                     (frame={current_frame} next_slot={next_slot} \
+                     slot_copy={slot_copy} next_compute={next_compute})"
+                );
+            }
         }
-        tracing::warn!(
+        if crate::validation_env::timeline_validation_enabled() && next_compute == 0 {
+            tracing::warn!(
+                current_frame,
+                next_slot,
+                "vk.acquire: next_slot has no last_compute_timeline_value \
+                 — RT cache guard will be 0"
+            );
+        }
+        tracing::debug!(
             current_frame,
             next_slot,
             slot_copy,
@@ -1457,7 +1549,7 @@ pub(super) fn present(
                 frame_compute_timeline_value;
             surface_state_mut.frame_sync[current_frame].copy_timeline_value =
                 Some(signal_timeline_value);
-            tracing::warn!(
+            tracing::debug!(
                 current_frame,
                 frame_compute_timeline_value,
                 signal_timeline_value,
@@ -2275,6 +2367,26 @@ fn register_surface_texture(
     );
 
     Ok(handle)
+}
+
+/// Unregister a swapchain image texture (destroy view + bindless slot).
+/// Does NOT destroy the VkImage — it is owned by the swapchain.
+fn unregister_swapchain_texture_with_device(
+    logical_device: &mut LogicalDevice,
+    textures: &mut HashMap<TextureHandle, TextureState>,
+    tex_handle: TextureHandle,
+) {
+    if let Some(tex_state) = textures.remove(&tex_handle) {
+        logical_device
+            .resource_registry
+            .unregister_texture(tex_handle);
+        unsafe {
+            logical_device
+                .device
+                .destroy_image_view(tex_state.view, None);
+        }
+        tracing::debug!("Unregistered swapchain texture {}", tex_handle);
+    }
 }
 
 /// Unregister a swapchain image texture (destroy view + bindless slot).

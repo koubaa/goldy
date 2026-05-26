@@ -9,7 +9,8 @@
 //!   - `api` — graphics API validation (Vulkan validation layer + `VK_EXT_debug_utils` where
 //!     built; Metal `MTL_SHADER_VALIDATION` when applicable). For loader-only Vulkan layers, set
 //!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
-//!   - `all` — both layout and GPU API
+//!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
+//!   - `all` — layout, GPU API, and timeline
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
@@ -18,6 +19,7 @@
 struct ParsedValidation {
     layout: bool,
     gpu_api: bool,
+    timeline: bool,
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -55,9 +57,11 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                 "all" => {
                     out.layout = true;
                     out.gpu_api = true;
+                    out.timeline = true;
                 }
                 "layout" | "layouts" => out.layout = true,
                 "api" => out.gpu_api = true,
+                "timeline" => out.timeline = true,
                 _ => {}
             }
         }
@@ -87,6 +91,13 @@ pub(crate) fn gpu_api_validation_enabled() -> bool {
     from_goldy_validation_var().gpu_api
 }
 
+/// WSI timeline invariants (Vulkan surface acquire post-wait checks).
+#[cfg(feature = "vulkan")]
+#[must_use]
+pub(crate) fn timeline_validation_enabled() -> bool {
+    from_goldy_validation_var().timeline
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_validation_list;
@@ -104,6 +115,12 @@ mod tests {
         let p = parse_validation_list("all");
         assert!(p.layout);
         assert!(p.gpu_api);
+        assert!(p.timeline);
+
+        let p = parse_validation_list("timeline");
+        assert!(!p.layout);
+        assert!(!p.gpu_api);
+        assert!(p.timeline);
 
         let p = parse_validation_list("api; api");
         assert!(!p.layout);
