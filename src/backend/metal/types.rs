@@ -20,7 +20,7 @@ use crate::types::{DepthFormat, TextureFormat};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
-use metal as mtl;
+use ::metal as mtl;
 use mtl::{
     ArgumentEncoder, Buffer as MTLBuffer, CommandQueue,
     ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState,
@@ -788,8 +788,25 @@ impl ResourceRegistry {
         local_index
     }
 
+    /// Reserve a storage-image LOCAL index without binding it to a TextureHandle.
+    ///
+    /// Used for transient bindless slots that outlive any single `TextureHandle`
+    /// but belong to a long-lived owner (e.g. a `Surface` that re-encodes a
+    /// fresh drawable into the same slot every frame). The owner must release
+    /// the slot via [`Self::release_storage_image_slot`] when destroyed.
+    pub fn reserve_storage_image_slot(&mut self) -> u32 {
+        self.storage_image.alloc()
+    }
+
+    /// Associate a TextureHandle with a previously-reserved storage-image
+    /// LOCAL index so `texture_bindless_index()` / `Texture::bindless_index()`
+    /// resolves to the right slot. Does not bump any counters.
+    pub fn bind_storage_image_slot(&mut self, handle: TextureHandle, local_index: u32) {
+        self.texture_indices.insert(handle, local_index);
+    }
+
     /// Return a storage-image LOCAL index to the free list so it can be
-    /// reused by a subsequent `register_storage_image`.
+    /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
     ///
     /// See [`Self::release_texture_slot`] for the `barrier` semantics.
     pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
@@ -1077,13 +1094,13 @@ pub(crate) struct SurfaceState {
     pub layer: *mut std::ffi::c_void,
     /// The currently acquired CAMetalDrawable (set during acquire, cleared on present)
     pub current_drawable: Option<*mut std::ffi::c_void>,
-    /// Texture handle for the current frame's compute scratch target.
+    /// Texture handle for the current drawable's texture (registered for bindless access)
     pub current_texture_handle: Option<TextureHandle>,
-    /// Persistent storage-image scratch textures keyed by frame index.
-    ///
-    /// Compute presentation writes into these heap-backed textures; `present`
-    /// blits the current scratch texture into the CAMetalDrawable.
-    pub compute_scratch_textures: [Option<TextureHandle>; MAX_FRAMES_IN_FLIGHT],
+    /// Triple-buffered storage-image LOCAL indices reserved at surface create.
+    /// Each frame uses `bindless_storage_slots[current_frame]` so the CPU never
+    /// re-encodes a slot that the GPU is still reading from a previous frame.
+    /// Released back to the device's `ResourceRegistry` free list on surface destroy.
+    pub bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT],
     /// Current present mode
     pub present_mode: crate::types::PresentMode,
     /// Frame-scoped GPU commands ([`crate::backend::GpuBackend::record_gpu_work`]).
