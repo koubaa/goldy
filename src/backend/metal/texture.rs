@@ -59,10 +59,13 @@ pub(super) fn create(
     descriptor.set_usage(mtl_usage);
     descriptor.set_storage_mode(MTLStorageMode::Shared);
 
-    let texture = logical_device
-        .texture_heap
-        .allocate(&descriptor)
-        .context("Metal texture heap is full — all overflow heaps exhausted")?;
+    let texture = match logical_device.texture_heap.allocate(&descriptor) {
+        Some(t) => t,
+        None => {
+            tracing::warn!("Metal texture heap exhausted — falling back to off-heap device allocation");
+            logical_device.device.new_texture(&descriptor)
+        }
+    };
 
     let is_storage_image = matches!(
         access,
