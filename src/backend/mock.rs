@@ -1087,7 +1087,7 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         let device = self
             .surfaces
             .get(&frame.surface)
@@ -1105,6 +1105,24 @@ impl GpuBackend for MockBackend {
             self.recorded_compute_commands.push(pending);
             self.compute_dispatch_count += 1;
         }
+
+        let next = self.device_timeline_next.entry(device).or_insert(0);
+        *next += 1;
+        let tv = *next;
+        self.device_timeline_completed.insert(device, tv);
+        Ok(tv)
+    }
+
+    fn present_frame(
+        &mut self,
+        frame: FrameToken,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let device = self
+            .surfaces
+            .get(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .device_handle;
 
         let surf = self
             .surfaces

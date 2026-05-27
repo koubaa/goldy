@@ -928,8 +928,16 @@ impl GpuBackend for Dx12Backend {
         surface::record_gpu_work(&mut self.state, frame.surface, commands)
     }
 
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
-        surface::end_frame(&mut self.state, frame)
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::submit_frame(&mut self.state, frame)
+    }
+
+    fn present_frame(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::present_frame(&mut self.state, frame, submit_tv)
     }
 
     fn create_pipeline_with_depth(

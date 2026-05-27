@@ -31,35 +31,40 @@ pub struct Surface {
 
 /// A present operation that completed (or is completing) on a persistent worker thread.
 ///
-/// Returned by [`Frame::present_async`]. Call [`PendingPresent::finish`] to retrieve
-/// the GPU timeline value.  Because the worker is a **persistent parked thread**
-/// (not spawned per-frame), `finish` is a single `mpsc::recv` — no thread teardown,
-/// no stack deallocation, typically < 1 µs.
+/// Returned by [`Frame::present_async`]. Call [`PendingPresent::finish`] to wait for
+/// the compositor hand-off and to obtain the frame's **submit** timeline value.
+///
+/// GPU compute for the frame is already submitted on the calling thread before this
+/// is returned; `finish()` only waits for the optional background present worker.
 pub struct PendingPresent {
     inner: PendingPresentInner,
 }
 
 enum PendingPresentInner {
-    /// Completion arrives via the persistent present thread's response channel.
-    Channel(mpsc::Receiver<Result<TimelineValue>>),
+    /// Present completes on the worker; recv reports errors only.
+    Channel {
+        rx: mpsc::Receiver<Result<()>>,
+        submit_tv: TimelineValue,
+    },
     /// Present already executed synchronously (fallback / already-presented guard).
     AlreadyDone(TimelineValue),
 }
 
 impl PendingPresent {
-    /// Block until the present completes and return the GPU timeline value.
+    /// Block until the present worker completes (if any) and return the submit timeline.
     ///
-    /// On the channel path this is a single `mpsc::recv` (~0.1 µs when the worker
-    /// has already posted the result, up to ~40 µs if you call it before the OS
-    /// present finishes).
+    /// The returned value is the timeline from [`Frame::submit_frame`] on the render
+    /// thread, not a separate present-only signal.
     pub fn finish(self) -> Result<TimelineValue> {
         let _tz = tracy_zone!("pending_present.finish");
         match self.inner {
-            PendingPresentInner::Channel(rx) => {
+            PendingPresentInner::Channel { rx, submit_tv } => {
                 let _rz = tracy_zone!("pending_present.recv");
-                rx.recv().map_err(|_| {
-                    anyhow::anyhow!("present worker thread dropped sender (panicked?)")
-                })?
+                rx.recv()
+                    .map_err(|_| {
+                        anyhow::anyhow!("present worker thread dropped sender (panicked?)")
+                    })??;
+                Ok(submit_tv)
             }
             PendingPresentInner::AlreadyDone(tv) => Ok(tv),
         }
@@ -73,7 +78,7 @@ impl PendingPresent {
     /// recv is typically < 1 µs regardless.
     pub fn is_done(&self) -> bool {
         match &self.inner {
-            PendingPresentInner::Channel(_) => false,
+            PendingPresentInner::Channel { .. } => false,
             PendingPresentInner::AlreadyDone(_) => true,
         }
     }
@@ -86,9 +91,10 @@ impl PendingPresent {
 type PresentWork = (
     Arc<Mutex<Box<dyn GpuBackend>>>,
     FrameToken,
+    TimelineValue,
     Device,
     DeferredPayload,
-    mpsc::Sender<Result<TimelineValue>>,
+    mpsc::Sender<Result<()>>,
 );
 
 /// A persistent thread dedicated to OS present calls.
@@ -118,38 +124,46 @@ impl PresentThread {
     }
 
     fn worker_loop(rx: mpsc::Receiver<PresentWork>) {
-        while let Ok((backend, token, device, keepalive, reply_tx)) = rx.recv() {
+        while let Ok((backend, token, submit_tv, device, keepalive, reply_tx)) = rx.recv() {
             let _tz = tracy_zone!("present_thread.do_present");
-            let result = do_present_work(backend, token, device, keepalive);
+            let result = do_present_only(backend, token, submit_tv, device, keepalive);
             let _ = reply_tx.send(result);
         }
     }
 
-    /// Send present work to the persistent thread. Returns a `PendingPresent`
-    /// whose `finish()` is just a channel recv.
-    pub(crate) fn submit(
+    /// Offload compositor present to the worker. Compute must already be submitted.
+    pub(crate) fn submit_present(
         &self,
         backend: Arc<Mutex<Box<dyn GpuBackend>>>,
         token: FrameToken,
+        submit_tv: TimelineValue,
         device: Device,
         keepalive: DeferredPayload,
     ) -> PendingPresent {
         let (reply_tx, reply_rx) = mpsc::channel();
-        // If send fails the worker is dead — fall back to synchronous.
         if self
             .tx
-            .send((backend.clone(), token, device.clone(), keepalive, reply_tx))
+            .send((
+                backend.clone(),
+                token,
+                submit_tv,
+                device.clone(),
+                keepalive,
+                reply_tx,
+            ))
             .is_err()
         {
             tracing::warn!("present worker dead, falling back to synchronous present");
-            let tv_result = do_present_work(backend, token, device, DeferredPayload::new());
-            let tv = tv_result.unwrap_or(0);
+            let _ = do_present_only(backend, token, submit_tv, device, DeferredPayload::new());
             return PendingPresent {
-                inner: PendingPresentInner::AlreadyDone(tv),
+                inner: PendingPresentInner::AlreadyDone(submit_tv),
             };
         }
         PendingPresent {
-            inner: PendingPresentInner::Channel(reply_rx),
+            inner: PendingPresentInner::Channel {
+                rx: reply_rx,
+                submit_tv,
+            },
         }
     }
 }
@@ -174,6 +188,8 @@ pub struct Frame {
     width: u32,
     height: u32,
     presented: bool,
+    /// Timeline returned by [`GpuBackend::submit_frame`] for this bracket.
+    submit_tv: Option<TimelineValue>,
     /// Resources (e.g. transient textures) that must outlive the frame's GPU work.
     /// Deferred to the VramAllocator ring at present time. Uses a Mutex so
     /// submit_compute can push to it via &self without requiring &mut Frame.
@@ -274,6 +290,7 @@ impl Surface {
             width: w,
             height: h,
             presented: false,
+            submit_tv: None,
             keepalive: Mutex::new(DeferredPayload::new()),
             present_thread: Arc::clone(&self.present_thread),
         })
@@ -286,7 +303,7 @@ impl Surface {
 
     /// Present a rendered frame (legacy API — prefer [`Frame::present`]).
     pub fn present(&self, mut frame: Frame) -> Result<TimelineValue> {
-        frame.do_present()
+        frame.do_present_sync()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -644,75 +661,91 @@ impl Frame {
         backend.record_render(&self.token, &commands)
     }
 
-    /// Submit all work and present. Returns the GPU timeline value when this frame completes.
-    pub fn present(mut self) -> Result<TimelineValue> {
-        self.do_present()
-    }
-
-    fn do_present(&mut self) -> Result<TimelineValue> {
-        let _tz = tracy_zone!("frame.present");
-        if self.presented {
-            let backend = self.backend.lock().unwrap();
-            return Ok(backend.gpu_progress(self.device_handle));
+    /// Submit recorded GPU work for this frame. Does not present.
+    ///
+    /// Safe to call once per frame before [`Self::present`] or [`Self::present_async`].
+    pub fn submit_frame(&mut self) -> Result<TimelineValue> {
+        let _tz = tracy_zone!("frame.submit_frame");
+        if let Some(tv) = self.submit_tv {
+            return Ok(tv);
         }
-        self.presented = true;
-        let _ = self.texture.take();
-        let token = self.token;
-        let tv = {
-            let mut backend = self.backend.lock().unwrap();
-            backend.end_frame(token)?
-        };
-        tracy_frame_mark!();
-        // Stamp any pending placement heap regions with the present timeline.
-        if let Ok(mut heap_guard) = self._device.inner.placement_heap.lock() {
-            if let Some(ref mut heap) = *heap_guard {
-                heap.stamp_all_pending(tv);
-            }
-        }
-        // Defer any keepalive resources (e.g. transient textures from submit_compute)
-        // until the GPU retires this frame's timeline.
-        let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
-        if !keepalive.is_empty() {
-            self._device.defer_release(tv, keepalive);
-        }
+        let mut backend = self.backend.lock().unwrap();
+        let tv = backend.submit_frame(&self.token)?;
+        self.submit_tv = Some(tv);
         Ok(tv)
     }
 
-    /// Submit all work and present on the persistent background thread.
+    /// Submit recorded work and present on this thread.
     ///
-    /// Sends work to a parked worker thread that calls `backend.end_frame`
-    /// (~40 µs on Vulkan/DX12), allowing it to overlap with the OS event-loop
-    /// overhead (~70 µs) that follows `request_redraw` on the main thread.
-    /// This reduces dead time between frames from ~110 µs to ~30 µs.
+    /// Returns the **submit** timeline (compute completion), not a separate present signal.
+    pub fn present(mut self) -> Result<TimelineValue> {
+        self.do_present_sync()
+    }
+
+    fn do_present_sync(&mut self) -> Result<TimelineValue> {
+        let _tz = tracy_zone!("frame.present");
+        if self.presented {
+            return Ok(self.submit_tv.unwrap_or_else(|| {
+                let backend = self.backend.lock().unwrap();
+                backend.gpu_progress(self.device_handle)
+            }));
+        }
+        self.presented = true;
+        let _ = self.texture.take();
+        let submit_tv = self.submit_frame()?;
+        {
+            let mut backend = self.backend.lock().unwrap();
+            backend.present_frame(self.token, submit_tv)?;
+        }
+        self.apply_frame_bookkeeping(submit_tv)?;
+        Ok(submit_tv)
+    }
+
+    fn apply_frame_bookkeeping(&self, submit_tv: TimelineValue) -> Result<()> {
+        tracy_frame_mark!();
+        if let Ok(mut heap_guard) = self._device.inner.placement_heap.lock() {
+            if let Some(ref mut heap) = *heap_guard {
+                heap.stamp_all_pending(submit_tv);
+            }
+        }
+        let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
+        if !keepalive.is_empty() {
+            self._device.defer_release(submit_tv, keepalive);
+        }
+        Ok(())
+    }
+
+    /// Submit recorded work on this thread, then offload only the compositor present.
     ///
-    /// Call [`PendingPresent::finish`] at the **start** of the next frame (before
-    /// `begin_frame`) to recv the result — typically < 1 µs since the worker
-    /// has already posted the completion.
-    ///
-    /// The existing [`Frame::present`] is unchanged and remains the correct choice
-    /// for non-latency-sensitive paths (readback, headless rendering, etc.).
+    /// Returns [`PendingPresent`] carrying the submit timeline immediately; call
+    /// [`PendingPresent::finish`] at the start of the next frame to wait for present errors.
     pub fn present_async(mut self) -> Result<PendingPresent> {
         let _tz = tracy_zone!("frame.present_async");
         if self.presented {
-            let tv = {
+            let submit_tv = self.submit_tv.unwrap_or_else(|| {
                 let backend = self.backend.lock().unwrap();
                 backend.gpu_progress(self.device_handle)
-            };
+            });
             return Ok(PendingPresent {
-                inner: PendingPresentInner::AlreadyDone(tv),
+                inner: PendingPresentInner::AlreadyDone(submit_tv),
             });
         }
         self.presented = true;
-
         let _ = self.texture.take();
-        let token = self.token;
+
+        let submit_tv = self.submit_frame()?;
+        self.apply_frame_bookkeeping(submit_tv)?;
+
         let backend = Arc::clone(&self.backend);
         let device = self._device.clone();
-        let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
-
-        let pending = self
-            .present_thread
-            .submit(backend, token, device, keepalive);
+        let token = self.token;
+        let pending = self.present_thread.submit_present(
+            backend,
+            token,
+            submit_tv,
+            device,
+            DeferredPayload::new(),
+        );
         Ok(pending)
     }
 
@@ -725,41 +758,24 @@ impl Frame {
     }
 }
 
-/// Executes the core present sequence: GPU submit + OS present + resource bookkeeping.
-///
-/// Extracted so it can be called from either the background thread (async path) or
-/// the calling thread (spawn-failure fallback).
-fn do_present_work(
+/// Compositor present only (compute already submitted). Used by the present worker.
+fn do_present_only(
     backend: Arc<Mutex<Box<dyn crate::backend::GpuBackend>>>,
     token: crate::backend::FrameToken,
-    device: Device,
-    keepalive: crate::vram_allocator::DeferredPayload,
-) -> Result<TimelineValue> {
-    let tv = {
-        let _tz = tracy_zone!("frame.do_present_work.end_frame");
-        let mut b = backend.lock().unwrap();
-        b.end_frame(token)?
-    };
-    tracy_frame_mark!();
-    {
-        let _tz = tracy_zone!("frame.do_present_work.stamp_heap");
-        if let Ok(mut heap_guard) = device.inner.placement_heap.lock() {
-            if let Some(ref mut heap) = *heap_guard {
-                heap.stamp_all_pending(tv);
-            }
-        }
-    }
-    if !keepalive.is_empty() {
-        let _tz = tracy_zone!("frame.do_present_work.defer_release");
-        device.defer_release(tv, keepalive);
-    }
-    Ok(tv)
+    submit_tv: TimelineValue,
+    _device: Device,
+    _keepalive: crate::vram_allocator::DeferredPayload,
+) -> Result<()> {
+    let _tz = tracy_zone!("frame.do_present_only");
+    let mut b = backend.lock().unwrap();
+    b.present_frame(token, submit_tv)?;
+    Ok(())
 }
 
 impl Drop for Frame {
     fn drop(&mut self) {
         if !self.presented {
-            let _ = self.do_present();
+            let _ = self.do_present_sync();
         }
     }
 }

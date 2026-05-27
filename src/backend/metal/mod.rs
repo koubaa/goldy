@@ -704,8 +704,16 @@ impl GpuBackend for MetalBackend {
         Ok(())
     }
 
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
-        surface::end_frame(&mut self.state, frame)
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::submit_frame(&mut self.state, frame)
+    }
+
+    fn present_frame(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::present_frame(&mut self.state, frame, submit_tv)
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {

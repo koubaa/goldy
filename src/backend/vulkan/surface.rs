@@ -1197,10 +1197,9 @@ where
     Ok(())
 }
 
-/// Present the rendered image to the screen.
-pub(super) fn end_frame(
+pub(super) fn submit_frame(
     state: &mut super::types::VulkanState,
-    frame: crate::backend::FrameToken,
+    frame: &crate::backend::FrameToken,
 ) -> Result<crate::timeline::TimelineValue> {
     let dh = state
         .surfaces
@@ -1216,22 +1215,23 @@ pub(super) fn end_frame(
         std::mem::take(&mut surf.frame_pending_gpu_commands)
     };
 
-    let frame_compute_timeline_value = if !pending.is_empty() {
-        super::compute::submit(state, dh, &pending)?
-    } else {
-        let ld = state
-            .devices
-            .get(&dh)
-            .context("Surface's device is invalid")?;
-        ld.timeline_next.saturating_sub(1)
-    };
+    if !pending.is_empty() {
+        return super::compute::submit(state, dh, &pending);
+    }
 
-    present(
-        state,
-        frame.surface,
-        frame.image,
-        frame_compute_timeline_value,
-    )
+    let ld = state
+        .devices
+        .get(&dh)
+        .context("Surface's device is invalid")?;
+    Ok(ld.timeline_next.saturating_sub(1))
+}
+
+pub(super) fn present_frame(
+    state: &mut super::types::VulkanState,
+    frame: crate::backend::FrameToken,
+    submit_tv: crate::timeline::TimelineValue,
+) -> Result<crate::timeline::TimelineValue> {
+    present(state, frame.surface, frame.image, submit_tv)
 }
 
 /// Present the rendered image to the screen.

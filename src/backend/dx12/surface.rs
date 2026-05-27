@@ -458,8 +458,7 @@ pub(super) fn record_gpu_work(
     Ok(())
 }
 
-/// Flush optional frame compute, present, and return the device timeline value (fence) for this frame.
-pub(super) fn end_frame(state: &mut Dx12State, frame: FrameToken) -> Result<u64> {
+pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<u64> {
     let device_handle = state
         .surfaces
         .get(&frame.surface)
@@ -475,11 +474,27 @@ pub(super) fn end_frame(state: &mut Dx12State, frame: FrameToken) -> Result<u64>
     };
 
     if !pending.is_empty() {
-        super::compute::submit(state, device_handle, &pending)?;
+        return super::compute::submit(state, device_handle, &pending);
     }
 
-    present(state, frame.surface, frame.image)?;
+    let dev = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
+    Ok(dev.fence_value.saturating_sub(1))
+}
 
+pub(super) fn present_frame(
+    state: &mut Dx12State,
+    frame: FrameToken,
+    _submit_tv: u64,
+) -> Result<u64> {
+    present(state, frame.surface, frame.image)?;
+    let device_handle = state
+        .surfaces
+        .get(&frame.surface)
+        .context("Invalid surface handle")?
+        .device_handle;
     let dev = state
         .devices
         .get(&device_handle)

@@ -14,65 +14,6 @@ use crate::tracy_zone;
 use anyhow::anyhow;
 use std::collections::VecDeque;
 
-/// Semantic hint for how the frame pipeline should be scheduled.
-///
-/// The application chooses based on its tolerance for input lag vs. desire for
-/// throughput. Goldy selects the optimal internal strategy (pipelining depth,
-/// buffer allocation, CB retention) accordingly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FrameStrategy {
-    /// Minimize latency. Frames are fully synchronous: the CPU blocks until the
-    /// GPU finishes each frame before starting the next.
-    ///
-    /// [`FrameOrchestrator::flush`] and [`FrameOrchestrator::end_frame_standalone`]
-    /// automatically attempt zero-cost command-buffer resubmission via
-    /// [`Device::try_resubmit_retained`].  When the graph's topology, pipeline, and
-    /// dispatch dimensions are unchanged from the previous frame the GPU command buffer
-    /// is replayed without any CPU re-recording overhead.
-    ///
-    /// Best for: interactive applications, games, live previews.
-    LowLatency,
-
-    /// Balanced throughput. Two frames overlap: the CPU records frame N+1 while
-    /// the GPU executes frame N. VRAM stays bounded via graph coloring across
-    /// staggered pipeline stages.
-    ///
-    /// Best for: applications that can tolerate one frame of input lag.
-    Balanced,
-
-    /// Maximum throughput. Deeply pipelined: the CPU is always recording ahead
-    /// of the GPU. Latency is highest but FPS ceiling is maximized.
-    ///
-    /// Best for: offline rendering, benchmarks, batch processing.
-    MaxThroughput {
-        /// Maximum number of frames allowed in-flight. Defaults to 3 if `None`.
-        max_frames_in_flight: Option<u32>,
-    },
-}
-
-impl FrameStrategy {
-    /// Derive the pipelining depth from the strategy.
-    pub fn depth(&self) -> usize {
-        match self {
-            FrameStrategy::LowLatency => 1,
-            FrameStrategy::Balanced => 2,
-            FrameStrategy::MaxThroughput {
-                max_frames_in_flight,
-            } => max_frames_in_flight.unwrap_or(3) as usize,
-        }
-    }
-
-    /// Whether transient-buffer graph coloring should be used for VRAM reuse.
-    ///
-    /// At depth=1 (LowLatency) all buffers are persistent — graph coloring adds
-    /// overhead with no benefit and prevents stable bindless indices needed for CB
-    /// retention. At depth>1 graph coloring aliases physical memory across
-    /// staggered pipeline stages.
-    pub fn use_graph_coloring(&self) -> bool {
-        self.depth() > 1
-    }
-}
-
 /// Token returned from [`FrameOrchestrator::begin_frame`]; must be passed to
 /// [`FrameOrchestrator::flush`], [`FrameOrchestrator::end_frame_standalone`], or
 /// [`FrameOrchestrator::end_frame_for_surface`].
@@ -102,7 +43,6 @@ struct FrameSlot<T> {
 /// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
 pub struct FrameOrchestrator<T> {
     device: Device,
-    strategy: FrameStrategy,
     max_depth: usize,
     ring: VecDeque<FrameSlot<T>>,
     /// Monotonic id for the next [`FrameHandle`].
@@ -110,8 +50,8 @@ pub struct FrameOrchestrator<T> {
     /// `Some` between [`Self::begin_frame`] and a matching end-frame call.
     open: Option<FrameHandle>,
     /// Retention fingerprint stored by the most recent successful [`Self::submit_with_retention`]
-    /// call.  `None` until the first retain-eligible submit.  Used by [`FrameStrategy::LowLatency`]
-    /// to attempt zero-cost resubmission on subsequent frames.
+    /// call.  `None` until the first retain-eligible submit.  Used when `max_depth == 1` to
+    /// attempt zero-cost resubmission on subsequent frames.
     last_retention_key: Option<u64>,
 }
 
@@ -120,16 +60,8 @@ impl<T> FrameOrchestrator<T> {
     /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire (same role as
     /// `max_regions` on pooled transient allocators).
     pub fn new(device: &Device, max_depth: usize) -> Self {
-        let strategy = match max_depth {
-            0 | 1 => FrameStrategy::LowLatency,
-            2 => FrameStrategy::Balanced,
-            n => FrameStrategy::MaxThroughput {
-                max_frames_in_flight: Some(n as u32),
-            },
-        };
         Self {
             device: device.clone(),
-            strategy,
             max_depth: max_depth.max(1),
             ring: VecDeque::new(),
             next_id: 1,
@@ -138,25 +70,10 @@ impl<T> FrameOrchestrator<T> {
         }
     }
 
-    /// Create an orchestrator from a [`FrameStrategy`], which derives the
-    /// pipelining depth automatically.
-    pub fn with_strategy(device: &Device, strategy: FrameStrategy) -> Self {
-        let max_depth = strategy.depth();
-        Self {
-            device: device.clone(),
-            strategy,
-            max_depth,
-            ring: VecDeque::new(),
-            next_id: 1,
-            open: None,
-            last_retention_key: None,
-        }
-    }
-
-    /// The frame scheduling strategy configured at construction.
+    /// `true` when depth is 1 and command-buffer retention may be used.
     #[inline]
-    pub fn strategy(&self) -> FrameStrategy {
-        self.strategy
+    pub fn retains_command_buffers(&self) -> bool {
+        self.max_depth == 1
     }
 
     /// Maximum number of in-flight frame slots (configured at construction).
@@ -224,7 +141,7 @@ impl<T> FrameOrchestrator<T> {
 
     /// Mid-frame submit: dispatches the current graph and starts a fresh one.
     ///
-    /// For [`FrameStrategy::LowLatency`] the graph is submitted via
+    /// When [`Self::retains_command_buffers`] is true the graph is submitted via
     /// [`Device::submit_pipelined_and_retain`] and on subsequent frames zero-cost
     /// resubmission is attempted first via [`Device::try_resubmit_retained`].
     /// All other strategies use [`Device::submit_pipelined`] unconditionally.
@@ -254,7 +171,7 @@ impl<T> FrameOrchestrator<T> {
     /// End a standalone (headless / render-to-texture) frame: submit remaining work, push the
     /// cleanup slot with a known timeline, clear the open handle.
     ///
-    /// For [`FrameStrategy::LowLatency`] the same retention logic as [`Self::flush`] applies:
+    /// When [`Self::retains_command_buffers`] is true the same retention logic as [`Self::flush`] applies:
     /// zero-cost resubmission is attempted first, falling back to a retain-and-record submit.
     ///
     /// If `graph` is empty, `fallback_timeline` is used (e.g. the value from previous
@@ -282,9 +199,9 @@ impl<T> FrameOrchestrator<T> {
         Ok(tv)
     }
 
-    /// Submit `graph` using the retention-aware strategy for the configured [`FrameStrategy`].
+    /// Submit `graph`, using command-buffer retention when [`Self::retains_command_buffers`].
     ///
-    /// - **[`FrameStrategy::LowLatency`]**: tries [`Device::try_resubmit_retained`] first
+    /// - **depth == 1**: tries [`Device::try_resubmit_retained`] first
     ///   (zero CPU recording cost on a hit); on a miss (first frame or fingerprint change)
     ///   falls back to [`Device::submit_pipelined_and_retain`] so the next frame can hit.
     ///   The last successful retention key is stored in `self.last_retention_key`.
@@ -295,7 +212,7 @@ impl<T> FrameOrchestrator<T> {
         &mut self,
         graph: &mut TaskGraph,
     ) -> Result<TimelineValue, GoldyError> {
-        if self.strategy != FrameStrategy::LowLatency {
+        if !self.retains_command_buffers() {
             return self.device.submit_pipelined(graph);
         }
 

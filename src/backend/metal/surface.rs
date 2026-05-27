@@ -442,9 +442,9 @@ pub(super) fn present(
 
     Ok(signal_value)
 }
-pub(super) fn end_frame(
+pub(super) fn submit_frame(
     state: &mut MetalState,
-    frame: FrameToken,
+    frame: &FrameToken,
 ) -> Result<crate::timeline::TimelineValue> {
     let dh = state
         .surfaces
@@ -461,9 +461,23 @@ pub(super) fn end_frame(
     };
 
     if !pending.is_empty() {
-        compute::submit(state, dh, &pending)?;
+        return compute::submit(state, dh, &pending);
     }
 
+    let ld = state
+        .devices
+        .get(&dh)
+        .context("Device no longer valid")?;
+    Ok(ld.timeline_event.as_ref().signaled_value().max(
+        ld.last_committed_timeline.unwrap_or(0),
+    ))
+}
+
+pub(super) fn present_frame(
+    state: &mut MetalState,
+    frame: FrameToken,
+    _submit_tv: crate::timeline::TimelineValue,
+) -> Result<crate::timeline::TimelineValue> {
     present(state, frame.surface, frame.image)
 }
 
