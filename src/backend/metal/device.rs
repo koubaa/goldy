@@ -134,6 +134,32 @@ fn create_heaps(device: &MTLDevice, heap_size: u64) -> (HeapAllocator, TextureHe
     buffer_heap_desc.set_storage_mode(MTLStorageMode::Shared);
     buffer_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
     buffer_heap_desc.set_heap_type(MTLHeapType::Automatic);
+    // Tracked (not Untracked): switching to Untracked was investigated as a
+    // potential perf win (avoiding Metal's implicit hazard-tracking overhead)
+    // but turned out to break frame pipelining in practice.
+    //
+    // The explicit synchronisation Untracked requires is:
+    //   • MTLFence at blit↔compute encoder boundaries within a command buffer
+    //   • MTLSharedEvent waits between standalone blit CBs (buffer writes/clears)
+    //     and the following compute CB, to ensure cache coherency
+    //   • A per-resource "written buffers" annotation that lets consecutive
+    //     compute CBs skip the event wait when they share no written resources
+    //
+    // All Goldy integration tests pass with that scheme, but Ekrano still
+    // regresses (~185 FPS vs ~200 FPS Tracked baseline) for two reasons:
+    //   1. Intra-graph partition waits: emit_partitioned_commands splits large
+    //      graphs into two CBs submitted back-to-back; the second CB must wait
+    //      for the first via MTLSharedEvent (MTLFence can't cross CB boundaries),
+    //      which serialises consecutive partitions and eliminates GPU pipelining.
+    //      Metal's hardware hazard tracking avoids this cost entirely.
+    //   2. Encoder-split overhead: every ResourceBarrier forces end_encoding +
+    //      new_compute_command_encoder + use_heaps_for_compute, which is paid
+    //      once per wave rather than once per CB submission.
+    //
+    // The net result is that the synchronisation overhead for Untracked exceeds
+    // the savings from bypassing implicit hazard tracking for this workload.
+    // Revisit if Apple exposes a lighter cross-CB barrier primitive, or if
+    // Ekrano moves to single-CB submission for its graphs.
     buffer_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
     let buffer_heap = device.new_heap(&buffer_heap_desc);
     let heap_allocator = HeapAllocator::new(device.clone(), buffer_heap, heap_size);
@@ -148,6 +174,10 @@ fn create_heaps(device: &MTLDevice, heap_size: u64) -> (HeapAllocator, TextureHe
     texture_heap_desc.set_storage_mode(MTLStorageMode::Shared);
     texture_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
     texture_heap_desc.set_heap_type(MTLHeapType::Automatic);
+    // Tracked: same rationale as the buffer heap above. Textures are an even
+    // harder case for Untracked — render-target hazards (coarse→fine, ping-pong
+    // filter layers, swapchain copies) span multiple command buffers, and
+    // MTLSharedEvent ordering alone did not restore correctness there.
     texture_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
     let texture_heap_raw = device.new_heap(&texture_heap_desc);
     let texture_heap = TextureHeapAllocator::new(device.clone(), texture_heap_raw, heap_size);
