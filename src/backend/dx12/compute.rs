@@ -913,74 +913,80 @@ fn record_gpu_command(
             unsafe { barriers::barrier_globals(cl7, &[g]) };
         }
         GpuCommand::ResourceBarrier {
-            buffers: buf_handles,
-            textures: tex_handles,
-            src_usage,
-            dst_usage,
+            buffers: buf_entries,
+            textures: tex_entries,
         } => {
             let _tz = tracy_zone!("dx12.resource_barrier");
-            let sync_before = slot_usage_to_dx12_sync(src_usage);
-            let access_before = slot_usage_to_dx12_access(src_usage);
-            let sync_after = slot_usage_to_dx12_sync(dst_usage);
-            let access_after = slot_usage_to_dx12_access(dst_usage);
 
             // WARP silently removes the device when D3D12_BARRIER_TYPE_BUFFER
             // enhanced barriers are used, causing ExecuteCommandLists to fail
             // and the subsequent Signal() to AV. Fall back to a global barrier
             // which is correct (just less precise).
-            if ctx.use_global_buffer_barriers || buf_handles.is_empty() {
-                if !buf_handles.is_empty() {
+            let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = Vec::new();
+            if ctx.use_global_buffer_barriers {
+                for (_, usage) in buf_entries {
                     let g = D3D12_GLOBAL_BARRIER {
-                        SyncBefore: sync_before,
-                        SyncAfter: sync_after,
-                        AccessBefore: access_before,
-                        AccessAfter: access_after,
+                        SyncBefore: slot_usage_to_dx12_sync(&usage.src),
+                        SyncAfter: slot_usage_to_dx12_sync(&usage.dst),
+                        AccessBefore: slot_usage_to_dx12_access(&usage.src),
+                        AccessAfter: slot_usage_to_dx12_access(&usage.dst),
                     };
                     unsafe { barriers::barrier_globals(cl7, &[g]) };
                 }
             } else {
-                let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
+                buf_barriers = buf_entries
                     .iter()
-                    .filter_map(|h| state.buffers.get(h))
-                    .map(|bs| {
-                        barriers::buffer_barrier_full(
-                            &bs.resource,
-                            sync_before,
-                            sync_after,
-                            access_before,
-                            access_after,
-                        )
+                    .filter_map(|(h, usage)| {
+                        state.buffers.get(h).map(|bs| {
+                            barriers::buffer_barrier_full(
+                                &bs.resource,
+                                slot_usage_to_dx12_sync(&usage.src),
+                                slot_usage_to_dx12_sync(&usage.dst),
+                                slot_usage_to_dx12_access(&usage.src),
+                                slot_usage_to_dx12_access(&usage.dst),
+                            )
+                        })
                     })
                     .collect();
-                unsafe { barriers::barrier_buffers(cl7, &buf_barriers) };
-                unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
             }
 
-            let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_handles
+            let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_entries
                 .iter()
-                .filter_map(|h| state.textures.get(h))
-                .map(|ts| {
-                    let (tex_sync_after, tex_access_after, tex_layout_after) =
-                        texture_barrier_state_for_usage(dst_usage, ts.is_storage);
-                    let (tex_sync_before, tex_access_before, tex_layout_before) =
-                        texture_barrier_state_for_layout(ts.last_layout);
-                    barriers::texture_barrier_full(
-                        &ts.resource,
-                        tex_sync_before,
-                        tex_sync_after,
-                        tex_access_before,
-                        tex_access_after,
-                        tex_layout_before,
-                        tex_layout_after,
-                    )
+                .filter_map(|(h, usage)| {
+                    state.textures.get(h).map(|ts| {
+                        let (tex_sync_after, tex_access_after, tex_layout_after) =
+                            texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
+                        let (tex_sync_before, tex_access_before, tex_layout_before) =
+                            texture_barrier_state_for_layout(ts.last_layout);
+                        (
+                            barriers::texture_barrier_full(
+                                &ts.resource,
+                                tex_sync_before,
+                                tex_sync_after,
+                                tex_access_before,
+                                tex_access_after,
+                                tex_layout_before,
+                                tex_layout_after,
+                            ),
+                            tex_layout_after,
+                        )
+                    })
                 })
+                .map(|(b, _)| b)
                 .collect();
-            unsafe { barriers::barrier_textures(cl7, &tex_barriers) };
+
+            if !ctx.use_global_buffer_barriers {
+                unsafe { barriers::barrier_groups(cl7, &buf_barriers, &tex_barriers) };
+                unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
+            } else if !tex_barriers.is_empty() {
+                unsafe { barriers::barrier_textures(cl7, &tex_barriers) };
+            }
             unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
-            for h in tex_handles {
+
+            for (h, usage) in tex_entries {
                 if let Some(ts) = state.textures.get_mut(h) {
                     let (_, _, tex_layout_after) =
-                        texture_barrier_state_for_usage(dst_usage, ts.is_storage);
+                        texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
                     ts.last_layout = tex_layout_after;
                 }
             }

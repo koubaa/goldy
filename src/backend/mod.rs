@@ -363,15 +363,13 @@ pub enum GpuCommand {
     /// Per-resource memory barrier with full access semantics.
     ///
     /// Emitted by the compute graph scheduler at dependency edges.
-    /// `src_usage` and `dst_usage` describe what kind of GPU work produced and
-    /// will consume the listed resources, in Koubaa-level terms.  Each backend
-    /// lowers them to its native synchronization primitives without needing to
-    /// infer access from surrounding commands.
+    /// Each `(handle, BarrierUsage)` pair describes what kind of GPU work produced
+    /// and will consume that specific resource.  Each backend lowers them to its
+    /// native synchronization primitives without needing to infer access from
+    /// surrounding commands.
     ResourceBarrier {
-        buffers: Vec<BufferHandle>,
-        textures: Vec<TextureHandle>,
-        src_usage: crate::task_graph::SlotUsageSet,
-        dst_usage: crate::task_graph::SlotUsageSet,
+        buffers: Vec<(BufferHandle, crate::task_graph::BarrierUsage)>,
+        textures: Vec<(TextureHandle, crate::task_graph::BarrierUsage)>,
     },
 }
 

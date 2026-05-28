@@ -713,13 +713,13 @@ pub(super) fn record_commands_to_buffer(
                 }
             }
             GpuCommand::ResourceBarrier {
-                buffers: buf_handles,
-                textures: tex_handles,
+                buffers: buf_entries,
+                textures: tex_entries,
                 ..
             } => {
                 if let Some(enc) = guard.compute {
                     let mut resources: Vec<&mtl::ResourceRef> = Vec::new();
-                    for handle in buf_handles {
+                    for (handle, _) in buf_entries {
                         if let Some(buf_state) = state.buffers.get(handle) {
                             let buf_ref: &mtl::BufferRef = &buf_state.buffer;
                             resources.push(unsafe {
@@ -727,7 +727,7 @@ pub(super) fn record_commands_to_buffer(
                             });
                         }
                     }
-                    for handle in tex_handles {
+                    for (handle, _) in tex_entries {
                         if let Some(tex_state) = state.textures.get(handle) {
                             let tex_ref: &mtl::TextureRef = &tex_state.texture;
                             resources.push(unsafe {

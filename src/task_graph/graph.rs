@@ -2508,7 +2508,7 @@ mod tests {
 
         if let GpuCommand::ResourceBarrier { buffers, .. } = barrier {
             assert!(
-                buffers.contains(&parent_handle),
+                buffers.iter().any(|(h, _)| *h == parent_handle),
                 "barrier should reference the parent buffer handle {}, got {:?}",
                 parent_handle,
                 buffers

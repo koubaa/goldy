@@ -227,27 +227,28 @@ impl GraphIR {
     }
 }
 
-/// Resources that need a barrier before a wave executes, with full access semantics.
+/// Per-resource sync/access semantics on one side of a barrier.
 ///
-/// `src_usage` and `dst_usage` describe *what kind of GPU work* produced and will
-/// consume the listed resources.  Backends lower these to native synchronization
-/// primitives (DX12 enhanced-barrier sync/access flags, Vulkan stage/access masks).
-///
-/// Both fields are the *union* across all dependency edges that feed this barrier:
-/// if wave N depends on both a `ClearBuffer` (Transfer/Write) and a `Dispatch`
-/// (Compute/Write), then `src_usage.kinds` contains `TRANSFER | COMPUTE`.
+/// `src` describes what the producer wave did; `dst` what the consumer wave will do.
+/// Backends lower these to native synchronization primitives (DX12 enhanced-barrier
+/// sync/access flags, Vulkan stage/access masks).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BarrierUsage {
+    /// What the producer side did to this resource.
+    pub src: SlotUsageSet,
+    /// What the consumer side will do to this resource.
+    pub dst: SlotUsageSet,
+}
+
+/// Resources that need a barrier before a wave executes, with per-resource access semantics.
 #[derive(Debug, Clone, Default)]
 pub struct BarrierSet {
-    pub buffers: Vec<BufferHandle>,
-    pub textures: Vec<TextureHandle>,
+    pub buffers: Vec<(BufferHandle, BarrierUsage)>,
+    pub textures: Vec<(TextureHandle, BarrierUsage)>,
     /// Transient buffer IDs whose concrete `BufferHandle` is only known at
     /// emission time (after slot resolution).  Resolved and folded into the
     /// `ResourceBarrier` command inside `emit_waves_to_commands`.
-    pub transient_ids: Vec<u32>,
-    /// What the producer side did to the listed resources.
-    pub src_usage: SlotUsageSet,
-    /// What the consumer side will do to the listed resources.
-    pub dst_usage: SlotUsageSet,
+    pub transient_ids: Vec<(u32, BarrierUsage)>,
 }
 
 impl BarrierSet {
