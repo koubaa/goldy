@@ -596,7 +596,24 @@ fn record_gpu_command(
     match cmd {
         GpuCommand::SetPipeline(handle) => {
             let _tz = tracy_zone!("dx12.set_pipeline");
+
             ctx.current_compute_pipeline = Some(*handle);
+            // This optimization was attempted but led to a slight performance regression
+            // It seems to be related to latency hiding - changing the root signatures
+            // caused the driver to warm up the GPU while the barrier drained.
+            // This may be driver-specific, but kernel fusion (a future goldy optimization)
+            // will render this kind of optimization moot - so we can do the conservative
+            // thing for now.
+
+            /*let pipeline_changed = ctx.current_compute_pipeline != Some(*handle);
+            if pipeline_changed {
+                if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
+                    unsafe {
+                        cl.SetComputeRootSignature(&pipeline_state.root_signature);
+                        cl.SetPipelineState(&pipeline_state.pipeline_state);
+                    }
+                }
+            }*/
             if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
                 unsafe {
                     cl.SetComputeRootSignature(&pipeline_state.root_signature);
