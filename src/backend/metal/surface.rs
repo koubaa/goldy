@@ -199,6 +199,14 @@ pub(super) fn acquire(
         }
     }
 
+    // Clone the GPU-signal timestamp arc before taking a mutable surface borrow.
+    // This lets us read the value after nextDrawable without conflicting borrows.
+    let gpu_signal_arc = state
+        .surfaces
+        .get(&surface)
+        .and_then(|ss| state.devices.get(&ss.device_handle))
+        .map(|ld| ld.timeline_waiter.last_signal_ns_arc());
+
     let surface_state = state
         .surfaces
         .get_mut(&surface)
@@ -212,11 +220,69 @@ pub(super) fn acquire(
 
     surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
+    // Snapshot the GPU-signal timestamp and CPU clock before blocking on the compositor.
+    // gpu_signal_before: when did the GPU last fire a completion handler?
+    // t_pre: CPU time just before nextDrawable (= when we enter the potential stall).
+    let gpu_signal_before_ns = gpu_signal_arc
+        .as_ref()
+        .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(0);
+    let t_pre_drawable_ns = super::types::metal_instant_ns();
+
     // Get the next drawable from the layer
     let drawable: id = {
         let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
         unsafe { msg_send![layer, nextDrawable] }
     };
+
+    // ── nextDrawable latency diagnostics ────────────────────────────────────
+    //
+    //  drawable_wait_us  : time spent blocked inside nextDrawable.
+    //  gpu_signal_age_us : age of the last GPU completion signal at the moment
+    //                      we entered nextDrawable.
+    //    • Large age + large wait → compositor throttle (GPU idle, compositor
+    //      hasn't released a drawable yet).
+    //    • Small age + large wait → GPU pacing (GPU was still running when we
+    //      called nextDrawable; both GPU and compositor contributed to the stall).
+    //    • gpu_fired_during_wait → GPU completion fired *inside* nextDrawable,
+    //      proving compute was on the critical path for this frame.
+    {
+        let t_post_drawable_ns = super::types::metal_instant_ns();
+        let gpu_signal_after_ns = gpu_signal_arc
+            .as_ref()
+            .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or(0);
+
+        let drawable_wait_us =
+            t_post_drawable_ns.saturating_sub(t_pre_drawable_ns) / 1000;
+        let gpu_signal_age_us = if gpu_signal_before_ns > 0 {
+            t_pre_drawable_ns.saturating_sub(gpu_signal_before_ns) / 1000
+        } else {
+            u64::MAX
+        };
+        let gpu_fired_during_wait =
+            gpu_signal_after_ns > gpu_signal_before_ns && gpu_signal_before_ns > 0;
+
+        if gpu_signal_age_us == u64::MAX {
+            tracing::debug!(
+                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
+                 (no prior gpu signal — first frame?)"
+            );
+        } else {
+            tracing::debug!(
+                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
+                 gpu_signal_age={gpu_signal_age_us}µs \
+                 gpu_fired_during_wait={gpu_fired_during_wait}"
+            );
+        }
+
+        crate::tracy_plot!("nextDrawable_wait_us", drawable_wait_us as f64);
+        if gpu_signal_age_us != u64::MAX {
+            crate::tracy_plot!("gpu_signal_age_us", gpu_signal_age_us as f64);
+        }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     if drawable == nil {
         anyhow::bail!("Failed to get next drawable from CAMetalLayer");
     }
