@@ -573,6 +573,11 @@ impl Frame {
     pub fn height(&self) -> u32 {
         self.height
     }
+
+    /// Swapchain image index acquired by [`Surface::begin`] for this frame.
+    pub fn image_index(&self) -> u32 {
+        self.token.image as u32
+    }
 }
 
 impl Drop for Frame {
