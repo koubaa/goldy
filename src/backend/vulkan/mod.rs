@@ -1057,11 +1057,9 @@ impl GpuBackend for VulkanBackend {
             }
             surface.pending_swapchain_returns.retain(|&(idx, tv)| {
                 if progress >= tv {
-                    signal_queue.push(crate::signal::Signal::SwapchainReturned {
-                        image_index: idx,
-                    });
-                    surface.pending_acquire_count =
-                        surface.pending_acquire_count.saturating_sub(1);
+                    signal_queue
+                        .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
                     false
                 } else {
                     true
@@ -1071,7 +1069,10 @@ impl GpuBackend for VulkanBackend {
         crate::signal::drain_all_signals(&signal_queue)
     }
 
-    fn peek_oldest_in_flight(&self, device_handle: DeviceHandle) -> Option<crate::timeline::TimelineValue> {
+    fn peek_oldest_in_flight(
+        &self,
+        device_handle: DeviceHandle,
+    ) -> Option<crate::timeline::TimelineValue> {
         let ld = self.state.devices.get(&device_handle)?;
         let progress = self.gpu_progress(device_handle);
         let scheduled = ld.timeline_next.saturating_sub(1);

@@ -1033,13 +1033,12 @@ impl GpuBackend for MockBackend {
         Vec::new()
     }
 
-    fn peek_oldest_in_flight(&self, device: DeviceHandle) -> Option<crate::timeline::TimelineValue> {
+    fn peek_oldest_in_flight(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<crate::timeline::TimelineValue> {
         let progress = self.gpu_progress(device);
-        let scheduled = self
-            .device_timeline_next
-            .get(&device)
-            .copied()
-            .unwrap_or(0);
+        let scheduled = self.device_timeline_next.get(&device).copied().unwrap_or(0);
         if progress < scheduled {
             Some(progress.saturating_add(1))
         } else {
@@ -1048,7 +1047,10 @@ impl GpuBackend for MockBackend {
     }
 
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
-        self.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
+        self.surface_pending_acquire
+            .get(&surface)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn wait_until(
@@ -2014,16 +2016,12 @@ mod tests {
         assert_eq!(backend.pending_acquire_count(surface), 0);
 
         let signals = backend.poll_signals(device);
-        assert!(
-            signals
-                .iter()
-                .any(|s| matches!(s, crate::signal::Signal::SwapchainAcquired { .. }))
-        );
-        assert!(
-            signals
-                .iter()
-                .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. }))
-        );
+        assert!(signals
+            .iter()
+            .any(|s| matches!(s, crate::signal::Signal::SwapchainAcquired { .. })));
+        assert!(signals
+            .iter()
+            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
     }
 
     #[test]
@@ -2071,10 +2069,8 @@ mod tests {
         assert_eq!(backend.pending_acquire_count(surface), 0);
 
         let signals = backend.poll_signals(device);
-        assert!(
-            !signals
-                .iter()
-                .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. }))
-        );
+        assert!(!signals
+            .iter()
+            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
     }
 }

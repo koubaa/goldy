@@ -576,8 +576,7 @@ impl GpuBackend for MetalBackend {
             // pending_swapchain_returns only tracks which surfaces need counter decrements.
             for (surface_handle, _image_index) in returns {
                 if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
-                    surf.pending_acquire_count =
-                        surf.pending_acquire_count.saturating_sub(1);
+                    surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
                 }
             }
             return crate::signal::drain_all_signals(&ld.signal_queue);
@@ -585,7 +584,10 @@ impl GpuBackend for MetalBackend {
         Vec::new()
     }
 
-    fn peek_oldest_in_flight(&self, device: DeviceHandle) -> Option<crate::timeline::TimelineValue> {
+    fn peek_oldest_in_flight(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<crate::timeline::TimelineValue> {
         let ld = self.state.devices.get(&device)?;
         let progress = ld.timeline_event.as_ref().signaled_value();
         let scheduled = ld.timeline_next.saturating_sub(1);

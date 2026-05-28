@@ -448,7 +448,8 @@ pub(super) fn acquire(
     }
 
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.signal_queue.push(crate::signal::Signal::SwapchainAcquired { image_index });
+        ld.signal_queue
+            .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
     Ok(image_index as SwapchainImageHandle)
@@ -900,9 +901,7 @@ pub(super) fn present(
     // Advance frame
     let (return_fence, return_image) = {
         let fence_val = surface.frame_sync[current_frame].fence_value;
-        let img = surface
-            .current_image_index
-            .unwrap_or(_image_index as u32);
+        let img = surface.current_image_index.unwrap_or(_image_index as u32);
         surface.current_image_index = None;
         surface.current_frame = (surface.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         (fence_val, img)
@@ -916,9 +915,10 @@ pub(super) fn present(
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
         if let Some(ld) = state.devices.get(&device_handle) {
-            ld.signal_queue.push(crate::signal::Signal::SwapchainReturned {
-                image_index: return_image,
-            });
+            ld.signal_queue
+                .push(crate::signal::Signal::SwapchainReturned {
+                    image_index: return_image,
+                });
         }
     }
 

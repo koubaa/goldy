@@ -253,8 +253,7 @@ pub(super) fn acquire(
             .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
             .unwrap_or(0);
 
-        let drawable_wait_us =
-            t_post_drawable_ns.saturating_sub(t_pre_drawable_ns) / 1000;
+        let drawable_wait_us = t_post_drawable_ns.saturating_sub(t_pre_drawable_ns) / 1000;
         let gpu_signal_age_us = if gpu_signal_before_ns > 0 {
             t_pre_drawable_ns.saturating_sub(gpu_signal_before_ns) / 1000
         } else {
@@ -320,8 +319,7 @@ pub(super) fn acquire(
         let image_index = surface_state.current_frame as u32;
         surface_state.current_texture_handle = Some(tex_handle);
         surface_state.last_acquired_image_index = Some(image_index);
-        surface_state.pending_acquire_count =
-            surface_state.pending_acquire_count.saturating_add(1);
+        surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_add(1);
         let signal_queue = state
             .devices
             .get(&device_handle)
@@ -500,9 +498,8 @@ pub(super) fn present(
             // Metal has no WSI timeline to poll: push SwapchainReturned here from the
             // completion handler. Vulkan/DX12 defer this signal until poll_signals when
             // gpu_progress crosses the copy/fence value.
-            signal_queue_present.push(crate::signal::Signal::SwapchainReturned {
-                image_index: idx,
-            });
+            signal_queue_present
+                .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
             if let Ok(mut pending) = return_pending.lock() {
                 pending.push((surface, idx));
             }
@@ -565,13 +562,12 @@ pub(super) fn submit_frame(
         return compute::submit(state, dh, &pending);
     }
 
-    let ld = state
-        .devices
-        .get(&dh)
-        .context("Device no longer valid")?;
-    Ok(ld.timeline_event.as_ref().signaled_value().max(
-        ld.last_committed_timeline.unwrap_or(0),
-    ))
+    let ld = state.devices.get(&dh).context("Device no longer valid")?;
+    Ok(ld
+        .timeline_event
+        .as_ref()
+        .signaled_value()
+        .max(ld.last_committed_timeline.unwrap_or(0)))
 }
 
 pub(super) fn present_frame(

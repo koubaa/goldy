@@ -821,9 +821,8 @@ pub(super) fn acquire(
             }
 
             if let Some(ld) = state.devices.get(&device_handle) {
-                ld.signal_queue.push(crate::signal::Signal::SwapchainAcquired {
-                    image_index,
-                });
+                ld.signal_queue
+                    .push(crate::signal::Signal::SwapchainAcquired { image_index });
             }
 
             Ok(image_index as SwapchainImageHandle)
@@ -1596,8 +1595,7 @@ pub(super) fn present(
         let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
         let copy_tv = surface_state.frame_sync[current_frame].copy_timeline_value;
         surface_state.current_image_index = None;
-        surface_state.current_frame =
-            (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         (copy_tv, image_index)
     };
 
@@ -1608,12 +1606,12 @@ pub(super) fn present(
                 .push((image_idx_for_return, tv));
         }
     } else if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
-        surface_state.pending_acquire_count =
-            surface_state.pending_acquire_count.saturating_sub(1);
+        surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_sub(1);
         if let Some(ld) = state.devices.get(&device_handle) {
-            ld.signal_queue.push(crate::signal::Signal::SwapchainReturned {
-                image_index: image_idx_for_return,
-            });
+            ld.signal_queue
+                .push(crate::signal::Signal::SwapchainReturned {
+                    image_index: image_idx_for_return,
+                });
         }
     }
 

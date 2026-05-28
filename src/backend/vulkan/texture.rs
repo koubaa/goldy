@@ -104,12 +104,11 @@ pub(super) fn create(
         .memory_type_index(memory_type);
 
     let memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
-        .map_err(|e| {
+        .inspect_err(|_e| {
             crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
                 reason: crate::signal::OversubscribedReason::TextureHeap,
                 size_hint: mem_reqs.size,
             });
-            e
         })
         .context("Failed to allocate texture memory")?;
 
