@@ -1276,6 +1276,24 @@ struct StagingFinish {
 /// `retain_key`: when `Some(k)`, stores the closed command list in
 /// `LogicalDevice::retained_graph` for zero-cost re-execution via
 /// [`try_resubmit_retained`].
+///
+/// # Abandoned optimizations
+///
+/// Two approaches were attempted here to reduce per-frame CPU recording cost and were
+/// reverted due to the reasons noted:
+///
+/// 1. **CBV binding table + fingerprint-based CL reuse**: replaced 128-byte root constants
+///    with a persistently-mapped UPLOAD buffer (CBV at root param 1) and slot indices
+///    (1-DWORD root param 0).  The binding table allowed resubmitting the same closed
+///    command list across frames when `compute_retention_fingerprint` was stable.
+///    Reverted: the required `wait_for_fence` after every `ExecuteCommandLists` to prevent
+///    CPU/GPU races on the shared binding-table buffer cut throughput from ~2500 FPS to
+///    ~1200 FPS — a net regression for the common case.
+///
+/// 2. **CBV binding table + bind groups**: same binding-table layout as above, with
+///    per-pipeline bind groups (descriptor-table caching) to amortise heap binding cost.
+///    Reverted: DX12 bundles do not support `Dispatch`, and a descriptor-table approach
+///    without bundles did not provide a clean enough win to justify the complexity.
 fn execute_signal_and_finish(
     state: &mut Dx12State,
     command_list: &ID3D12GraphicsCommandList,
