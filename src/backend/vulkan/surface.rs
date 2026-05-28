@@ -1607,6 +1607,14 @@ pub(super) fn present(
                 .pending_swapchain_returns
                 .push((image_idx_for_return, tv));
         }
+    } else if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
+        surface_state.pending_acquire_count =
+            surface_state.pending_acquire_count.saturating_sub(1);
+        if let Some(ld) = state.devices.get(&device_handle) {
+            ld.signal_queue.push(crate::signal::Signal::SwapchainReturned {
+                image_index: image_idx_for_return,
+            });
+        }
     }
 
     // Handle suboptimal or out of date
@@ -1948,6 +1956,8 @@ pub(super) fn resize(
         surface_state.depth_memory = new_depth_memory;
         surface_state.depth_view = new_depth_view;
         surface_state.present_mode_dirty = false;
+        surface_state.pending_acquire_count = 0;
+        surface_state.pending_swapchain_returns.clear();
         // scratch_texture_slots was already reset above after destroying old slots.
     }
 

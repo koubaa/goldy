@@ -430,7 +430,6 @@ pub(crate) struct LogicalDevice {
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
-    pub last_emitted_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 
     // Bindless infrastructure
     /// `true` when adapter reports tiled resources tier >= 1 (buffer reserved resources).

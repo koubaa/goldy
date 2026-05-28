@@ -431,6 +431,9 @@ pub(super) fn present(
     let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
         waiter.signal(signal_value);
         if let Some(idx) = return_image {
+            // Metal has no WSI timeline to poll: push SwapchainReturned here from the
+            // completion handler. Vulkan/DX12 defer this signal until poll_signals when
+            // gpu_progress crosses the copy/fence value.
             signal_queue_present.push(crate::signal::Signal::SwapchainReturned {
                 image_index: idx,
             });
@@ -588,6 +591,11 @@ pub(super) fn resize(
     let size = CGSize::new(width as f64, height as f64);
     unsafe {
         let () = msg_send![layer, setDrawableSize: size];
+    }
+
+    surface_state.pending_acquire_count = 0;
+    if let Some(ld) = state.devices.get(&surface_state.device_handle) {
+        ld.pending_swapchain_returns.lock().unwrap().clear();
     }
 
     tracing::debug!("Resized surface {} to {}x{}", surface, width, height);

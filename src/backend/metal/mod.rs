@@ -572,7 +572,9 @@ impl GpuBackend for MetalBackend {
         if let Some(ld) = self.state.devices.get(&device) {
             let returns: Vec<(SurfaceHandle, u32)> =
                 std::mem::take(&mut *ld.pending_swapchain_returns.lock().unwrap());
-            for (surface_handle, _idx) in returns {
+            // SwapchainReturned was already pushed from the completion handler;
+            // pending_swapchain_returns only tracks which surfaces need counter decrements.
+            for (surface_handle, _image_index) in returns {
                 if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
                     surf.pending_acquire_count =
                         surf.pending_acquire_count.saturating_sub(1);

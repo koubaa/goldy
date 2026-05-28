@@ -913,6 +913,13 @@ pub(super) fn present(
             surf.pending_swapchain_returns
                 .push((return_image, return_fence));
         }
+    } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+        surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
+        if let Some(ld) = state.devices.get(&device_handle) {
+            ld.signal_queue.push(crate::signal::Signal::SwapchainReturned {
+                image_index: return_image,
+            });
+        }
     }
 
     Ok(())
@@ -1119,6 +1126,8 @@ pub(super) fn resize(
     surface.current_image_index = None;
     surface.current_texture_handle = None;
     surface.compute_scratch_textures = vec![None; MAX_FRAMES_IN_FLIGHT];
+    surface.pending_acquire_count = 0;
+    surface.pending_swapchain_returns.clear();
 
     tracing::debug!("Resized surface to {}x{}", width, height);
     Ok(())

@@ -335,9 +335,6 @@ pub(crate) struct LogicalDevice {
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
-    /// Highest epoch for which [`crate::signal::Signal::BoundaryCrossed`] was posted (fence thread).
-    #[allow(dead_code)]
-    pub last_emitted_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,

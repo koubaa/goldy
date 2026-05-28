@@ -1,19 +1,22 @@
 //! GPU backend signals and the delivery queue used by [`crate::Device::poll_signals`].
 //!
 //! Async signals (`BoundaryCrossed`, swapchain events) are pushed from driver callback
-//! threads or backend internals into a per-device [`SignalQueue`]. Synchronous signals
-//! (`Oversubscribed`) are accumulated on the calling thread and merged when the client
-//! drains via `poll_signals`.
+//! threads or backend internals into a per-device [`SignalQueue`] (mutex-protected `Vec`;
+//! low contention in practice). Synchronous signals (`Oversubscribed`) are accumulated on
+//! the calling thread and merged when the client drains via `poll_signals`.
 
 use crate::timeline::TimelineValue;
 use std::cell::RefCell;
 use std::sync::Mutex;
 
 /// Reason reported with [`Signal::Oversubscribed`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OversubscribedReason {
     BufferHeap,
     TextureHeap,
+    /// Reserved. Not yet emitted; bindless slot exhaustion currently panics.
+    /// Will be wired when `ResourceRegistry` allocation is converted to `Result`.
     BindlessSlots,
 }
 
@@ -71,7 +74,12 @@ fn drain_sync_signals() -> Vec<Signal> {
     SYNC_SIGNALS.with(|s| std::mem::take(&mut *s.borrow_mut()))
 }
 
-/// Drain async queue and synchronous buffer into one vec (async first, then sync).
+/// Drain async queue first, then thread-local synchronous signals.
+///
+/// Async signals (`BoundaryCrossed`, swapchain events) lead so the caller sees
+/// GPU-completion notifications before same-frame allocation failures.
+/// `Oversubscribed` always trails because it fires on the calling thread after
+/// the async queue snapshot is already taken.
 pub fn drain_all_signals(queue: &SignalQueue) -> Vec<Signal> {
     let mut out = queue.drain();
     out.append(&mut drain_sync_signals());
@@ -93,21 +101,21 @@ mod tests {
     }
 
     #[test]
-    fn sync_signals_merged_on_drain_all() {
+    fn oversubscribed_ordering() {
         let q = SignalQueue::new();
         push_sync_signal(Signal::Oversubscribed {
             reason: OversubscribedReason::BufferHeap,
-            size_hint: 1024,
+            size_hint: 512,
         });
-        q.push(Signal::BoundaryCrossed { epoch: 2 });
+        q.push(Signal::BoundaryCrossed { epoch: 3 });
         let all = drain_all_signals(&q);
         assert_eq!(all.len(), 2);
-        assert!(matches!(all[0], Signal::BoundaryCrossed { epoch: 2 }));
+        assert!(matches!(all[0], Signal::BoundaryCrossed { epoch: 3 }));
         assert!(matches!(
             all[1],
             Signal::Oversubscribed {
                 reason: OversubscribedReason::BufferHeap,
-                size_hint: 1024,
+                size_hint: 512,
             }
         ));
     }

@@ -801,6 +801,9 @@ impl GpuBackend for MockBackend {
 
         surf.width = width;
         surf.height = height;
+        if let Some(count) = self.surface_pending_acquire.get_mut(&surface) {
+            *count = 0;
+        }
         Ok(())
     }
 
@@ -1963,6 +1966,115 @@ mod tests {
         assert_eq!(
             backend.wait_until_count, 0,
             "submit_graph should not call wait_until (no CPU waits)"
+        );
+    }
+
+    #[test]
+    fn acquire_release_pairs_on_mock() {
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
+            }
+        }
+
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let surface = backend
+            .create_surface(device, &MockWindow, &MockWindow, None)
+            .unwrap();
+
+        let (frame, _tex) = backend.begin_frame(surface).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 1);
+
+        backend.present_frame(frame, 0).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 0);
+
+        let signals = backend.poll_signals(device);
+        assert!(
+            signals
+                .iter()
+                .any(|s| matches!(s, crate::signal::Signal::SwapchainAcquired { .. }))
+        );
+        assert!(
+            signals
+                .iter()
+                .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. }))
+        );
+    }
+
+    #[test]
+    fn counter_zero_after_resize() {
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
+            }
+        }
+
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let surface = backend
+            .create_surface(device, &MockWindow, &MockWindow, None)
+            .unwrap();
+
+        let (_frame, _tex) = backend.begin_frame(surface).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 1);
+
+        backend.surface_resize(surface, 1024, 768).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 0);
+
+        let signals = backend.poll_signals(device);
+        assert!(
+            !signals
+                .iter()
+                .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. }))
         );
     }
 }
