@@ -86,6 +86,10 @@ fn allocate_mtl_storage_buffer(
         }
     }
 
+    crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+        reason: crate::signal::OversubscribedReason::BufferHeap,
+        size_hint: allocation_size,
+    });
     bail!("Metal buffer heap allocation failed — all heaps exhausted");
 }
 

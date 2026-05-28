@@ -37,6 +37,10 @@ pub mod metal;
 /// task-graph command emission (e.g. `DispatchBatch` argument packing).
 pub(crate) mod shared;
 
+/// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12).
+#[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows")))]
+pub(crate) mod signal_fence;
+
 use crate::types::{
     BackendType, BindlessHandle, BufferFlags, Color, DataAccess, DepthFormat, DepthStencilState,
     DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess,
@@ -694,6 +698,15 @@ pub trait GpuBackend: Send + Sync {
     /// Latest GPU completion point on this device's timeline (`value` is done when
     /// `gpu_progress() >= value`).
     fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
+
+    /// Drain pending backend signals for this device (async queue + synchronous oversubscribed).
+    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal>;
+
+    /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
+    fn peek_oldest_in_flight(&self, device: DeviceHandle) -> Option<crate::timeline::TimelineValue>;
+
+    /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
+    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
 
     fn wait_until(
         &mut self,

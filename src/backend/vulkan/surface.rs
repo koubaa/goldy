@@ -437,6 +437,8 @@ pub(super) fn create(
             scratch_texture_slots: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
             current_texture_handle: None,
             frame_pending_gpu_commands: Vec::new(),
+            pending_acquire_count: 0,
+            pending_swapchain_returns: Vec::new(),
         },
     );
 
@@ -811,8 +813,18 @@ pub(super) fn acquire(
             let scratch_handle =
                 ensure_scratch_texture_slot(state, surface_handle, device_handle, current_frame)?;
 
-            let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
-            surface_state.current_texture_handle = Some(scratch_handle);
+            {
+                let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
+                surface_state.current_texture_handle = Some(scratch_handle);
+                surface_state.pending_acquire_count =
+                    surface_state.pending_acquire_count.saturating_add(1);
+            }
+
+            if let Some(ld) = state.devices.get(&device_handle) {
+                ld.signal_queue.push(crate::signal::Signal::SwapchainAcquired {
+                    image_index,
+                });
+            }
 
             Ok(image_index as SwapchainImageHandle)
         }
@@ -1580,9 +1592,22 @@ pub(super) fn present(
     }
 
     // Clear the current image and advance frame counter.
-    let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
-    surface_state.current_image_index = None;
-    surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    let (copy_tv, image_idx_for_return) = {
+        let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
+        let copy_tv = surface_state.frame_sync[current_frame].copy_timeline_value;
+        surface_state.current_image_index = None;
+        surface_state.current_frame =
+            (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        (copy_tv, image_index)
+    };
+
+    if let Some(tv) = copy_tv {
+        if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
+            surface_state
+                .pending_swapchain_returns
+                .push((image_idx_for_return, tv));
+        }
+    }
 
     // Handle suboptimal or out of date
     match result {

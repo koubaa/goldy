@@ -331,6 +331,14 @@ pub(crate) struct LogicalDevice {
     /// Next timeline value to signal on `timeline_semaphore`.
     pub timeline_next: u64,
 
+    /// Async signal delivery (fence thread → [`crate::Device::poll_signals`]).
+    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fence_thread: Option<std::thread::JoinHandle<()>>,
+    /// Highest epoch for which [`crate::signal::Signal::BoundaryCrossed`] was posted (fence thread).
+    #[allow(dead_code)]
+    pub last_emitted_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
 
@@ -640,6 +648,10 @@ pub(crate) struct SurfaceState {
     pub current_texture_handle: Option<super::TextureHandle>,
     /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`](crate::backend::GpuBackend::record_gpu_work)).
     pub frame_pending_gpu_commands: Vec<super::GpuCommand>,
+    /// Drawables acquired or presented but not yet returned to the swapchain pool.
+    pub pending_acquire_count: u32,
+    /// `(image_index, timeline)` pairs waiting for GPU completion before `SwapchainReturned`.
+    pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
 }
 
 /// Pending buffer operations for command recording.

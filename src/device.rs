@@ -551,6 +551,21 @@ impl Device {
             .is_device_valid(self.inner.handle)
     }
 
+    /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
+    ///
+    /// Call from the render thread before reclaiming resources; driver callbacks only enqueue
+    /// async signals — client policy runs here without locks on ekrano state.
+    pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
+        let mut backend = self.inner.backend.lock().unwrap();
+        backend.poll_signals(self.inner.handle)
+    }
+
+    /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
+    pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.peek_oldest_in_flight(self.inner.handle)
+    }
+
     /// Latest GPU completion counter on this device's timeline (`wait_until(value)` is valid once
     /// `gpu_progress() >= value`).
     pub fn gpu_progress(&self) -> TimelineValue {

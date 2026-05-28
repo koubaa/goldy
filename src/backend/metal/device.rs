@@ -93,7 +93,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     );
 
     let timeline_event = device.new_shared_event();
-    let timeline_waiter = TimelineWaiter::new();
+    let signal_queue = std::sync::Arc::new(crate::signal::SignalQueue::new());
+    let timeline_waiter = TimelineWaiter::new_with_signals(std::sync::Arc::clone(&signal_queue));
 
     state.devices.insert(
         handle,
@@ -109,6 +110,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             resource_registry: ResourceRegistry::new(),
             timeline_event,
             timeline_waiter,
+            signal_queue,
+            pending_swapchain_returns: Mutex::new(Vec::new()),
             timeline_next: 1,
             timeline_scheduled_max: 0,
             deletion_queue: DeletionQueue::new(),

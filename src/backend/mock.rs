@@ -60,6 +60,8 @@ pub struct MockBackend {
     pub default_surface_format: TextureFormat,
     device_timeline_next: HashMap<DeviceHandle, u64>,
     device_timeline_completed: HashMap<DeviceHandle, u64>,
+    signal_queues: HashMap<DeviceHandle, crate::signal::SignalQueue>,
+    surface_pending_acquire: HashMap<SurfaceHandle, u32>,
 }
 
 #[allow(dead_code)]
@@ -183,6 +185,8 @@ impl MockBackend {
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
             device_timeline_completed: HashMap::new(),
+            signal_queues: HashMap::new(),
+            surface_pending_acquire: HashMap::new(),
         }
     }
 
@@ -234,11 +238,18 @@ impl GpuBackend for MockBackend {
         self.next_device_handle += 1;
 
         self.devices.insert(handle, MockDevice { adapter_id });
+        self.signal_queues
+            .insert(handle, crate::signal::SignalQueue::new());
+        self.device_timeline_next.insert(handle, 0);
+        self.device_timeline_completed.insert(handle, 0);
         Ok(handle)
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
         self.devices.remove(&device);
+        self.signal_queues.remove(&device);
+        self.device_timeline_next.remove(&device);
+        self.device_timeline_completed.remove(&device);
 
         // Clean up resources owned by this device
         self.buffers.retain(|_, b| b.device_handle != device);
@@ -720,12 +731,14 @@ impl GpuBackend for MockBackend {
                 pending_frame_compute: Vec::new(),
             },
         );
+        self.surface_pending_acquire.insert(handle, 0);
 
         Ok(handle)
     }
 
     fn destroy_surface(&mut self, surface: SurfaceHandle) {
         self.surfaces.remove(&surface);
+        self.surface_pending_acquire.remove(&surface);
     }
 
     fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
@@ -760,6 +773,13 @@ impl GpuBackend for MockBackend {
                 sampled_bindless_index: None,
             },
         );
+
+        *self.surface_pending_acquire.entry(surface).or_insert(0) += 1;
+        if let Some(queue) = self.signal_queues.get(&device_handle) {
+            queue.push(crate::signal::Signal::SwapchainAcquired {
+                image_index: image as u32,
+            });
+        }
 
         Ok((FrameToken { surface, image }, tex_handle))
     }
@@ -1003,6 +1023,31 @@ impl GpuBackend for MockBackend {
             .unwrap_or(0)
     }
 
+    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal> {
+        if let Some(queue) = self.signal_queues.get(&device) {
+            return crate::signal::drain_all_signals(queue);
+        }
+        Vec::new()
+    }
+
+    fn peek_oldest_in_flight(&self, device: DeviceHandle) -> Option<crate::timeline::TimelineValue> {
+        let progress = self.gpu_progress(device);
+        let scheduled = self
+            .device_timeline_next
+            .get(&device)
+            .copied()
+            .unwrap_or(0);
+        if progress < scheduled {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
+    }
+
+    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
+        self.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
+    }
+
     fn wait_until(
         &mut self,
         device: DeviceHandle,
@@ -1133,10 +1178,21 @@ impl GpuBackend for MockBackend {
         }
         self.surface_present_count += 1;
 
+        let image_index = frame.image as u32;
+        if let Some(queue) = self.signal_queues.get(&device) {
+            queue.push(crate::signal::Signal::SwapchainReturned { image_index });
+        }
+        if let Some(count) = self.surface_pending_acquire.get_mut(&frame.surface) {
+            *count = count.saturating_sub(1);
+        }
+
         let next = self.device_timeline_next.entry(device).or_insert(0);
         *next += 1;
         let tv = *next;
         self.device_timeline_completed.insert(device, tv);
+        if let Some(queue) = self.signal_queues.get(&device) {
+            queue.push(crate::signal::Signal::BoundaryCrossed { epoch: tv });
+        }
         Ok(tv)
     }
 

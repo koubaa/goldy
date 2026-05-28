@@ -389,6 +389,27 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
+    let signal_queue = std::sync::Arc::new(crate::signal::SignalQueue::new());
+    let fence_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let last_emitted_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let timeline_semaphore_for_poll = timeline_semaphore;
+    let device_for_poll = device.clone();
+    let signal_queue_poll = std::sync::Arc::clone(&signal_queue);
+    let shutdown_poll = std::sync::Arc::clone(&fence_shutdown);
+    let last_emitted_poll = std::sync::Arc::clone(&last_emitted_epoch);
+    let fence_thread = Some(crate::backend::signal_fence::spawn_fence_poller(
+        crate::backend::signal_fence::FencePollerState {
+            shutdown: shutdown_poll,
+            signal_queue: signal_queue_poll,
+            last_emitted_epoch: last_emitted_poll,
+            gpu_completed: std::sync::Arc::new(move || unsafe {
+                device_for_poll
+                    .get_semaphore_counter_value(timeline_semaphore_for_poll)
+                    .unwrap_or(0)
+            }),
+        },
+    ));
+
     state.devices.insert(
         handle,
         types::LogicalDevice {
@@ -412,6 +433,10 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             deletion_queue: types::DeletionQueue::new(),
             timeline_semaphore,
             timeline_next: 1,
+            signal_queue,
+            fence_shutdown,
+            fence_thread,
+            last_emitted_epoch,
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device
                 .properties
@@ -448,6 +473,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         "destroying Vulkan device"
     );
     if let Some(mut logical_device) = state.devices.remove(&device_handle) {
+        crate::backend::signal_fence::join_fence_poller(
+            &logical_device.fence_shutdown,
+            logical_device.fence_thread.take(),
+        );
         unsafe {
             let wait_result = logical_device.device.device_wait_idle();
 

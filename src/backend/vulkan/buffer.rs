@@ -160,6 +160,13 @@ pub(super) fn create(
         .memory_type_index(memory_type);
 
     let memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
+        .map_err(|e| {
+            crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+                reason: crate::signal::OversubscribedReason::BufferHeap,
+                size_hint: mem_requirements.size,
+            });
+            e
+        })
         .context("Failed to allocate buffer memory")?;
 
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }

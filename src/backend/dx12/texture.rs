@@ -180,6 +180,12 @@ pub(super) fn create(
             &mut resource,
         )
     };
+    if hr.is_err() {
+        crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+            reason: crate::signal::OversubscribedReason::TextureHeap,
+            size_hint: (width as u64) * (height as u64) * 4,
+        });
+    }
     hr.context("Failed to create texture")?;
     let resource = resource.context("CreateCommittedResource returned null")?;
 

@@ -488,17 +488,38 @@ impl DeletionQueue {
 #[derive(Clone)]
 pub(crate) struct TimelineWaiter {
     inner: Arc<(Mutex<u64>, Condvar)>,
+    signal_queue: Option<Arc<crate::signal::SignalQueue>>,
+    last_emitted: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TimelineWaiter {
     pub fn new() -> Self {
         Self {
             inner: Arc::new((Mutex::new(0), Condvar::new())),
+            signal_queue: None,
+            last_emitted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    /// Called from the `notifyListener` block when the GPU signals a timeline value.
+    pub fn new_with_signals(signal_queue: Arc<crate::signal::SignalQueue>) -> Self {
+        Self {
+            inner: Arc::new((Mutex::new(0), Condvar::new())),
+            signal_queue: Some(signal_queue),
+            last_emitted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Called from command-buffer completion handlers when the GPU signals a timeline value.
     pub fn signal(&self, value: u64) {
+        if let Some(queue) = &self.signal_queue {
+            let mut last = self.last_emitted.load(std::sync::atomic::Ordering::Acquire);
+            while last < value {
+                last += 1;
+                queue.push(crate::signal::Signal::BoundaryCrossed { epoch: last });
+                self.last_emitted
+                    .store(last, std::sync::atomic::Ordering::Release);
+            }
+        }
         let (lock, cvar) = &*self.inner;
         let mut signaled = lock.lock().unwrap();
         if value > *signaled {
@@ -559,6 +580,10 @@ pub(crate) struct LogicalDevice {
     pub timeline_event: SharedEvent,
     /// Event-driven waiter for GPU timeline completion (replaces poll loop).
     pub timeline_waiter: TimelineWaiter,
+    /// Async + sync signal delivery for [`crate::Device::poll_signals`].
+    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    /// Swapchain returns posted from completion handlers; drained on `poll_signals`.
+    pub pending_swapchain_returns: Mutex<Vec<(super::SurfaceHandle, u32)>>,
     /// Next [`TimelineValue`] assigned on submission (`timeline_next` follows successful commits).
     pub timeline_next: u64,
     /// Highest timeline value scheduled on the GPU queue for this device (used for idle / flush).
@@ -1105,6 +1130,8 @@ pub(crate) struct SurfaceState {
     pub present_mode: crate::types::PresentMode,
     /// Frame-scoped GPU commands ([`crate::backend::GpuBackend::record_gpu_work`]).
     pub frame_pending_gpu_commands: Vec<crate::backend::GpuCommand>,
+    pub pending_acquire_count: u32,
+    pub last_acquired_image_index: Option<u32>,
 }
 
 // SAFETY: `SurfaceState` contains raw pointers to a `CALayer` and `CAMetalDrawable`.

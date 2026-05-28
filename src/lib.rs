@@ -46,6 +46,7 @@ pub mod tracy;
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
 pub mod placement_heap;
+pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
@@ -58,6 +59,7 @@ pub use vram_allocator::DeferredPayload;
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
+pub use signal::{OversubscribedReason, Signal};
 pub use timeline::TimelineValue;
 
 pub use backend::GraphCommand;
@@ -72,7 +74,7 @@ pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
-pub use surface::{Frame, PendingPresent, Surface};
+pub use surface::{Frame, Surface};
 pub use task_graph::{
     GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId,
 };

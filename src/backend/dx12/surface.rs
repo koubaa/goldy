@@ -296,6 +296,8 @@ pub(super) fn create(
             present_mode: crate::types::PresentMode::Fifo,
             frame_latency_waitable,
             pending_frame_compute: Vec::new(),
+            pending_acquire_count: 0,
+            pending_swapchain_returns: Vec::new(),
         },
     );
 
@@ -439,8 +441,15 @@ pub(super) fn acquire(
         device_handle,
     )?;
 
-    let surface = state.surfaces.get_mut(&surface_handle).unwrap();
-    surface.current_texture_handle = Some(tex_handle);
+    {
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+        surface.current_texture_handle = Some(tex_handle);
+        surface.pending_acquire_count = surface.pending_acquire_count.saturating_add(1);
+    }
+
+    if let Some(ld) = state.devices.get(&device_handle) {
+        ld.signal_queue.push(crate::signal::Signal::SwapchainAcquired { image_index });
+    }
 
     Ok(image_index as SwapchainImageHandle)
 }
@@ -889,8 +898,22 @@ pub(super) fn present(
     }
 
     // Advance frame
-    surface.current_image_index = None;
-    surface.current_frame = (surface.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    let (return_fence, return_image) = {
+        let fence_val = surface.frame_sync[current_frame].fence_value;
+        let img = surface
+            .current_image_index
+            .unwrap_or(_image_index as u32);
+        surface.current_image_index = None;
+        surface.current_frame = (surface.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        (fence_val, img)
+    };
+
+    if return_fence > 0 {
+        if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+            surf.pending_swapchain_returns
+                .push((return_image, return_fence));
+        }
+    }
 
     Ok(())
 }

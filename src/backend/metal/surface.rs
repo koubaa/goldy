@@ -138,6 +138,8 @@ pub(super) fn create(
             bindless_storage_slots,
             present_mode: PresentMode::Auto,
             frame_pending_gpu_commands: Vec::new(),
+            pending_acquire_count: 0,
+            last_acquired_image_index: None,
         },
     );
     tracing::info!(
@@ -244,17 +246,32 @@ pub(super) fn acquire(
         bindless_slot,
     )?;
 
-    let surface_state = state
-        .surfaces
-        .get_mut(&surface)
-        .expect("surface must be registered before acquiring a frame");
-    surface_state.current_texture_handle = Some(tex_handle);
+    let (image_index, signal_queue) = {
+        let surface_state = state
+            .surfaces
+            .get_mut(&surface)
+            .expect("surface must be registered before acquiring a frame");
+        let image_index = surface_state.current_frame as u32;
+        surface_state.current_texture_handle = Some(tex_handle);
+        surface_state.last_acquired_image_index = Some(image_index);
+        surface_state.pending_acquire_count =
+            surface_state.pending_acquire_count.saturating_add(1);
+        let signal_queue = state
+            .devices
+            .get(&device_handle)
+            .map(|ld| std::sync::Arc::clone(&ld.signal_queue));
+        (image_index, signal_queue)
+    };
+
+    if let Some(queue) = signal_queue {
+        queue.push(crate::signal::Signal::SwapchainAcquired { image_index });
+    }
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.process_deletion_queue_up_to_signaled();
     }
 
-    Ok(surface_state.current_frame as u64)
+    Ok(image_index as u64)
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -405,8 +422,22 @@ pub(super) fn present(
     command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
 
     let waiter = logical_device.timeline_waiter.clone();
+    let signal_queue_present = std::sync::Arc::clone(&logical_device.signal_queue);
+    let return_pending = logical_device.pending_swapchain_returns.clone();
+    let return_image = state
+        .surfaces
+        .get(&surface)
+        .and_then(|s| s.last_acquired_image_index);
     let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
         waiter.signal(signal_value);
+        if let Some(idx) = return_image {
+            signal_queue_present.push(crate::signal::Signal::SwapchainReturned {
+                image_index: idx,
+            });
+            if let Ok(mut pending) = return_pending.lock() {
+                pending.push((surface, idx));
+            }
+        }
     })
     .copy();
     command_buffer.add_completed_handler(&handler);
@@ -433,6 +464,7 @@ pub(super) fn present(
         .expect("surface must be registered before presenting a frame");
     surface_state.current_drawable = None;
     surface_state.current_texture_handle = None;
+    surface_state.last_acquired_image_index = None;
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.in_flight_command_buffers
