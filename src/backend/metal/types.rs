@@ -583,7 +583,7 @@ pub(crate) struct LogicalDevice {
     /// Async + sync signal delivery for [`crate::Device::poll_signals`].
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     /// Swapchain returns posted from completion handlers; drained on `poll_signals`.
-    pub pending_swapchain_returns: Mutex<Vec<(super::SurfaceHandle, u32)>>,
+    pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,
     /// Next [`TimelineValue`] assigned on submission (`timeline_next` follows successful commits).
     pub timeline_next: u64,
     /// Highest timeline value scheduled on the GPU queue for this device (used for idle / flush).

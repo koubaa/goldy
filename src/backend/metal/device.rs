@@ -9,6 +9,7 @@ use super::types::{
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
 use anyhow::{Context, Result};
+use std::sync::{Arc, Mutex};
 
 /// Initial heap size for both the buffer and texture heaps.
 ///
@@ -111,7 +112,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             timeline_event,
             timeline_waiter,
             signal_queue,
-            pending_swapchain_returns: Mutex::new(Vec::new()),
+            pending_swapchain_returns: Arc::new(Mutex::new(Vec::new())),
             timeline_next: 1,
             timeline_scheduled_max: 0,
             deletion_queue: DeletionQueue::new(),
