@@ -353,6 +353,10 @@ impl Dx12Backend {
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
         if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
+            crate::backend::signal_fence::join_fence_poller(
+                &logical_device.fence_shutdown,
+                logical_device.fence_thread.take(),
+            );
             let _ = self.wait_for_gpu(&logical_device);
             // Advance fence_value past the value consumed by wait_for_gpu so that
             // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing
@@ -822,6 +826,56 @@ impl GpuBackend for Dx12Backend {
             .unwrap_or(0)
     }
 
+    fn poll_signals(&mut self, device_handle: DeviceHandle) -> Vec<crate::signal::Signal> {
+        let progress = self.gpu_progress(device_handle);
+        let signal_queue = self
+            .state
+            .devices
+            .get(&device_handle)
+            .map(|ld| std::sync::Arc::clone(&ld.signal_queue));
+        let Some(signal_queue) = signal_queue else {
+            return Vec::new();
+        };
+        for surface in self.state.surfaces.values_mut() {
+            if surface.device_handle != device_handle {
+                continue;
+            }
+            surface.pending_swapchain_returns.retain(|&(idx, tv)| {
+                if progress >= tv {
+                    signal_queue
+                        .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        crate::signal::drain_all_signals(&signal_queue)
+    }
+
+    fn peek_oldest_in_flight(
+        &self,
+        device_handle: DeviceHandle,
+    ) -> Option<crate::timeline::TimelineValue> {
+        let ld = self.state.devices.get(&device_handle)?;
+        let progress = self.gpu_progress(device_handle);
+        let scheduled = ld.fence_value.saturating_sub(1);
+        if progress < scheduled {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
+    }
+
+    fn pending_acquire_count(&self, surface_handle: SurfaceHandle) -> u32 {
+        self.state
+            .surfaces
+            .get(&surface_handle)
+            .map(|s| s.pending_acquire_count)
+            .unwrap_or(0)
+    }
+
     fn wait_until(
         &mut self,
         device_handle: DeviceHandle,
@@ -928,8 +982,16 @@ impl GpuBackend for Dx12Backend {
         surface::record_gpu_work(&mut self.state, frame.surface, commands)
     }
 
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
-        surface::end_frame(&mut self.state, frame)
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::submit_frame(&mut self.state, frame)
+    }
+
+    fn present_frame(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::present_frame(&mut self.state, frame, submit_tv)
     }
 
     fn create_pipeline_with_depth(

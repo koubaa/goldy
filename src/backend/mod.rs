@@ -37,6 +37,10 @@ pub mod metal;
 /// task-graph command emission (e.g. `DispatchBatch` argument packing).
 pub(crate) mod shared;
 
+/// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12).
+#[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows")))]
+pub(crate) mod signal_fence;
+
 use crate::types::{
     BackendType, BindlessHandle, BufferFlags, Color, DataAccess, DepthFormat, DepthStencilState,
     DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess,
@@ -359,15 +363,13 @@ pub enum GpuCommand {
     /// Per-resource memory barrier with full access semantics.
     ///
     /// Emitted by the compute graph scheduler at dependency edges.
-    /// `src_usage` and `dst_usage` describe what kind of GPU work produced and
-    /// will consume the listed resources, in Koubaa-level terms.  Each backend
-    /// lowers them to its native synchronization primitives without needing to
-    /// infer access from surrounding commands.
+    /// Each `(handle, BarrierUsage)` pair describes what kind of GPU work produced
+    /// and will consume that specific resource.  Each backend lowers them to its
+    /// native synchronization primitives without needing to infer access from
+    /// surrounding commands.
     ResourceBarrier {
-        buffers: Vec<BufferHandle>,
-        textures: Vec<TextureHandle>,
-        src_usage: crate::task_graph::SlotUsageSet,
-        dst_usage: crate::task_graph::SlotUsageSet,
+        buffers: Vec<(BufferHandle, crate::task_graph::BarrierUsage)>,
+        textures: Vec<(TextureHandle, crate::task_graph::BarrierUsage)>,
     },
 }
 
@@ -695,6 +697,16 @@ pub trait GpuBackend: Send + Sync {
     /// `gpu_progress() >= value`).
     fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
 
+    /// Drain pending backend signals for this device (async queue + synchronous oversubscribed).
+    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal>;
+
+    /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
+    fn peek_oldest_in_flight(&self, device: DeviceHandle)
+        -> Option<crate::timeline::TimelineValue>;
+
+    /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
+    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
+
     fn wait_until(
         &mut self,
         device: DeviceHandle,
@@ -798,8 +810,32 @@ pub trait GpuBackend: Send + Sync {
     /// Record GPU work that must be ordered with the active surface frame (e.g. compute into the swapchain).
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()>;
 
-    /// End the frame: submit all recorded work, present, return the timeline value when the frame completes on the GPU.
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue>;
+    /// Submit all recorded GPU work for this frame bracket. Does not present.
+    ///
+    /// Returns the timeline value signaled when the frame's compute (and transfer) work
+    /// completes on the GPU. When no work was recorded, returns the latest completed
+    /// or scheduled compute timeline appropriate for the backend.
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue>;
+
+    /// Present the swapchain image for this frame after [`Self::submit_frame`].
+    ///
+    /// `submit_tv` is the value returned by [`Self::submit_frame`] so backends that use
+    /// separate present queues can wait for compute before presenting.
+    fn present_frame(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue>;
+
+    /// Submit recorded work and present. Convenience for callers that do not split the bracket.
+    ///
+    /// Default implementation calls [`Self::submit_frame`] then [`Self::present_frame`].
+    /// The returned timeline is from present (when present allocates its own signal) or
+    /// from submit when present reuses the submit timeline.
+    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
+        let submit_tv = self.submit_frame(&frame)?;
+        self.present_frame(frame, submit_tv)
+    }
 
     // Compute pipeline management
     /// Create a compute pipeline from a compute shader.

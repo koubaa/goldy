@@ -551,6 +551,21 @@ impl Device {
             .is_device_valid(self.inner.handle)
     }
 
+    /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
+    ///
+    /// Call from the render thread before reclaiming resources; driver callbacks only enqueue
+    /// async signals — client policy runs here without locks on ekrano state.
+    pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
+        let mut backend = self.inner.backend.lock().unwrap();
+        backend.poll_signals(self.inner.handle)
+    }
+
+    /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
+    pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.peek_oldest_in_flight(self.inner.handle)
+    }
+
     /// Latest GPU completion counter on this device's timeline (`wait_until(value)` is valid once
     /// `gpu_progress() >= value`).
     pub fn gpu_progress(&self) -> TimelineValue {
@@ -665,11 +680,21 @@ impl Device {
     /// [`defer_release`]: Self::defer_release
     pub fn flush_deferred_deletions(&self) {
         let _tz = crate::tracy_zone!("device.flush_deferred_deletions");
-        let mut backend = self.inner.backend.lock().unwrap();
-        backend.flush_deferred_deletions(self.inner.handle);
-        let progress = backend.gpu_progress(self.inner.handle);
-        drop(backend);
+        let progress = {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+            backend.gpu_progress(self.inner.handle)
+        };
+        // reclaim drops DeferredPayloads. With RECLAMATION_EPOCH set, Buffer::drop
+        // queues Metal heap buffers into the deletion queue with a barrier equal to
+        // the already-completed reclamation epoch rather than timeline_scheduled_max.
+        // Those entries are immediately eligible, so a second flush processes them and
+        // returns the heap memory before any subsequent allocation attempt.
         self.inner.vram_allocator.reclaim(progress);
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+        }
     }
 
     /// Returns `true` if the device's [`VramAllocator`] holds deferred payloads that

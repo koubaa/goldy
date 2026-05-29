@@ -47,6 +47,60 @@ pub unsafe fn barrier_buffers(cmd: &ID3D12GraphicsCommandList7, barriers: &[D3D1
     cmd.Barrier(&[group]);
 }
 
+/// Record buffer and/or texture barrier groups in a single `Barrier()` call.
+///
+/// Empty slices are skipped.  At least one group must be non-empty.
+///
+/// # Safety
+/// Barrier slices must remain valid for the duration of the call.
+pub unsafe fn barrier_groups(
+    cmd: &ID3D12GraphicsCommandList7,
+    buffers: &[D3D12_BUFFER_BARRIER],
+    textures: &[D3D12_TEXTURE_BARRIER],
+) {
+    let mut groups: [D3D12_BARRIER_GROUP; 2] = [
+        D3D12_BARRIER_GROUP {
+            Type: D3D12_BARRIER_TYPE_BUFFER,
+            NumBarriers: 0,
+            Anonymous: D3D12_BARRIER_GROUP_0 {
+                pBufferBarriers: std::ptr::null(),
+            },
+        },
+        D3D12_BARRIER_GROUP {
+            Type: D3D12_BARRIER_TYPE_TEXTURE,
+            NumBarriers: 0,
+            Anonymous: D3D12_BARRIER_GROUP_0 {
+                pTextureBarriers: std::ptr::null(),
+            },
+        },
+    ];
+    let mut count = 0usize;
+    if !buffers.is_empty() {
+        groups[count] = D3D12_BARRIER_GROUP {
+            Type: D3D12_BARRIER_TYPE_BUFFER,
+            NumBarriers: buffers.len() as u32,
+            Anonymous: D3D12_BARRIER_GROUP_0 {
+                pBufferBarriers: buffers.as_ptr(),
+            },
+        };
+        count += 1;
+    }
+    if !textures.is_empty() {
+        groups[count] = D3D12_BARRIER_GROUP {
+            Type: D3D12_BARRIER_TYPE_TEXTURE,
+            NumBarriers: textures.len() as u32,
+            Anonymous: D3D12_BARRIER_GROUP_0 {
+                pTextureBarriers: textures.as_ptr(),
+            },
+        };
+        count += 1;
+    }
+    if count == 0 {
+        return;
+    }
+    cmd.Barrier(&groups[..count]);
+}
+
 /// Record one or more texture barriers.
 ///
 /// # Safety

@@ -86,6 +86,10 @@ fn allocate_mtl_storage_buffer(
         }
     }
 
+    crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+        reason: crate::signal::OversubscribedReason::BufferHeap,
+        size_hint: allocation_size,
+    });
     bail!("Metal buffer heap allocation failed — all heaps exhausted");
 }
 
@@ -573,7 +577,18 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
-            let barrier = device.timeline_scheduled_max;
+            // When called during VramAllocator reclamation (inside `reclaim`), the
+            // reclamation epoch has already been GPU-completed, so using it as the
+            // deletion-queue barrier lets the next process_deletion_queue_up_to_signaled
+            // call free the Metal heap allocation immediately rather than waiting for
+            // the (often much larger) timeline_scheduled_max.
+            let barrier = if gpu_idle {
+                0
+            } else {
+                crate::vram_allocator::RECLAMATION_EPOCH
+                    .with(|e| e.get())
+                    .unwrap_or(device.timeline_scheduled_max)
+            };
             device
                 .resource_registry
                 .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });

@@ -3,7 +3,7 @@
 use super::super::shared;
 use super::staging;
 use super::types::{ComputePipelineState, LogicalDevice, PushLayout};
-use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, SurfaceHandle};
+use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand};
 use crate::gpu_profiler::{self, DispatchGpuNs};
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
@@ -362,11 +362,11 @@ pub(super) fn destroy(
 }
 
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
+/// Submit a batch of GPU commands as a single compute submission.
 pub(super) fn submit(
     state: &mut super::types::VulkanState,
     device_handle: DeviceHandle,
     commands: &[GpuCommand],
-    defer_to_present_for_surface: Option<SurfaceHandle>,
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("vk.submit");
     // Detect WriteBuffer up-front so we can skip all the staging-belt /
@@ -574,12 +574,7 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        create_vulkan_gpu_profile_pool(
-            ld,
-            defer_to_present_for_surface.is_some(),
-            dispatch_count,
-            dispatch_labels,
-        )?
+        create_vulkan_gpu_profile_pool(ld, false, dispatch_count, dispatch_labels)?
     };
 
     let mut vk_gpu_profile = vk_gpu_profile;
@@ -880,51 +875,45 @@ pub(super) fn submit(
                     }
                 }
                 GpuCommand::ResourceBarrier {
-                    buffers: buf_handles,
-                    textures: tex_handles,
-                    src_usage,
-                    dst_usage,
+                    buffers: buf_entries,
+                    textures: tex_entries,
                 } => {
                     let _tz = tracy_zone!("vk.resource_barrier");
-                    let src_stage = slot_usage_to_vk_stage(src_usage);
-                    let src_access = slot_usage_to_vk_access(src_usage);
-                    let dst_stage = slot_usage_to_vk_stage(dst_usage);
-                    let dst_access = slot_usage_to_vk_access(dst_usage);
                     unsafe {
-                        let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_handles
+                        let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_entries
                             .iter()
-                            .filter_map(|h| buffers.get(h))
-                            .map(|bs| {
-                                vk::BufferMemoryBarrier2::default()
-                                    .src_stage_mask(src_stage)
-                                    .src_access_mask(src_access)
-                                    .dst_stage_mask(dst_stage)
-                                    .dst_access_mask(dst_access)
-                                    .buffer(bs.buffer)
-                                    .offset(0)
-                                    .size(vk::WHOLE_SIZE)
+                            .filter_map(|(h, usage)| {
+                                buffers.get(h).map(|bs| {
+                                    vk::BufferMemoryBarrier2::default()
+                                        .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                        .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                                        .buffer(bs.buffer)
+                                        .offset(0)
+                                        .size(vk::WHOLE_SIZE)
+                                })
                             })
                             .collect();
                         // Textures: we don't track per-image Vulkan layout in TextureState,
-                        // so use a global memory barrier for the texture portion. No layout
+                        // so use a global memory barrier per texture entry. No layout
                         // transition needed — just execution + memory dependency.
-                        let tex_mem: Option<vk::MemoryBarrier2> = if !tex_handles.is_empty() {
-                            Some(
+                        let tex_mem: Vec<vk::MemoryBarrier2> = tex_entries
+                            .iter()
+                            .map(|(_, usage)| {
                                 vk::MemoryBarrier2::default()
-                                    .src_stage_mask(src_stage)
-                                    .src_access_mask(src_access)
-                                    .dst_stage_mask(dst_stage)
-                                    .dst_access_mask(dst_access),
-                            )
+                                    .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                    .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                    .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                            })
+                            .collect();
+                        let dep_info = if tex_mem.is_empty() {
+                            vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
                         } else {
-                            None
-                        };
-                        let dep_info = if let Some(ref mb) = tex_mem {
                             vk::DependencyInfo::default()
                                 .buffer_memory_barriers(&buf_barriers)
-                                .memory_barriers(std::slice::from_ref(mb))
-                        } else {
-                            vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
+                                .memory_barriers(&tex_mem)
                         };
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
@@ -1158,30 +1147,6 @@ pub(super) fn submit(
 
         (cmd, belt_idx, texture_upload_idx)
     };
-
-    if let Some(sid) = defer_to_present_for_surface {
-        let surf = state
-            .surfaces
-            .get_mut(&sid)
-            .context("defer compute: invalid surface handle")?;
-        if surf.current_image_index.is_none() {
-            anyhow::bail!("defer compute: surface has no acquired image");
-        }
-        let cf = surf.current_frame;
-        surf.frame_sync[cf].deferred_compute_cbs.push(cmd);
-        if !texture_upload_scratch.is_empty() {
-            let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
-                .into_iter()
-                .map(|s| s.entry)
-                .collect();
-            surf.frame_sync[cf]
-                .pending_compute_texture_staging
-                .extend(entries);
-        }
-        // Staging belt `finish` and texture_staging_pools release happen in
-        // `surface::present` once the timeline signal value for this batch is known.
-        return Ok(0);
-    }
 
     // Standalone submit: signal device timeline semaphore (Vulkan 1.2+).
     let signal_value = {
@@ -1796,51 +1761,45 @@ fn submit_graph_impl(
                     }
                 }
                 GpuCommand::ResourceBarrier {
-                    buffers: buf_handles,
-                    textures: tex_handles,
-                    src_usage,
-                    dst_usage,
+                    buffers: buf_entries,
+                    textures: tex_entries,
                 } => {
                     let _tz = tracy_zone!("vk.resource_barrier");
-                    let src_stage = slot_usage_to_vk_stage(src_usage);
-                    let src_access = slot_usage_to_vk_access(src_usage);
-                    let dst_stage = slot_usage_to_vk_stage(dst_usage);
-                    let dst_access = slot_usage_to_vk_access(dst_usage);
                     unsafe {
-                        let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_handles
+                        let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_entries
                             .iter()
-                            .filter_map(|h| buffers.get(h))
-                            .map(|bs| {
-                                vk::BufferMemoryBarrier2::default()
-                                    .src_stage_mask(src_stage)
-                                    .src_access_mask(src_access)
-                                    .dst_stage_mask(dst_stage)
-                                    .dst_access_mask(dst_access)
-                                    .buffer(bs.buffer)
-                                    .offset(0)
-                                    .size(vk::WHOLE_SIZE)
+                            .filter_map(|(h, usage)| {
+                                buffers.get(h).map(|bs| {
+                                    vk::BufferMemoryBarrier2::default()
+                                        .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                        .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                                        .buffer(bs.buffer)
+                                        .offset(0)
+                                        .size(vk::WHOLE_SIZE)
+                                })
                             })
                             .collect();
                         // Textures: we don't track per-image Vulkan layout in TextureState,
-                        // so use a global memory barrier for the texture portion. No layout
+                        // so use a global memory barrier per texture entry. No layout
                         // transition needed — just execution + memory dependency.
-                        let tex_mem: Option<vk::MemoryBarrier2> = if !tex_handles.is_empty() {
-                            Some(
+                        let tex_mem: Vec<vk::MemoryBarrier2> = tex_entries
+                            .iter()
+                            .map(|(_, usage)| {
                                 vk::MemoryBarrier2::default()
-                                    .src_stage_mask(src_stage)
-                                    .src_access_mask(src_access)
-                                    .dst_stage_mask(dst_stage)
-                                    .dst_access_mask(dst_access),
-                            )
+                                    .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                    .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                    .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                            })
+                            .collect();
+                        let dep_info = if tex_mem.is_empty() {
+                            vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
                         } else {
-                            None
-                        };
-                        let dep_info = if let Some(ref mb) = tex_mem {
                             vk::DependencyInfo::default()
                                 .buffer_memory_barriers(&buf_barriers)
-                                .memory_barriers(std::slice::from_ref(mb))
-                        } else {
-                            vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
+                                .memory_barriers(&tex_mem)
                         };
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }

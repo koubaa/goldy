@@ -699,7 +699,7 @@ pub(super) fn create(
         };
 
         let mut resource: Option<ID3D12Resource> = None;
-        unsafe {
+        let hr = unsafe {
             logical_device.device.CreateCommittedResource(
                 &heap_properties,
                 D3D12_HEAP_FLAG_NONE,
@@ -708,8 +708,14 @@ pub(super) fn create(
                 None,
                 &mut resource,
             )
+        };
+        if hr.is_err() {
+            crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+                reason: crate::signal::OversubscribedReason::BufferHeap,
+                size_hint: allocation_size,
+            });
         }
-        .context("Failed to create buffer resource")?;
+        hr.context("Failed to create buffer resource")?;
 
         let resource = resource.context("CreateCommittedResource returned null")?;
 

@@ -54,6 +54,10 @@ fn allocate_mtl_texture(
         }
     }
 
+    crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+        reason: crate::signal::OversubscribedReason::TextureHeap,
+        size_hint: descriptor.width() * descriptor.height(),
+    });
     bail!("Metal texture heap is full — all overflow heaps exhausted");
 }
 

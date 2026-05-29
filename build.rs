@@ -23,29 +23,19 @@ struct PlatformInfo {
 }
 
 /// `GOLDY_CACHE_VERSION` for on-disk shader bytecode cache invalidation.
+///
+/// Intentionally omits the git hash: per-entry cache keys are already content-addressed
+/// (shader source + defines + target + optimization level), so a real shader change produces
+/// a per-entry miss without wiping the whole file. Only a Slang upgrade or a package version
+/// bump should invalidate all entries.
 fn emit_goldy_cache_version(slang_semver_label: Option<&str>) {
     let pkg = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
-    let git = std::process::Command::new("git")
-        .current_dir(&manifest_dir)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "nogit".into());
-
     let sl = slang_semver_label.unwrap_or("noslang");
-    println!("cargo:rustc-env=GOLDY_CACHE_VERSION=v{pkg}-g{git}-slang{sl}");
+    println!("cargo:rustc-env=GOLDY_CACHE_VERSION=v{pkg}-slang{sl}");
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/heads");
-    println!("cargo:rerun-if-changed=.git/logs/HEAD");
     println!("cargo:rerun-if-env-changed=GOLDY_SLANG_PATH");
     println!("cargo:rerun-if-changed=slang/manifest.json");
 

@@ -331,6 +331,11 @@ pub(crate) struct LogicalDevice {
     /// Next timeline value to signal on `timeline_semaphore`.
     pub timeline_next: u64,
 
+    /// Async signal delivery (fence thread → [`crate::Device::poll_signals`]).
+    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fence_thread: Option<std::thread::JoinHandle<()>>,
+
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
 
@@ -542,34 +547,44 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 /// Per-frame synchronization resources for proper swapchain pipelining.
 pub(crate) struct FrameSync {
     pub command_buffer: vk::CommandBuffer,
+    /// Recorded fresh each present with ONE_TIME_SUBMIT to copy the per-slot
+    /// scratch texture into the acquired swapchain image (scratch→swapchain
+    /// blit path). This is WSI work, separate from runtime-owned compute
+    /// submissions.
+    pub copy_command_buffer: vk::CommandBuffer,
     pub image_available_semaphore: vk::Semaphore,
-    /// Signaled by Submit 1 (compute work) and consumed by Submit 2 (present
-    /// barrier).  Separates the `in_flight_fence` signal from the present
-    /// barrier so the fence fires as soon as GPU compute is done, matching
-    /// DX12's per-slot fence semantics.
+    /// Signaled by Submit 1 (render work) and consumed by Submit 2 (present
+    /// barrier) in the *graphics* (render-pass) present path only.
     pub work_done_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
-    /// CPU-side fence signaled by the presentation engine when the swapchain
-    /// image is truly available for write.  Passed to `vkAcquireNextImageKHR`
-    /// alongside `image_available_semaphore`; waited in a separate
-    /// `vk.surface.wait_acquire` tracy zone so the flame graph can distinguish
-    /// GPU-compute stalls (`vk.surface.wait_compute`) from WSI / presentation-
-    /// engine latency (`vk.surface.wait_acquire`).
-    pub acquire_fence: vk::Fence,
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
-    /// presentation uses a barrier submit in `present` instead (see `surface::present`).
+    /// presentation uses the scratch-texture copy path in `present` instead (see
+    /// `surface::present`).
     pub render_pass_submitted: bool,
-    /// Device timeline value signaled for this frame slot's last queue submission
-    /// (render or compute+present batch). Consumed when presenting.
+    /// Device timeline value signaled for this frame slot's final frame work.
+    /// Consumed when presenting.
     pub frame_timeline_value: Option<u64>,
-    /// Compute command buffers recorded in [`GpuBackend::end_frame`](crate::backend::GpuBackend::end_frame) and submitted
-    /// with the present-barrier batch in [`super::surface::present`].
-    pub deferred_compute_cbs: Vec<vk::CommandBuffer>,
-    /// Texture upload staging entries for `deferred_compute_cbs`, released into
-    /// the per-device `TextureStagingPool` under the frame's timeline signal value
-    /// at present time.
-    pub pending_compute_texture_staging: Vec<crate::backend::vulkan::staging::TextureStagingEntry>,
+    /// Persistent cache of the last compute timeline value signaled for this frame slot.
+    /// Unlike `frame_timeline_value`, this is not consumed when presenting.
+    pub last_compute_timeline_value: u64,
+    /// Timeline value signaled by the WSI copy submit.  Used by `acquire()` to
+    /// ensure the scratch texture's copy-read has completed before the slot is
+    /// reused for new compute writes.  Higher than `frame_timeline_value` when
+    /// the scratch-texture path is active.
+    pub copy_timeline_value: Option<u64>,
+}
+
+/// A device-local scratch texture used as the compute render target for one
+/// frame slot.  Compute shaders write to this image each frame; at present
+/// time it is copied into the acquired swapchain image, decoupling the frame's
+/// render phase from WSI image availability entirely.
+pub(crate) struct ScratchTextureSlot {
+    pub image: vk::Image,
+    pub memory: vk::DeviceMemory,
+    /// Bindless storage-image handle.  Equal to the index in `TextureState`
+    /// so compute shaders can write to this slot without knowing about WSI.
+    pub texture_handle: super::TextureHandle,
 }
 
 /// Surface (swapchain) state for window presentation.
@@ -615,11 +630,25 @@ pub(crate) struct SurfaceState {
     pub current_image_index: Option<u32>,
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
-    /// Handle of the swapchain image acquired this frame (an alias into
-    /// `swapchain_texture_handles`). Cleared at present; never freed here.
+    /// One scratch texture slot per frame slot (`MAX_FRAMES_IN_FLIGHT` entries).
+    /// Each slot is lazily created on first acquire and reused every frame.
+    /// Compute shaders write to the slot for `current_frame`; at present time
+    /// that image is copied into the acquired swapchain image, completely
+    /// decoupling GPU rendering from WSI image availability.
+    ///
+    /// NOTE: making this opt-in / configurable (e.g. for a latency-sensitive
+    /// mode that trades throughput for lower frame latency) is future work.
+    /// The current design is a max-throughput strategy.
+    pub scratch_texture_slots: Vec<Option<ScratchTextureSlot>>,
+    /// Handle of the scratch texture for the current frame slot — what compute
+    /// shaders write to.  Cleared at present; the underlying slot persists.
     pub current_texture_handle: Option<super::TextureHandle>,
     /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`](crate::backend::GpuBackend::record_gpu_work)).
     pub frame_pending_gpu_commands: Vec<super::GpuCommand>,
+    /// Drawables acquired or presented but not yet returned to the swapchain pool.
+    pub pending_acquire_count: u32,
+    /// `(image_index, timeline)` pairs waiting for GPU completion before `SwapchainReturned`.
+    pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
 }
 
 /// Pending buffer operations for command recording.

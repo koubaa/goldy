@@ -46,11 +46,12 @@ pub mod tracy;
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
 pub mod placement_heap;
+pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
 pub use error::GoldyError;
-pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, FrameStrategy, RetiredFrame};
+pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use vram_allocator::DeferredPayload;
 
@@ -58,6 +59,7 @@ pub use vram_allocator::DeferredPayload;
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
+pub use signal::{OversubscribedReason, Signal};
 pub use timeline::TimelineValue;
 
 pub use backend::GraphCommand;

@@ -37,6 +37,8 @@ pub struct Frame {
     width: u32,
     height: u32,
     presented: bool,
+    /// Timeline returned by [`GpuBackend::submit_frame`] for this bracket.
+    submit_tv: Option<TimelineValue>,
     /// Resources (e.g. transient textures) that must outlive the frame's GPU work.
     /// Deferred to the VramAllocator ring at present time. Uses a Mutex so
     /// submit_compute can push to it via &self without requiring &mut Frame.
@@ -134,6 +136,7 @@ impl Surface {
             width: w,
             height: h,
             presented: false,
+            submit_tv: None,
             keepalive: Mutex::new(DeferredPayload::new()),
         })
     }
@@ -145,7 +148,7 @@ impl Surface {
 
     /// Present a rendered frame (legacy API — prefer [`Frame::present`]).
     pub fn present(&self, mut frame: Frame) -> Result<TimelineValue> {
-        frame.do_present()
+        frame.do_present_sync()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -187,6 +190,12 @@ impl Surface {
     pub fn present_mode(&self) -> PresentMode {
         let backend = self.backend.lock().unwrap();
         backend.surface_present_mode(self.handle)
+    }
+
+    /// How many swapchain drawables are in-flight (acquired or presented, not yet returned).
+    pub fn pending_acquire_count(&self) -> u32 {
+        let backend = self.backend.lock().unwrap();
+        backend.pending_acquire_count(self.handle)
     }
 
     /// Compile, auto-partition, and submit a graph that writes to the swapchain
@@ -503,38 +512,58 @@ impl Frame {
         backend.record_render(&self.token, &commands)
     }
 
-    /// Submit all work and present. Returns the GPU timeline value when this frame completes.
-    pub fn present(mut self) -> Result<TimelineValue> {
-        self.do_present()
+    /// Submit recorded GPU work for this frame. Does not present.
+    ///
+    /// Safe to call once per frame before [`Self::present`].
+    pub fn submit_frame(&mut self) -> Result<TimelineValue> {
+        let _tz = tracy_zone!("frame.submit_frame");
+        if let Some(tv) = self.submit_tv {
+            return Ok(tv);
+        }
+        let mut backend = self.backend.lock().unwrap();
+        let tv = backend.submit_frame(&self.token)?;
+        self.submit_tv = Some(tv);
+        Ok(tv)
     }
 
-    fn do_present(&mut self) -> Result<TimelineValue> {
+    /// Submit recorded work and present on this thread.
+    ///
+    /// Returns the **submit** timeline (compute completion), not a separate present signal.
+    pub fn present(mut self) -> Result<TimelineValue> {
+        self.do_present_sync()
+    }
+
+    fn do_present_sync(&mut self) -> Result<TimelineValue> {
         let _tz = tracy_zone!("frame.present");
         if self.presented {
-            let backend = self.backend.lock().unwrap();
-            return Ok(backend.gpu_progress(self.device_handle));
+            return Ok(self.submit_tv.unwrap_or_else(|| {
+                let backend = self.backend.lock().unwrap();
+                backend.gpu_progress(self.device_handle)
+            }));
         }
         self.presented = true;
         let _ = self.texture.take();
-        let token = self.token;
-        let tv = {
+        let submit_tv = self.submit_frame()?;
+        {
             let mut backend = self.backend.lock().unwrap();
-            backend.end_frame(token)?
-        };
+            backend.present_frame(self.token, submit_tv)?;
+        }
+        self.apply_frame_bookkeeping(submit_tv)?;
+        Ok(submit_tv)
+    }
+
+    fn apply_frame_bookkeeping(&self, submit_tv: TimelineValue) -> Result<()> {
         tracy_frame_mark!();
-        // Stamp any pending placement heap regions with the present timeline.
         if let Ok(mut heap_guard) = self._device.inner.placement_heap.lock() {
             if let Some(ref mut heap) = *heap_guard {
-                heap.stamp_all_pending(tv);
+                heap.stamp_all_pending(submit_tv);
             }
         }
-        // Defer any keepalive resources (e.g. transient textures from submit_compute)
-        // until the GPU retires this frame's timeline.
         let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
         if !keepalive.is_empty() {
-            self._device.defer_release(tv, keepalive);
+            self._device.defer_release(submit_tv, keepalive);
         }
-        Ok(tv)
+        Ok(())
     }
 
     pub fn width(&self) -> u32 {
@@ -544,12 +573,17 @@ impl Frame {
     pub fn height(&self) -> u32 {
         self.height
     }
+
+    /// Swapchain image index acquired by [`Surface::begin`] for this frame.
+    pub fn image_index(&self) -> u32 {
+        self.token.image as u32
+    }
 }
 
 impl Drop for Frame {
     fn drop(&mut self) {
         if !self.presented {
-            let _ = self.do_present();
+            let _ = self.do_present_sync();
         }
     }
 }

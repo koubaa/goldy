@@ -427,6 +427,10 @@ pub(crate) struct LogicalDevice {
     pub fence: Direct3D12::ID3D12Fence,
     pub fence_value: u64,
 
+    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fence_thread: Option<std::thread::JoinHandle<()>>,
+
     // Bindless infrastructure
     /// `true` when adapter reports tiled resources tier >= 1 (buffer reserved resources).
     pub supports_reserved_buffers: bool,
@@ -765,6 +769,8 @@ pub(crate) struct SurfaceState {
     pub frame_latency_waitable: Option<SendSyncHandle>,
     /// Compute commands recorded between `begin_frame` and `end_frame` / `present`.
     pub pending_frame_compute: Vec<crate::backend::GpuCommand>,
+    pub pending_acquire_count: u32,
+    pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
 }
 
 /// Consolidated DX12 backend state.

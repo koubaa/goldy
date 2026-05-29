@@ -568,6 +568,44 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
+    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal> {
+        if let Some(ld) = self.state.devices.get(&device) {
+            let returns: Vec<(SurfaceHandle, u32)> =
+                std::mem::take(&mut *ld.pending_swapchain_returns.lock().unwrap());
+            // SwapchainReturned was already pushed from the completion handler;
+            // pending_swapchain_returns only tracks which surfaces need counter decrements.
+            for (surface_handle, _image_index) in returns {
+                if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
+                    surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
+                }
+            }
+            return crate::signal::drain_all_signals(&ld.signal_queue);
+        }
+        Vec::new()
+    }
+
+    fn peek_oldest_in_flight(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<crate::timeline::TimelineValue> {
+        let ld = self.state.devices.get(&device)?;
+        let progress = ld.timeline_event.as_ref().signaled_value();
+        let scheduled = ld.timeline_next.saturating_sub(1);
+        if progress < scheduled {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
+    }
+
+    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
+        self.state
+            .surfaces
+            .get(&surface)
+            .map(|s| s.pending_acquire_count)
+            .unwrap_or(0)
+    }
+
     fn wait_until(
         &mut self,
         device: DeviceHandle,
@@ -704,8 +742,16 @@ impl GpuBackend for MetalBackend {
         Ok(())
     }
 
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
-        surface::end_frame(&mut self.state, frame)
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::submit_frame(&mut self.state, frame)
+    }
+
+    fn present_frame(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::present_frame(&mut self.state, frame, submit_tv)
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {

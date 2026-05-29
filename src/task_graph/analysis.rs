@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ir::{
-    BarrierSet, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, SlotUsageSet, UsageKindFlags,
+    BarrierSet, BarrierUsage, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, UsageKindFlags,
     Wave,
 };
 // NodeAccess is used in the test module via `super::*`
@@ -377,8 +377,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
 }
 
 /// Determine which resources need barriers before `wave_idx` executes, and
-/// derive the Koubaa-level access semantics (`src_usage` / `dst_usage`) for the
-/// barrier from the producer and consumer node kinds.
+/// derive per-resource Koubaa-level access semantics (`BarrierUsage`) from the
+/// producer and consumer node kinds on each crossing edge.
 ///
 /// `BufferRange` entries are collapsed to their parent handle so the emitted
 /// `BarrierSet` always contains whole-buffer handles that backends can look up
@@ -393,11 +393,9 @@ fn compute_barriers(
     use crate::backend::{BufferHandle, TextureHandle};
 
     let wave_set: HashSet<usize> = wave_nodes.iter().copied().collect();
-    let mut barrier_buffers: HashSet<BufferHandle> = HashSet::new();
-    let mut barrier_textures: HashSet<TextureHandle> = HashSet::new();
-    let mut barrier_transients: HashSet<u32> = HashSet::new();
-    let mut src_usage = SlotUsageSet::default();
-    let mut dst_usage = SlotUsageSet::default();
+    let mut buffer_usage: HashMap<BufferHandle, BarrierUsage> = HashMap::new();
+    let mut texture_usage: HashMap<TextureHandle, BarrierUsage> = HashMap::new();
+    let mut transient_usage: HashMap<u32, BarrierUsage> = HashMap::new();
 
     // Any edge crossing into this wave means the conflicting resource needs a barrier.
     for &(from, to) in edges {
@@ -407,21 +405,23 @@ fn compute_barriers(
             for bi in &from_node.bindings {
                 for bj in &to_node.bindings {
                     if bindings_conflict(bi, bj) {
-                        // Accumulate usage from this edge.
-                        src_usage.merge(bi.access, node_usage_kind(from_node));
-                        dst_usage.merge(bj.access, node_usage_kind(to_node));
-
                         match bi.resource {
                             ResourceId::TransientBuffer(tid) => {
-                                barrier_transients.insert(tid.0);
+                                let entry = transient_usage.entry(tid.0).or_default();
+                                entry.src.merge(bi.access, node_usage_kind(from_node));
+                                entry.dst.merge(bj.access, node_usage_kind(to_node));
                             }
                             ResourceId::Texture(h) => {
-                                barrier_textures.insert(h);
+                                let entry = texture_usage.entry(h).or_default();
+                                entry.src.merge(bi.access, node_usage_kind(from_node));
+                                entry.dst.merge(bj.access, node_usage_kind(to_node));
                             }
                             _ => {
                                 // Collapse sub-range to parent for backend barrier commands.
                                 if let Some(h) = bi.resource.canonical_buffer_handle() {
-                                    barrier_buffers.insert(h);
+                                    let entry = buffer_usage.entry(h).or_default();
+                                    entry.src.merge(bi.access, node_usage_kind(from_node));
+                                    entry.dst.merge(bj.access, node_usage_kind(to_node));
                                 }
                             }
                         }
@@ -431,19 +431,17 @@ fn compute_barriers(
         }
     }
 
-    let mut buffers: Vec<_> = barrier_buffers.into_iter().collect();
-    let mut textures: Vec<_> = barrier_textures.into_iter().collect();
-    let mut transient_ids: Vec<_> = barrier_transients.into_iter().collect();
-    buffers.sort();
-    textures.sort();
-    transient_ids.sort();
+    let mut buffers: Vec<_> = buffer_usage.into_iter().collect();
+    let mut textures: Vec<_> = texture_usage.into_iter().collect();
+    let mut transient_ids: Vec<_> = transient_usage.into_iter().collect();
+    buffers.sort_by_key(|(h, _)| *h);
+    textures.sort_by_key(|(h, _)| *h);
+    transient_ids.sort_by_key(|(id, _)| *id);
 
     BarrierSet {
         buffers,
         textures,
         transient_ids,
-        src_usage,
-        dst_usage,
     }
 }
 
@@ -476,10 +474,10 @@ pub(crate) fn emit_waves_to_commands(
             // Resolve transient buffer IDs to their concrete parent handles.
             if !wave.barriers_before.transient_ids.is_empty() {
                 if let Some(r) = resolver {
-                    for &tid in &wave.barriers_before.transient_ids {
+                    for &(tid, usage) in &wave.barriers_before.transient_ids {
                         if let Some(resolved) = r.buffers.get(&tid) {
-                            if !barrier_buffers.contains(&resolved.parent) {
-                                barrier_buffers.push(resolved.parent);
+                            if !barrier_buffers.iter().any(|(h, _)| *h == resolved.parent) {
+                                barrier_buffers.push((resolved.parent, usage));
                             }
                         }
                     }
@@ -488,8 +486,6 @@ pub(crate) fn emit_waves_to_commands(
             commands.push(GpuCommand::ResourceBarrier {
                 buffers: barrier_buffers,
                 textures: wave.barriers_before.textures.clone(),
-                src_usage: wave.barriers_before.src_usage,
-                dst_usage: wave.barriers_before.dst_usage,
             });
         }
 
@@ -843,10 +839,10 @@ pub fn emit_graph_commands(
             let mut barrier_buffers = wave.barriers_before.buffers.clone();
             if !wave.barriers_before.transient_ids.is_empty() {
                 if let Some(r) = resolver {
-                    for &tid in &wave.barriers_before.transient_ids {
+                    for &(tid, usage) in &wave.barriers_before.transient_ids {
                         if let Some(resolved) = r.buffers.get(&tid) {
-                            if !barrier_buffers.contains(&resolved.parent) {
-                                barrier_buffers.push(resolved.parent);
+                            if !barrier_buffers.iter().any(|(h, _)| *h == resolved.parent) {
+                                barrier_buffers.push((resolved.parent, usage));
                             }
                         }
                     }
@@ -855,8 +851,6 @@ pub fn emit_graph_commands(
             commands.push(GraphCommand::Compute(GpuCommand::ResourceBarrier {
                 buffers: barrier_buffers,
                 textures: wave.barriers_before.textures.clone(),
-                src_usage: wave.barriers_before.src_usage,
-                dst_usage: wave.barriers_before.dst_usage,
             }));
         }
 
@@ -1125,7 +1119,7 @@ mod tests {
         assert_eq!(schedule.waves[0].node_indices, vec![0]);
         assert_eq!(schedule.waves[1].node_indices, vec![1]);
         assert!(!schedule.waves[1].barriers_before.is_empty());
-        assert_eq!(schedule.waves[1].barriers_before.buffers, vec![0]);
+        assert_eq!(schedule.waves[1].barriers_before.buffers[0].0, 0);
     }
 
     #[test]
@@ -1278,7 +1272,8 @@ mod tests {
 
         assert_eq!(schedule.waves.len(), 2);
         let barrier = &schedule.waves[1].barriers_before;
-        assert_eq!(barrier.buffers, vec![0, 1]);
+        let handles: Vec<_> = barrier.buffers.iter().map(|(h, _)| *h).collect();
+        assert_eq!(handles, vec![0, 1]);
     }
 
     #[test]
@@ -2178,7 +2173,7 @@ mod tests {
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
-        assert_eq!(schedule.waves[1].barriers_before.buffers, vec![42]);
+        assert_eq!(schedule.waves[1].barriers_before.buffers[0].0, 42);
     }
 
     #[test]
@@ -2203,7 +2198,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
         // Only one barrier entry (parent 99), deduplicated
-        assert_eq!(schedule.waves[1].barriers_before.buffers, vec![99]);
+        assert_eq!(schedule.waves[1].barriers_before.buffers[0].0, 99);
     }
 
     #[test]
@@ -2219,7 +2214,7 @@ mod tests {
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
-        assert_eq!(schedule.waves[1].barriers_before.buffers, vec![5]);
+        assert_eq!(schedule.waves[1].barriers_before.buffers[0].0, 5);
     }
 
     #[test]
@@ -2244,7 +2239,13 @@ mod tests {
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
-        assert_eq!(schedule.waves[1].barriers_before.buffers, vec![1, 2]);
+        let handles: Vec<_> = schedule.waves[1]
+            .barriers_before
+            .buffers
+            .iter()
+            .map(|(h, _)| *h)
+            .collect();
+        assert_eq!(handles, vec![1, 2]);
     }
 
     #[test]
@@ -2275,7 +2276,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
         assert!(schedule.waves[1].barriers_before.buffers.is_empty());
-        assert_eq!(schedule.waves[1].barriers_before.textures, vec![7]);
+        assert_eq!(schedule.waves[1].barriers_before.textures[0].0, 7);
     }
 
     // -------------------------------------------------------------------------

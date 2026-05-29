@@ -422,21 +422,24 @@ pub(super) fn create(
         Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
     };
 
-    let pipeline_state: ID3D12PipelineState = loop {
-        match unsafe { logical_device.device.CreateComputePipelineState(&pso_desc) } {
-            Ok(p) => break p,
-            Err(e) if try_drop_stale_cached_blob => {
-                tracing::warn!(
-                    device = device_handle,
-                    error = ?e,
-                    "discarding stale DX12 compute PSO blob; rebuilding without cache entry"
-                );
-                logical_device.compute_pso_blobs.remove(&key);
-                logical_device.pso_disk_cache_dirty = true;
-                pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
-                try_drop_stale_cached_blob = false;
+    let pipeline_state: ID3D12PipelineState = {
+        let _tz = crate::tracy_zone!("goldy.dx12.CreateComputePipelineState");
+        loop {
+            match unsafe { logical_device.device.CreateComputePipelineState(&pso_desc) } {
+                Ok(p) => break p,
+                Err(e) if try_drop_stale_cached_blob => {
+                    tracing::warn!(
+                        device = device_handle,
+                        error = ?e,
+                        "discarding stale DX12 compute PSO blob; rebuilding without cache entry"
+                    );
+                    logical_device.compute_pso_blobs.remove(&key);
+                    logical_device.pso_disk_cache_dirty = true;
+                    pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
+                    try_drop_stale_cached_blob = false;
+                }
+                Err(e) => anyhow::bail!("Failed to create compute pipeline state: {:?}", e),
             }
-            Err(e) => anyhow::bail!("Failed to create compute pipeline state: {:?}", e),
         }
     };
 
@@ -593,7 +596,24 @@ fn record_gpu_command(
     match cmd {
         GpuCommand::SetPipeline(handle) => {
             let _tz = tracy_zone!("dx12.set_pipeline");
+
             ctx.current_compute_pipeline = Some(*handle);
+            // This optimization was attempted but led to a slight performance regression
+            // It seems to be related to latency hiding - changing the root signatures
+            // caused the driver to warm up the GPU while the barrier drained.
+            // This may be driver-specific, but kernel fusion (a future goldy optimization)
+            // will render this kind of optimization moot - so we can do the conservative
+            // thing for now.
+
+            /*let pipeline_changed = ctx.current_compute_pipeline != Some(*handle);
+            if pipeline_changed {
+                if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
+                    unsafe {
+                        cl.SetComputeRootSignature(&pipeline_state.root_signature);
+                        cl.SetPipelineState(&pipeline_state.pipeline_state);
+                    }
+                }
+            }*/
             if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
                 unsafe {
                     cl.SetComputeRootSignature(&pipeline_state.root_signature);
@@ -893,74 +913,80 @@ fn record_gpu_command(
             unsafe { barriers::barrier_globals(cl7, &[g]) };
         }
         GpuCommand::ResourceBarrier {
-            buffers: buf_handles,
-            textures: tex_handles,
-            src_usage,
-            dst_usage,
+            buffers: buf_entries,
+            textures: tex_entries,
         } => {
             let _tz = tracy_zone!("dx12.resource_barrier");
-            let sync_before = slot_usage_to_dx12_sync(src_usage);
-            let access_before = slot_usage_to_dx12_access(src_usage);
-            let sync_after = slot_usage_to_dx12_sync(dst_usage);
-            let access_after = slot_usage_to_dx12_access(dst_usage);
 
             // WARP silently removes the device when D3D12_BARRIER_TYPE_BUFFER
             // enhanced barriers are used, causing ExecuteCommandLists to fail
             // and the subsequent Signal() to AV. Fall back to a global barrier
             // which is correct (just less precise).
-            if ctx.use_global_buffer_barriers || buf_handles.is_empty() {
-                if !buf_handles.is_empty() {
+            let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = Vec::new();
+            if ctx.use_global_buffer_barriers {
+                for (_, usage) in buf_entries {
                     let g = D3D12_GLOBAL_BARRIER {
-                        SyncBefore: sync_before,
-                        SyncAfter: sync_after,
-                        AccessBefore: access_before,
-                        AccessAfter: access_after,
+                        SyncBefore: slot_usage_to_dx12_sync(&usage.src),
+                        SyncAfter: slot_usage_to_dx12_sync(&usage.dst),
+                        AccessBefore: slot_usage_to_dx12_access(&usage.src),
+                        AccessAfter: slot_usage_to_dx12_access(&usage.dst),
                     };
                     unsafe { barriers::barrier_globals(cl7, &[g]) };
                 }
             } else {
-                let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_handles
+                buf_barriers = buf_entries
                     .iter()
-                    .filter_map(|h| state.buffers.get(h))
-                    .map(|bs| {
-                        barriers::buffer_barrier_full(
-                            &bs.resource,
-                            sync_before,
-                            sync_after,
-                            access_before,
-                            access_after,
-                        )
+                    .filter_map(|(h, usage)| {
+                        state.buffers.get(h).map(|bs| {
+                            barriers::buffer_barrier_full(
+                                &bs.resource,
+                                slot_usage_to_dx12_sync(&usage.src),
+                                slot_usage_to_dx12_sync(&usage.dst),
+                                slot_usage_to_dx12_access(&usage.src),
+                                slot_usage_to_dx12_access(&usage.dst),
+                            )
+                        })
                     })
                     .collect();
-                unsafe { barriers::barrier_buffers(cl7, &buf_barriers) };
-                unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
             }
 
-            let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_handles
+            let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_entries
                 .iter()
-                .filter_map(|h| state.textures.get(h))
-                .map(|ts| {
-                    let (tex_sync_after, tex_access_after, tex_layout_after) =
-                        texture_barrier_state_for_usage(dst_usage, ts.is_storage);
-                    let (tex_sync_before, tex_access_before, tex_layout_before) =
-                        texture_barrier_state_for_layout(ts.last_layout);
-                    barriers::texture_barrier_full(
-                        &ts.resource,
-                        tex_sync_before,
-                        tex_sync_after,
-                        tex_access_before,
-                        tex_access_after,
-                        tex_layout_before,
-                        tex_layout_after,
-                    )
+                .filter_map(|(h, usage)| {
+                    state.textures.get(h).map(|ts| {
+                        let (tex_sync_after, tex_access_after, tex_layout_after) =
+                            texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
+                        let (tex_sync_before, tex_access_before, tex_layout_before) =
+                            texture_barrier_state_for_layout(ts.last_layout);
+                        (
+                            barriers::texture_barrier_full(
+                                &ts.resource,
+                                tex_sync_before,
+                                tex_sync_after,
+                                tex_access_before,
+                                tex_access_after,
+                                tex_layout_before,
+                                tex_layout_after,
+                            ),
+                            tex_layout_after,
+                        )
+                    })
                 })
+                .map(|(b, _)| b)
                 .collect();
-            unsafe { barriers::barrier_textures(cl7, &tex_barriers) };
+
+            if !ctx.use_global_buffer_barriers {
+                unsafe { barriers::barrier_groups(cl7, &buf_barriers, &tex_barriers) };
+                unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
+            } else if !tex_barriers.is_empty() {
+                unsafe { barriers::barrier_textures(cl7, &tex_barriers) };
+            }
             unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
-            for h in tex_handles {
+
+            for (h, usage) in tex_entries {
                 if let Some(ts) = state.textures.get_mut(h) {
                     let (_, _, tex_layout_after) =
-                        texture_barrier_state_for_usage(dst_usage, ts.is_storage);
+                        texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
                     ts.last_layout = tex_layout_after;
                 }
             }
@@ -1250,6 +1276,24 @@ struct StagingFinish {
 /// `retain_key`: when `Some(k)`, stores the closed command list in
 /// `LogicalDevice::retained_graph` for zero-cost re-execution via
 /// [`try_resubmit_retained`].
+///
+/// # Abandoned optimizations
+///
+/// Two approaches were attempted here to reduce per-frame CPU recording cost and were
+/// reverted due to the reasons noted:
+///
+/// 1. **CBV binding table + fingerprint-based CL reuse**: replaced 128-byte root constants
+///    with a persistently-mapped UPLOAD buffer (CBV at root param 1) and slot indices
+///    (1-DWORD root param 0).  The binding table allowed resubmitting the same closed
+///    command list across frames when `compute_retention_fingerprint` was stable.
+///    Reverted: the required `wait_for_fence` after every `ExecuteCommandLists` to prevent
+///    CPU/GPU races on the shared binding-table buffer cut throughput from ~2500 FPS to
+///    ~1200 FPS — a net regression for the common case.
+///
+/// 2. **CBV binding table + bind groups**: same binding-table layout as above, with
+///    per-pipeline bind groups (descriptor-table caching) to amortise heap binding cost.
+///    Reverted: DX12 bundles do not support `Dispatch`, and a descriptor-table approach
+///    without bundles did not provide a clean enough win to justify the complexity.
 fn execute_signal_and_finish(
     state: &mut Dx12State,
     command_list: &ID3D12GraphicsCommandList,

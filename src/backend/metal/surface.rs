@@ -138,6 +138,8 @@ pub(super) fn create(
             bindless_storage_slots,
             present_mode: PresentMode::Auto,
             frame_pending_gpu_commands: Vec::new(),
+            pending_acquire_count: 0,
+            last_acquired_image_index: None,
         },
     );
     tracing::info!(
@@ -197,6 +199,14 @@ pub(super) fn acquire(
         }
     }
 
+    // Clone the GPU-signal timestamp arc before taking a mutable surface borrow.
+    // This lets us read the value after nextDrawable without conflicting borrows.
+    let gpu_signal_arc = state
+        .surfaces
+        .get(&surface)
+        .and_then(|ss| state.devices.get(&ss.device_handle))
+        .map(|ld| ld.timeline_waiter.last_signal_ns_arc());
+
     let surface_state = state
         .surfaces
         .get_mut(&surface)
@@ -210,11 +220,68 @@ pub(super) fn acquire(
 
     surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
+    // Snapshot the GPU-signal timestamp and CPU clock before blocking on the compositor.
+    // gpu_signal_before: when did the GPU last fire a completion handler?
+    // t_pre: CPU time just before nextDrawable (= when we enter the potential stall).
+    let gpu_signal_before_ns = gpu_signal_arc
+        .as_ref()
+        .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(0);
+    let t_pre_drawable_ns = super::types::metal_instant_ns();
+
     // Get the next drawable from the layer
     let drawable: id = {
         let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
         unsafe { msg_send![layer, nextDrawable] }
     };
+
+    // ── nextDrawable latency diagnostics ────────────────────────────────────
+    //
+    //  drawable_wait_us  : time spent blocked inside nextDrawable.
+    //  gpu_signal_age_us : age of the last GPU completion signal at the moment
+    //                      we entered nextDrawable.
+    //    • Large age + large wait → compositor throttle (GPU idle, compositor
+    //      hasn't released a drawable yet).
+    //    • Small age + large wait → GPU pacing (GPU was still running when we
+    //      called nextDrawable; both GPU and compositor contributed to the stall).
+    //    • gpu_fired_during_wait → GPU completion fired *inside* nextDrawable,
+    //      proving compute was on the critical path for this frame.
+    {
+        let t_post_drawable_ns = super::types::metal_instant_ns();
+        let gpu_signal_after_ns = gpu_signal_arc
+            .as_ref()
+            .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or(0);
+
+        let drawable_wait_us = t_post_drawable_ns.saturating_sub(t_pre_drawable_ns) / 1000;
+        let gpu_signal_age_us = if gpu_signal_before_ns > 0 {
+            t_pre_drawable_ns.saturating_sub(gpu_signal_before_ns) / 1000
+        } else {
+            u64::MAX
+        };
+        let gpu_fired_during_wait =
+            gpu_signal_after_ns > gpu_signal_before_ns && gpu_signal_before_ns > 0;
+
+        if gpu_signal_age_us == u64::MAX {
+            tracing::debug!(
+                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
+                 (no prior gpu signal — first frame?)"
+            );
+        } else {
+            tracing::debug!(
+                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
+                 gpu_signal_age={gpu_signal_age_us}µs \
+                 gpu_fired_during_wait={gpu_fired_during_wait}"
+            );
+        }
+
+        crate::tracy_plot!("nextDrawable_wait_us", drawable_wait_us as f64);
+        if gpu_signal_age_us != u64::MAX {
+            crate::tracy_plot!("gpu_signal_age_us", gpu_signal_age_us as f64);
+        }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     if drawable == nil {
         anyhow::bail!("Failed to get next drawable from CAMetalLayer");
     }
@@ -244,17 +311,31 @@ pub(super) fn acquire(
         bindless_slot,
     )?;
 
-    let surface_state = state
-        .surfaces
-        .get_mut(&surface)
-        .expect("surface must be registered before acquiring a frame");
-    surface_state.current_texture_handle = Some(tex_handle);
+    let (image_index, signal_queue) = {
+        let surface_state = state
+            .surfaces
+            .get_mut(&surface)
+            .expect("surface must be registered before acquiring a frame");
+        let image_index = surface_state.current_frame as u32;
+        surface_state.current_texture_handle = Some(tex_handle);
+        surface_state.last_acquired_image_index = Some(image_index);
+        surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_add(1);
+        let signal_queue = state
+            .devices
+            .get(&device_handle)
+            .map(|ld| std::sync::Arc::clone(&ld.signal_queue));
+        (image_index, signal_queue)
+    };
+
+    if let Some(queue) = signal_queue {
+        queue.push(crate::signal::Signal::SwapchainAcquired { image_index });
+    }
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.process_deletion_queue_up_to_signaled();
     }
 
-    Ok(surface_state.current_frame as u64)
+    Ok(image_index as u64)
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -405,8 +486,24 @@ pub(super) fn present(
     command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
 
     let waiter = logical_device.timeline_waiter.clone();
+    let signal_queue_present = std::sync::Arc::clone(&logical_device.signal_queue);
+    let return_pending = logical_device.pending_swapchain_returns.clone();
+    let return_image = state
+        .surfaces
+        .get(&surface)
+        .and_then(|s| s.last_acquired_image_index);
     let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
         waiter.signal(signal_value);
+        if let Some(idx) = return_image {
+            // Metal has no WSI timeline to poll: push SwapchainReturned here from the
+            // completion handler. Vulkan/DX12 defer this signal until poll_signals when
+            // gpu_progress crosses the copy/fence value.
+            signal_queue_present
+                .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+            if let Ok(mut pending) = return_pending.lock() {
+                pending.push((surface, idx));
+            }
+        }
     })
     .copy();
     command_buffer.add_completed_handler(&handler);
@@ -433,6 +530,7 @@ pub(super) fn present(
         .expect("surface must be registered before presenting a frame");
     surface_state.current_drawable = None;
     surface_state.current_texture_handle = None;
+    surface_state.last_acquired_image_index = None;
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.in_flight_command_buffers
@@ -442,9 +540,9 @@ pub(super) fn present(
 
     Ok(signal_value)
 }
-pub(super) fn end_frame(
+pub(super) fn submit_frame(
     state: &mut MetalState,
-    frame: FrameToken,
+    frame: &FrameToken,
 ) -> Result<crate::timeline::TimelineValue> {
     let dh = state
         .surfaces
@@ -461,9 +559,22 @@ pub(super) fn end_frame(
     };
 
     if !pending.is_empty() {
-        compute::submit(state, dh, &pending)?;
+        return compute::submit(state, dh, &pending);
     }
 
+    let ld = state.devices.get(&dh).context("Device no longer valid")?;
+    Ok(ld
+        .timeline_event
+        .as_ref()
+        .signaled_value()
+        .max(ld.last_committed_timeline.unwrap_or(0)))
+}
+
+pub(super) fn present_frame(
+    state: &mut MetalState,
+    frame: FrameToken,
+    _submit_tv: crate::timeline::TimelineValue,
+) -> Result<crate::timeline::TimelineValue> {
     present(state, frame.surface, frame.image)
 }
 
@@ -542,6 +653,11 @@ pub(super) fn resize(
     let size = CGSize::new(width as f64, height as f64);
     unsafe {
         let () = msg_send![layer, setDrawableSize: size];
+    }
+
+    surface_state.pending_acquire_count = 0;
+    if let Some(ld) = state.devices.get(&surface_state.device_handle) {
+        ld.pending_swapchain_returns.lock().unwrap().clear();
     }
 
     tracing::debug!("Resized surface {} to {}x{}", surface, width, height);

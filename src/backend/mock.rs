@@ -60,6 +60,8 @@ pub struct MockBackend {
     pub default_surface_format: TextureFormat,
     device_timeline_next: HashMap<DeviceHandle, u64>,
     device_timeline_completed: HashMap<DeviceHandle, u64>,
+    signal_queues: HashMap<DeviceHandle, crate::signal::SignalQueue>,
+    surface_pending_acquire: HashMap<SurfaceHandle, u32>,
 }
 
 #[allow(dead_code)]
@@ -183,6 +185,8 @@ impl MockBackend {
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
             device_timeline_completed: HashMap::new(),
+            signal_queues: HashMap::new(),
+            surface_pending_acquire: HashMap::new(),
         }
     }
 
@@ -234,11 +238,18 @@ impl GpuBackend for MockBackend {
         self.next_device_handle += 1;
 
         self.devices.insert(handle, MockDevice { adapter_id });
+        self.signal_queues
+            .insert(handle, crate::signal::SignalQueue::new());
+        self.device_timeline_next.insert(handle, 0);
+        self.device_timeline_completed.insert(handle, 0);
         Ok(handle)
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
         self.devices.remove(&device);
+        self.signal_queues.remove(&device);
+        self.device_timeline_next.remove(&device);
+        self.device_timeline_completed.remove(&device);
 
         // Clean up resources owned by this device
         self.buffers.retain(|_, b| b.device_handle != device);
@@ -720,12 +731,14 @@ impl GpuBackend for MockBackend {
                 pending_frame_compute: Vec::new(),
             },
         );
+        self.surface_pending_acquire.insert(handle, 0);
 
         Ok(handle)
     }
 
     fn destroy_surface(&mut self, surface: SurfaceHandle) {
         self.surfaces.remove(&surface);
+        self.surface_pending_acquire.remove(&surface);
     }
 
     fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
@@ -761,6 +774,13 @@ impl GpuBackend for MockBackend {
             },
         );
 
+        *self.surface_pending_acquire.entry(surface).or_insert(0) += 1;
+        if let Some(queue) = self.signal_queues.get(&device_handle) {
+            queue.push(crate::signal::Signal::SwapchainAcquired {
+                image_index: image as u32,
+            });
+        }
+
         Ok((FrameToken { surface, image }, tex_handle))
     }
 
@@ -781,6 +801,9 @@ impl GpuBackend for MockBackend {
 
         surf.width = width;
         surf.height = height;
+        if let Some(count) = self.surface_pending_acquire.get_mut(&surface) {
+            *count = 0;
+        }
         Ok(())
     }
 
@@ -1003,6 +1026,33 @@ impl GpuBackend for MockBackend {
             .unwrap_or(0)
     }
 
+    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal> {
+        if let Some(queue) = self.signal_queues.get(&device) {
+            return crate::signal::drain_all_signals(queue);
+        }
+        Vec::new()
+    }
+
+    fn peek_oldest_in_flight(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<crate::timeline::TimelineValue> {
+        let progress = self.gpu_progress(device);
+        let scheduled = self.device_timeline_next.get(&device).copied().unwrap_or(0);
+        if progress < scheduled {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
+    }
+
+    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
+        self.surface_pending_acquire
+            .get(&surface)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn wait_until(
         &mut self,
         device: DeviceHandle,
@@ -1087,7 +1137,7 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         let device = self
             .surfaces
             .get(&frame.surface)
@@ -1106,6 +1156,24 @@ impl GpuBackend for MockBackend {
             self.compute_dispatch_count += 1;
         }
 
+        let next = self.device_timeline_next.entry(device).or_insert(0);
+        *next += 1;
+        let tv = *next;
+        self.device_timeline_completed.insert(device, tv);
+        Ok(tv)
+    }
+
+    fn present_frame(
+        &mut self,
+        frame: FrameToken,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let device = self
+            .surfaces
+            .get(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .device_handle;
+
         let surf = self
             .surfaces
             .get_mut(&frame.surface)
@@ -1115,10 +1183,21 @@ impl GpuBackend for MockBackend {
         }
         self.surface_present_count += 1;
 
+        let image_index = frame.image as u32;
+        if let Some(queue) = self.signal_queues.get(&device) {
+            queue.push(crate::signal::Signal::SwapchainReturned { image_index });
+        }
+        if let Some(count) = self.surface_pending_acquire.get_mut(&frame.surface) {
+            *count = count.saturating_sub(1);
+        }
+
         let next = self.device_timeline_next.entry(device).or_insert(0);
         *next += 1;
         let tv = *next;
         self.device_timeline_completed.insert(device, tv);
+        if let Some(queue) = self.signal_queues.get(&device) {
+            queue.push(crate::signal::Signal::BoundaryCrossed { epoch: tv });
+        }
         Ok(tv)
     }
 
@@ -1890,5 +1969,108 @@ mod tests {
             backend.wait_until_count, 0,
             "submit_graph should not call wait_until (no CPU waits)"
         );
+    }
+
+    #[test]
+    fn acquire_release_pairs_on_mock() {
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
+            }
+        }
+
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let surface = backend
+            .create_surface(device, &MockWindow, &MockWindow, None)
+            .unwrap();
+
+        let (frame, _tex) = backend.begin_frame(surface).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 1);
+
+        backend.present_frame(frame, 0).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 0);
+
+        let signals = backend.poll_signals(device);
+        assert!(signals
+            .iter()
+            .any(|s| matches!(s, crate::signal::Signal::SwapchainAcquired { .. })));
+        assert!(signals
+            .iter()
+            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+    }
+
+    #[test]
+    fn counter_zero_after_resize() {
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
+            }
+        }
+
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let surface = backend
+            .create_surface(device, &MockWindow, &MockWindow, None)
+            .unwrap();
+
+        let (_frame, _tex) = backend.begin_frame(surface).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 1);
+
+        backend.surface_resize(surface, 1024, 768).unwrap();
+        assert_eq!(backend.pending_acquire_count(surface), 0);
+
+        let signals = backend.poll_signals(device);
+        assert!(!signals
+            .iter()
+            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
     }
 }

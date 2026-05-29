@@ -296,6 +296,8 @@ pub(super) fn create(
             present_mode: crate::types::PresentMode::Fifo,
             frame_latency_waitable,
             pending_frame_compute: Vec::new(),
+            pending_acquire_count: 0,
+            pending_swapchain_returns: Vec::new(),
         },
     );
 
@@ -439,8 +441,16 @@ pub(super) fn acquire(
         device_handle,
     )?;
 
-    let surface = state.surfaces.get_mut(&surface_handle).unwrap();
-    surface.current_texture_handle = Some(tex_handle);
+    {
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+        surface.current_texture_handle = Some(tex_handle);
+        surface.pending_acquire_count = surface.pending_acquire_count.saturating_add(1);
+    }
+
+    if let Some(ld) = state.devices.get(&device_handle) {
+        ld.signal_queue
+            .push(crate::signal::Signal::SwapchainAcquired { image_index });
+    }
 
     Ok(image_index as SwapchainImageHandle)
 }
@@ -458,8 +468,7 @@ pub(super) fn record_gpu_work(
     Ok(())
 }
 
-/// Flush optional frame compute, present, and return the device timeline value (fence) for this frame.
-pub(super) fn end_frame(state: &mut Dx12State, frame: FrameToken) -> Result<u64> {
+pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<u64> {
     let device_handle = state
         .surfaces
         .get(&frame.surface)
@@ -475,11 +484,27 @@ pub(super) fn end_frame(state: &mut Dx12State, frame: FrameToken) -> Result<u64>
     };
 
     if !pending.is_empty() {
-        super::compute::submit(state, device_handle, &pending)?;
+        return super::compute::submit(state, device_handle, &pending);
     }
 
-    present(state, frame.surface, frame.image)?;
+    let dev = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
+    Ok(dev.fence_value.saturating_sub(1))
+}
 
+pub(super) fn present_frame(
+    state: &mut Dx12State,
+    frame: FrameToken,
+    _submit_tv: u64,
+) -> Result<u64> {
+    present(state, frame.surface, frame.image)?;
+    let device_handle = state
+        .surfaces
+        .get(&frame.surface)
+        .context("Invalid surface handle")?
+        .device_handle;
     let dev = state
         .devices
         .get(&device_handle)
@@ -874,8 +899,28 @@ pub(super) fn present(
     }
 
     // Advance frame
-    surface.current_image_index = None;
-    surface.current_frame = (surface.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    let (return_fence, return_image) = {
+        let fence_val = surface.frame_sync[current_frame].fence_value;
+        let img = surface.current_image_index.unwrap_or(_image_index as u32);
+        surface.current_image_index = None;
+        surface.current_frame = (surface.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        (fence_val, img)
+    };
+
+    if return_fence > 0 {
+        if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+            surf.pending_swapchain_returns
+                .push((return_image, return_fence));
+        }
+    } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
+        surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
+        if let Some(ld) = state.devices.get(&device_handle) {
+            ld.signal_queue
+                .push(crate::signal::Signal::SwapchainReturned {
+                    image_index: return_image,
+                });
+        }
+    }
 
     Ok(())
 }
@@ -1081,6 +1126,8 @@ pub(super) fn resize(
     surface.current_image_index = None;
     surface.current_texture_handle = None;
     surface.compute_scratch_textures = vec![None; MAX_FRAMES_IN_FLIGHT];
+    surface.pending_acquire_count = 0;
+    surface.pending_swapchain_returns.clear();
 
     tracing::debug!("Resized surface to {}x{}", width, height);
     Ok(())
