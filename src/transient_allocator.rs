@@ -389,29 +389,8 @@ enum RegionState {
     /// The allocator treats these conservatively: they cannot be reclaimed until an epoch
     /// is supplied, but they do not count as Active so the next `begin_frame` can proceed.
     Pending,
-    /// Reclamation has been deferred to the VramAllocator ring via a reclaim token.
-    /// The token's Drop impl adds the region index to `pending_resets`; `begin_frame` then
-    /// applies the reset. The epoch is retained for the safety-valve wait path.
+    /// Written by an earlier frame; reusable once `gpu_progress >= epoch`.
     DeferredReclaim { epoch: TimelineValue },
-}
-
-/// Token pushed into a [`DeferredPayload`] at `end_frame`.
-///
-/// When the VramAllocator ring drops this token (i.e., after `gpu_progress >= epoch`),
-/// the token appends the region indices to the allocator's `pending_resets` list.
-/// The next `begin_frame` call drains `pending_resets` and transitions those regions
-/// to `Empty`, making them available for reuse.
-struct RegionReclaimToken {
-    pending_resets: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
-    indices: Vec<usize>,
-}
-
-impl Drop for RegionReclaimToken {
-    fn drop(&mut self) {
-        if let Ok(mut pending) = self.pending_resets.lock() {
-            pending.extend_from_slice(&self.indices);
-        }
-    }
 }
 
 struct Region {
@@ -426,14 +405,14 @@ struct Region {
 /// * **Empty** — ready for use; bump pointer is at 0.
 /// * **Active** — being bump-allocated from this frame.
 /// * **Pending** — frame finished but epoch not yet known (surface path). Promoted to
-///   Retired when [`TransientAllocator::end_frame`] supplies the epoch.
-/// * **Retired** — written by an earlier frame; reusable once the GPU has finished that
-///   frame's work.
+///   `DeferredReclaim` when [`TransientAllocator::end_frame`] supplies the epoch.
+/// * **DeferredReclaim** — written by an earlier frame; reusable once the GPU has
+///   finished that frame's work (`epoch <= gpu_progress()`).
 ///
 /// `begin_frame` moves Active regions to Pending (if `end_frame` wasn't called yet) and
-/// opportunistically promotes Retired regions whose epochs have passed. `alloc` spills to
-/// a fresh region when the active one fills. `end_frame` assigns the epoch to all Pending
-/// regions and retires any remaining Active ones.
+/// opportunistically recycles `DeferredReclaim` regions whose epochs have passed. `alloc`
+/// spills to a fresh region when the active one fills. `end_frame` assigns the epoch to
+/// all Pending regions and retires any remaining Active ones.
 ///
 /// Closest CPU analog: an N-arena epoch-based-reclamation allocator. This is the same
 /// pattern that drives the Linux kernel's RCU, JVM's ZGC region recycling, and crossbeam's
@@ -444,9 +423,6 @@ pub struct EpochRegionsAllocator {
     /// Indices of regions in `Active` state, in the order they were activated this frame.
     /// On `end_frame`, every index here is moved to `DeferredReclaim`.
     active: VecDeque<usize>,
-    /// Region indices enqueued when a reclaim token is dropped once the VramAllocator ring
-    /// has retired their epoch. Drained at the start of `begin_frame`.
-    pending_resets: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
 impl EpochRegionsAllocator {
@@ -457,7 +433,6 @@ impl EpochRegionsAllocator {
             config,
             regions: vec![region],
             active: VecDeque::new(),
-            pending_resets: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -482,16 +457,21 @@ impl EpochRegionsAllocator {
         })
     }
 
-    /// Drain any region indices enqueued when reclaim tokens drop and reset them.
-    ///
-    /// Called at the start of `begin_frame` after `device.flush_deferred_deletions()`.
-    fn drain_pending_resets(&mut self) {
-        let indices: Vec<usize> =
-            std::mem::take(&mut *self.pending_resets.lock().expect("pending_resets poisoned"));
-        for idx in indices {
-            if matches!(self.regions[idx].state, RegionState::DeferredReclaim { .. }) {
-                self.regions[idx].pool.reset();
-                self.regions[idx].state = RegionState::Empty;
+    /// Reset `DeferredReclaim` regions whose epoch has retired.
+    fn reclaim_retired_regions(&mut self, device: &Device) {
+        // Escape hatch (U4): when enabled, also drive device-wide reclamation so the
+        // backend deletion queue / VRAM ring drain at the pre-U4 cadence instead of
+        // waiting on the signal/poller path. See `GOLDY_EAGER_RECLAIM_DX12`.
+        if crate::validation_env::eager_reclaim_dx12_enabled() {
+            device.flush_deferred_deletions();
+        }
+        let progress = device.gpu_progress();
+        for r in &mut self.regions {
+            if let RegionState::DeferredReclaim { epoch } = r.state {
+                if epoch <= progress {
+                    r.pool.reset();
+                    r.state = RegionState::Empty;
+                }
             }
         }
     }
@@ -533,9 +513,7 @@ impl EpochRegionsAllocator {
     /// Acquire a region to allocate from, growing or waiting as needed. Used both at the
     /// start of a frame and when an active region runs out mid-frame.
     fn acquire_region(&mut self, device: &Device, min_size: u64) -> Result<usize> {
-        // Drain any tokens that fired via VramAllocator reclaim (non-blocking).
-        device.flush_deferred_deletions();
-        self.drain_pending_resets();
+        self.reclaim_retired_regions(device);
 
         if let Some(idx) = self.find_empty(min_size) {
             // Grow the region if it was empty but undersized.
@@ -558,10 +536,8 @@ impl EpochRegionsAllocator {
         // Pipeline-depth cap hit. Safety valve: wait on the oldest DeferredReclaim.
         if let Some((idx, epoch)) = self.oldest_deferred() {
             device.wait_until(epoch)?;
-            // After waiting, drain the now-completed tokens.
-            device.flush_deferred_deletions();
-            self.drain_pending_resets();
-            // The region should now be Empty from the token, but force-reset as fallback.
+            self.reclaim_retired_regions(device);
+            // Force-reset as fallback if progress still lags the signal epoch.
             if matches!(self.regions[idx].state, RegionState::DeferredReclaim { .. }) {
                 self.regions[idx].pool.reset();
                 self.regions[idx].state = RegionState::Empty;
@@ -573,17 +549,14 @@ impl EpochRegionsAllocator {
             return Ok(idx);
         }
 
-        // No DeferredReclaim regions — but there may be Pending regions (deferred end_frame).
-        // Force a GPU drain and convert Pending → Empty.
+        // No DeferredReclaim regions — but there may be Pending regions (deferred end_frame,
+        // epoch not yet known). Reset them to Empty so allocation can proceed.
         for r in &mut self.regions {
             if r.state == RegionState::Pending {
                 r.pool.reset();
                 r.state = RegionState::Empty;
             }
         }
-        // Flush again after forcing Pending→Empty.
-        device.flush_deferred_deletions();
-        self.drain_pending_resets();
 
         if let Some(idx) = self.find_empty(min_size) {
             if self.regions[idx].pool.capacity() < min_size {
@@ -651,10 +624,7 @@ impl TransientAllocator for EpochRegionsAllocator {
             self.active.clear();
         }
 
-        // Drain any RegionReclaimTokens that fired via VramAllocator reclaim.
-        // flush_deferred_deletions() processes all payloads whose epoch <= gpu_progress.
-        device.flush_deferred_deletions();
-        self.drain_pending_resets();
+        self.reclaim_retired_regions(device);
 
         // Pre-acquire one region so the first alloc is hot-path lock-free. If hint_size is 0
         // (caller has no estimate), use min_region_size so we don't allocate a tiny region.
@@ -682,7 +652,7 @@ impl TransientAllocator for EpochRegionsAllocator {
         self.regions[idx].pool.alloc_bytes(size, element_stride)
     }
 
-    fn end_frame(&mut self, device: &Device, epoch: TimelineValue) {
+    fn end_frame(&mut self, _device: &Device, epoch: TimelineValue) {
         // Collect indices to retire from the active set and any Pending regions.
         let mut retiring: Vec<usize> = Vec::with_capacity(self.active.len());
         for &idx in &self.active {
@@ -701,18 +671,9 @@ impl TransientAllocator for EpochRegionsAllocator {
             return;
         }
 
-        // Transition to DeferredReclaim and push a RegionReclaimToken.
         for &idx in &retiring {
             self.regions[idx].state = RegionState::DeferredReclaim { epoch };
         }
-
-        let token = RegionReclaimToken {
-            pending_resets: std::sync::Arc::clone(&self.pending_resets),
-            indices: retiring,
-        };
-        let mut payload = crate::vram_allocator::DeferredPayload::new();
-        payload.push(token);
-        device.defer_release(epoch, payload);
     }
 
     fn capacity(&self) -> u64 {
@@ -1388,9 +1349,9 @@ mod tests {
     }
 
     #[test]
-    fn epoch_regions_defer_release_transitions_to_empty() {
+    fn epoch_regions_recycles_after_epoch() {
         // After end_frame, regions should be in DeferredReclaim state.
-        // After flush_deferred_deletions + begin_frame, they should be Empty.
+        // After wait + begin_frame, they should be Empty.
         let device = test_device();
         let mut a = EpochRegionsAllocator::new(&device, small_config()).expect("create");
 
@@ -1400,7 +1361,6 @@ mod tests {
         let tv = device.submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
-        // Regions are now DeferredReclaim, not Empty.
         assert!(
             a.retired_count() >= 1,
             "active region should be DeferredReclaim"
@@ -1411,16 +1371,12 @@ mod tests {
             "no Empty regions immediately after end_frame"
         );
 
-        // Wait for the GPU to retire, then flush — this fires the RegionReclaimToken.
         device.wait_until(tv).expect("wait");
-        device.flush_deferred_deletions();
-
-        // begin_frame drains pending_resets → regions become Empty.
         a.begin_frame(&device, 0).expect("begin 2");
         assert_eq!(
             a.retired_count(),
             0,
-            "DeferredReclaim should be gone after flush+begin"
+            "DeferredReclaim should be gone after wait + begin_frame"
         );
     }
 

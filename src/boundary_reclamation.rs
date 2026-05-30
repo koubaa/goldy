@@ -99,8 +99,7 @@ mod tests {
         );
     }
 
-    /// EpochRegions regions transition Empty only after flush fires the reclaim token
-    /// and `begin_frame` drains `pending_resets`.
+    /// EpochRegions regions transition Empty once `gpu_progress >= epoch` at `begin_frame`.
     #[test]
     fn u0_epoch_regions_recycles_after_epoch() {
         let device = test_device();
@@ -123,20 +122,59 @@ mod tests {
         );
 
         device.wait_until(tv).expect("wait");
-        device.flush_deferred_deletions();
 
-        // Token fired into pending_resets, but regions stay DeferredReclaim until
-        // begin_frame drains pending_resets — flush alone is not enough.
+        // Epoch retired on GPU, but begin_frame has not run yet.
         assert!(
             alloc.retired_count() >= 1,
-            "flush alone must not reset regions; begin_frame drains pending_resets"
+            "region must stay DeferredReclaim before begin_frame"
         );
 
-        alloc.begin_frame(&device, 0).expect("begin after flush");
+        alloc.begin_frame(&device, 0).expect("begin after wait");
         assert_eq!(
             alloc.retired_count(),
             0,
-            "DeferredReclaim should be gone after flush + begin_frame"
+            "DeferredReclaim should be gone after wait + begin_frame"
+        );
+    }
+
+    /// EpochRegions must NOT recycle a region while `gpu_progress < epoch`.
+    ///
+    /// This is the use-after-free guard for the U4 direct-compare reclaim: `begin_frame`
+    /// runs `reclaim_retired_regions`, but a region retired to a not-yet-retired epoch must
+    /// stay `DeferredReclaim` until the GPU actually reaches it.
+    #[test]
+    fn u4_epoch_regions_not_recycled_before_epoch() {
+        let device = test_device();
+        let mut alloc = EpochRegionsAllocator::new(&device, small_config()).expect("create");
+
+        alloc.begin_frame(&device, 0).expect("begin 1");
+        let _view = alloc.alloc(&device, 1024, Some(4)).expect("alloc");
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
+
+        // Retire the region to a far epoch the GPU has NOT reached.
+        let far_epoch = tv + 100;
+        alloc.end_frame(&device, far_epoch);
+        assert!(
+            alloc.retired_count() >= 1,
+            "region should be DeferredReclaim after end_frame"
+        );
+
+        // begin_frame runs reclaim_retired_regions, but gpu_progress (== tv) < far_epoch,
+        // so the region must NOT recycle (it would be a use-after-free).
+        alloc.begin_frame(&device, 0).expect("begin 2");
+        assert!(
+            alloc.retired_count() >= 1,
+            "region must not recycle before its epoch retires"
+        );
+
+        // Once the epoch retires, the next begin_frame recycles it.
+        device.wait_until(far_epoch).expect("wait");
+        alloc.begin_frame(&device, 0).expect("begin 3");
+        assert_eq!(
+            alloc.retired_count(),
+            0,
+            "region recycles once gpu_progress >= epoch"
         );
     }
 
