@@ -732,7 +732,7 @@ impl Device {
     /// reached. This includes:
     /// - `BufferView`s from the placement heap (for transient buffer lifetimes)
     /// - `RegionReclaimToken`s from `EpochRegionsAllocator`
-    /// - `FreeRangeToken`s from `HeapTransientAllocator`
+    /// - `HeapTransientAllocator` deferred free ranges (recycled at `begin_frame`)
     /// - `ResetToken`s from `BumpResetAllocator`
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload

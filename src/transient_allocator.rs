@@ -713,25 +713,6 @@ struct DeferredFree {
     epoch: Option<TimelineValue>,
 }
 
-/// Token pushed into a [`DeferredPayload`] when a heap range is freed.
-///
-/// When the VramAllocator ring drops this token (after `gpu_progress >= epoch`),
-/// it enqueues the `(offset, size)` pairs into `pending_frees`. The next
-/// `begin_frame` call drains `pending_frees` and merges them back into the
-/// allocator's free list via `insert_free`.
-struct FreeRangeToken {
-    pending_frees: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
-    ranges: Vec<(u64, u64)>,
-}
-
-impl Drop for FreeRangeToken {
-    fn drop(&mut self) {
-        if let Ok(mut pending) = self.pending_frees.lock() {
-            pending.extend_from_slice(&self.ranges);
-        }
-    }
-}
-
 /// Best-fit free-list allocator inside a single monolithic [`BufferPool`].
 ///
 /// Unlike the bump-only strategies, `HeapTransientAllocator` supports mid-frame
@@ -750,13 +731,9 @@ pub struct HeapTransientAllocator {
     watermark: u64,
     /// Coalesced free ranges available for immediate reuse: `offset -> size`.
     free_list: BTreeMap<u64, u64>,
-    /// Ranges freed via `free()` awaiting epoch assignment or deferral.
+    /// Ranges freed via `free()` awaiting GPU retirement before reuse.
     /// `None` epoch means the epoch is not yet known (assigned in `end_frame`).
-    /// `Some(e)` means the range has a known epoch but hasn't been deferred yet.
     deferred: Vec<DeferredFree>,
-    /// Ranges enqueued when free-range tokens drop once their epoch retires.
-    /// Drained by `begin_frame` via `drain_pending_frees`.
-    pending_frees: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
     /// Bytes currently live (allocated minus freed-and-retired).
     live_bytes: u64,
     /// Peak `live_bytes` observed across the lifetime of this allocator (diagnostic).
@@ -781,51 +758,23 @@ impl HeapTransientAllocator {
             watermark: 0,
             free_list: BTreeMap::new(),
             deferred: Vec::new(),
-            pending_frees: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             live_bytes: 0,
             peak_live_bytes: 0,
             frame_count: 0,
         })
     }
 
-    /// Move any freed ranges that the VramAllocator ring has already released into the free list.
-    /// Called at the start of `begin_frame`.
-    fn drain_pending_frees(&mut self) {
-        let ranges: Vec<(u64, u64)> =
-            std::mem::take(&mut *self.pending_frees.lock().expect("pending_frees poisoned"));
-        for (offset, size) in ranges {
-            self.insert_free(offset, size);
-        }
-    }
-
-    /// For any `deferred` frees that have a known epoch, create deferred free-range tokens and
-    /// call `device.defer_release`. Called from `begin_frame` (for `Some(epoch)` frees that
-    /// arrived after the last `end_frame`) and from `end_frame` (after stamping `None` frees).
-    fn flush_deferred_to_vram(&mut self, device: &Device) {
-        if self.deferred.is_empty() {
-            return;
-        }
-        // Partition: entries with known epochs go to defer_release, None-epoch entries stay.
-        let mut to_defer: std::collections::BTreeMap<u64, Vec<(u64, u64)>> =
-            std::collections::BTreeMap::new();
-        let mut remaining = Vec::new();
-        for d in self.deferred.drain(..) {
-            if let Some(ep) = d.epoch {
-                to_defer.entry(ep).or_default().push((d.offset, d.size));
-            } else {
-                remaining.push(d);
-            }
+    /// Return deferred frees whose epoch has retired to the coalescing free list.
+    fn reclaim_retired_frees(&mut self, device: &Device) {
+        let progress = device.gpu_progress();
+        let (retired, remaining): (Vec<_>, Vec<_>) = self
+            .deferred
+            .drain(..)
+            .partition(|d| d.epoch.is_some_and(|epoch| epoch <= progress));
+        for d in retired {
+            self.insert_free(d.offset, d.size);
         }
         self.deferred = remaining;
-        for (epoch, ranges) in to_defer {
-            let token = FreeRangeToken {
-                pending_frees: std::sync::Arc::clone(&self.pending_frees),
-                ranges,
-            };
-            let mut payload = crate::vram_allocator::DeferredPayload::new();
-            payload.push(token);
-            device.defer_release(epoch, payload);
-        }
     }
 
     /// Pull the watermark back when the highest free range extends up to (or past) it.
@@ -936,11 +885,7 @@ const HEAP_WARMUP_FRAMES: u64 = 8;
 impl TransientAllocator for HeapTransientAllocator {
     fn begin_frame(&mut self, device: &Device, _hint_size: u64) -> Result<()> {
         self.frame_count += 1;
-        // Flush any deferred frees with known epochs (e.g., from post-end_frame free calls).
-        self.flush_deferred_to_vram(device);
-        // Process any ranges whose tokens have been dropped by the VramAllocator ring.
-        device.flush_deferred_deletions();
-        self.drain_pending_frees();
+        self.reclaim_retired_frees(device);
         self.compact_watermark();
         // After warmup, auto-shrink if we over-grew during the first few frames.
         if self.frame_count == HEAP_WARMUP_FRAMES {
@@ -1004,7 +949,7 @@ impl TransientAllocator for HeapTransientAllocator {
         });
     }
 
-    fn end_frame(&mut self, device: &Device, epoch: TimelineValue) {
+    fn end_frame(&mut self, _device: &Device, epoch: TimelineValue) {
         // Stamp any mid-frame frees (epoch=None) with this frame's timeline so
         // they become eligible for reuse only after the GPU retires this frame.
         for d in &mut self.deferred {
@@ -1012,8 +957,6 @@ impl TransientAllocator for HeapTransientAllocator {
                 d.epoch = Some(epoch);
             }
         }
-        // Convert all deferred frees to VramAllocator-tracked tokens.
-        self.flush_deferred_to_vram(device);
     }
 
     fn capacity(&self) -> u64 {
@@ -1050,9 +993,6 @@ impl TransientAllocator for HeapTransientAllocator {
         self.watermark = 0;
         self.free_list.clear();
         self.deferred.clear();
-        if let Ok(mut pending) = self.pending_frees.lock() {
-            pending.clear();
-        }
         self.live_bytes = 0;
         self.frame_count = 0;
     }
@@ -1375,9 +1315,8 @@ mod tests {
     }
 
     #[test]
-    fn heap_transient_free_range_token_fires_via_vram_reclaim() {
-        // After end_frame, freed ranges should be returned to the free list via
-        // FreeRangeToken (through flush_deferred_deletions + begin_frame).
+    fn heap_transient_recycles_after_epoch() {
+        // After end_frame, freed ranges return to the free list once gpu_progress >= epoch.
         let device = test_device();
         let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
 
@@ -1387,23 +1326,18 @@ mod tests {
         let mut graph = crate::task_graph::TaskGraph::new();
         let tv = device.submit(&mut graph).expect("submit");
 
-        // Free with known epoch.
         alloc.free(offset, 1024, Some(tv));
         alloc.end_frame(&device, tv);
 
-        // Wait and flush to fire the FreeRangeToken.
         device.wait_until(tv).expect("wait");
-        device.flush_deferred_deletions();
-
         alloc.begin_frame(&device, 0).unwrap();
-        // Now the range should be back in the free list and reusable.
         let v2 = alloc
             .alloc(&device, 1024, Some(4))
             .expect("alloc after reclaim");
         assert_eq!(
             v2.offset(),
             offset,
-            "freed range should be reused after VramAllocator reclaim"
+            "freed range should be reused after epoch retires"
         );
     }
 

@@ -178,7 +178,7 @@ mod tests {
         );
     }
 
-    /// HeapTransient freed ranges return to the free list via VramAllocator reclaim.
+    /// HeapTransient freed ranges return to the free list once `gpu_progress >= epoch`.
     #[test]
     fn u0_heap_free_range_recycles_after_epoch() {
         let device = test_device();
@@ -194,8 +194,6 @@ mod tests {
         alloc.free(offset, 1024, Some(far_epoch));
         alloc.end_frame(&device, far_epoch);
 
-        // GPU has not reached far_epoch — flush must not recycle the range.
-        device.flush_deferred_deletions();
         alloc.begin_frame(&device, 0).unwrap();
         let blocked = alloc.alloc(&device, 1024, Some(4)).unwrap();
         assert_ne!(
@@ -205,7 +203,6 @@ mod tests {
         );
 
         device.wait_until(far_epoch).expect("wait");
-        device.flush_deferred_deletions();
         alloc.begin_frame(&device, 0).unwrap();
         let reused = alloc
             .alloc(&device, 1024, Some(4))
@@ -213,7 +210,7 @@ mod tests {
         assert_eq!(
             reused.offset(),
             offset,
-            "freed range should be reused after submit + wait + flush"
+            "freed range should be reused after wait + begin_frame"
         );
     }
 
