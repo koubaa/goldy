@@ -561,7 +561,7 @@ impl Device {
     }
 
     /// Drain pending signals and service [`Signal::BoundaryCrossed`] by calling
-    /// [`boundary_crossed`](Self::boundary_crossed) with each notification's epoch.
+    /// [`boundary_crossed`](Self::boundary_crossed) at the highest drained epoch.
     ///
     /// Returns the full signal batch so callers can still handle swapchain events,
     /// oversubscription, and frame bookkeeping. Non-boundary signals are not acted on
@@ -569,10 +569,14 @@ impl Device {
     pub fn poll_signals_and_service(&self) -> Vec<crate::signal::Signal> {
         let _tz = crate::tracy_zone!("device.poll_signals_and_service");
         let signals = self.poll_signals();
-        for signal in &signals {
-            if let crate::signal::Signal::BoundaryCrossed { epoch } = signal {
-                self.boundary_crossed(*epoch);
+        let latest_boundary = signals.iter().fold(None, |latest, signal| match signal {
+            crate::signal::Signal::BoundaryCrossed { epoch } => {
+                Some(latest.unwrap_or(0).max(*epoch))
             }
+            _ => latest,
+        });
+        if let Some(epoch) = latest_boundary {
+            self.boundary_crossed(epoch);
         }
         signals
     }
