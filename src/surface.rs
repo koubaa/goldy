@@ -156,12 +156,17 @@ impl Surface {
             return Ok(());
         }
         tracing::debug!(width, height, "Resizing surface");
-        {
-            let mut backend = self.backend.lock().unwrap();
-            backend.surface_resize(self.handle, width, height)?;
-        }
-        self.width = width;
-        self.height = height;
+        let mut backend = self.backend.lock().unwrap();
+        backend.surface_resize(self.handle, width, height)?;
+        // Read back the dimensions actually used by the backend. surface_resize may clamp
+        // the requested extents to the surface's Vulkan/DX12/Metal capability limits, or
+        // bail out early when the clamped extent matches the current swapchain. Storing the
+        // actual backend dimensions here keeps Surface.width/height consistent with the
+        // underlying swapchain — preventing render targets from being sized at a different
+        // resolution than the swapchain scratch texture.
+        let (actual_w, actual_h) = backend.surface_size(self.handle);
+        self.width = actual_w;
+        self.height = actual_h;
         Ok(())
     }
 

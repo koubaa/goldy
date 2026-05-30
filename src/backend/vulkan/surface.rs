@@ -1580,14 +1580,33 @@ pub(super) fn present(
     // `queue_present` returns Ok on SUCCESS and SUBOPTIMAL_KHR; Err on real failures.
     let _mark_image_presented = result.is_ok();
     if let Err(e) = &result {
-        tracing::warn!(
-            surface_handle,
-            %device_handle,
-            current_frame,
-            image_index,
-            result = ?e,
-            "queue_present failed"
+        // ERROR_OUT_OF_DATE_KHR / SUBOPTIMAL_KHR are expected during interactive window
+        // resizing: they signal that the swapchain needs rebuilding, which the caller does
+        // reactively. Treat them as routine control flow (debug), not as warnings. Any other
+        // error is a genuine failure and stays at warn.
+        let expected_during_resize = matches!(
+            *e,
+            vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR
         );
+        if expected_during_resize {
+            tracing::debug!(
+                surface_handle,
+                %device_handle,
+                current_frame,
+                image_index,
+                result = ?e,
+                "queue_present: swapchain out of date (will rebuild)"
+            );
+        } else {
+            tracing::warn!(
+                surface_handle,
+                %device_handle,
+                current_frame,
+                image_index,
+                result = ?e,
+                "queue_present failed"
+            );
+        }
     }
 
     // Clear the current image and advance frame counter.
