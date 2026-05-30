@@ -240,36 +240,18 @@ impl TransientAllocatorStrategy {
 // BumpReset strategy
 // -----------------------------------------------------------------------
 
-/// Token pushed into a [`DeferredPayload`] at `end_frame`.
-///
-/// When the VramAllocator ring drops this token (after `gpu_progress >= epoch`),
-/// it sets `reset_ready` to `true`. `begin_frame` checks this flag and, if set,
-/// can reset the pool without blocking on `wait_until`.
-struct ResetToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl Drop for ResetToken {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
 /// Single-pool bump allocator that resets between frames.
 ///
 /// `begin_frame` blocks on the previous frame's epoch (if any) before resetting the bump
-/// pointer. This is the simplest correct strategy and provides a useful baseline / fallback
-/// for debugging, but it serializes the CPU and the GPU — the CPU cannot begin recording
-/// frame N+1 until frame N's GPU work is done.
-///
-/// When the deferred reset token fires via the VramAllocator ring (`Device::flush_deferred_deletions`),
-/// `begin_frame` can reset the pool non-blockingly. Otherwise it falls back to `wait_until`.
+/// pointer when `gpu_progress() < last_epoch`. This is the simplest correct strategy and
+/// provides a useful baseline / fallback for debugging, but it serializes the CPU and the
+/// GPU when the prior frame is still in flight — the CPU cannot begin recording frame N+1
+/// until frame N's GPU work is done.
 ///
 /// Equivalent to a per-thread arena allocator with synchronous reset.
 pub struct BumpResetAllocator {
     pool: BufferPool,
     last_epoch: Option<TimelineValue>,
-    /// Set to `true` once the deferred reset token is dropped after `gpu_progress >= last_epoch`.
-    /// Reset to `false` in `end_frame` when a new token is issued.
-    reset_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BumpResetAllocator {
@@ -286,27 +268,16 @@ impl BumpResetAllocator {
         Ok(Self {
             pool,
             last_epoch: None,
-            reset_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         })
     }
 }
 
 impl TransientAllocator for BumpResetAllocator {
     fn begin_frame(&mut self, device: &Device, hint_size: u64) -> Result<()> {
-        // Give the VramAllocator a chance to fire the ResetToken non-blockingly.
-        device.flush_deferred_deletions();
-
-        // If the token hasn't fired yet (GPU still in flight), fall back to blocking wait.
-        // This is the same serialization cost as before; the token path is an optimization
-        // for callers that call flush_deferred_deletions eagerly between frames.
-        if !self.reset_ready.load(std::sync::atomic::Ordering::Acquire) {
-            if let Some(tv) = self.last_epoch {
-                if device.gpu_progress() < tv {
-                    device.wait_until(tv)?;
-                }
+        if let Some(tv) = self.last_epoch {
+            if device.gpu_progress() < tv {
+                device.wait_until(tv)?;
             }
-            // Drain after wait to catch any newly-fired tokens.
-            device.flush_deferred_deletions();
         }
 
         // Grow to fit the hint if known.
@@ -334,17 +305,8 @@ impl TransientAllocator for BumpResetAllocator {
         self.pool.alloc_bytes(size, element_stride)
     }
 
-    fn end_frame(&mut self, device: &Device, epoch: TimelineValue) {
+    fn end_frame(&mut self, _device: &Device, epoch: TimelineValue) {
         self.last_epoch = Some(epoch);
-        // Mark not-ready and issue a ResetToken to the VramAllocator ring.
-        // When the token fires, reset_ready becomes true and begin_frame can
-        // skip the blocking wait_until.
-        self.reset_ready
-            .store(false, std::sync::atomic::Ordering::Release);
-        let token = ResetToken(std::sync::Arc::clone(&self.reset_ready));
-        let mut payload = crate::vram_allocator::DeferredPayload::new();
-        payload.push(token);
-        device.defer_release(epoch, payload);
     }
 
     fn capacity(&self) -> u64 {
@@ -366,8 +328,6 @@ impl TransientAllocator for BumpResetAllocator {
     fn clear(&mut self) {
         self.pool.reset();
         self.last_epoch = None;
-        self.reset_ready
-            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -1346,9 +1306,8 @@ mod tests {
     }
 
     #[test]
-    fn bump_reset_token_fires_non_blockingly() {
-        // After end_frame issues a ResetToken, flush_deferred_deletions should
-        // fire it so begin_frame can reset without blocking wait_until.
+    fn bump_reset_recycles_after_epoch() {
+        // After end_frame records the epoch, begin_frame resets once gpu_progress >= epoch.
         let device = test_device();
         let mut a = BumpResetAllocator::new(&device, small_config()).expect("create");
 
@@ -1358,23 +1317,7 @@ mod tests {
         let tv = device.submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
-        // reset_ready is now false.
-        assert!(
-            !a.reset_ready.load(std::sync::atomic::Ordering::Acquire),
-            "reset_ready should be false after end_frame"
-        );
-
-        // Wait and flush to fire the ResetToken.
         device.wait_until(tv).expect("wait");
-        device.flush_deferred_deletions();
-
-        // reset_ready should be true now (token fired).
-        assert!(
-            a.reset_ready.load(std::sync::atomic::Ordering::Acquire),
-            "reset_ready should be true after flush_deferred_deletions"
-        );
-
-        // begin_frame should not need to wait again (fast path).
         a.begin_frame(&device, 0).expect("begin 2 should not block");
     }
 }
