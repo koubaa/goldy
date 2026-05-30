@@ -668,7 +668,7 @@ impl Device {
     /// non-blocking frame drain) can call this to reclaim slots immediately
     /// rather than waiting for the next internal call.
     ///
-    /// Drives all epoch-based reclamation: `VramAllocator::reclaim` drops any
+    /// Drives all epoch-based reclamation: `VramAllocator::boundary_crossed` drops any
     /// [`DeferredPayload`]s registered via [`defer_release`] whose epoch has been
     /// reached. This includes:
     /// - `BufferView`s from the placement heap (for transient buffer lifetimes)
@@ -685,12 +685,12 @@ impl Device {
             backend.flush_deferred_deletions(self.inner.handle);
             backend.gpu_progress(self.inner.handle)
         };
-        // reclaim drops DeferredPayloads. With RECLAMATION_EPOCH set, Buffer::drop
+        // boundary_crossed drops DeferredPayloads. With RECLAMATION_EPOCH set, Buffer::drop
         // queues Metal heap buffers into the deletion queue with a barrier equal to
         // the already-completed reclamation epoch rather than timeline_scheduled_max.
         // Those entries are immediately eligible, so a second flush processes them and
         // returns the heap memory before any subsequent allocation attempt.
-        self.inner.vram_allocator.reclaim(progress);
+        self.inner.vram_allocator.boundary_crossed(progress);
         {
             let mut backend = self.inner.backend.lock().unwrap();
             backend.flush_deferred_deletions(self.inner.handle);
