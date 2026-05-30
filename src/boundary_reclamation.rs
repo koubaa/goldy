@@ -23,7 +23,7 @@ mod tests {
     use crate::signal::Signal;
     use crate::task_graph::TaskGraph;
     use crate::transient_allocator::{
-        EpochRegionsAllocator, HeapTransientAllocator, TransientAllocator,
+        BumpResetAllocator, EpochRegionsAllocator, HeapTransientAllocator, TransientAllocator,
         TransientAllocatorConfig,
     };
     use crate::types::BufferFlags;
@@ -297,5 +297,46 @@ mod tests {
             "VRAM ring must empty via pull path without polling signals"
         );
         assert!(weak.upgrade().is_none(), "payload must drop after pull flush");
+    }
+
+    /// BumpReset must NOT reset the pool before the prior frame's epoch retires.
+    ///
+    /// `begin_frame` gates the reset on `gpu_progress() >= last_epoch`. If the epoch
+    /// has not retired, it must block via `wait_until`. This test uses a far epoch
+    /// that the mock backend has not reached and verifies that `begin_frame` calls
+    /// `wait_until` (advancing mock progress) before resetting.
+    #[test]
+    fn u6_bump_reset_waits_before_reset() {
+        let device = test_device();
+        let mut alloc = BumpResetAllocator::new(&device, small_config()).expect("create");
+
+        alloc.begin_frame(&device, 0).expect("begin 1");
+        let v1 = alloc.alloc(&device, 512, Some(4)).expect("alloc");
+        let original_offset = v1.offset();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
+
+        // Retire to a far epoch the GPU has NOT reached.
+        let far_epoch = tv + 100;
+        alloc.end_frame(&device, far_epoch);
+
+        // begin_frame must wait on far_epoch (mock wait_until advances progress),
+        // then reset. If the wait were skipped, the pool would reset while the
+        // GPU is still using the buffer — a use-after-free.
+        alloc.begin_frame(&device, 0).expect("begin 2");
+
+        // After reset the bump pointer is at 0, so the next alloc should land at
+        // the same offset as the first (confirming reset happened).
+        let v2 = alloc.alloc(&device, 512, Some(4)).expect("alloc after reset");
+        assert_eq!(
+            v2.offset(),
+            original_offset,
+            "bump should reset to 0 after wait + begin_frame"
+        );
+        // gpu_progress should now be >= far_epoch (mock wait_until advanced it).
+        assert!(
+            device.gpu_progress() >= far_epoch,
+            "begin_frame must have called wait_until to advance progress"
+        );
     }
 }

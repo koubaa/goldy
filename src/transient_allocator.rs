@@ -275,16 +275,24 @@ impl BumpResetAllocator {
 impl TransientAllocator for BumpResetAllocator {
     fn begin_frame(&mut self, device: &Device, hint_size: u64) -> Result<()> {
         if let Some(tv) = self.last_epoch {
+            // gpu_progress() and wait_until() are two separate lock acquisitions.
+            // The GPU may retire tv between the check and the wait — that's harmless
+            // (wait_until returns immediately when the semaphore/fence has already
+            // fired). The opposite direction (progress reads stale-low on a poller
+            // backend) causes an unnecessary but correct wait of at most ~1 ms.
             if device.gpu_progress() < tv {
                 device.wait_until(tv)?;
             }
         }
 
-        // Grow to fit the hint if known.
+        // Grow to fit the hint if known. resize() may fail (OOM); if it does we
+        // propagate the error *before* reset(), preserving the prior frame's data
+        // so a retry with a smaller hint is possible.
         if hint_size > self.pool.capacity() {
             self.pool.resize(hint_size)?;
         }
         self.pool.reset();
+        self.last_epoch = None;
         Ok(())
     }
 
