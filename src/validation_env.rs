@@ -98,23 +98,6 @@ pub(crate) fn timeline_validation_enabled() -> bool {
     from_goldy_validation_var().timeline
 }
 
-/// `GOLDY_EAGER_RECLAIM_DX12=1|true|yes` — temporary escape hatch for the
-/// unified-boundary-event refactor (U4).
-///
-/// When set, `EpochRegionsAllocator` also drives device-wide deferred-deletion
-/// flushing during region reclaim, restoring the pre-U4 cadence at which the
-/// backend deletion queue / VRAM ring were drained. Intended for the DX12 perf
-/// test where the 1 ms fence poller can let reclamation fall behind. Remove once
-/// the regression is confirmed absent and the hook is unneeded by later units.
-///
-/// Cached on first read: the value is fixed for the process lifetime.
-#[must_use]
-pub(crate) fn eager_reclaim_dx12_enabled() -> bool {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| env_truthy("GOLDY_EAGER_RECLAIM_DX12"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::parse_validation_list;

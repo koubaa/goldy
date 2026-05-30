@@ -459,12 +459,6 @@ impl EpochRegionsAllocator {
 
     /// Reset `DeferredReclaim` regions whose epoch has retired.
     fn reclaim_retired_regions(&mut self, device: &Device) {
-        // Escape hatch (U4): when enabled, also drive device-wide reclamation so the
-        // backend deletion queue / VRAM ring drain at the pre-U4 cadence instead of
-        // waiting on the signal/poller path. See `GOLDY_EAGER_RECLAIM_DX12`.
-        if crate::validation_env::eager_reclaim_dx12_enabled() {
-            device.flush_deferred_deletions();
-        }
         let progress = device.gpu_progress();
         for r in &mut self.regions {
             if let RegionState::DeferredReclaim { epoch } = r.state {
