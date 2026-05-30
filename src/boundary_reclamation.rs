@@ -272,4 +272,30 @@ mod tests {
         );
         assert!(weak.upgrade().is_none(), "payload must drop after service");
     }
+
+    /// Pull-side `flush_deferred_deletions` must reclaim without draining signals.
+    ///
+    /// Locks the plan invariant that `gpu_progress()` is the authoritative retirement
+    /// horizon: reclamation must not depend solely on the client draining
+    /// `Signal::BoundaryCrossed` from the poller queue.
+    #[test]
+    fn pull_path_reclaims_without_signal_drain() {
+        let device = test_device();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
+
+        let alive = Arc::new(77u32);
+        let weak = Arc::downgrade(&alive);
+        device.defer_until(tv, alive);
+        assert!(device.has_deferred_payloads());
+
+        device.wait_until(tv).expect("wait");
+        device.flush_deferred_deletions();
+
+        assert!(
+            !device.has_deferred_payloads(),
+            "VRAM ring must empty via pull path without polling signals"
+        );
+        assert!(weak.upgrade().is_none(), "payload must drop after pull flush");
+    }
 }

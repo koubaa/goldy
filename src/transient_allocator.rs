@@ -767,14 +767,18 @@ impl HeapTransientAllocator {
     /// Return deferred frees whose epoch has retired to the coalescing free list.
     fn reclaim_retired_frees(&mut self, device: &Device) {
         let progress = device.gpu_progress();
-        let (retired, remaining): (Vec<_>, Vec<_>) = self
-            .deferred
-            .drain(..)
-            .partition(|d| d.epoch.is_some_and(|epoch| epoch <= progress));
-        for d in retired {
-            self.insert_free(d.offset, d.size);
+        let mut i = 0;
+        while i < self.deferred.len() {
+            if self.deferred[i]
+                .epoch
+                .is_some_and(|epoch| epoch <= progress)
+            {
+                let d = self.deferred.swap_remove(i);
+                self.insert_free(d.offset, d.size);
+            } else {
+                i += 1;
+            }
         }
-        self.deferred = remaining;
     }
 
     /// Pull the watermark back when the highest free range extends up to (or past) it.

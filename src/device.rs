@@ -727,13 +727,15 @@ impl Device {
     /// Pull-side wrapper around [`boundary_crossed`](Self::boundary_crossed) using the
     /// authoritative latest retired epoch from [`gpu_progress`](Self::gpu_progress).
     ///
-    /// Drives all epoch-based reclamation: `VramAllocator::boundary_crossed` drops any
-    /// [`DeferredPayload`]s registered via [`defer_release`] whose epoch has been
-    /// reached. This includes:
-    /// - `BufferView`s from the placement heap (for transient buffer lifetimes)
-    /// - `RegionReclaimToken`s from `EpochRegionsAllocator`
-    /// - `HeapTransientAllocator` deferred free ranges (recycled at `begin_frame`)
+    /// Drives device-owned epoch-based reclamation via [`boundary_crossed`](Self::boundary_crossed):
+    /// the VRAM deferred ring drops [`DeferredPayload`]s registered via [`defer_release`]
+    /// whose epoch has been reached. This includes:
+    /// - `BufferView`s from the placement heap (transient buffer lifetimes)
     /// - `ResetToken`s from `BumpResetAllocator`
+    ///
+    /// Transient allocators (`EpochRegionsAllocator`, `HeapTransientAllocator`) self-service
+    /// by comparing stored epochs to [`gpu_progress`](Self::gpu_progress) at `begin_frame`;
+    /// they no longer register reclaim tokens on the VRAM ring.
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
