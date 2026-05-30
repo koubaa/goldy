@@ -20,6 +20,7 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::device::Device;
     use crate::placement_heap::PlacementHeap;
+    use crate::signal::Signal;
     use crate::task_graph::TaskGraph;
     use crate::transient_allocator::{
         EpochRegionsAllocator, HeapTransientAllocator, TransientAllocator,
@@ -209,5 +210,31 @@ mod tests {
         let o4 = heap.acquire(1024).expect("space available after reclaim");
         assert_eq!(o4, 0, "reclaimed region should wrap to offset 0");
         assert_eq!(heap.in_flight_count(), 3, "two old + one new in flight");
+    }
+
+    /// `poll_signals_and_service` routes `BoundaryCrossed` into `boundary_crossed(epoch)`.
+    #[test]
+    fn u3_signal_boundary_crossed_services_vram_ring() {
+        let device = test_device();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
+
+        let alive = Arc::new(42u32);
+        let weak = Arc::downgrade(&alive);
+        device.defer_until(tv, alive);
+        assert!(device.has_deferred_payloads());
+
+        let signals = device.poll_signals_and_service();
+        assert!(
+            signals
+                .iter()
+                .any(|s| matches!(s, Signal::BoundaryCrossed { epoch } if *epoch == tv)),
+            "submit should post BoundaryCrossed for epoch {tv}"
+        );
+        assert!(
+            !device.has_deferred_payloads(),
+            "VRAM ring must empty after poll_signals_and_service"
+        );
+        assert!(weak.upgrade().is_none(), "payload must drop after service");
     }
 }

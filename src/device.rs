@@ -560,6 +560,23 @@ impl Device {
         backend.poll_signals(self.inner.handle)
     }
 
+    /// Drain pending signals and service [`Signal::BoundaryCrossed`] by calling
+    /// [`boundary_crossed`](Self::boundary_crossed) with each notification's epoch.
+    ///
+    /// Returns the full signal batch so callers can still handle swapchain events,
+    /// oversubscription, and frame bookkeeping. Non-boundary signals are not acted on
+    /// here.
+    pub fn poll_signals_and_service(&self) -> Vec<crate::signal::Signal> {
+        let _tz = crate::tracy_zone!("device.poll_signals_and_service");
+        let signals = self.poll_signals();
+        for signal in &signals {
+            if let crate::signal::Signal::BoundaryCrossed { epoch } = signal {
+                self.boundary_crossed(*epoch);
+            }
+        }
+        signals
+    }
+
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
     pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
         let backend = self.inner.backend.lock().unwrap();

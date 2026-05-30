@@ -1092,6 +1092,9 @@ impl GpuBackend for MockBackend {
         *next += 1;
         let tv = *next;
         self.device_timeline_completed.insert(device, tv);
+        if let Some(queue) = self.signal_queues.get(&device) {
+            queue.push(crate::signal::Signal::BoundaryCrossed { epoch: tv });
+        }
         Ok(tv)
     }
 
