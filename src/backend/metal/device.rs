@@ -116,6 +116,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             timeline_next: 1,
             timeline_scheduled_max: 0,
             deletion_queue: DeletionQueue::new(),
+            reclamation_context: None,
             last_committed_timeline: None,
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),

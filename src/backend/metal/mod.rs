@@ -784,6 +784,16 @@ impl GpuBackend for MetalBackend {
         }
     }
 
+    fn set_reclamation_context(
+        &mut self,
+        device: DeviceHandle,
+        epoch: Option<crate::timeline::TimelineValue>,
+    ) {
+        if let Some(ld) = self.state.devices.get_mut(&device) {
+            ld.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
+        }
+    }
+
     fn reset_buffer_heaps(&mut self, device: DeviceHandle) {
         // Safety: dropping the old primary heap and clearing overflow heaps
         // is only sound once every command buffer that allocated buffers from

@@ -705,11 +705,14 @@ impl Device {
             let mut backend = self.inner.backend.lock().unwrap();
             backend.flush_deferred_deletions(self.inner.handle);
         }
-        // boundary_crossed drops DeferredPayloads. With RECLAMATION_EPOCH set, Buffer::drop
-        // queues Metal heap buffers into the deletion queue with a barrier equal to
-        // the already-completed reclamation epoch rather than timeline_scheduled_max.
-        // Those entries are immediately eligible, so a second flush processes them and
-        // returns the heap memory before any subsequent allocation attempt.
+        // boundary_crossed drops DeferredPayloads. The backend reclamation context tells
+        // Metal Buffer::drop to queue heap frees with the already-retired epoch rather
+        // than timeline_scheduled_max. Those entries are immediately eligible, so the
+        // second flush returns heap memory before any subsequent allocation attempt.
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.set_reclamation_context(self.inner.handle, Some(epoch));
+        }
         self.inner.vram_allocator.boundary_crossed(epoch);
         if let Ok(mut heap_guard) = self.inner.placement_heap.lock() {
             if let Some(heap) = heap_guard.as_mut() {
@@ -718,6 +721,7 @@ impl Device {
         }
         {
             let mut backend = self.inner.backend.lock().unwrap();
+            backend.set_reclamation_context(self.inner.handle, None);
             backend.flush_deferred_deletions(self.inner.handle);
         }
     }
