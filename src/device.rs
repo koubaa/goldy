@@ -694,7 +694,8 @@ impl Device {
     /// value (push notification).
     ///
     /// Ordering is load-bearing on Metal: backend deletion flush, VRAM ring reclaim,
-    /// then a second backend deletion flush to process buffers dropped during reclaim.
+    /// placement-heap ring reclaim, then a second backend deletion flush to process
+    /// buffers dropped during reclaim.
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
@@ -710,6 +711,11 @@ impl Device {
         // Those entries are immediately eligible, so a second flush processes them and
         // returns the heap memory before any subsequent allocation attempt.
         self.inner.vram_allocator.boundary_crossed(epoch);
+        if let Ok(mut heap_guard) = self.inner.placement_heap.lock() {
+            if let Some(heap) = heap_guard.as_mut() {
+                heap.reclaim(epoch);
+            }
+        }
         {
             let mut backend = self.inner.backend.lock().unwrap();
             backend.flush_deferred_deletions(self.inner.handle);
@@ -729,12 +735,10 @@ impl Device {
     ///
     /// Drives device-owned epoch-based reclamation via [`boundary_crossed`](Self::boundary_crossed):
     /// the VRAM deferred ring drops [`DeferredPayload`]s registered via [`defer_release`]
-    /// whose epoch has been reached. This includes:
-    /// - `BufferView`s from the placement heap (transient buffer lifetimes)
-    /// Transient allocators (`BumpResetAllocator`, `EpochRegionsAllocator`,
-    /// `HeapTransientAllocator`) self-service by comparing stored epochs to
-    /// [`gpu_progress`](Self::gpu_progress) at `begin_frame`; they no longer register
-    /// reclaim tokens on the VRAM ring.
+    /// (including evicted placement-heap views/textures), and the placement-heap ring
+    /// reclaims retired regions. Transient allocators (`BumpResetAllocator`,
+    /// `EpochRegionsAllocator`, `HeapTransientAllocator`) self-service by comparing stored
+    /// epochs to [`gpu_progress`](Self::gpu_progress) at `begin_frame`.
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
@@ -1043,7 +1047,8 @@ impl Device {
         )?;
         drop(backend);
 
-        // Stamp paged-mode timeline.
+        // Stamp paged-mode timeline. Ring-mode region reclaim is driven by
+        // [`Device::boundary_crossed`] on the next flush/signal boundary.
         let mut heap_guard = self.inner.placement_heap.lock().unwrap();
         if let Some(heap) = heap_guard.as_mut() {
             heap.stamp_pending(tv);

@@ -247,6 +247,34 @@ mod tests {
         assert_eq!(heap.in_flight_count(), 3, "two old + one new in flight");
     }
 
+    /// `Device::boundary_crossed` drives placement-heap ring reclaim for device-owned heaps.
+    #[test]
+    fn u7_boundary_crossed_reclaims_placement_heap_ring() {
+        let device = test_device();
+        let mut heap = PlacementHeap::new(&device, 3 * 1024, 1024).unwrap();
+
+        let _o1 = heap.acquire(1024).unwrap();
+        heap.stamp(1);
+        let _o2 = heap.acquire(1024).unwrap();
+        heap.stamp(2);
+        let _o3 = heap.acquire(1024).unwrap();
+        heap.stamp(3);
+        assert_eq!(heap.in_flight_count(), 3);
+
+        *device.inner.placement_heap.lock().unwrap() = Some(heap);
+
+        device.boundary_crossed(1);
+
+        let stats = device
+            .placement_heap_stats()
+            .expect("device-owned placement heap");
+        assert_eq!(
+            stats.in_flight_count,
+            2,
+            "boundary_crossed(epoch=1) must reclaim one ring region"
+        );
+    }
+
     /// `poll_signals_and_service` routes `BoundaryCrossed` into `boundary_crossed(epoch)`.
     #[test]
     fn u3_signal_boundary_crossed_services_vram_ring() {
