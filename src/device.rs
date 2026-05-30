@@ -660,6 +660,41 @@ impl Device {
         backend.max_bindless_slots_per_category(self.inner.handle, category)
     }
 
+    /// Process deferred GPU deletions and reclaim VRAM-ring payloads whose epoch
+    /// has retired.
+    ///
+    /// This is the single reclamation entry point for epoch-keyed resource retirement.
+    /// Both explicit pull (`flush_deferred_deletions`) and signal-driven paths route here
+    /// with an epoch value.
+    ///
+    /// `epoch` is the retirement horizon: the VRAM deferred ring drops payloads whose
+    /// registered epoch is `<= epoch`. Callers typically pass either
+    /// [`gpu_progress`](Self::gpu_progress) (pull) or a `Signal::BoundaryCrossed { epoch }`
+    /// value (push notification).
+    ///
+    /// Ordering is load-bearing on Metal: backend deletion flush, VRAM ring reclaim,
+    /// then a second backend deletion flush to process buffers dropped during reclaim.
+    ///
+    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
+    /// [`defer_release`]: Self::defer_release
+    pub fn boundary_crossed(&self, epoch: TimelineValue) {
+        let _tz = crate::tracy_zone!("device.boundary_crossed");
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+        }
+        // boundary_crossed drops DeferredPayloads. With RECLAMATION_EPOCH set, Buffer::drop
+        // queues Metal heap buffers into the deletion queue with a barrier equal to
+        // the already-completed reclamation epoch rather than timeline_scheduled_max.
+        // Those entries are immediately eligible, so a second flush processes them and
+        // returns the heap memory before any subsequent allocation attempt.
+        self.inner.vram_allocator.boundary_crossed(epoch);
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            backend.flush_deferred_deletions(self.inner.handle);
+        }
+    }
+
     /// Reclaim bindless descriptor slots and process deferred GPU deletions
     /// whose timeline barrier has been signaled.
     ///
@@ -667,6 +702,9 @@ impl Device {
     /// consumers that drop buffers between those points (e.g. during a
     /// non-blocking frame drain) can call this to reclaim slots immediately
     /// rather than waiting for the next internal call.
+    ///
+    /// Pull-side wrapper around [`boundary_crossed`](Self::boundary_crossed) using the
+    /// authoritative latest retired epoch from [`gpu_progress`](Self::gpu_progress).
     ///
     /// Drives all epoch-based reclamation: `VramAllocator::boundary_crossed` drops any
     /// [`DeferredPayload`]s registered via [`defer_release`] whose epoch has been
@@ -680,21 +718,7 @@ impl Device {
     /// [`defer_release`]: Self::defer_release
     pub fn flush_deferred_deletions(&self) {
         let _tz = crate::tracy_zone!("device.flush_deferred_deletions");
-        let progress = {
-            let mut backend = self.inner.backend.lock().unwrap();
-            backend.flush_deferred_deletions(self.inner.handle);
-            backend.gpu_progress(self.inner.handle)
-        };
-        // boundary_crossed drops DeferredPayloads. With RECLAMATION_EPOCH set, Buffer::drop
-        // queues Metal heap buffers into the deletion queue with a barrier equal to
-        // the already-completed reclamation epoch rather than timeline_scheduled_max.
-        // Those entries are immediately eligible, so a second flush processes them and
-        // returns the heap memory before any subsequent allocation attempt.
-        self.inner.vram_allocator.boundary_crossed(progress);
-        {
-            let mut backend = self.inner.backend.lock().unwrap();
-            backend.flush_deferred_deletions(self.inner.handle);
-        }
+        self.boundary_crossed(self.gpu_progress());
     }
 
     /// Returns `true` if the device's [`VramAllocator`] holds deferred payloads that
