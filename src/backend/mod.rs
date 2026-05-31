@@ -911,7 +911,7 @@ pub trait GpuBackend: Send + Sync {
 
     /// Install a per-thread reclamation epoch for the next deferred-payload drop window.
     ///
-    /// Metal uses this so `Buffer::drop` during [`Device::boundary_crossed`] queues heap
+    /// Metal uses this so `Buffer::drop` during [`crate::device::Device::boundary_crossed`] queues heap
     /// frees with the already-retired epoch instead of `timeline_scheduled_max`. Only the
     /// installing thread observes the override; other threads keep conservative barriers.
     fn set_reclamation_context(

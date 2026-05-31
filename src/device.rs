@@ -560,7 +560,7 @@ impl Device {
         backend.poll_signals(self.inner.handle)
     }
 
-    /// Drain pending signals and service [`Signal::BoundaryCrossed`] by calling
+    /// Drain pending signals and service [`crate::signal::Signal::BoundaryCrossed`] by calling
     /// [`boundary_crossed`](Self::boundary_crossed) at the highest drained epoch.
     ///
     /// Returns the full signal batch so callers can still handle swapchain events,

@@ -269,8 +269,7 @@ mod tests {
             .placement_heap_stats()
             .expect("device-owned placement heap");
         assert_eq!(
-            stats.in_flight_count,
-            2,
+            stats.in_flight_count, 2,
             "boundary_crossed(epoch=1) must reclaim one ring region"
         );
     }
@@ -324,7 +323,10 @@ mod tests {
             !device.has_deferred_payloads(),
             "VRAM ring must empty via pull path without polling signals"
         );
-        assert!(weak.upgrade().is_none(), "payload must drop after pull flush");
+        assert!(
+            weak.upgrade().is_none(),
+            "payload must drop after pull flush"
+        );
     }
 
     /// BumpReset must NOT reset the pool before the prior frame's epoch retires.
@@ -355,7 +357,9 @@ mod tests {
 
         // After reset the bump pointer is at 0, so the next alloc should land at
         // the same offset as the first (confirming reset happened).
-        let v2 = alloc.alloc(&device, 512, Some(4)).expect("alloc after reset");
+        let v2 = alloc
+            .alloc(&device, 512, Some(4))
+            .expect("alloc after reset");
         assert_eq!(
             v2.offset(),
             original_offset,
