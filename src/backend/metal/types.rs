@@ -639,6 +639,10 @@ pub(crate) struct LogicalDevice {
     pub timeline_scheduled_max: u64,
     /// Deferred GPU resource teardown until [`SharedEvent`] reaches the queued barrier.
     pub deletion_queue: DeletionQueue,
+    /// Thread-scoped reclamation epoch installed by [`Device::boundary_crossed`](crate::device::Device::boundary_crossed)
+    /// before VRAM deferred payloads drop. Only the installing thread reads this when choosing
+    /// a Metal deletion-queue barrier; other threads fall back to `timeline_scheduled_max`.
+    pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// Timeline value of the most recently committed command buffer, or `None` if nothing has
     /// been submitted yet. Used to decide whether a direct CPU `memcpy` into a shared-mode
     /// buffer is safe: it is safe only when `gpu_progress() >= last_committed_timeline`,
@@ -672,6 +676,22 @@ impl LogicalDevice {
         let signaled = self.timeline_event.as_ref().signaled_value();
         self.deletion_queue.process_up_to(signaled);
         self.resource_registry.drain_pending_slots_up_to(signaled);
+    }
+
+    /// Deletion-queue barrier for buffer teardown. During VRAM reclamation on the installing
+    /// thread, uses the explicit retired epoch so heap memory returns on the next flush.
+    pub(crate) fn buffer_deletion_barrier(&self, gpu_idle: bool) -> u64 {
+        if gpu_idle {
+            0
+        } else if let Some((thread, epoch)) = self.reclamation_context {
+            if thread == std::thread::current().id() {
+                epoch
+            } else {
+                self.timeline_scheduled_max
+            }
+        } else {
+            self.timeline_scheduled_max
+        }
     }
 }
 

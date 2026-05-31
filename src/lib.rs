@@ -89,5 +89,8 @@ pub use transient_allocator::{
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};
 
+#[cfg(test)]
+mod boundary_reclamation;
+
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub use backend::dx12::WARP_ADAPTER_ID;

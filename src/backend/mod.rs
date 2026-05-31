@@ -909,6 +909,18 @@ pub trait GpuBackend: Send + Sync {
     /// frame drain) can call this explicitly to reclaim slots immediately.
     fn flush_deferred_deletions(&mut self, _device: DeviceHandle) {}
 
+    /// Install a per-thread reclamation epoch for the next deferred-payload drop window.
+    ///
+    /// Metal uses this so `Buffer::drop` during [`crate::device::Device::boundary_crossed`] queues heap
+    /// frees with the already-retired epoch instead of `timeline_scheduled_max`. Only the
+    /// installing thread observes the override; other threads keep conservative barriers.
+    fn set_reclamation_context(
+        &mut self,
+        _device: DeviceHandle,
+        _epoch: Option<crate::timeline::TimelineValue>,
+    ) {
+    }
+
     /// Resources queued for destruction after the GPU timeline advances (for tests).
     #[doc(hidden)]
     fn deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {

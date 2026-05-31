@@ -64,23 +64,9 @@ use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::Result;
 use std::any::Any;
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-
-// The GPU epoch that is currently being reclaimed on this thread by `reclaim`.
-//
-// Set before dropping `DeferredPayload` entries so that `Buffer::drop` (→ the Metal
-// `destroy_buffer` path) can use the reclamation epoch as the deletion-queue barrier
-// instead of the conservative `timeline_scheduled_max`.  This allows the Metal heap
-// allocator to free those buffers on the very next `process_deletion_queue_up_to_signaled`
-// call, since `signaled_value >= reclamation_epoch` is already true by definition.
-//
-// `None` means we are NOT in a reclamation context; normal deletion semantics apply.
-thread_local! {
-    pub static RECLAMATION_EPOCH: Cell<Option<u64>> = const { Cell::new(None) };
-}
 
 // -----------------------------------------------------------------------
 // DeferredPayload
@@ -89,7 +75,7 @@ thread_local! {
 /// A type-erased bundle of GPU resources to be held alive until a GPU timeline epoch retires.
 ///
 /// Passed to [`VramAllocator::defer_release`] to register resources for deferred dropping.
-/// The allocator holds the payload until [`VramAllocator::reclaim`] determines that the
+/// The allocator holds the payload until [`VramAllocator::boundary_crossed`] determines that the
 /// associated epoch has been reached, then drops all resources in the payload.
 ///
 /// # Example
@@ -225,9 +211,9 @@ pub trait VramAllocator: Send + Sync {
     /// Register `payload` for deferred dropping after GPU timeline `epoch` retires.
     ///
     /// The allocator holds all resources in the payload alive until a subsequent call to
-    /// [`reclaim`](Self::reclaim) observes `gpu_progress >= epoch`, at which point the
+    /// [`boundary_crossed`](Self::boundary_crossed) observes `gpu_progress >= epoch`, at which point the
     /// payload is dropped. Entries are expected to arrive roughly in epoch order; calling
-    /// [`reclaim`](Self::reclaim) drains from the front.
+    /// [`boundary_crossed`](Self::boundary_crossed) drains from the front.
     ///
     /// Custom allocators that manage their own memory (e.g. PTX slab allocators) should
     /// override this to integrate with their internal reclamation pipeline.
@@ -242,7 +228,7 @@ pub trait VramAllocator: Send + Sync {
     /// at frame boundaries.
     ///
     /// The default implementation is a no-op and returns 0.
-    fn reclaim(&self, _gpu_progress: TimelineValue) -> usize {
+    fn boundary_crossed(&self, _gpu_progress: TimelineValue) -> usize {
         0
     }
 
@@ -259,7 +245,7 @@ pub trait VramAllocator: Send + Sync {
     /// The oldest epoch currently in the deferred ring, if any.
     ///
     /// If non-`None`, waiting for this timeline value then calling
-    /// [`reclaim`](Self::reclaim) would free the oldest batch of deferred resources.
+    /// [`boundary_crossed`](Self::boundary_crossed) would free the oldest batch of deferred resources.
     ///
     /// The default implementation returns `None`.
     fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
@@ -284,7 +270,7 @@ pub trait VramAllocator: Send + Sync {
 /// with no tracking, budgeting, or overhead.
 ///
 /// Installed automatically when a [`Device`] is created. Implements the full
-/// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::reclaim`],
+/// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::boundary_crossed`],
 /// and [`VramAllocator::drain`].
 pub struct DefaultVramAllocator {
     deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
@@ -317,7 +303,7 @@ impl VramAllocator for DefaultVramAllocator {
         self.deferred.lock().unwrap().push_back((epoch, payload));
     }
 
-    fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
+    fn boundary_crossed(&self, gpu_progress: TimelineValue) -> usize {
         let drained: Vec<(TimelineValue, DeferredPayload)> = {
             let mut ring = self.deferred.lock().unwrap();
             let mut drained = Vec::new();
@@ -331,9 +317,7 @@ impl VramAllocator for DefaultVramAllocator {
             drained
         };
         let count = drained.len();
-        RECLAMATION_EPOCH.with(|e| e.set(Some(gpu_progress)));
         drop(drained);
-        RECLAMATION_EPOCH.with(|e| e.set(None));
         count
     }
 
@@ -502,8 +486,8 @@ impl VramAllocator for TrackingVramAllocator {
         self.inner.defer_release(epoch, payload);
     }
 
-    fn reclaim(&self, gpu_progress: TimelineValue) -> usize {
-        self.inner.reclaim(gpu_progress)
+    fn boundary_crossed(&self, gpu_progress: TimelineValue) -> usize {
+        self.inner.boundary_crossed(gpu_progress)
     }
 
     fn has_deferred_payloads(&self) -> bool {
@@ -687,7 +671,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn default_allocator_reclaim_drops_retired_entries() {
+    fn default_allocator_boundary_crossed_drops_retired_entries() {
         let alloc = DefaultVramAllocator::new();
 
         // Track drops via an Arc.
@@ -699,11 +683,11 @@ mod tests {
         alloc.defer_release(5, p);
 
         // epoch=5, gpu_progress=4 — should NOT reclaim yet.
-        assert_eq!(alloc.reclaim(4), 0);
+        assert_eq!(alloc.boundary_crossed(4), 0);
         assert!(weak.upgrade().is_some(), "resource should still be alive");
 
         // gpu_progress=5 — should reclaim and drop.
-        assert_eq!(alloc.reclaim(5), 1);
+        assert_eq!(alloc.boundary_crossed(5), 1);
         assert!(
             weak.upgrade().is_none(),
             "resource should have been dropped"
@@ -711,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn default_allocator_reclaim_preserves_future_entries() {
+    fn default_allocator_boundary_crossed_preserves_future_entries() {
         let alloc = DefaultVramAllocator::new();
 
         let alive_early = Arc::new(1u32);
@@ -728,12 +712,12 @@ mod tests {
         alloc.defer_release(10, p2);
 
         // Reclaim only up to epoch 2.
-        assert_eq!(alloc.reclaim(2), 1);
+        assert_eq!(alloc.boundary_crossed(2), 1);
         assert!(weak_early.upgrade().is_none(), "epoch=2 should be dropped");
         assert!(weak_late.upgrade().is_some(), "epoch=10 should survive");
 
         // Reclaim the rest.
-        assert_eq!(alloc.reclaim(10), 1);
+        assert_eq!(alloc.boundary_crossed(10), 1);
         assert!(
             weak_late.upgrade().is_none(),
             "epoch=10 should now be dropped"
@@ -761,8 +745,8 @@ mod tests {
         let alloc = DefaultVramAllocator::new();
         // Deferring an empty payload should not add an entry.
         alloc.defer_release(1, DeferredPayload::new());
-        // reclaim returns 0 (nothing was added).
-        assert_eq!(alloc.reclaim(100), 0);
+        // boundary_crossed returns 0 (nothing was added).
+        assert_eq!(alloc.boundary_crossed(100), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -770,7 +754,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn tracking_allocator_delegates_defer_and_reclaim() {
+    fn tracking_allocator_delegates_defer_and_boundary_crossed() {
         let inner = Arc::new(DefaultVramAllocator::new());
         let tracking = TrackingVramAllocator::new(inner.clone());
 
@@ -782,11 +766,11 @@ mod tests {
         tracking.defer_release(3, p);
 
         // Not yet retired.
-        assert_eq!(tracking.reclaim(2), 0);
+        assert_eq!(tracking.boundary_crossed(2), 0);
         assert!(weak.upgrade().is_some());
 
         // Retired.
-        assert_eq!(tracking.reclaim(3), 1);
+        assert_eq!(tracking.boundary_crossed(3), 1);
         assert!(weak.upgrade().is_none());
     }
 
