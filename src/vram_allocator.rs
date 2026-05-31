@@ -120,6 +120,19 @@ impl Default for DeferredPayload {
 }
 
 // -----------------------------------------------------------------------
+// ParcelKind
+// -----------------------------------------------------------------------
+
+/// Zoning / telemetry label for a freed parcel (buffer-kind vs texture-kind).
+///
+/// Not used for separate accounting code paths — only passed to [`VramAllocator::notify_freed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParcelKind {
+    Buffer,
+    Texture,
+}
+
+// -----------------------------------------------------------------------
 // Trait
 // -----------------------------------------------------------------------
 
@@ -177,18 +190,15 @@ pub trait VramAllocator: Send + Sync {
         Texture::new(device, width, height, format, access, flags)
     }
 
-    /// Notify the allocator that a buffer has been freed.
+    /// Notify the allocator that a deed-holding parcel has been freed.
     ///
-    /// Called automatically by [`Buffer::drop`] when the allocator is installed on the
-    /// device. Implementations should decrement their tracked byte counts here.
-    /// The `size` is the buffer's allocated size at the time of destruction.
-    fn notify_buffer_freed(&self, _size: u64) {}
-
-    /// Notify the allocator that a texture has been freed.
+    /// Called automatically from [`Buffer::drop`] / [`Texture::drop`] when the parcel
+    /// was allocated through the device's [`VramAllocator`] (and carries a deed).
+    /// Borrowing sub-parcels (e.g. [`crate::buffer::BufferView`]) never call this.
     ///
-    /// Called automatically by [`Texture::drop`] when the allocator is installed on the
-    /// device. The `byte_size` is [`Texture::byte_size`] at the time of destruction.
-    fn notify_texture_freed(&self, _byte_size: usize) {}
+    /// `reserved` is the parcel's reserved backing size; `committed` is the runtime's
+    /// handed-out estimate (logical size for buffers, [`Texture::byte_size`] for textures).
+    fn notify_freed(&self, _reserved: u64, _committed: u64, _kind: ParcelKind) {}
 
     /// Net bytes allocated by this allocator (allocations minus frees).
     ///
@@ -459,15 +469,10 @@ impl VramAllocator for TrackingVramAllocator {
         Ok(tex)
     }
 
-    fn notify_buffer_freed(&self, size: u64) {
-        self.live_bytes.fetch_sub(size as i64, Ordering::Relaxed);
-        self.inner.notify_buffer_freed(size);
-    }
-
-    fn notify_texture_freed(&self, byte_size: usize) {
+    fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelKind) {
         self.live_bytes
-            .fetch_sub(byte_size as i64, Ordering::Relaxed);
-        self.inner.notify_texture_freed(byte_size);
+            .fetch_sub(reserved as i64, Ordering::Relaxed);
+        self.inner.notify_freed(reserved, committed, kind);
     }
 
     fn allocated_bytes(&self) -> u64 {
@@ -532,6 +537,17 @@ mod tests {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
+    /// Returns `(base, device, tracking)`. Keep `base` alive for the test body so the
+    /// mock backend device handle remains valid on the cloned `device` handle.
+    fn device_with_tracking() -> (Device, Device, Arc<TrackingVramAllocator>) {
+        let base = test_device();
+        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(
+            DefaultVramAllocator::new(),
+        )));
+        let device = base.with_vram_allocator(tracking.clone());
+        (base, device, tracking)
+    }
+
     #[test]
     fn default_allocator_creates_buffer() {
         let device = test_device();
@@ -568,26 +584,17 @@ mod tests {
 
     #[test]
     fn tracking_allocator_tracks_bytes() {
-        let device = test_device();
-        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
+        let (_base, device, tracking) = device_with_tracking();
 
-        assert_eq!(alloc.allocated_bytes(), 0);
+        assert_eq!(tracking.allocated_bytes(), 0);
 
-        let buf = alloc
-            .alloc_buffer(
-                &device,
-                4096,
-                DataAccess::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+        let buf = device
+            .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
             .unwrap();
-        assert!(alloc.allocated_bytes() >= 4096);
+        assert!(tracking.allocated_bytes() >= 4096);
 
-        let size = buf.allocated_size();
         drop(buf);
-        alloc.notify_buffer_freed(size);
-        assert_eq!(alloc.allocated_bytes(), 0);
+        assert_eq!(tracking.allocated_bytes(), 0);
     }
 
     #[test]
@@ -617,12 +624,10 @@ mod tests {
 
     #[test]
     fn tracking_allocator_texture_tracking() {
-        let device = test_device();
-        let alloc = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
+        let (_base, device, tracking) = device_with_tracking();
 
-        let tex = alloc
+        let tex = device
             .alloc_texture(
-                &device,
                 32,
                 32,
                 TextureFormat::Rgba8Unorm,
@@ -630,12 +635,69 @@ mod tests {
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .unwrap();
-        let byte_size = tex.byte_size();
-        assert!(alloc.allocated_bytes() > 0);
+        assert!(tracking.allocated_bytes() > 0);
 
         drop(tex);
-        alloc.notify_texture_freed(byte_size);
-        assert_eq!(alloc.allocated_bytes(), 0);
+        assert_eq!(tracking.allocated_bytes(), 0);
+    }
+
+    #[test]
+    fn accounting_round_trip_mixed_parcels() {
+        let (_base, device, tracking) = device_with_tracking();
+        const N: usize = 8;
+
+        for _ in 0..N {
+            assert_eq!(tracking.allocated_bytes(), 0);
+
+            let buf = device
+                .alloc_buffer(1024, DataAccess::Scattered, None, BufferFlags::empty())
+                .unwrap();
+            let hinted = device
+                .alloc_buffer_with_capacity(512, 4096, DataAccess::Scattered, BufferFlags::empty())
+                .unwrap();
+            let tex = device
+                .alloc_texture(
+                    16,
+                    16,
+                    TextureFormat::Rgba8Unorm,
+                    SpatialAccess::Interpolated,
+                    TextureFlags::COPY_DST,
+                )
+                .unwrap();
+
+            let bytes_with_parcels = tracking.allocated_bytes();
+            assert!(bytes_with_parcels > 0);
+
+            let view = buf.create_view(0, 256, Some(4)).unwrap();
+            let bytes_before_view_drop = tracking.allocated_bytes();
+            drop(view);
+            assert_eq!(
+                tracking.allocated_bytes(),
+                bytes_before_view_drop,
+                "BufferView drop must not change allocator accounting"
+            );
+
+            drop(buf);
+            drop(hinted);
+            drop(tex);
+            assert_eq!(tracking.allocated_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn deed_survives_with_vram_allocator_clone() {
+        let base = test_device();
+        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(
+            DefaultVramAllocator::new(),
+        )));
+        let device = base.with_vram_allocator(tracking.clone());
+
+        let buf = device
+            .alloc_buffer(2048, DataAccess::Scattered, None, BufferFlags::empty())
+            .unwrap();
+        assert!(tracking.allocated_bytes() >= 2048);
+        drop(buf);
+        assert_eq!(tracking.allocated_bytes(), 0);
     }
 
     #[test]

@@ -34,14 +34,16 @@ The `VramAllocator` trait sits **below** all three, providing a single customiza
 Every `Device` ships with a `DefaultVramAllocator` that delegates directly to the backend with zero overhead. You can allocate through it explicitly via convenience methods:
 
 ```rust
-// These go through the device's VramAllocator:
+// These go through the device's VramAllocator (parcel carries a deed; Drop notifies the allocator):
 let buf = device.alloc_buffer(size, DataAccess::Scattered, None, BufferFlags::empty())?;
 let tex = device.alloc_texture(width, height, format, access, flags)?;
 
-// These bypass the allocator (direct backend call):
+// These bypass the allocator (direct backend call; no deed, no allocator accounting on Drop):
 let buf = Buffer::new(&device, size, DataAccess::Scattered)?;
 let tex = Texture::new(&device, width, height, format, access, flags)?;
 ```
+
+Only allocations through `device.alloc_*` attach an allocator **deed** and call `VramAllocator::notify_freed` on drop. Borrowing sub-parcels such as `BufferView` never account.
 
 Goldy's built-in pooling systems (`TexturePool`, `BufferPool`, ekrano's `ResourcePool`) all route through the device's allocator automatically.
 
@@ -113,11 +115,21 @@ impl VramAllocator for MyAllocator {
         Texture::new(device, width, height, format, access, flags)
     }
 
+    fn notify_freed(
+        &self,
+        reserved: u64,
+        _committed: u64,
+        _kind: goldy::vram_allocator::ParcelKind,
+    ) {
+        // Decrement your tracked bytes (reserved is the parcel's reserved backing size).
+        let _ = reserved;
+    }
+
     fn name(&self) -> &'static str { "my-allocator" }
 }
 ```
 
-All trait methods have default implementations that delegate to the standard constructors, so you only need to override the methods you care about.
+All trait methods have default implementations that delegate to the standard constructors, so you only need to override the methods you care about. Parcels allocated via `Device::alloc_buffer` / `alloc_texture` notify your allocator automatically on drop when you install it with `with_vram_allocator`.
 
 ## Relationship to TransientAllocator
 

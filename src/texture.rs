@@ -7,8 +7,9 @@
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
 use crate::types::{BindlessCategory, BindlessHandle, SpatialAccess, TextureFlags, TextureFormat};
+use crate::vram_allocator::{ParcelKind, VramAllocator};
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 /// A GPU texture that can be sampled in shaders.
 ///
@@ -25,9 +26,16 @@ pub struct Texture {
     access: SpatialAccess,
     flags: TextureFlags,
     owned: bool,
+    /// Allocator deed for accounting on drop; set only when allocated via [`Device::alloc_texture`].
+    deed: Option<Weak<dyn VramAllocator>>,
 }
 
 impl Texture {
+    /// Attach the allocator deed (called from [`Device::alloc_texture`] only).
+    pub(crate) fn set_deed(&mut self, deed: Weak<dyn VramAllocator>) {
+        self.deed = Some(deed);
+    }
+
     /// Create a new empty texture with the specified access pattern.
     ///
     /// The texture is created with uninitialized data. Use `write()` to
@@ -77,6 +85,7 @@ impl Texture {
             access,
             flags,
             owned: true,
+            deed: None,
         })
     }
 
@@ -339,6 +348,7 @@ impl Texture {
             access: self.access,
             flags: self.flags,
             owned: false,
+            deed: None,
         }
     }
 
@@ -367,6 +377,7 @@ impl Texture {
             access: SpatialAccess::Direct,
             flags: TextureFlags::empty(),
             owned: false,
+            deed: None,
         }
     }
 }
@@ -384,6 +395,10 @@ impl Drop for Texture {
         );
         if let Ok(mut backend) = self.backend.lock() {
             backend.destroy_texture(self.handle);
+        }
+        if let Some(allocator) = self.deed.as_ref().and_then(Weak::upgrade) {
+            let byte_size = self.byte_size() as u64;
+            allocator.notify_freed(byte_size, byte_size, ParcelKind::Texture);
         }
     }
 }

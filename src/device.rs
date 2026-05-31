@@ -477,9 +477,12 @@ impl Device {
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        self.inner
-            .vram_allocator
-            .alloc_buffer(self, size, access, element_stride, flags)
+        let mut buf =
+            self.inner
+                .vram_allocator
+                .alloc_buffer(self, size, access, element_stride, flags)?;
+        buf.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
+        Ok(buf)
     }
 
     /// Allocate a GPU buffer with a capacity hint through the device's [`VramAllocator`].
@@ -492,13 +495,15 @@ impl Device {
         access: DataAccess,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        self.inner.vram_allocator.alloc_buffer_with_capacity(
+        let mut buf = self.inner.vram_allocator.alloc_buffer_with_capacity(
             self,
             initial_size,
             expected_max,
             access,
             flags,
-        )
+        )?;
+        buf.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
+        Ok(buf)
     }
 
     /// Allocate a GPU texture through the device's [`VramAllocator`].
@@ -518,9 +523,12 @@ impl Device {
         access: SpatialAccess,
         flags: TextureFlags,
     ) -> anyhow::Result<crate::texture::Texture> {
-        self.inner
+        let mut tex = self
+            .inner
             .vram_allocator
-            .alloc_texture(self, width, height, format, access, flags)
+            .alloc_texture(self, width, height, format, access, flags)?;
+        tex.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
+        Ok(tex)
     }
 
     // =======================================================================
