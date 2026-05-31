@@ -2,7 +2,10 @@
 #![cfg(any(feature = "vulkan", feature = "dx12"))]
 
 use goldy::shader_cache::{ShaderBytecodeDiskCache, GOLDY_SHADER_CACHE_MAGIC};
-use goldy::{types::BackendType, ComputePipeline, DeviceType, Instance, ShaderModule};
+use goldy::{
+    types::BackendType, ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions,
+    ShaderModule,
+};
 /// Simple compute shader (same intent as [`compute_integration::DOUBLE_SHADER`]).
 const CACHE_TEST_COMPUTE: &str = r#"
 import goldy_exp;
@@ -18,8 +21,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 fn try_vulkan_gpu() -> Option<(Instance, goldy::Device)> {
     let instance = Instance::new().ok()?;
     let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .request_adapter(&RequestAdapterOptions::default())
+        .ok()?
+        .request_device(&DeviceDescriptor::default())
         .ok()?;
     (device.backend_type() == BackendType::Vulkan).then_some((instance, device))
 }
@@ -72,8 +76,9 @@ fn vk_pipeline_cache_survives_reload() {
     drop(device);
 
     let device2 = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("second adapter")
+        .request_device(&DeviceDescriptor::default())
         .expect("second device create");
     assert_eq!(
         device2.backend_type(),
@@ -98,8 +103,8 @@ fn shader_cache_file_written_after_compile() {
         Err(_) => return,
     };
     let device = match instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .request_adapter(&RequestAdapterOptions::default())
+        .and_then(|a| a.request_device(&DeviceDescriptor::default()))
     {
         Ok(d) => d,
         Err(_) => return,

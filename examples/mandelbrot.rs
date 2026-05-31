@@ -3,8 +3,8 @@
 //! Run with: cargo run --example mandelbrot
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface,
+    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
 };
 use std::sync::Arc;
 use winit::{
@@ -56,7 +56,11 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            self.instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
 
         // Create surface first to get the correct format
         let surface = Surface::new(&device, window.as_ref())?;

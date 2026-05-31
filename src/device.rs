@@ -56,25 +56,95 @@ impl Instance {
         Ok(Self { backend })
     }
 
+    fn adapter_from_info(&self, info: AdapterInfo) -> Adapter {
+        let caps = self.backend.lock().unwrap().adapter_capabilities(info.id);
+        Adapter {
+            inner: Arc::new(AdapterInner {
+                backend: Arc::clone(&self.backend),
+                info,
+                caps,
+            }),
+        }
+    }
+
     /// Enumerate available GPU adapters.
     pub fn enumerate_adapters(&self) -> Vec<Adapter> {
-        let backend = self.backend.lock().unwrap();
-        let adapters: Vec<Adapter> = backend
-            .enumerate_adapters()
+        let infos = self.backend.lock().unwrap().enumerate_adapters();
+        let adapters: Vec<Adapter> = infos
             .into_iter()
-            .map(|info| Adapter { info })
+            .map(|info| self.adapter_from_info(info))
             .collect();
         tracing::debug!(count = adapters.len(), "Enumerated GPU adapters");
         for adapter in &adapters {
             tracing::debug!(
-                id = adapter.info.id,
-                name = %adapter.info.name,
-                vendor = %adapter.info.vendor,
-                device_type = ?adapter.info.device_type,
+                id = adapter.inner.info.id,
+                name = %adapter.inner.info.name,
+                vendor = %adapter.inner.info.vendor,
+                device_type = ?adapter.inner.info.device_type,
                 "  adapter"
             );
         }
         adapters
+    }
+
+    /// Request an adapter matching the given options (wgpu-style).
+    pub fn request_adapter(&self, opts: &RequestAdapterOptions) -> Result<Adapter> {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            if self.backend_type() == BackendType::Dx12 && opts.force_fallback_adapter {
+                tracing::info!("Using WARP fallback adapter");
+                return self.adapter_for_id(crate::backend::dx12::WARP_ADAPTER_ID);
+            }
+        }
+
+        tracing::info!(?opts.power_preference, "Requesting GPU adapter");
+        let adapters = self.enumerate_adapters();
+        anyhow::ensure!(!adapters.is_empty(), "No GPU adapters available");
+
+        let adapter = match opts.power_preference {
+            PowerPreference::HighPerformance => adapters
+                .iter()
+                .find(|a| a.device_type() == DeviceType::DiscreteGpu)
+                .or_else(|| {
+                    adapters
+                        .iter()
+                        .find(|a| a.device_type() == DeviceType::IntegratedGpu)
+                })
+                .or_else(|| {
+                    adapters
+                        .iter()
+                        .find(|a| a.device_type() == DeviceType::Other)
+                })
+                .or(adapters.first()),
+            PowerPreference::LowPower => adapters
+                .iter()
+                .find(|a| a.device_type() == DeviceType::IntegratedGpu)
+                .or_else(|| adapters.iter().find(|a| a.device_type() == DeviceType::Cpu))
+                .or(adapters.first()),
+            PowerPreference::None => adapters.first(),
+        }
+        .context("No GPU adapters available")?;
+
+        tracing::info!(
+            adapter_id = adapter.inner.info.id,
+            adapter_name = %adapter.inner.info.name,
+            adapter_type = ?adapter.inner.info.device_type,
+            "Selected GPU adapter"
+        );
+
+        Ok(adapter.clone())
+    }
+
+    fn adapter_for_id(&self, adapter_id: u32) -> Result<Adapter> {
+        let info = self
+            .backend
+            .lock()
+            .unwrap()
+            .enumerate_adapters()
+            .into_iter()
+            .find(|a| a.id == adapter_id)
+            .with_context(|| format!("Invalid adapter ID: {adapter_id}"))?;
+        Ok(self.adapter_from_info(info))
     }
 
     /// Create a device on the first adapter matching the given type.
@@ -83,12 +153,18 @@ impl Instance {
     /// the WARP software adapter instead, even if a real GPU is present (WARP is still listed via
     /// `GOLDY_DX12_ALLOW_WARP=1` or by setting `GOLDY_DX12_FORCE_WARP=1` alone, which also
     /// registers the WARP adapter). Ignored for non-DX12 backends.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use Instance::request_adapter(...).request_device(...) instead"
+    )]
     pub fn create_device(&self, preferred_type: DeviceType) -> Result<Device> {
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         {
             if self.backend_type() == BackendType::Dx12 && crate::backend::dx12::env_force_warp() {
                 tracing::info!("GOLDY_DX12_FORCE_WARP=1 — using WARP adapter");
-                return self.create_device_for_adapter(crate::backend::dx12::WARP_ADAPTER_ID);
+                return self
+                    .adapter_for_id(crate::backend::dx12::WARP_ADAPTER_ID)?
+                    .request_device(&DeviceDescriptor::default());
             }
         }
 
@@ -97,18 +173,18 @@ impl Instance {
 
         let adapter = adapters
             .iter()
-            .find(|a| a.info.device_type == preferred_type)
+            .find(|a| a.inner.info.device_type == preferred_type)
             .or_else(|| adapters.first())
             .context("No GPU adapters available")?;
 
         tracing::info!(
-            adapter_id = adapter.info.id,
-            adapter_name = %adapter.info.name,
-            adapter_type = ?adapter.info.device_type,
+            adapter_id = adapter.inner.info.id,
+            adapter_name = %adapter.inner.info.name,
+            adapter_type = ?adapter.inner.info.device_type,
             "Selected GPU adapter"
         );
 
-        self.create_device_for_adapter(adapter.info.id)
+        adapter.request_device(&DeviceDescriptor::default())
     }
 
     /// Create a device on a specific adapter by ID.
@@ -116,45 +192,13 @@ impl Instance {
     /// The device is automatically configured with the built-in `goldy_exp`
     /// (experimental) shader library registered. You can register additional
     /// libraries using [`Device::register_library`].
+    #[deprecated(
+        since = "0.2.0",
+        note = "use Adapter::request_device(...) after enumerate_adapters or request_adapter"
+    )]
     pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
-        tracing::debug!(adapter_id, "Creating device for adapter");
-        let mut backend = self.backend.lock().unwrap();
-
-        let device_type = backend
-            .enumerate_adapters()
-            .into_iter()
-            .find(|a| a.id == adapter_id)
-            .map(|a| a.device_type)
-            .unwrap_or(DeviceType::Other);
-
-        let handle = backend.create_device(adapter_id)?;
-
-        #[cfg(all(feature = "dx12", target_os = "windows"))]
-        {
-            if adapter_id == crate::backend::dx12::WARP_ADAPTER_ID
-                && backend.backend_type() == BackendType::Dx12
-            {
-                crate::backend::dx12::log_warp_module_path_once();
-            }
-        }
-
-        let mut registry = ShaderLibraryRegistry::new();
-        registry.register(ShaderLibrary::goldy_experimental())?;
-
-        tracing::info!(adapter_id, ?device_type, "GPU device created");
-
-        Ok(Device {
-            inner: Arc::new(DeviceInner {
-                backend: Arc::clone(&self.backend),
-                handle,
-                adapter_id,
-                device_type,
-                library_registry: Arc::new(Mutex::new(registry)),
-                vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
-                placement_heap: Mutex::new(None),
-                high_water_timeline: AtomicU64::new(0),
-            }),
-        })
+        self.adapter_for_id(adapter_id)?
+            .request_device(&DeviceDescriptor::default())
     }
 
     /// Get the backend type (Vulkan, Metal, DX12).
@@ -163,31 +207,138 @@ impl Instance {
     }
 }
 
-/// Information about a GPU adapter.
+/// Options for [`Instance::request_adapter`].
 #[derive(Debug, Clone)]
+pub struct RequestAdapterOptions {
+    /// Prefer a high-performance or low-power adapter when multiple are available.
+    pub power_preference: PowerPreference,
+    /// When true on DX12, select the WARP software adapter.
+    pub force_fallback_adapter: bool,
+}
+
+impl Default for RequestAdapterOptions {
+    fn default() -> Self {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        let force_fallback_adapter = crate::backend::dx12::env_force_warp();
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        let force_fallback_adapter = false;
+        Self {
+            power_preference: PowerPreference::HighPerformance,
+            force_fallback_adapter,
+        }
+    }
+}
+
+/// Power preference for adapter selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerPreference {
+    /// No preference — use the first enumerated adapter.
+    None,
+    /// Prefer integrated / low-power GPUs.
+    LowPower,
+    /// Prefer discrete / high-performance GPUs, with integrated and other fallbacks.
+    HighPerformance,
+}
+
+/// Descriptor for [`Adapter::request_device`].
+#[derive(Debug, Clone, Default)]
+pub struct DeviceDescriptor {
+    /// Optional debug label for the logical device.
+    pub label: Option<String>,
+}
+
+pub(crate) struct AdapterInner {
+    backend: Arc<Mutex<Box<dyn GpuBackend>>>,
+    info: AdapterInfo,
+    caps: DeviceCapabilities,
+}
+
+/// A physical GPU adapter with immutable capabilities.
+#[derive(Clone)]
 pub struct Adapter {
-    pub info: AdapterInfo,
+    pub(crate) inner: Arc<AdapterInner>,
+}
+
+impl std::fmt::Debug for Adapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Adapter")
+            .field("info", &self.inner.info)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Adapter {
+    /// Immutable adapter metadata (name, vendor, device type, backend).
+    pub fn get_info(&self) -> AdapterInfo {
+        self.inner.info.clone()
+    }
+
+    /// Immutable capability snapshot for this adapter.
+    pub fn capabilities(&self) -> DeviceCapabilities {
+        self.inner.caps.clone()
+    }
+
+    /// Create a logical [`Device`] on this adapter.
+    pub fn request_device(&self, desc: &DeviceDescriptor) -> Result<Device> {
+        let _ = desc;
+        tracing::debug!(
+            adapter_id = self.inner.info.id,
+            "Creating device for adapter"
+        );
+        let mut backend = self.inner.backend.lock().unwrap();
+        let handle = backend.create_device(self.inner.info.id)?;
+
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            if self.inner.info.id == crate::backend::dx12::WARP_ADAPTER_ID
+                && backend.backend_type() == BackendType::Dx12
+            {
+                crate::backend::dx12::log_warp_module_path_once();
+            }
+        }
+
+        drop(backend);
+
+        let mut registry = ShaderLibraryRegistry::new();
+        registry.register(ShaderLibrary::goldy_experimental())?;
+
+        tracing::info!(
+            adapter_id = self.inner.info.id,
+            device_type = ?self.inner.info.device_type,
+            "GPU device created"
+        );
+
+        Ok(Device {
+            inner: Arc::new(DeviceInner {
+                backend: Arc::clone(&self.inner.backend),
+                handle,
+                adapter: self.clone(),
+                library_registry: Arc::new(Mutex::new(registry)),
+                vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
+                placement_heap: Mutex::new(None),
+                high_water_timeline: AtomicU64::new(0),
+            }),
+        })
+    }
+
     /// Get the adapter ID.
     pub fn id(&self) -> u32 {
-        self.info.id
+        self.inner.info.id
     }
 
     /// Get the adapter name.
     pub fn name(&self) -> &str {
-        &self.info.name
+        &self.inner.info.name
     }
 
     /// Get the device type.
     pub fn device_type(&self) -> DeviceType {
-        self.info.device_type
+        self.inner.info.device_type
     }
 
     /// Get the vendor name.
     pub fn vendor(&self) -> &str {
-        &self.info.vendor
+        &self.inner.info.vendor
     }
 }
 
@@ -290,8 +441,7 @@ pub struct Device {
 pub(crate) struct DeviceInner {
     pub(crate) backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: DeviceHandle,
-    adapter_id: u32,
-    device_type: DeviceType,
+    adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
     pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
@@ -451,8 +601,7 @@ impl Device {
             inner: Arc::new(DeviceInner {
                 backend: Arc::clone(&self.inner.backend),
                 handle: self.inner.handle,
-                adapter_id: self.inner.adapter_id,
-                device_type: self.inner.device_type,
+                adapter: self.inner.adapter.clone(),
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
                 placement_heap: Mutex::new(None),
@@ -535,14 +684,19 @@ impl Device {
     // Device metadata
     // =======================================================================
 
+    /// Physical adapter this device was created from.
+    pub fn adapter(&self) -> &Adapter {
+        &self.inner.adapter
+    }
+
     /// Get the adapter ID this device was created on.
     pub fn adapter_id(&self) -> u32 {
-        self.inner.adapter_id
+        self.inner.adapter.id()
     }
 
     /// Get the device type (discrete GPU, integrated GPU, CPU/software, etc.).
     pub fn device_type(&self) -> DeviceType {
-        self.inner.device_type
+        self.inner.adapter.device_type()
     }
 
     /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
@@ -1141,10 +1295,11 @@ impl Device {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use goldy::{Instance, DeviceType};
+    /// use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions};
     ///
     /// let instance = Instance::new()?;
-    /// let device = instance.create_device(DeviceType::DiscreteGpu)?;
+    /// let adapter = instance.request_adapter(&RequestAdapterOptions::default())?;
+    /// let device = adapter.request_device(&DeviceDescriptor::default())?;
     /// let caps = device.capabilities();
     ///
     /// println!("Surface format: {:?}", caps.preferred_surface_format);
@@ -1153,8 +1308,7 @@ impl Device {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn capabilities(&self) -> DeviceCapabilities {
-        let backend = self.inner.backend.lock().unwrap();
-        backend.device_capabilities(self.inner.handle)
+        self.inner.adapter.capabilities()
     }
 
     // --- Shader Library Management ---
@@ -1340,9 +1494,33 @@ impl Device {
     #[cfg(test)]
     pub(crate) fn from_backend(backend: Box<dyn GpuBackend>) -> anyhow::Result<Self> {
         let backend = Arc::new(Mutex::new(backend));
+        let adapter_info = {
+            let b = backend.lock().unwrap();
+            b.enumerate_adapters()
+                .into_iter()
+                .next()
+                .unwrap_or(AdapterInfo {
+                    id: 0,
+                    name: "Test GPU".to_string(),
+                    vendor: "Goldy Test".to_string(),
+                    backend: BackendType::Vulkan,
+                    device_type: DeviceType::Other,
+                })
+        };
+        let caps = backend
+            .lock()
+            .unwrap()
+            .adapter_capabilities(adapter_info.id);
+        let adapter = Adapter {
+            inner: Arc::new(AdapterInner {
+                backend: Arc::clone(&backend),
+                info: adapter_info,
+                caps,
+            }),
+        };
         let handle = {
             let mut b = backend.lock().unwrap();
-            b.create_device(0)?
+            b.create_device(adapter.id())?
         };
 
         let mut registry = ShaderLibraryRegistry::new();
@@ -1352,8 +1530,7 @@ impl Device {
             inner: Arc::new(DeviceInner {
                 backend,
                 handle,
-                adapter_id: 0,
-                device_type: DeviceType::Other,
+                adapter,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 placement_heap: Mutex::new(None),
@@ -1367,8 +1544,8 @@ impl Drop for DeviceInner {
     fn drop(&mut self) {
         tracing::debug!(
             %self.handle,
-            adapter_id = self.adapter_id,
-            device_type = ?self.device_type,
+            adapter_id = self.adapter.id(),
+            device_type = ?self.adapter.device_type(),
             "Destroying GPU device"
         );
         // Wait for all submitted GPU work to complete. This covers any in-flight work not

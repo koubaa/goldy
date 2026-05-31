@@ -1,11 +1,15 @@
 //! Smoke tests for [`goldy::FrameOrchestrator`] and [`goldy::Device::submit_pipelined`].
 
-use goldy::{DeviceType, FrameOrchestrator, Instance, TaskGraph};
+use goldy::{DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions, TaskGraph};
 
 #[test]
 fn orchestrator_double_begin_fails() {
     let instance = Instance::new().expect("instance");
-    let device = instance.create_device(DeviceType::Cpu).expect("cpu device");
+    let device = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("adapter")
+        .request_device(&DeviceDescriptor::default())
+        .expect("device");
 
     let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&device, 3);
     let h = orch
@@ -23,7 +27,11 @@ fn orchestrator_double_begin_fails() {
 #[test]
 fn orchestrator_reclaim_empty_is_ok() {
     let instance = Instance::new().expect("instance");
-    let device = instance.create_device(DeviceType::Cpu).expect("cpu device");
+    let device = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("adapter")
+        .request_device(&DeviceDescriptor::default())
+        .expect("device");
 
     let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&device, 2);
     orch.reclaim(|_d, _r| Ok::<_, std::convert::Infallible>(()))

@@ -754,10 +754,12 @@ pub(crate) fn lcm(a: u64, b: u64) -> u64 {
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{Instance, DeviceType, BufferPool};
+/// use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions, BufferPool};
 ///
 /// let instance = Instance::new()?;
-/// let device = instance.create_device(DeviceType::DiscreteGpu)?;
+/// let device = instance
+///     .request_adapter(&RequestAdapterOptions::default())?
+///     .request_device(&DeviceDescriptor::default())?;
 ///
 /// let mut pool = BufferPool::new(&device, 1024 * 1024)?; // 1 MB pool
 ///

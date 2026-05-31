@@ -6,8 +6,9 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, Color, CommandEncoder, DataAccess, DeviceType, IndexFormat, Instance,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
+    Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, IndexFormat, Instance,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule,
+    Surface, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -173,7 +174,7 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(self.instance.request_adapter(&RequestAdapterOptions::default())?.request_device(&DeviceDescriptor::default())?);
         let surface = Surface::new(&device, window.as_ref())?;
 
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;

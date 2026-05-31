@@ -107,10 +107,20 @@ impl MetalBackend {
         let slang_compiler =
             crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
+        let adapters: Vec<types::MetalAdapterInfo> = ::metal::Device::all()
+            .into_iter()
+            .enumerate()
+            .map(|(idx, device)| types::MetalAdapterInfo {
+                device,
+                adapter_id: idx as u32,
+            })
+            .collect();
+
         goldy_event!("backend.metal.init", success = true);
 
         Ok(Self {
             state: MetalState {
+                adapters,
                 device_lost: std::sync::atomic::AtomicBool::new(false),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
@@ -152,7 +162,11 @@ impl GpuBackend for MetalBackend {
     }
 
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
-        device::enumerate()
+        device::enumerate(&self.state.adapters)
+    }
+
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+        device::adapter_capabilities(adapter_id)
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
@@ -233,15 +247,8 @@ impl GpuBackend for MetalBackend {
         buffer::hint_unused_above(&mut self.state, buffer, offset);
     }
 
-    fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
-        let _ = device;
-        crate::device::DeviceCapabilities {
-            has_zero_copy_storage_readback: true,
-            buffer_resize_cost: crate::types::BufferResizeCost::Constant,
-            buffer_page_size: 16 * 1024,
-            buffer_decommit_supported: true,
-            ..crate::device::DeviceCapabilities::default()
-        }
+    fn device_capabilities(&self, _device: DeviceHandle) -> crate::device::DeviceCapabilities {
+        device::adapter_capabilities(0)
     }
 
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32> {

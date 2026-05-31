@@ -54,6 +54,53 @@ pub(super) fn enumerate(adapters: &[DxgiAdapterInfo]) -> Vec<AdapterInfo> {
         .collect()
 }
 
+/// Probe whether an adapter supports reserved (tiled) buffers without creating a full Goldy device.
+pub(super) fn query_supports_reserved_buffers(adapter: &IDXGIAdapter1) -> bool {
+    let mut device: Option<ID3D12Device> = None;
+    if unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device) }.is_err() {
+        return false;
+    }
+    let Some(device) = device else {
+        return false;
+    };
+    let mut d3d12_options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+    unsafe {
+        if device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS,
+                &mut d3d12_options as *mut _ as *mut _,
+                std::mem::size_of_val(&d3d12_options) as u32,
+            )
+            .is_ok()
+        {
+            d3d12_options.TiledResourcesTier.0 >= 1
+        } else {
+            false
+        }
+    }
+}
+
+/// Build the public capability snapshot for a physical adapter.
+pub(super) fn adapter_capabilities(
+    adapters: &[DxgiAdapterInfo],
+    adapter_id: u32,
+) -> crate::device::DeviceCapabilities {
+    let mut caps = crate::device::DeviceCapabilities {
+        has_zero_copy_storage_readback: false,
+        ..Default::default()
+    };
+    if adapters
+        .iter()
+        .find(|a| a.adapter_id == adapter_id)
+        .is_some_and(|a| a.supports_reserved_buffers && !super::env_disable_reserved_buffers())
+    {
+        caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
+        caps.buffer_page_size = 64 * 1024;
+        caps.buffer_decommit_supported = true;
+    }
+    caps
+}
+
 /// Create a logical device from an adapter ID.
 #[allow(clippy::too_many_lines)]
 pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHandle> {
@@ -73,17 +120,28 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
 
     super::install_debug_layer_exception_handler();
 
-    let mut d3d12_options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
-    unsafe {
-        device
-            .CheckFeatureSupport(
-                D3D12_FEATURE_D3D12_OPTIONS,
-                &mut d3d12_options as *mut _ as *mut _,
-                std::mem::size_of_val(&d3d12_options) as u32,
-            )
-            .context("CheckFeatureSupport(D3D12_OPTIONS)")?;
-    }
-    let supports_reserved_buffers = d3d12_options.TiledResourcesTier.0 >= 1;
+    let supports_reserved_buffers = adapter.supports_reserved_buffers;
+    debug_assert_eq!(
+        supports_reserved_buffers,
+        {
+            let mut d3d12_options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+            unsafe {
+                if device
+                    .CheckFeatureSupport(
+                        D3D12_FEATURE_D3D12_OPTIONS,
+                        &mut d3d12_options as *mut _ as *mut _,
+                        std::mem::size_of_val(&d3d12_options) as u32,
+                    )
+                    .is_ok()
+                {
+                    d3d12_options.TiledResourcesTier.0 >= 1
+                } else {
+                    false
+                }
+            }
+        },
+        "DxgiAdapterInfo reserved-buffer flag out of sync with live query"
+    );
 
     // Create command queue
     let queue_desc = D3D12_COMMAND_QUEUE_DESC {

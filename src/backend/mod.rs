@@ -397,6 +397,12 @@ pub trait GpuBackend: Send + Sync {
     /// Enumerate available adapters.
     fn enumerate_adapters(&self) -> Vec<AdapterInfo>;
 
+    /// Immutable capability snapshot for a physical adapter (no logical device required).
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+        let _ = adapter_id;
+        crate::device::DeviceCapabilities::default()
+    }
+
     // Device management
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle>;
     fn destroy_device(&mut self, device: DeviceHandle);

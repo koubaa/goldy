@@ -12,8 +12,8 @@
 use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
-    DeviceType, Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -111,7 +111,11 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            self.instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
 
         // Surface with a depth buffer for 3D depth testing
         let surface =

@@ -310,6 +310,8 @@ pub(crate) struct DxgiAdapterInfo {
     pub adapter: Dxgi::IDXGIAdapter1,
     pub desc: Dxgi::DXGI_ADAPTER_DESC1,
     pub adapter_id: u32,
+    /// From `D3D12_FEATURE_DATA_D3D12_OPTIONS::TiledResourcesTier` at enumeration.
+    pub supports_reserved_buffers: bool,
 }
 
 /// A slot in the compute command allocator pool.

@@ -206,6 +206,9 @@ impl VulkanBackend {
                 if major > 1 || (major == 1 && minor >= 4) {
                     let id = adapter_id;
                     adapter_id += 1;
+                    let pdev_features = unsafe { instance.get_physical_device_features(handle) };
+                    let supports_sparse = pdev_features.sparse_binding != 0
+                        && pdev_features.sparse_residency_buffer != 0;
                     tracing::info!(
                         "  [{}] {} ({:?}) - Vulkan {}.{}",
                         id,
@@ -218,6 +221,12 @@ impl VulkanBackend {
                         handle,
                         properties,
                         adapter_id: id,
+                        supports_sparse_buffer: supports_sparse,
+                        vk_timestamp_compute_and_graphics: properties
+                            .limits
+                            .timestamp_compute_and_graphics
+                            != 0,
+                        vk_timestamp_period_ns: properties.limits.timestamp_period,
                     })
                 } else {
                     rejected.push(format!("{}: {}.{}", name.to_string_lossy(), major, minor));
@@ -304,6 +313,10 @@ impl GpuBackend for VulkanBackend {
 
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
         device::enumerate(&self.state.physical_devices)
+    }
+
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+        device::adapter_capabilities(&self.state.physical_devices, adapter_id)
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
@@ -452,18 +465,13 @@ impl GpuBackend for VulkanBackend {
         &self,
         device_handle: DeviceHandle,
     ) -> crate::device::DeviceCapabilities {
-        let mut caps = crate::device::DeviceCapabilities::default();
-        if self
+        let adapter_id = self
             .state
             .devices
             .get(&device_handle)
-            .is_some_and(|d| d.supports_sparse_buffer)
-        {
-            caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
-            caps.buffer_page_size = 64 * 1024;
-            caps.buffer_decommit_supported = true;
-        }
-        caps
+            .map(|d| d.adapter_id)
+            .unwrap_or(0);
+        self.adapter_capabilities(adapter_id)
     }
 
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {

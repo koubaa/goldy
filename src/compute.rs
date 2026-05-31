@@ -16,10 +16,12 @@ use std::sync::{Arc, Mutex};
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{Instance, DeviceType, ShaderModule, ComputePipeline};
+/// use goldy::{ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule};
 ///
 /// let instance = Instance::new()?;
-/// let device = instance.create_device(DeviceType::DiscreteGpu)?;
+/// let device = instance
+///     .request_adapter(&RequestAdapterOptions::default())?
+///     .request_device(&DeviceDescriptor::default())?;
 ///
 /// let shader = ShaderModule::from_slang(&device, r#"
 ///     import goldy_exp;
@@ -77,10 +79,12 @@ impl Drop for ComputePipeline {
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{Instance, DeviceType, ComputeEncoder};
+/// use goldy::{ComputeEncoder, DeviceDescriptor, Instance, RequestAdapterOptions};
 ///
 /// let instance = Instance::new()?;
-/// let device = instance.create_device(DeviceType::DiscreteGpu)?;
+/// let device = instance
+///     .request_adapter(&RequestAdapterOptions::default())?
+///     .request_device(&DeviceDescriptor::default())?;
 ///
 /// let mut encoder = ComputeEncoder::new();
 /// let mut pass = encoder.begin_compute_pass();

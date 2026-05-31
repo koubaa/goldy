@@ -6,6 +6,42 @@ use crate::types::{PyBackendType, PyDeviceType};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
+fn device_from_preferred_type(
+    instance: &goldy::Instance,
+    preferred_type: goldy::DeviceType,
+) -> anyhow::Result<goldy::Device> {
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    {
+        if instance.backend_type() == goldy::BackendType::Dx12
+            && std::env::var("GOLDY_DX12_FORCE_WARP")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        {
+            return device_for_adapter(instance, goldy::WARP_ADAPTER_ID);
+        }
+    }
+
+    let adapters = instance.enumerate_adapters();
+    let adapter = adapters
+        .iter()
+        .find(|a| a.device_type() == preferred_type)
+        .or(adapters.first())
+        .ok_or_else(|| anyhow::anyhow!("No GPU adapters available"))?;
+    adapter.request_device(&goldy::DeviceDescriptor::default())
+}
+
+fn device_for_adapter(
+    instance: &goldy::Instance,
+    adapter_id: u32,
+) -> anyhow::Result<goldy::Device> {
+    let adapters = instance.enumerate_adapters();
+    let adapter = adapters
+        .iter()
+        .find(|a| a.id() == adapter_id)
+        .ok_or_else(|| anyhow::anyhow!("Adapter {adapter_id} not found"))?;
+    adapter.request_device(&goldy::DeviceDescriptor::default())
+}
+
 /// GPU instance - entry point for Goldy.
 ///
 /// Create an instance to enumerate adapters and create devices.
@@ -43,10 +79,8 @@ impl PyInstance {
     /// Raises:
     ///     GoldyError: If no suitable adapter is found or device creation fails.
     fn create_device(&self, preferred_type: PyDeviceType) -> PyResult<PyDevice> {
-        let device = self
-            .inner
-            .create_device(preferred_type.into())
-            .into_py_result()?;
+        let device =
+            device_from_preferred_type(&self.inner, preferred_type.into()).into_py_result()?;
         Ok(PyDevice {
             inner: Arc::new(device),
         })
@@ -60,10 +94,7 @@ impl PyInstance {
     /// Returns:
     ///     A new Device instance.
     fn create_device_for_adapter(&self, adapter_id: u32) -> PyResult<PyDevice> {
-        let device = self
-            .inner
-            .create_device_for_adapter(adapter_id)
-            .into_py_result()?;
+        let device = device_for_adapter(&self.inner, adapter_id).into_py_result()?;
         Ok(PyDevice {
             inner: Arc::new(device),
         })

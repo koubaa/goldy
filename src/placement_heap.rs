@@ -991,8 +991,7 @@ mod tests {
     /// path through `Device::submit_pipelined` / `submit_with_placement_heap`.
     #[test]
     fn steady_state_transient_resolution_zero_cost() {
-        use crate::task_graph::{NodeAccess, TaskGraph};
-        use crate::types::DataAccess;
+        use crate::task_graph::TaskGraph;
 
         let device = test_device();
 

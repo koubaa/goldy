@@ -6,8 +6,8 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, SpatialAccess, TextureFlags, TextureFormat},
-    Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, Sampler, ShaderModule, Surface, Texture, Vertex2DUv,
+    Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance, RenderPipeline,
+    RequestAdapterOptions, RenderPipelineDesc, Sampler, ShaderModule, Surface, Texture, Vertex2DUv,
 };
 use std::sync::Arc;
 use winit::{
@@ -148,7 +148,7 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(self.instance.request_adapter(&RequestAdapterOptions::default())?.request_device(&DeviceDescriptor::default())?);
         let surface = Surface::new(&device, window.as_ref())?;
 
         // Create shader

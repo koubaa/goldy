@@ -720,7 +720,12 @@ pub(super) fn acquire(
                 );
             }
         }
-        if crate::validation_env::timeline_validation_enabled() && next_compute == 0 {
+        if crate::validation_env::timeline_validation_enabled()
+            && next_compute == 0
+            && surface_state.frame_sync[next_slot]
+                .copy_timeline_value
+                .is_some()
+        {
             tracing::warn!(
                 current_frame,
                 next_slot,

@@ -8,7 +8,8 @@
 //! use goldy::{Instance, DeviceType};
 //!
 //! let instance = Instance::new().unwrap();
-//! let device = instance.create_device(DeviceType::DiscreteGpu).unwrap();
+//! let adapter = instance.request_adapter(&Default::default()).unwrap();
+//! let device = adapter.request_device(&Default::default()).unwrap();
 //! ```
 
 pub mod backend;
@@ -64,7 +65,10 @@ pub use timeline::TimelineValue;
 
 pub use backend::GraphCommand;
 pub use backend::{BufferHeapStats, TextureHeapStats};
-pub use device::{Adapter, Device, DeviceCapabilities, Instance};
+pub use device::{
+    Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
+    RequestAdapterOptions,
+};
 pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
