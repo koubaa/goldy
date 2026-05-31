@@ -43,7 +43,7 @@ let buf = Buffer::new(&device, size, DataAccess::Scattered)?;
 let tex = Texture::new(&device, width, height, format, access, flags)?;
 ```
 
-Only allocations through `device.alloc_*` attach an allocator **deed** and call [`VramAllocator::notify_freed`] on drop. Borrowing sub-parcels such as `BufferView` never account.
+Only allocations through `device.alloc_*` attach an allocator **deed** and call `VramAllocator::notify_freed` on drop. Borrowing sub-parcels such as `BufferView` never account.
 
 Goldy's built-in pooling systems (`TexturePool`, `BufferPool`, ekrano's `ResourcePool`) all route through the device's allocator automatically.
 

@@ -477,13 +477,10 @@ impl Device {
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        let mut buf = self.inner.vram_allocator.alloc_buffer(
-            self,
-            size,
-            access,
-            element_stride,
-            flags,
-        )?;
+        let mut buf =
+            self.inner
+                .vram_allocator
+                .alloc_buffer(self, size, access, element_stride, flags)?;
         buf.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
         Ok(buf)
     }
@@ -526,14 +523,10 @@ impl Device {
         access: SpatialAccess,
         flags: TextureFlags,
     ) -> anyhow::Result<crate::texture::Texture> {
-        let mut tex = self.inner.vram_allocator.alloc_texture(
-            self,
-            width,
-            height,
-            format,
-            access,
-            flags,
-        )?;
+        let mut tex = self
+            .inner
+            .vram_allocator
+            .alloc_texture(self, width, height, format, access, flags)?;
         tex.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
         Ok(tex)
     }

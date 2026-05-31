@@ -194,7 +194,7 @@ pub trait VramAllocator: Send + Sync {
     ///
     /// Called automatically from [`Buffer::drop`] / [`Texture::drop`] when the parcel
     /// was allocated through the device's [`VramAllocator`] (and carries a deed).
-    /// Borrowing sub-parcels (e.g. [`BufferView`]) never call this.
+    /// Borrowing sub-parcels (e.g. [`crate::buffer::BufferView`]) never call this.
     ///
     /// `reserved` is the parcel's reserved backing size; `committed` is the runtime's
     /// handed-out estimate (logical size for buffers, [`Texture::byte_size`] for textures).
