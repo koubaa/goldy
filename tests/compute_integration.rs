@@ -2425,10 +2425,7 @@ fn transient_allocator_strategy_default_and_parse() {
         TransientAllocatorStrategy::parse("bump"),
         Some(TransientAllocatorStrategy::BumpReset),
     );
-    assert_eq!(
-        TransientAllocatorStrategy::parse("epoch"),
-        None,
-    );
+    assert_eq!(TransientAllocatorStrategy::parse("epoch"), None,);
     assert_eq!(
         TransientAllocatorStrategy::parse("heap"),
         Some(TransientAllocatorStrategy::Heap),

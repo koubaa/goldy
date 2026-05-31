@@ -95,21 +95,22 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         available_device_exts.contains("VK_KHR_compute_shader_derivatives");
     let has_nv_compute_derivatives =
         available_device_exts.contains("VK_NV_compute_shader_derivatives");
-    let supports_compute_derivative_quads =
-        if has_khr_compute_derivatives || has_nv_compute_derivatives {
-            let mut supported_compute_derivatives =
-                vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default();
-            let mut supported_features2 =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut supported_compute_derivatives);
-            unsafe {
-                state
-                    .instance
-                    .get_physical_device_features2(physical_device_handle, &mut supported_features2);
-            }
-            supported_compute_derivatives.compute_derivative_group_quads != vk::FALSE
-        } else {
-            false
-        };
+    let supports_compute_derivative_quads = if has_khr_compute_derivatives
+        || has_nv_compute_derivatives
+    {
+        let mut supported_compute_derivatives =
+            vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default();
+        let mut supported_features2 =
+            vk::PhysicalDeviceFeatures2::default().push_next(&mut supported_compute_derivatives);
+        unsafe {
+            state
+                .instance
+                .get_physical_device_features2(physical_device_handle, &mut supported_features2);
+        }
+        supported_compute_derivatives.compute_derivative_group_quads != vk::FALSE
+    } else {
+        false
+    };
 
     let sparse_queue_family_index = if supports_sparse {
         queue_families
