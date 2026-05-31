@@ -284,9 +284,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         .bind_resources_raw_slice(&[uniform_handle.index(), SWAPCHAIN_SLOT_PLACEHOLDER])
         .dispatch(wg_x, wg_y, 1);
 
-    let frame = state
-        .surface
-        .submit_graph_to_frame(&mut graph, frame)?;
+    let frame = state.surface.submit_graph_to_frame(&mut graph, frame)?;
 
     // Present — the compute shader already wrote the pixels
     frame.present()?;
