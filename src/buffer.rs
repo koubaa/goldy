@@ -3,8 +3,9 @@
 use crate::backend::{BufferHandle, GpuBackend};
 use crate::device::Device;
 use crate::types::{BindlessCategory, BindlessHandle, BufferFlags, DataAccess};
+use crate::vram_allocator::{ParcelKind, VramAllocator};
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Types allowed as elements in [`Buffer::with_data`] and [`BufferPool::alloc_with_data`].
 ///
@@ -61,12 +62,19 @@ pub struct Buffer {
     peak_committed_bytes: u64,
     /// Number of completed [`Self::resize_to`] / [`Self::resize_to_uninitialized`] calls.
     resize_count: u32,
+    /// Allocator deed for accounting on drop; set only when allocated via [`Device::alloc_buffer`].
+    deed: Option<Weak<dyn VramAllocator>>,
 }
 
 impl Buffer {
     #[inline]
     pub(crate) fn gpu_buffer_handle(&self) -> BufferHandle {
         self.handle
+    }
+
+    /// Attach the allocator deed (called from [`Device::alloc_buffer`] paths only).
+    pub(crate) fn set_deed(&mut self, deed: Weak<dyn VramAllocator>) {
+        self.deed = Some(deed);
     }
 
     /// Create a new buffer with the specified access pattern.
@@ -143,6 +151,7 @@ impl Buffer {
             flags,
             peak_committed_bytes: allocated_size,
             resize_count: 0,
+            deed: None,
         })
     }
     pub fn new_with_stride(
@@ -183,6 +192,7 @@ impl Buffer {
             flags,
             peak_committed_bytes: size,
             resize_count: 0,
+            deed: None,
         })
     }
 
@@ -236,6 +246,7 @@ impl Buffer {
             flags,
             peak_committed_bytes: bytes.len() as u64,
             resize_count: 0,
+            deed: None,
         };
         buffer.write(0, bytes)?;
         Ok(buffer)
@@ -303,6 +314,7 @@ impl Buffer {
             flags,
             peak_committed_bytes: data.len() as u64,
             resize_count: 0,
+            deed: None,
         };
         buffer.write(0, data)?;
         Ok(buffer)
@@ -540,6 +552,9 @@ impl Drop for Buffer {
         tracing::trace!(size = self.size, access = ?self.access, "Destroying buffer");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_buffer(self.handle);
+        if let Some(allocator) = self.deed.as_ref().and_then(Weak::upgrade) {
+            allocator.notify_freed(self.allocated_size, self.size, ParcelKind::Buffer);
+        }
     }
 }
 

@@ -53,7 +53,7 @@ pub mod vram_allocator;
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
-pub use vram_allocator::DeferredPayload;
+pub use vram_allocator::{DeferredPayload, ParcelKind};
 
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
