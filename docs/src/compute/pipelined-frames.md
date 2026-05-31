@@ -162,7 +162,7 @@ pub struct RetiredFrame<T> {
 
 ### Surface path timeline is always deferred
 
-On the swapchain path the timeline value comes from `Frame::present`, which fires *after* `end_frame_for_surface`. The orchestrator holds the slot in a `timeline: None` state until `note_presented` arrives. The `EpochRegions` transient allocator documents the same invariant — `end_frame` may legally arrive after the next `begin_frame`.
+On the swapchain path the timeline value comes from `Frame::present`, which fires *after* `end_frame_for_surface`. The orchestrator holds the slot in a `timeline: None` state until `note_presented` arrives. The `Heap` transient allocator documents the same invariant — `end_frame` may legally arrive after the next `begin_frame` (mid-frame frees are stamped in `end_frame`).
 
 ### Relationship to `TransientAllocator`
 

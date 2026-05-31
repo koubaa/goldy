@@ -75,6 +75,43 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let supports_sparse =
         pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0;
 
+    let available_device_exts: std::collections::HashSet<String> = unsafe {
+        state
+            .instance
+            .enumerate_device_extension_properties(physical_device_handle)
+    }
+    .unwrap_or_default()
+    .into_iter()
+    .map(|ext| {
+        unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    })
+    .collect();
+
+    const KHR_COMPUTE_DERIVATIVES: &CStr = c"VK_KHR_compute_shader_derivatives";
+    const NV_COMPUTE_DERIVATIVES: &CStr = c"VK_NV_compute_shader_derivatives";
+    let has_khr_compute_derivatives =
+        available_device_exts.contains("VK_KHR_compute_shader_derivatives");
+    let has_nv_compute_derivatives =
+        available_device_exts.contains("VK_NV_compute_shader_derivatives");
+    let supports_compute_derivative_quads = if has_khr_compute_derivatives
+        || has_nv_compute_derivatives
+    {
+        let mut supported_compute_derivatives =
+            vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default();
+        let mut supported_features2 =
+            vk::PhysicalDeviceFeatures2::default().push_next(&mut supported_compute_derivatives);
+        unsafe {
+            state
+                .instance
+                .get_physical_device_features2(physical_device_handle, &mut supported_features2);
+        }
+        supported_compute_derivatives.compute_derivative_group_quads != vk::FALSE
+    } else {
+        false
+    };
+
     let sparse_queue_family_index = if supports_sparse {
         queue_families
             .iter()
@@ -134,6 +171,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let mut pipeline_robustness_features =
         vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default().pipeline_robustness(true);
 
+    // Texture sampling in compute shaders requires Slang to emit SPV_KHR_compute_shader_derivatives.
+    let mut compute_derivatives_features =
+        vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default()
+            .compute_derivative_group_quads(true);
+
     let core_features = vk::PhysicalDeviceFeatures {
         vertex_pipeline_stores_and_atomics: vk::TRUE,
         fragment_stores_and_atomics: vk::TRUE,
@@ -150,6 +192,10 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .push_next(&mut vulkan_13_features)
         .push_next(&mut vulkan_12_features)
         .push_next(&mut pipeline_robustness_features);
+
+    if supports_compute_derivative_quads {
+        let _ = features2.push_next(&mut compute_derivatives_features);
+    }
 
     // Create logical device with swapchain extension
     let mut queue_family_set = std::collections::BTreeSet::new();
@@ -168,11 +214,18 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         })
         .collect();
     // Extensions: swapchain for presentation, plus 1.4-promoted extensions whose KHR
-    let device_extensions = [
+    // variants must still be requested, plus optional compute-derivatives support.
+    let mut device_extensions = vec![
         khr::swapchain::NAME.as_ptr(),
         khr::map_memory2::NAME.as_ptr(),
         ext::pipeline_robustness::NAME.as_ptr(),
     ];
+    if supports_compute_derivative_quads && has_khr_compute_derivatives {
+        device_extensions.push(KHR_COMPUTE_DERIVATIVES.as_ptr());
+    }
+    if supports_compute_derivative_quads && has_nv_compute_derivatives {
+        device_extensions.push(NV_COMPUTE_DERIVATIVES.as_ptr());
+    }
 
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)

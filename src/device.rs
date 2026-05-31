@@ -691,35 +691,48 @@ impl Device {
     /// `epoch` is the retirement horizon: the VRAM deferred ring drops payloads whose
     /// registered epoch is `<= epoch`. Callers typically pass either
     /// [`gpu_progress`](Self::gpu_progress) (pull) or a `Signal::BoundaryCrossed { epoch }`
-    /// value (push notification).
+    /// value (push notification). Calling this twice for the same epoch is safe: already-
+    /// reclaimed payloads are not dropped again.
     ///
-    /// Ordering is load-bearing on Metal: backend deletion flush, VRAM ring reclaim,
-    /// placement-heap ring reclaim, then a second backend deletion flush to process
-    /// buffers dropped during reclaim.
+    /// # Double-flush ordering (load-bearing on Metal)
+    ///
+    /// 1. **Pass 1 — pre-reclaim flush:** drain backend deletions that are already eligible
+    ///    (timeline barriers already signaled) before any new drops occur.
+    /// 2. **Reclamation-context bracket:** set the backend reclamation context to `epoch`.
+    ///    During this bracket, [`boundary_crossed`](crate::vram_allocator::VramAllocator::boundary_crossed)
+    ///    drops [`DeferredPayload`]s and the placement-heap ring reclaims retired regions.
+    ///    On Metal, `Buffer::drop` inside those drops queues heap frees at the already-
+    ///    retired epoch rather than `timeline_scheduled_max`, making them immediately
+    ///    eligible for the next flush.
+    /// 3. **Pass 2 — post-reclaim flush:** clear the reclamation context and drain heap
+    ///    frees queued during step 2 before any subsequent allocation attempt.
+    ///
+    /// On non-Metal backends [`set_reclamation_context`](crate::backend::GpuBackend::set_reclamation_context)
+    /// is a no-op, so pass 2 is redundant-but-cheap.
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
     pub fn boundary_crossed(&self, epoch: TimelineValue) {
         let _tz = crate::tracy_zone!("device.boundary_crossed");
         {
+            let _tz = crate::tracy_zone!("device.boundary_crossed.flush_pre");
             let mut backend = self.inner.backend.lock().unwrap();
             backend.flush_deferred_deletions(self.inner.handle);
         }
-        // boundary_crossed drops DeferredPayloads. The backend reclamation context tells
-        // Metal Buffer::drop to queue heap frees with the already-retired epoch rather
-        // than timeline_scheduled_max. Those entries are immediately eligible, so the
-        // second flush returns heap memory before any subsequent allocation attempt.
         {
+            let _tz = crate::tracy_zone!("device.boundary_crossed.reclaim");
             let mut backend = self.inner.backend.lock().unwrap();
             backend.set_reclamation_context(self.inner.handle, Some(epoch));
-        }
-        self.inner.vram_allocator.boundary_crossed(epoch);
-        if let Ok(mut heap_guard) = self.inner.placement_heap.lock() {
-            if let Some(heap) = heap_guard.as_mut() {
-                heap.reclaim(epoch);
+            drop(backend);
+            self.inner.vram_allocator.boundary_crossed(epoch);
+            if let Ok(mut heap_guard) = self.inner.placement_heap.lock() {
+                if let Some(heap) = heap_guard.as_mut() {
+                    heap.reclaim(epoch);
+                }
             }
         }
         {
+            let _tz = crate::tracy_zone!("device.boundary_crossed.flush_post");
             let mut backend = self.inner.backend.lock().unwrap();
             backend.set_reclamation_context(self.inner.handle, None);
             backend.flush_deferred_deletions(self.inner.handle);
@@ -741,8 +754,8 @@ impl Device {
     /// the VRAM deferred ring drops [`DeferredPayload`]s registered via [`defer_release`]
     /// (including evicted placement-heap views/textures), and the placement-heap ring
     /// reclaims retired regions. Transient allocators (`BumpResetAllocator`,
-    /// `EpochRegionsAllocator`, `HeapTransientAllocator`) self-service by comparing stored
-    /// epochs to [`gpu_progress`](Self::gpu_progress) at `begin_frame`.
+    /// `HeapTransientAllocator`) self-service by comparing stored epochs to
+    /// [`gpu_progress`](Self::gpu_progress) at `begin_frame`.
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
