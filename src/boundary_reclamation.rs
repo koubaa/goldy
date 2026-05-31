@@ -7,9 +7,8 @@
 //!
 //! Contract under test:
 //! 1. VRAM deferred ring empties after `submit + wait + flush`
-//! 2. `EpochRegionsAllocator` recycles regions after epoch retirement
-//! 3. `HeapTransientAllocator` returns freed ranges after epoch retirement
-//! 4. `PlacementHeap` ring reclaims stamped regions once `gpu_progress >= epoch`
+//! 2. `HeapTransientAllocator` returns freed ranges after epoch retirement
+//! 3. `PlacementHeap` ring reclaims stamped regions once `gpu_progress >= epoch`
 //!
 //! Run with: `cargo test -p goldy boundary_reclamation`
 
@@ -23,8 +22,7 @@ mod tests {
     use crate::signal::Signal;
     use crate::task_graph::TaskGraph;
     use crate::transient_allocator::{
-        BumpResetAllocator, EpochRegionsAllocator, HeapTransientAllocator, TransientAllocator,
-        TransientAllocatorConfig,
+        BumpResetAllocator, HeapTransientAllocator, TransientAllocator, TransientAllocatorConfig,
     };
     use crate::types::BufferFlags;
 
@@ -35,8 +33,6 @@ mod tests {
     fn small_config() -> TransientAllocatorConfig {
         TransientAllocatorConfig {
             initial_size: 4 * 1024,
-            min_region_size: 4 * 1024,
-            max_regions: 3,
             alignment: 256,
             flags: BufferFlags::empty(),
         }
@@ -45,8 +41,6 @@ mod tests {
     fn heap_config() -> TransientAllocatorConfig {
         TransientAllocatorConfig {
             initial_size: 64 * 1024,
-            min_region_size: 64 * 1024,
-            max_regions: 3,
             alignment: 256,
             flags: BufferFlags::empty(),
         }
@@ -96,85 +90,6 @@ mod tests {
         assert!(
             weak.upgrade().is_none(),
             "payload must be dropped after flush"
-        );
-    }
-
-    /// EpochRegions regions transition Empty once `gpu_progress >= epoch` at `begin_frame`.
-    #[test]
-    fn u0_epoch_regions_recycles_after_epoch() {
-        let device = test_device();
-        let mut alloc = EpochRegionsAllocator::new(&device, small_config()).expect("create");
-
-        alloc.begin_frame(&device, 0).expect("begin 1");
-        let _view = alloc.alloc(&device, 1024, Some(4)).expect("alloc");
-        let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
-
-        alloc.end_frame(&device, tv);
-        assert!(
-            alloc.retired_count() >= 1,
-            "active region should be DeferredReclaim after end_frame"
-        );
-        assert_eq!(
-            alloc.empty_count(),
-            0,
-            "no Empty regions immediately after end_frame"
-        );
-
-        device.wait_until(tv).expect("wait");
-
-        // Epoch retired on GPU, but begin_frame has not run yet.
-        assert!(
-            alloc.retired_count() >= 1,
-            "region must stay DeferredReclaim before begin_frame"
-        );
-
-        alloc.begin_frame(&device, 0).expect("begin after wait");
-        assert_eq!(
-            alloc.retired_count(),
-            0,
-            "DeferredReclaim should be gone after wait + begin_frame"
-        );
-    }
-
-    /// EpochRegions must NOT recycle a region while `gpu_progress < epoch`.
-    ///
-    /// This is the use-after-free guard for the U4 direct-compare reclaim: `begin_frame`
-    /// runs `reclaim_retired_regions`, but a region retired to a not-yet-retired epoch must
-    /// stay `DeferredReclaim` until the GPU actually reaches it.
-    #[test]
-    fn u4_epoch_regions_not_recycled_before_epoch() {
-        let device = test_device();
-        let mut alloc = EpochRegionsAllocator::new(&device, small_config()).expect("create");
-
-        alloc.begin_frame(&device, 0).expect("begin 1");
-        let _view = alloc.alloc(&device, 1024, Some(4)).expect("alloc");
-        let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
-
-        // Retire the region to a far epoch the GPU has NOT reached.
-        let far_epoch = tv + 100;
-        alloc.end_frame(&device, far_epoch);
-        assert!(
-            alloc.retired_count() >= 1,
-            "region should be DeferredReclaim after end_frame"
-        );
-
-        // begin_frame runs reclaim_retired_regions, but gpu_progress (== tv) < far_epoch,
-        // so the region must NOT recycle (it would be a use-after-free).
-        alloc.begin_frame(&device, 0).expect("begin 2");
-        assert!(
-            alloc.retired_count() >= 1,
-            "region must not recycle before its epoch retires"
-        );
-
-        // Once the epoch retires, the next begin_frame recycles it.
-        device.wait_until(far_epoch).expect("wait");
-        alloc.begin_frame(&device, 0).expect("begin 3");
-        assert_eq!(
-            alloc.retired_count(),
-            0,
-            "region recycles once gpu_progress >= epoch"
         );
     }
 
@@ -327,6 +242,69 @@ mod tests {
             weak.upgrade().is_none(),
             "payload must drop after pull flush"
         );
+    }
+
+    /// `boundary_crossed` is idempotent: calling it twice for the same epoch reclaims once.
+    #[test]
+    fn boundary_crossed_is_idempotent_for_same_epoch() {
+        let device = test_device();
+        let mut graph = TaskGraph::new();
+        let tv = device.submit(&mut graph).expect("submit");
+
+        let alive = Arc::new(11u32);
+        let weak = Arc::downgrade(&alive);
+        device.defer_until(tv, alive);
+        assert!(device.has_deferred_payloads());
+
+        device.wait_until(tv).expect("wait");
+
+        device.boundary_crossed(tv);
+        assert!(
+            !device.has_deferred_payloads(),
+            "first boundary_crossed must drain the VRAM ring"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "payload must drop on first boundary_crossed"
+        );
+
+        // Second call for the same epoch must be a no-op (no double-free panic).
+        device.boundary_crossed(tv);
+        assert!(
+            !device.has_deferred_payloads(),
+            "second boundary_crossed must remain a no-op"
+        );
+    }
+
+    /// A stale (lower) epoch after a higher-water reclaim must not under-reclaim or double-free.
+    #[test]
+    fn boundary_crossed_stale_epoch_is_no_op_after_high_water() {
+        let device = test_device();
+        let mut graph1 = TaskGraph::new();
+        let tv1 = device.submit(&mut graph1).expect("submit 1");
+        let mut graph2 = TaskGraph::new();
+        let tv2 = device.submit(&mut graph2).expect("submit 2");
+        assert!(tv2 > tv1, "mock timeline must advance");
+
+        let alive1 = Arc::new(1u32);
+        let alive2 = Arc::new(2u32);
+        let weak1 = Arc::downgrade(&alive1);
+        let weak2 = Arc::downgrade(&alive2);
+        device.defer_until(tv1, alive1);
+        device.defer_until(tv2, alive2);
+        assert!(device.has_deferred_payloads());
+
+        device.wait_until(tv2).expect("wait");
+
+        // High-water reclaim retires both payloads (epoch <= tv2).
+        device.boundary_crossed(tv2);
+        assert!(!device.has_deferred_payloads());
+        assert!(weak1.upgrade().is_none());
+        assert!(weak2.upgrade().is_none());
+
+        // Stale lower epoch must not panic or resurrect payloads.
+        device.boundary_crossed(tv1);
+        assert!(!device.has_deferred_payloads());
     }
 
     /// BumpReset must NOT reset the pool before the prior frame's epoch retires.

@@ -83,7 +83,7 @@ pub use task_graph::{SwapchainOutputHandle, SWAPCHAIN_SLOT_PLACEHOLDER};
 pub use texture::Texture;
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use transient_allocator::{
-    BumpResetAllocator, EpochRegionsAllocator, TransientAllocator, TransientAllocatorConfig,
+    BumpResetAllocator, TransientAllocator, TransientAllocatorConfig,
     TransientAllocatorStrategy,
 };
 pub use types::*;

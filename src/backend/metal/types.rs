@@ -521,15 +521,6 @@ pub(crate) struct TimelineWaiter {
 }
 
 impl TimelineWaiter {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new((Mutex::new(0), Condvar::new())),
-            signal_queue: None,
-            last_emitted: Arc::new(AtomicU64::new(0)),
-            last_signal_instant_ns: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
     pub fn new_with_signals(signal_queue: Arc<crate::signal::SignalQueue>) -> Self {
         Self {
             inner: Arc::new((Mutex::new(0), Condvar::new())),
@@ -562,13 +553,8 @@ impl TimelineWaiter {
         cvar.notify_all();
     }
 
-    /// CPU timestamp (nanos since in-process epoch) of the most recent GPU signal.
-    /// Returns 0 if no signal has fired yet.
-    pub fn last_signal_ns(&self) -> u64 {
-        self.last_signal_instant_ns.load(Ordering::Acquire)
-    }
-
-    /// Clone of the raw `Arc<AtomicU64>` backing `last_signal_ns`.
+    /// Clone of the raw `Arc<AtomicU64>` holding the CPU timestamp (nanos since
+    /// in-process epoch) of the most recent GPU signal (0 until the first fires).
     ///
     /// Callers that need to read the value from a context where borrowing the
     /// device is not possible (e.g. after a mutable surface borrow has started)

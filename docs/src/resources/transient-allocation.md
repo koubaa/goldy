@@ -10,10 +10,10 @@ Two strategies are built in. More can be added by implementing the `TransientAll
 
 | Strategy | Pipeline depth | Memory | Best for |
 |----------|---------------|--------|----------|
-| `BumpReset` | 1 (serialized) | Lowest | Debugging, validation, single-frame-at-a-time workloads |
-| `EpochRegions` | Adaptive (up to `max_regions`) | Moderate | Pipelined rendering, overlapping CPU encoding with GPU execution |
+| `BumpReset` | 1 (serialized) | Lowest | Minimum-memory baseline, depth=1 workloads, diagnostic isolation |
+| `Heap` | Pipelined | Peak ≈ live working set | Default for overlapping CPU encoding with GPU execution |
 
-The strategy is selected at construction time via `TransientAllocatorStrategy`. The default is `EpochRegions` — the pipelined strategy.
+The strategy is selected at construction time via `TransientAllocatorStrategy`. The default is `Heap` — the pipelined free-list strategy.
 
 ## API Overview
 
@@ -23,16 +23,14 @@ The strategy is selected at construction time via `TransientAllocatorStrategy`. 
 use goldy::{TransientAllocatorStrategy, TransientAllocatorConfig};
 
 // Explicit strategy
-let strategy = TransientAllocatorStrategy::EpochRegions;
+let strategy = TransientAllocatorStrategy::Heap;
 let mut allocator = strategy.create(&device, TransientAllocatorConfig {
     initial_size: 4 * 1024 * 1024,
-    min_region_size: 4 * 1024 * 1024,
-    max_regions: 4,
     alignment: 256,
     flags: BufferFlags::GPU_ONLY,
 })?;
 
-// Or use the default strategy (EpochRegions)
+// Or use the default strategy (Heap)
 let mut allocator = TransientAllocatorStrategy::default().create(
     &device,
     TransientAllocatorConfig::default(),
@@ -42,7 +40,7 @@ let mut allocator = TransientAllocatorStrategy::default().create(
 ### Per-frame lifecycle
 
 ```rust
-// 1. Begin frame — reclaim completed regions, grow if needed
+// 1. Begin frame — reclaim completed ranges, grow if needed
 allocator.begin_frame(&device, estimated_frame_bytes)?;
 
 // 2. Allocate — returns a BufferView with its own bindless descriptor
@@ -52,14 +50,14 @@ let segments = allocator.alloc(&device, seg_bytes, Some(seg_stride))?;
 // ... build and submit GPU work ...
 let timeline = device.submit(&graph)?;
 
-// 3. End frame — tag all active regions with this epoch
+// 3. End frame — stamp mid-frame frees with this epoch
 allocator.end_frame(timeline);
 ```
 
 ### Diagnostics
 
 ```rust
-allocator.name();            // "bump_reset" or "epoch_regions"
+allocator.name();            // "bump_reset" or "heap"
 allocator.capacity();        // total GPU bytes held
 allocator.used_this_frame(); // bytes allocated so far this frame
 ```
@@ -68,55 +66,32 @@ allocator.used_this_frame(); // bytes allocated so far this frame
 
 ### BumpReset
 
-The simplest correct strategy. A single `BufferPool` backs all allocations. At the start of each frame, `begin_frame` blocks until the previous frame's GPU epoch has been signaled, then resets the bump pointer to zero.
+The minimum-memory strategy. A single `BufferPool` backs all allocations. At the start of each frame, `begin_frame` blocks until the previous frame's GPU epoch has been signaled, then resets the bump pointer to zero.
 
 ```
 Frame N:   [  CPU encode  ]────submit────►[  GPU execute  ]
 Frame N+1:                      wait ◄────┘[  CPU encode  ]──►...
 ```
 
-This is equivalent to a per-thread arena allocator with synchronous `free` — the CPU cannot begin recording frame N+1 until frame N's GPU work completes. It uses the absolute minimum memory (one pool, no copies), making it ideal for profiling baselines and for workloads where the CPU is not the bottleneck.
+This is equivalent to a per-thread arena allocator with synchronous reset — the CPU cannot begin recording frame N+1 until frame N's GPU work completes. It uses the absolute minimum memory (one pool, no free-list bookkeeping), making it ideal for pipeline depth = 1, profiling baselines, and isolating reclamation-timing bugs.
 
-### EpochRegions
+### Heap
 
-Multiple bump regions, each tagged with a `TimelineValue` epoch. Regions transition through four states:
-
-```
-   ┌─────┐   begin_frame    ┌────────┐   end_frame    ┌─────────┐
-   │Empty│ ────────────────► │ Active │ ─────────────► │ Retired │
-   └─────┘                   └────────┘                └────┬────┘
-      ▲                          │ begin_frame               │
-      │                          │ (deferred end_frame)      │
-      │                          ▼                           │
-      │                      ┌─────────┐  end_frame          │
-      │                      │ Pending │ ───────────────────►│
-      │                      └─────────┘                     │
-      │              gpu_progress() >= epoch                 │
-      └──────────────────────────────────────────────────────┘
-```
-
-- **Empty** — bump pointer at zero, ready for allocation.
-- **Active** — being allocated from this frame. Multiple regions may be active if a single frame spills beyond one region's capacity.
-- **Pending** — frame finished recording but the epoch is not yet known (surface-presentation path where `end_frame` is deferred until after `Frame::present`). Promoted to Retired when the deferred `end_frame` supplies the epoch.
-- **Retired** — written by an earlier frame, waiting for the GPU to catch up. Becomes Empty once `device.gpu_progress() >= epoch`.
-
-`begin_frame` promotes completed retirees without blocking. Only when the region cap (`max_regions`) is hit and no retirees are complete does the strategy fall back to a synchronous wait — this is the "safety valve" that prevents unbounded memory growth.
+A single monolithic buffer with a best-fit free list and coalescing. Mid-frame `free()` calls return sub-allocations to a deferred-free queue keyed by GPU timeline; once the GPU retires past that epoch, ranges merge back into the free list for reuse within the same or subsequent frames.
 
 ```
 Frame N:   [  CPU encode  ]──submit──►[  GPU execute  ]
 Frame N+1: [  CPU encode  ]──submit──►     [  GPU execute  ]
-Frame N+2: [  CPU encode  ]──...           reclaim N's regions ◄─┘
+Frame N+2: [  CPU encode  ]──...           reclaim N's ranges ◄─┘
 ```
 
-The closest CPU-side analogue is epoch-based reclamation (EBR), the same pattern used by crossbeam's `Collector`, the Linux kernel's RCU, and JVM region-based garbage collectors like G1/ZGC.
+Peak memory is proportional to the peak *live* working set, not the sum of all allocations. `end_frame` may arrive after the next `begin_frame` on the surface path — mid-frame frees with `epoch=None` are stamped in `end_frame`.
 
 ## Configuration
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `initial_size` | 64 KiB | Backing storage allocated on first frame. The allocator grows reactively and auto-shrinks after warmup. |
-| `min_region_size` | 4 MiB | Minimum bytes per region for `EpochRegions`. Smaller = finer reclamation granularity, more regions. |
-| `max_regions` | 3 | Pipeline depth cap for `EpochRegions`. `BumpReset` ignores this. |
 | `alignment` | 256 | Sub-allocation alignment (must be power of two). 256 covers all known `minStorageBufferOffsetAlignment` values. |
 | `flags` | `GPU_ONLY` | `BufferFlags` applied to backing storage |
 
@@ -135,6 +110,7 @@ pub trait TransientAllocator: Send {
     // Optional overrides with defaults
     fn used_this_frame(&self) -> u64 { 0 }
     fn hint_unused_above(&mut self, _offset: u64) {}
+    fn free(&mut self, _offset: u64, _size: u64, _epoch: Option<TimelineValue>) {}
     fn clear(&mut self) {}
 }
 ```
@@ -154,4 +130,4 @@ Possible future strategies:
 | `TexturePool` | Acquire/release cache for textures | Keyed recycling, no sub-allocation |
 | **`TransientAllocator`** | **Pluggable per-frame bump allocation** | **Epoch-aware, strategy-selectable** |
 
-`TransientAllocator` *uses* `BufferPool` internally (each strategy/region is backed by one), but adds lifecycle management that `BufferPool` alone does not provide.
+`TransientAllocator` *uses* `BufferPool` internally (each strategy is backed by one), but adds lifecycle management that `BufferPool` alone does not provide.

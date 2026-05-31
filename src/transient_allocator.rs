@@ -14,15 +14,12 @@
 //! CPU memory-management world has spent decades exploring:
 //!
 //! * [`BumpResetAllocator`] — single bump pool, blocking reset between frames. Equivalent to
-//!   a per-thread arena with synchronous reset. Minimal memory; serializes CPU and GPU.
-//! * [`EpochRegionsAllocator`] — many bump regions tagged with [`TimelineValue`] epochs;
-//!   reclamation is asynchronous via [`Device::gpu_progress`]. Closest analog: epoch-based
-//!   reclamation (EBR) used by lock-free data structures and region-based garbage collectors
-//!   like G1. Non-blocking hot path; pipeline depth adapts to workload.
+//!   a per-thread arena with synchronous reset. Minimum memory footprint; serializes CPU and
+//!   GPU. Natural fit for pipeline depth = 1.
 //! * [`HeapTransientAllocator`] — single monolithic buffer with a real free list (best-fit
 //!   with coalescing). Freed sub-allocations return to the free list once their GPU epoch
 //!   retires, enabling mid-pipeline memory reuse. Peak memory ≈ peak live working set rather
-//!   than sum of everything allocated.
+//!   than sum of everything allocated. Default strategy for pipelined rendering.
 //!
 //! Selection at construction time uses [`TransientAllocatorStrategy`]. Consumers that want
 //! a runtime switch (e.g. via environment variable) should read the variable themselves and
@@ -38,19 +35,19 @@
 //!    reclaim later
 //!
 //! **Important:** `end_frame` may be called *after* the next `begin_frame` when the epoch
-//! is not known until after surface presentation. [`EpochRegionsAllocator`] handles this
-//! correctly by tracking "pending" regions whose epoch has not yet been supplied.
+//! is not known until after surface presentation. [`HeapTransientAllocator`] handles this
+//! via deferred-free stamping in `end_frame`.
 //!
 //! Strategies are free to over- or under-implement individual steps as long as semantics
 //! are preserved. For example, `BumpResetAllocator::end_frame` only stores the epoch for the
-//! next `begin_frame`'s wait; `EpochRegionsAllocator::end_frame` tags every region used.
+//! next `begin_frame`'s wait; `HeapTransientAllocator::end_frame` stamps mid-frame frees.
 
 use crate::buffer::{lcm, BufferPool, BufferView};
 use crate::device::Device;
 use crate::timeline::TimelineValue;
 use crate::types::BufferFlags;
 use anyhow::Result;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------
 // Config
@@ -58,19 +55,11 @@ use std::collections::{BTreeMap, VecDeque};
 
 /// Configuration for a [`TransientAllocator`].
 ///
-/// Strategies may ignore fields that don't apply (e.g. `min_region_size` is unused by
-/// [`BumpResetAllocator`]). Default values are tuned for typical 2D-rendering workloads.
+/// Default values are tuned for typical 2D-rendering workloads.
 #[derive(Debug, Clone)]
 pub struct TransientAllocatorConfig {
     /// Initial backing-storage size, in bytes. Allocators may grow beyond this on demand.
     pub initial_size: u64,
-    /// Minimum region size for region-based strategies (e.g. [`EpochRegionsAllocator`]). Ignored
-    /// by non-regional strategies. Default 4 MiB; smaller values trade region overhead for
-    /// finer-grained reclamation.
-    pub min_region_size: u64,
-    /// Maximum number of regions before [`EpochRegionsAllocator`] falls back to waiting on the
-    /// oldest in-flight region. Acts as a pipeline-depth cap. Ignored by other strategies.
-    pub max_regions: usize,
     /// Sub-allocation alignment in bytes. Must be a power of two. 256 satisfies
     /// `minStorageBufferOffsetAlignment` on all supported backends.
     pub alignment: u64,
@@ -83,8 +72,6 @@ impl Default for TransientAllocatorConfig {
     fn default() -> Self {
         Self {
             initial_size: 64 * 1024,
-            min_region_size: 4 * 1024 * 1024,
-            max_regions: 3,
             alignment: 256,
             flags: BufferFlags::GPU_ONLY,
         }
@@ -189,18 +176,14 @@ pub trait TransientAllocator: Send {
 
 /// Selectable allocation strategies. Use [`Self::create`] to instantiate.
 ///
-/// The default is [`Self::EpochRegions`] — the pipelined strategy that allows CPU and GPU
-/// to overlap. Use [`Self::BumpReset`] as a diagnostic baseline or when minimum memory
-/// footprint is more important than throughput.
+/// The default is [`Self::Heap`] — the pipelined strategy with a free list that allows CPU
+/// and GPU to overlap. Use [`Self::BumpReset`] as the minimum-memory baseline or when
+/// pipeline depth is 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransientAllocatorStrategy {
     /// Single bump pool that is `reset()`-ed each frame after waiting for the previous
     /// frame's GPU work to complete. Lowest memory usage; serializes CPU and GPU.
     BumpReset,
-    /// Multiple bump regions tagged with [`TimelineValue`] epochs. Reclamation is
-    /// asynchronous: a region becomes reusable as soon as its epoch is ≤ `gpu_progress()`,
-    /// no waiting required. Pipeline depth adapts to workload up to `max_regions`.
-    EpochRegions,
     /// Single monolithic buffer with a real free list. Mid-pipeline `free()` calls return
     /// sub-allocations to a deferred-free queue keyed by GPU timeline; once retired, ranges
     /// merge back into the free list for reuse within the same or subsequent frames.
@@ -212,11 +195,10 @@ pub enum TransientAllocatorStrategy {
 impl TransientAllocatorStrategy {
     /// Parse a strategy name. Case-insensitive. Returns `None` for unrecognised values.
     ///
-    /// Recognised values: `bump`, `bump_reset`, `epoch`, `epoch_regions`, `regions`.
+    /// Recognised values: `bump`, `bump_reset`, `heap`, `freelist`, `heap_freelist`.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "bump" | "bump_reset" | "bumpreset" => Some(Self::BumpReset),
-            "epoch" | "regions" | "epoch_regions" | "epochregions" => Some(Self::EpochRegions),
             "heap" | "freelist" | "heap_freelist" => Some(Self::Heap),
             _ => None,
         }
@@ -230,7 +212,6 @@ impl TransientAllocatorStrategy {
     ) -> Result<Box<dyn TransientAllocator>> {
         match self {
             Self::BumpReset => Ok(Box::new(BumpResetAllocator::new(device, config)?)),
-            Self::EpochRegions => Ok(Box::new(EpochRegionsAllocator::new(device, config)?)),
             Self::Heap => Ok(Box::new(HeapTransientAllocator::new(device, config)?)),
         }
     }
@@ -336,337 +317,6 @@ impl TransientAllocator for BumpResetAllocator {
     fn clear(&mut self) {
         self.pool.reset();
         self.last_epoch = None;
-    }
-}
-
-// -----------------------------------------------------------------------
-// EpochRegions strategy
-// -----------------------------------------------------------------------
-
-/// State of a region inside [`EpochRegionsAllocator`]. Designed so reclamation is a single
-/// comparison against [`Device::gpu_progress`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RegionState {
-    /// Backing exists and is ready for bump allocation.
-    Empty,
-    /// Currently being bump-allocated from. (Multiple regions may be active simultaneously if
-    /// a single frame's allocation spilled across regions.)
-    Active,
-    /// Frame has ended but the epoch is not yet known (surface-presentation path where
-    /// the timeline value arrives via a deferred `end_frame` after `Frame::present`).
-    /// The allocator treats these conservatively: they cannot be reclaimed until an epoch
-    /// is supplied, but they do not count as Active so the next `begin_frame` can proceed.
-    Pending,
-    /// Written by an earlier frame; reusable once `gpu_progress >= epoch`.
-    DeferredReclaim { epoch: TimelineValue },
-}
-
-struct Region {
-    pool: BufferPool,
-    state: RegionState,
-}
-
-/// Region-pool bump allocator with [`TimelineValue`]-based reclamation.
-///
-/// At any point in time, the regions are partitioned into:
-///
-/// * **Empty** — ready for use; bump pointer is at 0.
-/// * **Active** — being bump-allocated from this frame.
-/// * **Pending** — frame finished but epoch not yet known (surface path). Promoted to
-///   `DeferredReclaim` when [`TransientAllocator::end_frame`] supplies the epoch.
-/// * **DeferredReclaim** — written by an earlier frame; reusable once the GPU has
-///   finished that frame's work (`epoch <= gpu_progress()`).
-///
-/// `begin_frame` moves Active regions to Pending (if `end_frame` wasn't called yet) and
-/// opportunistically recycles `DeferredReclaim` regions whose epochs have passed. `alloc`
-/// spills to a fresh region when the active one fills. `end_frame` assigns the epoch to
-/// all Pending regions and retires any remaining Active ones.
-///
-/// Closest CPU analog: an N-arena epoch-based-reclamation allocator. This is the same
-/// pattern that drives the Linux kernel's RCU, JVM's ZGC region recycling, and crossbeam's
-/// `Collector`.
-pub struct EpochRegionsAllocator {
-    config: TransientAllocatorConfig,
-    regions: Vec<Region>,
-    /// Indices of regions in `Active` state, in the order they were activated this frame.
-    /// On `end_frame`, every index here is moved to `DeferredReclaim`.
-    active: VecDeque<usize>,
-}
-
-impl EpochRegionsAllocator {
-    /// Create a new allocator. Allocates one initial region immediately.
-    pub fn new(device: &Device, config: TransientAllocatorConfig) -> Result<Self> {
-        let region = Self::make_region(device, &config, config.min_region_size)?;
-        Ok(Self {
-            config,
-            regions: vec![region],
-            active: VecDeque::new(),
-        })
-    }
-
-    fn make_region(
-        device: &Device,
-        config: &TransientAllocatorConfig,
-        min_size: u64,
-    ) -> Result<Region> {
-        let size = config.min_region_size.max(min_size).max(config.alignment);
-        // Capacity hint equals the region size — each region only needs to handle
-        // its own share of per-frame demand, not the entire frame.
-        let pool = BufferPool::with_alignment_capacity_hint_and_flags(
-            device,
-            size,
-            size,
-            config.alignment,
-            config.flags,
-        )?;
-        Ok(Region {
-            pool,
-            state: RegionState::Empty,
-        })
-    }
-
-    /// Reset `DeferredReclaim` regions whose epoch has retired.
-    fn reclaim_retired_regions(&mut self, device: &Device) {
-        let progress = device.gpu_progress();
-        for r in &mut self.regions {
-            if let RegionState::DeferredReclaim { epoch } = r.state {
-                if epoch <= progress {
-                    r.pool.reset();
-                    r.state = RegionState::Empty;
-                }
-            }
-        }
-    }
-
-    /// Find an empty region with at least `min_size` bytes of capacity. Prefers regions that
-    /// fit `min_size` without growth.
-    fn find_empty(&self, min_size: u64) -> Option<usize> {
-        // First pass: exact fit (no growth needed).
-        for (i, r) in self.regions.iter().enumerate() {
-            if matches!(r.state, RegionState::Empty) && r.pool.capacity() >= min_size {
-                return Some(i);
-            }
-        }
-        // Second pass: any empty region (we'll grow it).
-        self.regions
-            .iter()
-            .position(|r| matches!(r.state, RegionState::Empty))
-    }
-
-    /// Index of the `DeferredReclaim` region with the smallest epoch (for the safety-valve wait).
-    fn oldest_deferred(&self) -> Option<(usize, TimelineValue)> {
-        self.regions
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| match r.state {
-                RegionState::DeferredReclaim { epoch } => Some((i, epoch)),
-                _ => None,
-            })
-            .min_by_key(|(_, e)| *e)
-    }
-
-    /// Activate region `idx`. Caller guarantees state is currently Empty.
-    fn activate(&mut self, idx: usize) {
-        debug_assert_eq!(self.regions[idx].state, RegionState::Empty);
-        self.regions[idx].state = RegionState::Active;
-        self.active.push_back(idx);
-    }
-
-    /// Acquire a region to allocate from, growing or waiting as needed. Used both at the
-    /// start of a frame and when an active region runs out mid-frame.
-    fn acquire_region(&mut self, device: &Device, min_size: u64) -> Result<usize> {
-        self.reclaim_retired_regions(device);
-
-        if let Some(idx) = self.find_empty(min_size) {
-            // Grow the region if it was empty but undersized.
-            if self.regions[idx].pool.capacity() < min_size {
-                self.regions[idx].pool.resize(min_size)?;
-            }
-            self.activate(idx);
-            return Ok(idx);
-        }
-
-        // No empty region. Try growing the pool.
-        if self.regions.len() < self.config.max_regions {
-            let region = Self::make_region(device, &self.config, min_size)?;
-            self.regions.push(region);
-            let idx = self.regions.len() - 1;
-            self.activate(idx);
-            return Ok(idx);
-        }
-
-        // Pipeline-depth cap hit. Safety valve: wait on the oldest DeferredReclaim.
-        if let Some((idx, epoch)) = self.oldest_deferred() {
-            device.wait_until(epoch)?;
-            self.reclaim_retired_regions(device);
-            // Force-reset as fallback if progress still lags the signal epoch.
-            if matches!(self.regions[idx].state, RegionState::DeferredReclaim { .. }) {
-                self.regions[idx].pool.reset();
-                self.regions[idx].state = RegionState::Empty;
-            }
-            if self.regions[idx].pool.capacity() < min_size {
-                self.regions[idx].pool.resize(min_size)?;
-            }
-            self.activate(idx);
-            return Ok(idx);
-        }
-
-        // No DeferredReclaim regions — but there may be Pending regions (deferred end_frame,
-        // epoch not yet known). Reset them to Empty so allocation can proceed.
-        for r in &mut self.regions {
-            if r.state == RegionState::Pending {
-                r.pool.reset();
-                r.state = RegionState::Empty;
-            }
-        }
-
-        if let Some(idx) = self.find_empty(min_size) {
-            if self.regions[idx].pool.capacity() < min_size {
-                self.regions[idx].pool.resize(min_size)?;
-            }
-            self.activate(idx);
-            return Ok(idx);
-        }
-
-        anyhow::bail!(
-            "EpochRegionsAllocator: all {} regions Active, cannot proceed",
-            self.regions.len()
-        )
-    }
-
-    /// Test-only inspection.
-    #[doc(hidden)]
-    pub fn region_count(&self) -> usize {
-        self.regions.len()
-    }
-
-    /// Test-only inspection. Returns the count of `DeferredReclaim` regions.
-    #[doc(hidden)]
-    pub fn retired_count(&self) -> usize {
-        self.regions
-            .iter()
-            .filter(|r| matches!(r.state, RegionState::DeferredReclaim { .. }))
-            .count()
-    }
-
-    /// Test-only inspection.
-    #[doc(hidden)]
-    pub fn empty_count(&self) -> usize {
-        self.regions
-            .iter()
-            .filter(|r| matches!(r.state, RegionState::Empty))
-            .count()
-    }
-
-    /// Test-only inspection.
-    #[doc(hidden)]
-    pub fn pending_count(&self) -> usize {
-        self.regions
-            .iter()
-            .filter(|r| matches!(r.state, RegionState::Pending))
-            .count()
-    }
-
-    /// Test-only inspection.
-    #[doc(hidden)]
-    pub fn active_count(&self) -> usize {
-        self.active.len()
-    }
-}
-
-impl TransientAllocator for EpochRegionsAllocator {
-    fn begin_frame(&mut self, device: &Device, hint_size: u64) -> Result<()> {
-        // If the previous frame's end_frame hasn't been called yet (surface path),
-        // move any leftover Active regions to Pending so they're out of the way.
-        // end_frame will assign the epoch when it arrives.
-        if !self.active.is_empty() {
-            for &idx in &self.active {
-                self.regions[idx].state = RegionState::Pending;
-            }
-            self.active.clear();
-        }
-
-        self.reclaim_retired_regions(device);
-
-        // Pre-acquire one region so the first alloc is hot-path lock-free. If hint_size is 0
-        // (caller has no estimate), use min_region_size so we don't allocate a tiny region.
-        let min_size = hint_size.max(self.config.min_region_size);
-        let _ = self.acquire_region(device, min_size)?;
-        Ok(())
-    }
-
-    fn alloc(
-        &mut self,
-        device: &Device,
-        size: u64,
-        element_stride: Option<u32>,
-    ) -> Result<BufferView> {
-        // Hot path: try the most-recently-activated region.
-        if let Some(&idx) = self.active.back() {
-            if self.regions[idx].pool.would_fit(size, element_stride) {
-                return self.regions[idx].pool.alloc_bytes(size, element_stride);
-            }
-        }
-
-        // Spill: current active region is full. Acquire another.
-        let _ = self.acquire_region(device, size)?;
-        let idx = *self.active.back().expect("acquire_region pushed an active");
-        self.regions[idx].pool.alloc_bytes(size, element_stride)
-    }
-
-    fn end_frame(&mut self, _device: &Device, epoch: TimelineValue) {
-        // Collect indices to retire from the active set and any Pending regions.
-        let mut retiring: Vec<usize> = Vec::with_capacity(self.active.len());
-        for &idx in &self.active {
-            retiring.push(idx);
-        }
-        self.active.clear();
-
-        // Also promote Pending regions (surface-path deferred end_frame).
-        for (idx, r) in self.regions.iter_mut().enumerate() {
-            if r.state == RegionState::Pending {
-                retiring.push(idx);
-            }
-        }
-
-        if retiring.is_empty() {
-            return;
-        }
-
-        for &idx in &retiring {
-            self.regions[idx].state = RegionState::DeferredReclaim { epoch };
-        }
-    }
-
-    fn capacity(&self) -> u64 {
-        self.regions.iter().map(|r| r.pool.capacity()).sum()
-    }
-
-    fn used_this_frame(&self) -> u64 {
-        self.active
-            .iter()
-            .map(|&i| self.regions[i].pool.used())
-            .sum()
-    }
-
-    fn name(&self) -> &'static str {
-        "epoch_regions"
-    }
-
-    fn hint_unused_above(&mut self, offset: u64) {
-        // Forward to the most-recently-active region. The offset is relative to the start of
-        // that region, matching the bump-pointer semantics of the caller.
-        if let Some(&idx) = self.active.back() {
-            self.regions[idx].pool.hint_unused_above(offset);
-        }
-    }
-
-    fn clear(&mut self) {
-        for r in &mut self.regions {
-            r.pool.reset();
-            r.state = RegionState::Empty;
-        }
-        self.active.clear();
     }
 }
 
@@ -993,24 +643,24 @@ mod tests {
             Some(TransientAllocatorStrategy::BumpReset)
         );
         assert_eq!(
-            TransientAllocatorStrategy::parse("epoch"),
-            Some(TransientAllocatorStrategy::EpochRegions)
+            TransientAllocatorStrategy::parse("heap"),
+            Some(TransientAllocatorStrategy::Heap)
         );
         assert_eq!(
-            TransientAllocatorStrategy::parse("regions"),
-            Some(TransientAllocatorStrategy::EpochRegions)
-        );
-        assert_eq!(
-            TransientAllocatorStrategy::parse("epoch_regions"),
-            Some(TransientAllocatorStrategy::EpochRegions)
+            TransientAllocatorStrategy::parse("freelist"),
+            Some(TransientAllocatorStrategy::Heap)
         );
     }
 
     #[test]
-    fn strategy_parse_rejects_unknown_names() {
+    fn strategy_parse_rejects_unknown_and_removed_names() {
         assert_eq!(TransientAllocatorStrategy::parse(""), None);
         assert_eq!(TransientAllocatorStrategy::parse("nope"), None);
         assert_eq!(TransientAllocatorStrategy::parse("default"), None);
+        // Former EpochRegions aliases are no longer recognised.
+        assert_eq!(TransientAllocatorStrategy::parse("epoch"), None);
+        assert_eq!(TransientAllocatorStrategy::parse("regions"), None);
+        assert_eq!(TransientAllocatorStrategy::parse("epoch_regions"), None);
     }
 
     #[test]
@@ -1026,8 +676,6 @@ mod tests {
         let c = TransientAllocatorConfig::default();
         assert!(c.alignment.is_power_of_two());
         assert!(c.initial_size > 0);
-        assert!(c.min_region_size > 0);
-        assert!(c.max_regions > 0);
     }
 
     // ---------------------------------------------------------------
@@ -1044,10 +692,53 @@ mod tests {
     fn heap_config() -> TransientAllocatorConfig {
         TransientAllocatorConfig {
             initial_size: 64 * 1024,
-            min_region_size: 64 * 1024,
-            max_regions: 3,
             alignment: 256,
             flags: crate::types::BufferFlags::empty(),
+        }
+    }
+
+    fn small_config() -> TransientAllocatorConfig {
+        TransientAllocatorConfig {
+            initial_size: 4 * 1024,
+            alignment: 256,
+            flags: crate::types::BufferFlags::empty(),
+        }
+    }
+
+    #[test]
+    fn strategy_create_smoke_bump_reset_and_heap() {
+        let device = test_device();
+        let config = small_config();
+
+        let bump = TransientAllocatorStrategy::BumpReset
+            .create(&device, config.clone())
+            .expect("create bump");
+        assert_eq!(bump.name(), "bump_reset");
+
+        let heap = TransientAllocatorStrategy::Heap
+            .create(&device, config)
+            .expect("create heap");
+        assert_eq!(heap.name(), "heap");
+    }
+
+    #[test]
+    fn bump_reset_capacity_stays_near_one_frame_working_set() {
+        let device = test_device();
+        let mut alloc = BumpResetAllocator::new(&device, small_config()).expect("create");
+
+        for frame in 0..5 {
+            alloc.begin_frame(&device, 0).expect("begin");
+            let _v = alloc.alloc(&device, 2048, Some(4)).expect("alloc");
+            let mut graph = crate::task_graph::TaskGraph::new();
+            let tv = device.submit(&mut graph).expect("submit");
+            alloc.end_frame(&device, tv);
+            device.wait_until(tv).expect("wait");
+
+            let cap = alloc.capacity();
+            assert!(
+                cap <= 8192,
+                "frame {frame}: BumpReset capacity {cap} should stay near one frame's working set"
+            );
         }
     }
 
@@ -1243,48 +934,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Tests for defer_release-driven reclamation (#150)
     // -----------------------------------------------------------------------
-
-    fn small_config() -> TransientAllocatorConfig {
-        TransientAllocatorConfig {
-            initial_size: 4 * 1024,
-            min_region_size: 4 * 1024,
-            max_regions: 3,
-            alignment: 256,
-            flags: crate::types::BufferFlags::empty(),
-        }
-    }
-
-    #[test]
-    fn epoch_regions_recycles_after_epoch() {
-        // After end_frame, regions should be in DeferredReclaim state.
-        // After wait + begin_frame, they should be Empty.
-        let device = test_device();
-        let mut a = EpochRegionsAllocator::new(&device, small_config()).expect("create");
-
-        a.begin_frame(&device, 0).expect("begin 1");
-        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-        let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
-
-        a.end_frame(&device, tv);
-        assert!(
-            a.retired_count() >= 1,
-            "active region should be DeferredReclaim"
-        );
-        assert_eq!(
-            a.empty_count(),
-            0,
-            "no Empty regions immediately after end_frame"
-        );
-
-        device.wait_until(tv).expect("wait");
-        a.begin_frame(&device, 0).expect("begin 2");
-        assert_eq!(
-            a.retired_count(),
-            0,
-            "DeferredReclaim should be gone after wait + begin_frame"
-        );
-    }
 
     #[test]
     fn heap_transient_recycles_after_epoch() {

@@ -57,8 +57,7 @@ pub struct FrameOrchestrator<T> {
 
 impl<T> FrameOrchestrator<T> {
     /// Create an orchestrator. `max_depth` bounds how many frames may be in flight before the
-    /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire (same role as
-    /// `max_regions` on pooled transient allocators).
+    /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire.
     pub fn new(device: &Device, max_depth: usize) -> Self {
         Self {
             device: device.clone(),
