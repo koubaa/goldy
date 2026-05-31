@@ -16,14 +16,14 @@
 
 use goldy::task_graph::TaskGraph;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
-use goldy::{Buffer, DataAccess, Device, DeviceType, Instance};
+use goldy::{Buffer, DataAccess, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 fn make_device() -> Device {
     let instance = Instance::new().expect("Instance::new");
     instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .or_else(|_| instance.create_device(DeviceType::Other))
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("adapter")
+        .request_device(&DeviceDescriptor::default())
         .expect("No Goldy device")
 }
 

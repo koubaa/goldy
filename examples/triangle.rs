@@ -5,8 +5,8 @@
 //! Run with: cargo run --example triangle
 
 use goldy::{
-    shader::builtins, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance,
-    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
+    shader::builtins, Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -51,7 +51,11 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            self.instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
 
         // Create vertex buffer with a triangle
         let vertices = [

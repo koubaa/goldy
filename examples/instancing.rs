@@ -9,9 +9,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceType,
-    Instance, Instance2D, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Surface, VertexBufferLayout,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceDescriptor,
+    Instance, Instance2D, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -85,7 +85,11 @@ struct RenderState {
 impl RenderState {
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
-        let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
         let surface = Surface::new(&device, window.as_ref())?;
 
         // Load shaders

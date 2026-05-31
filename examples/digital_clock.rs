@@ -10,8 +10,8 @@ use goldy::{
     examples::digital_clock::{
         generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE,
     },
-    Buffer, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline, RenderPipelineDesc,
-    ShaderModule, Surface,
+    Buffer, CommandEncoder, DataAccess, DeviceDescriptor, Instance, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -62,7 +62,11 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            self.instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
 
         // Create surface first to get the correct format
         let surface = Surface::new(&device, window.as_ref())?;

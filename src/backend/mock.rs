@@ -229,6 +229,10 @@ impl GpuBackend for MockBackend {
         self.adapters.clone()
     }
 
+    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
+        crate::device::DeviceCapabilities::default()
+    }
+
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
         if adapter_id as usize >= self.adapters.len() {
             anyhow::bail!("Invalid adapter id: {}", adapter_id);

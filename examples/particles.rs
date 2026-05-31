@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputePipeline, DataAccess, DeviceType, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, TaskGraph,
-    VertexBufferLayout,
+    Buffer, Color, CommandEncoder, ComputePipeline, DataAccess, DeviceDescriptor, Instance,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -100,7 +100,11 @@ struct RenderState {
 impl RenderState {
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
-        let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
         let surface = Surface::new(&device, window.as_ref())?;
 
         // Compute shader for particle physics

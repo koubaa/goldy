@@ -3,7 +3,7 @@
 use super::super::DeviceHandle;
 use super::staging::{StagingBelt, TextureStagingPool, DEFAULT_STAGING_CHUNK_SIZE};
 use super::types::{
-    DeletionQueue, HeapAllocator, LogicalDevice, MetalState, ResourceRegistry,
+    DeletionQueue, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState, ResourceRegistry,
     TextureHeapAllocator, TimelineWaiter, ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
@@ -25,12 +25,11 @@ use mtl::{
 };
 
 /// Enumerate available Metal devices/adapters.
-pub(super) fn enumerate() -> Vec<AdapterInfo> {
-    let devices = MTLDevice::all();
-    devices
+pub(super) fn enumerate(adapters: &[MetalAdapterInfo]) -> Vec<AdapterInfo> {
+    adapters
         .iter()
-        .enumerate()
-        .map(|(idx, device)| {
+        .map(|entry| {
+            let device = &entry.device;
             let name = device.name().to_string();
             let device_type = if device.is_low_power() {
                 DeviceType::IntegratedGpu
@@ -39,7 +38,7 @@ pub(super) fn enumerate() -> Vec<AdapterInfo> {
             };
 
             AdapterInfo {
-                id: idx as u32,
+                id: entry.adapter_id,
                 name,
                 vendor: "Apple".to_string(),
                 backend: BackendType::Metal,
@@ -49,14 +48,28 @@ pub(super) fn enumerate() -> Vec<AdapterInfo> {
         .collect()
 }
 
+/// Build the public capability snapshot for a physical adapter.
+pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCapabilities {
+    crate::device::DeviceCapabilities {
+        has_zero_copy_storage_readback: true,
+        buffer_resize_cost: crate::types::BufferResizeCost::Constant,
+        buffer_page_size: 16 * 1024,
+        buffer_decommit_supported: true,
+        ..crate::device::DeviceCapabilities::default()
+    }
+}
+
 /// Create a logical device from an adapter ID.
 pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHandle> {
-    let devices = MTLDevice::all();
-    let device = devices
-        .get(adapter_id as usize)
-        .cloned()
+    let mtl_device = state
+        .adapters
+        .iter()
+        .find(|a| a.adapter_id == adapter_id)
+        .map(|a| a.device.clone())
+        .or_else(|| MTLDevice::all().get(adapter_id as usize).cloned())
         .or_else(MTLDevice::system_default)
         .context("No Metal device available")?;
+    let device = mtl_device;
 
     let command_queue = device.new_command_queue();
 

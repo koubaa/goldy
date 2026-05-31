@@ -42,6 +42,24 @@ pub(super) fn enumerate(physical_devices: &[PhysicalDeviceInfo]) -> Vec<AdapterI
         .collect()
 }
 
+/// Build the public capability snapshot for a physical adapter.
+pub(super) fn adapter_capabilities(
+    physical_devices: &[PhysicalDeviceInfo],
+    adapter_id: u32,
+) -> crate::device::DeviceCapabilities {
+    let mut caps = crate::device::DeviceCapabilities::default();
+    if physical_devices
+        .iter()
+        .find(|d| d.adapter_id == adapter_id)
+        .is_some_and(|d| d.supports_sparse_buffer)
+    {
+        caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
+        caps.buffer_page_size = 64 * 1024;
+        caps.buffer_decommit_supported = true;
+    }
+    caps
+}
+
 /// Create a logical device from a physical device adapter ID.
 #[allow(clippy::too_many_lines)]
 pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceHandle> {
@@ -72,8 +90,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             .instance
             .get_physical_device_features(physical_device_handle)
     };
-    let supports_sparse =
-        pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0;
+    let supports_sparse = physical_device.supports_sparse_buffer;
+    debug_assert_eq!(
+        supports_sparse,
+        pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0,
+        "PhysicalDeviceInfo sparse flag out of sync with live query"
+    );
 
     let available_device_exts: std::collections::HashSet<String> = unsafe {
         state
@@ -488,12 +510,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             fence_shutdown,
             fence_thread,
             pipeline_cache,
-            vk_timestamp_compute_and_graphics: physical_device
-                .properties
-                .limits
-                .timestamp_compute_and_graphics
-                != 0,
-            vk_timestamp_period_ns: physical_device.properties.limits.timestamp_period,
+            vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
+            vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,
             free_cmd_buffers: Vec::new(),
             retained_compute_cb: None,
         },

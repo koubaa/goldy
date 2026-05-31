@@ -8,9 +8,29 @@ mod common;
 
 use goldy::{
     types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
-    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, DeviceType, Instance,
-    ShaderModule, Texture,
+    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceDescriptor,
+    DeviceType, Instance, RequestAdapterOptions, ShaderModule, Texture,
 };
+
+fn request_default_device(instance: &Instance) -> Device {
+    instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("Failed to request adapter")
+        .request_device(&DeviceDescriptor::default())
+        .expect("Failed to create device")
+}
+
+fn request_device_preferring(instance: &Instance, preferred: DeviceType) -> Device {
+    let adapters = instance.enumerate_adapters();
+    let adapter = adapters
+        .iter()
+        .find(|a| a.device_type() == preferred)
+        .or(adapters.first())
+        .expect("No GPU adapters available");
+    adapter
+        .request_device(&DeviceDescriptor::default())
+        .expect("Failed to create device")
+}
 
 /// Simple compute shader that doubles each value in a buffer.
 const DOUBLE_SHADER: &str = r#"
@@ -37,10 +57,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
 #[test]
 fn test_compute_pipeline_creation() {
     let instance = Instance::new().expect("Failed to create instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("Failed to create device");
+    let device = request_default_device(&instance);
 
     let shader =
         ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
@@ -66,10 +83,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 "#;
 
     let instance = Instance::new().expect("Failed to create instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("Failed to create device");
+    let device = request_default_device(&instance);
 
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
@@ -94,10 +108,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 "#;
 
     let instance = Instance::new().expect("Failed to create instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("Failed to create device");
+    let device = request_default_device(&instance);
 
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
@@ -119,10 +130,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 #[test]
 fn test_compute_with_uav_buffer() {
     let instance = Instance::new().expect("Failed to create instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("Failed to create device");
+    let device = request_default_device(&instance);
 
     let shader =
         ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
@@ -155,10 +163,7 @@ fn test_compute_with_uav_buffer() {
 #[test]
 fn test_compute_with_srv_and_uav() {
     let instance = Instance::new().expect("Failed to create instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("Failed to create device");
+    let device = request_default_device(&instance);
 
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("Failed to compile shader");
 
@@ -223,11 +228,7 @@ void cs_main(Scattered<uint> a, Scattered<uint> b, Scattered<uint> c,
 
 /// Helper: create a device (discrete or integrated).
 fn make_device() -> goldy::Device {
-    let instance = goldy::Instance::new().expect("Failed to create instance");
-    instance
-        .create_device(goldy::DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(goldy::DeviceType::IntegratedGpu))
-        .expect("Failed to create device")
+    request_default_device(&goldy::Instance::new().expect("Failed to create instance"))
 }
 
 /// Minimal compute shader for headless / validation tests (HLSL-style entry point).
@@ -247,8 +248,8 @@ fn vk_api_validation_active_backend_is_vulkan() -> bool {
         return false;
     };
     let Ok(device) = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .request_adapter(&RequestAdapterOptions::default())
+        .and_then(|a| a.request_device(&DeviceDescriptor::default()))
     else {
         return false;
     };
@@ -291,10 +292,7 @@ fn vk_api_validation_timeline_semaphore() {
     }
 
     let instance = Instance::new().expect("instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("device");
+    let device = request_default_device(&instance);
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -340,16 +338,18 @@ fn vk_api_validation_two_device_teardown() {
 
     let i1 = Instance::new().expect("i1");
     let d1 = i1
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| i1.create_device(DeviceType::IntegratedGpu))
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("adapter d1")
+        .request_device(&DeviceDescriptor::default())
         .expect("d1");
     let _b1 = Buffer::new(&d1, 256, DataAccess::Scattered).expect("b1");
     submit_minimal(&d1);
 
     let i2 = Instance::new().expect("i2");
     let d2 = i2
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| i2.create_device(DeviceType::IntegratedGpu))
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("adapter d2")
+        .request_device(&DeviceDescriptor::default())
         .expect("d2");
     let _b2 = Buffer::new(&d2, 256, DataAccess::Scattered).expect("b2");
     submit_minimal(&d2);
@@ -475,10 +475,7 @@ fn hint_unused_above_does_not_corrupt_prefix() {
 fn device_capabilities_metal_reports_constant_resize() {
     use goldy::{types::BufferResizeCost, BackendType, Instance};
     let inst = Instance::new().expect("i");
-    let device = inst
-        .create_device(goldy::DeviceType::IntegratedGpu)
-        .or_else(|_| inst.create_device(goldy::DeviceType::DiscreteGpu))
-        .expect("dev");
+    let device = request_device_preferring(&inst, goldy::DeviceType::IntegratedGpu);
     assert_eq!(device.backend_type(), BackendType::Metal);
     let caps = device.capabilities();
     assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);
@@ -490,10 +487,7 @@ fn device_capabilities_metal_reports_constant_resize() {
 fn device_capabilities_vulkan_reports_pagebind_when_sparse() {
     use goldy::{types::BufferResizeCost, BackendType, Instance};
     let inst = Instance::new().expect("i");
-    let device = inst
-        .create_device(goldy::DeviceType::DiscreteGpu)
-        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
-        .expect("dev");
+    let device = request_device_preferring(&inst, goldy::DeviceType::DiscreteGpu);
     if device.backend_type() != BackendType::Vulkan {
         return;
     }
@@ -510,10 +504,7 @@ fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
     use goldy::{types::BufferResizeCost, BackendType, Instance};
     // With multiple backends enabled, `GOLDY_BACKEND` may select a non-DX12 API; skip in that case.
     let inst = Instance::new().expect("i");
-    let device = inst
-        .create_device(goldy::DeviceType::DiscreteGpu)
-        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
-        .expect("dev");
+    let device = request_device_preferring(&inst, goldy::DeviceType::DiscreteGpu);
     if device.backend_type() != BackendType::Dx12 {
         return;
     }
@@ -529,10 +520,7 @@ fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
 fn sparse_backend_oversize_resize_and_hint_within_capacity() {
     use goldy::{types::BufferResizeCost, Instance};
     let inst = Instance::new().expect("i");
-    let device = inst
-        .create_device(goldy::DeviceType::DiscreteGpu)
-        .or_else(|_| inst.create_device(goldy::DeviceType::IntegratedGpu))
-        .expect("dev");
+    let device = request_device_preferring(&inst, goldy::DeviceType::DiscreteGpu);
     if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
         return;
     }
@@ -566,10 +554,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 }
 "#;
     let inst = Instance::new().expect("i");
-    let device = inst
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| inst.create_device(DeviceType::IntegratedGpu))
-        .expect("dev");
+    let device = request_device_preferring(&inst, DeviceType::DiscreteGpu);
     if device.backend_type() != BackendType::Dx12 {
         return;
     }
@@ -997,10 +982,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
 "#;
 
     let instance = Instance::new().expect("Failed to create instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("Failed to create device");
+    let device = request_default_device(&instance);
 
     let shader =
         ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("Failed to compile shader");
@@ -1575,11 +1557,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 "#;
 
     let instance = Instance::new().expect("instance");
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .or_else(|_| instance.create_device(DeviceType::Other))
-        .expect("device");
+    let device = request_default_device(&instance);
 
     let shader = ShaderModule::from_slang(&device, SHADER).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -2169,11 +2147,7 @@ static STRIDE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Helper: create a device for stride-validation tests.
 fn make_device_for_stride_tests() -> goldy::Device {
-    let instance = Instance::new().expect("instance");
-    instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .expect("device")
+    request_default_device(&Instance::new().expect("instance"))
 }
 
 /// Shader that reads from a `Scattered<uint>` buffer (element stride 4).

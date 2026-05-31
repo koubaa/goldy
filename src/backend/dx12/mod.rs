@@ -258,10 +258,13 @@ impl Dx12Backend {
                             .to_string();
                         tracing::info!("  [{}] {}", adapter_index, name);
 
+                        let supports_reserved_buffers =
+                            device::query_supports_reserved_buffers(&adapter);
                         adapters.push(DxgiAdapterInfo {
                             adapter,
                             desc,
                             adapter_id: adapter_index,
+                            supports_reserved_buffers,
                         });
                     }
                     adapter_index += 1;
@@ -283,10 +286,13 @@ impl Dx12Backend {
                                 .trim_end_matches('\0')
                                 .to_string();
                             tracing::info!("  [{}] {} (WARP)", WARP_ADAPTER_ID, name);
+                            let supports_reserved_buffers =
+                                device::query_supports_reserved_buffers(&adapter);
                             adapters.push(DxgiAdapterInfo {
                                 adapter,
                                 desc,
                                 adapter_id: WARP_ADAPTER_ID,
+                                supports_reserved_buffers,
                             });
                         }
                         Err(e) => tracing::warn!("WARP GetDesc1 failed: {:?}", e),
@@ -499,6 +505,10 @@ impl GpuBackend for Dx12Backend {
         device::enumerate(&self.state.adapters)
     }
 
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+        device::adapter_capabilities(&self.state.adapters, adapter_id)
+    }
+
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
         device::create(&mut self.state, adapter_id)
     }
@@ -633,21 +643,13 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
-        let mut caps = crate::device::DeviceCapabilities {
-            has_zero_copy_storage_readback: false,
-            ..Default::default()
-        };
-        if self
+        let adapter_id = self
             .state
             .devices
             .get(&device)
-            .is_some_and(|d| d.supports_reserved_buffers && !env_disable_reserved_buffers())
-        {
-            caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
-            caps.buffer_page_size = 64 * 1024;
-            caps.buffer_decommit_supported = true;
-        }
-        caps
+            .map(|d| d.adapter_id)
+            .unwrap_or(0);
+        self.adapter_capabilities(adapter_id)
     }
 
     fn clear_buffer(

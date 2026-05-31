@@ -87,14 +87,20 @@ fn make_device() -> goldy::Device {
     if std::env::var("GOLDY_DX12_ALLOW_WARP")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     {
-        if let Ok(dev) = instance.create_device_for_adapter(goldy::WARP_ADAPTER_ID) {
-            return dev;
+        if let Ok(adapter) = instance.request_adapter(&goldy::RequestAdapterOptions {
+            power_preference: goldy::PowerPreference::None,
+            force_fallback_adapter: true,
+        }) {
+            if let Ok(dev) = adapter.request_device(&goldy::DeviceDescriptor::default()) {
+                return dev;
+            }
         }
     }
 
     instance
-        .create_device(goldy::DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(goldy::DeviceType::IntegratedGpu))
+        .request_adapter(&goldy::RequestAdapterOptions::default())
+        .expect("Failed to request adapter")
+        .request_device(&goldy::DeviceDescriptor::default())
         .expect("Failed to create device")
 }
 

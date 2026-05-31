@@ -2,14 +2,18 @@
 
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DataAccess,
-    DepthFormat, DepthStencilState, Device, DeviceType, Instance, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule, TextureFormat, Vertex2D,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    DepthFormat, DepthStencilState, Device, DeviceDescriptor, Instance, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
+    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 pub fn create_device() -> Option<Device> {
     let instance = Instance::new().ok()?;
-    instance.create_device(DeviceType::DiscreteGpu).ok()
+    instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .ok()?
+        .request_device(&DeviceDescriptor::default())
+        .ok()
 }
 
 pub fn render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u8> {

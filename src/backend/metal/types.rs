@@ -1198,9 +1198,17 @@ pub(crate) struct SurfaceState {
 unsafe impl Send for SurfaceState {}
 unsafe impl Sync for SurfaceState {}
 
+/// Physical Metal GPU adapter (the `MTLDevice` is both adapter and device substrate).
+pub(crate) struct MetalAdapterInfo {
+    pub device: mtl::Device,
+    pub adapter_id: u32,
+}
+
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
+    /// Physical adapters discovered at backend init.
+    pub adapters: Vec<MetalAdapterInfo>,
     /// Set once any GPU wait has timed out (the GPU has wedged in a compute
     /// shader without the driver watchdog noticing). Subsequent waits fail
     /// fast instead of burning the full timeout budget per frame, letting

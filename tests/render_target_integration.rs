@@ -7,14 +7,18 @@ mod common;
 
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
-    DeviceType, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    DeviceDescriptor, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, RequestAdapterOptions, ShaderModule, TextureFormat, Vertex2D, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 
 fn create_device() -> Option<goldy::Device> {
     let instance = Instance::new().ok()?;
-    instance.create_device(DeviceType::DiscreteGpu).ok()
+    instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .ok()?
+        .request_device(&DeviceDescriptor::default())
+        .ok()
 }
 
 #[test]

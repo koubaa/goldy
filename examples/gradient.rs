@@ -9,8 +9,9 @@
 //! `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient`
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, LayoutCheckable,
-    RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, VertexBufferLayout,
+    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance,
+    LayoutCheckable, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule,
+    Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -57,7 +58,11 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            self.instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
         let surface = Surface::new(&device, window.as_ref())?;
         let shader = ShaderModule::from_slang_with_options(
             &device,

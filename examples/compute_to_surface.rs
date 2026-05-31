@@ -8,8 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, ComputePipeline, DataAccess, DeviceType, Instance, PresentMode,
-    ShaderModule, Surface, SurfaceConfig, TaskGraph,
+    task_graph::NodeAccess, Buffer, ComputePipeline, DataAccess, DeviceDescriptor, Instance,
+    PresentMode, RequestAdapterOptions, ShaderModule, Surface, SurfaceConfig, TaskGraph,
+    SWAPCHAIN_SLOT_PLACEHOLDER,
 };
 use std::sync::Arc;
 use winit::{
@@ -107,7 +108,11 @@ struct RenderState {
 impl App {
     fn init(&mut self, window: Arc<Window>) -> Result<()> {
         let instance = Instance::new()?;
-        let device = Arc::new(instance.create_device(DeviceType::DiscreteGpu)?);
+        let device = Arc::new(
+            instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
 
         let surface = Surface::new_with_config(
             &device,
@@ -254,11 +259,10 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         }),
     )?;
 
-    // Acquire the surface frame and get its texture
+    // Acquire the surface frame; swapchain UAV is resolved at submit time.
     let frame = state.surface.begin()?;
-    let texture = frame.texture();
 
-    // Dispatch the compute shader to write directly to the surface texture
+    // Dispatch the compute shader to write directly to the swapchain texture.
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
@@ -270,17 +274,17 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         .uniform_buffer
         .bindless_srv_handle()
         .expect("Uniform buffer has no bindless SRV handle");
-    let texture_handle = texture
-        .bindless_handle()
-        .expect("Surface texture has no bindless handle");
 
     let mut graph = TaskGraph::new();
+    let swapchain = graph.declare_swapchain_output();
     graph
         .node("compute", &state.compute_pipeline)
         .bind_buffer(&state.uniform_buffer, NodeAccess::Read)
-        .bind_resources_raw_slice(&[uniform_handle.index(), texture_handle.index()])
+        .bind_swapchain_output(swapchain, NodeAccess::Write)
+        .bind_resources_raw_slice(&[uniform_handle.index(), SWAPCHAIN_SLOT_PLACEHOLDER])
         .dispatch(wg_x, wg_y, 1);
-    frame.submit_compute(&graph)?;
+
+    let frame = state.surface.submit_graph_to_frame(&mut graph, frame)?;
 
     // Present — the compute shader already wrote the pixels
     frame.present()?;

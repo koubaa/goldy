@@ -8,8 +8,9 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceType, Instance, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
+    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 
 // Plasma shader that reads time from vertex attribute (compatible with QuadVertex)
@@ -447,7 +448,11 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Initialize device if needed
         if self.device.is_none() {
-            match self.instance.create_device(DeviceType::DiscreteGpu) {
+            match self
+                .instance
+                .request_adapter(&RequestAdapterOptions::default())
+                .and_then(|a| a.request_device(&DeviceDescriptor::default()))
+            {
                 Ok(device) => self.device = Some(Arc::new(device)),
                 Err(e) => {
                     tracing::error!("Failed to create device: {}", e);

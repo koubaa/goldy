@@ -286,6 +286,11 @@ pub(crate) struct PhysicalDeviceInfo {
     pub handle: vk::PhysicalDevice,
     pub properties: vk::PhysicalDeviceProperties,
     pub adapter_id: u32,
+    /// From physical-device features at enumeration (immutable for this adapter).
+    pub supports_sparse_buffer: bool,
+    /// From [`vk::PhysicalDeviceLimits::timestamp_compute_and_graphics`].
+    pub vk_timestamp_compute_and_graphics: bool,
+    pub vk_timestamp_period_ns: f32,
 }
 
 /// A logical Vulkan device with associated resources.
