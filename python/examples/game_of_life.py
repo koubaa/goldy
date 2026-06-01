@@ -87,7 +87,7 @@ def main():
 
     # Create Goldy device and surface
     instance = goldy.Instance()
-    device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+    device = instance.request_adapter().request_device()
     surface = goldy.Surface.from_glfw(device, window)
 
     # Load shaders

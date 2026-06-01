@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 ///     >>> window = glfw.create_window(800, 600, "Goldy", None, None)
 ///     >>>
 ///     >>> instance = goldy.Instance()
-///     >>> device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+///     >>> device = instance.request_adapter().request_device()
 ///     >>> surface = goldy.Surface.from_glfw(device, window)
 ///     >>>
 ///     >>> while not glfw.window_should_close(window):

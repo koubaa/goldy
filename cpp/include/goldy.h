@@ -522,15 +522,6 @@ enum GoldyBackendType goldy_instance_backend_type(const struct GoldyInstance *in
 // Call `goldy_get_last_error()` to get the error message.
 struct GoldyInstance *goldy_instance_create(void);
 
-// Create a device with a preferred device type.
-//
-// Returns a pointer to the device, or null on failure.
-//
-// # Safety
-// The instance pointer must be valid.
-struct GoldyDevice *goldy_instance_create_device(const struct GoldyInstance *instance,
-                                                 enum GoldyDeviceType preferred_type);
-
 // Create a device for a specific adapter ID.
 //
 // Returns a pointer to the device, or null on failure.

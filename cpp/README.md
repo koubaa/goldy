@@ -16,7 +16,7 @@ C and C++ bindings for the Goldy GPU library.
 int main() {
     // Create instance and device
     goldy::Instance instance;
-    goldy::Device device = instance.create_device(GoldyDeviceType::DiscreteGpu);
+    goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
     
     // Create render target
     goldy::RenderTarget target(device, 800, 600);
@@ -150,7 +150,9 @@ if (!instance) {
     // handle error
 }
 
-GoldyDevice* device = goldy_instance_create_device(instance, DiscreteGpu);
+GoldyAdapterInfo info = {};
+goldy_instance_get_adapter(instance, 0, &info);
+GoldyDevice* device = goldy_instance_create_device_for_adapter(instance, info.id);
 // ...
 
 goldy_device_destroy(device);

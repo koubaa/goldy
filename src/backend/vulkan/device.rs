@@ -54,7 +54,7 @@ pub(super) fn adapter_capabilities(
         .is_some_and(|d| d.supports_sparse_buffer)
     {
         caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
-        caps.buffer_page_size = 64 * 1024;
+        caps.buffer_page_size = 64 * 1024; // 64 KiB — universal sparse granularity; asserted in device::create
         caps.buffer_decommit_supported = true;
     }
     caps
@@ -287,6 +287,13 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     } else {
         (0u64, 0u32, None)
     };
+    if supports_sparse {
+        debug_assert_eq!(
+            sparse_buffer_block_size,
+            64 * 1024,
+            "sparse_buffer_block_size deviates from the 64 KiB assumed by DeviceCapabilities::buffer_page_size"
+        );
+    }
 
     // Load Vulkan 1.4 core APIs via KHR extension loaders (ash 0.38 predates 1.4 headers).
     // On a 1.4 device these functions are core — the KHR entry points are aliases.

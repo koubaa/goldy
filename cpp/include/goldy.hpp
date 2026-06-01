@@ -10,7 +10,8 @@
  *   #include <goldy.hpp>
  *
  *   goldy::Instance instance;
- *   goldy::Device device = instance.create_device(GOLDY_DEVICE_TYPE_DISCRETE_GPU);
+ *   auto adapters = instance.enumerate_adapters();
+ *   goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
  *   goldy::RenderTarget target(device, 800, 600);
  *   // ...
  */
@@ -258,13 +259,6 @@ public:
     }
 
     /**
-     * @brief Create a device with preferred type.
-     * @param preferred_type The preferred GPU type (discrete, integrated, etc.)
-     * @throws Exception if device creation fails.
-     */
-    Device create_device(GoldyDeviceType preferred_type = GOLDY_DEVICE_TYPE_DISCRETE_GPU);
-
-    /**
      * @brief Create a device for a specific adapter.
      * @param adapter_id The adapter ID from enumerate_adapters().
      * @throws Exception if device creation fails.
@@ -332,14 +326,6 @@ private:
 };
 
 // Instance methods that return Device
-inline Device Instance::create_device(GoldyDeviceType preferred_type) {
-    GoldyDevice* ptr = goldy_instance_create_device(ptr_.get(), preferred_type);
-    if (!ptr) {
-        throw Exception::from_last_error();
-    }
-    return Device(ptr);
-}
-
 inline Device Instance::create_device_for_adapter(uint32_t adapter_id) {
     GoldyDevice* ptr = goldy_instance_create_device_for_adapter(ptr_.get(), adapter_id);
     if (!ptr) {

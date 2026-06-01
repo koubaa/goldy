@@ -2,34 +2,10 @@
 
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
-use crate::types::{GoldyAdapterInfo, GoldyBackendType, GoldyDeviceType};
+use crate::types::{GoldyAdapterInfo, GoldyBackendType};
 use anyhow::Context;
-use goldy::{DeviceDescriptor, DeviceType};
+use goldy::DeviceDescriptor;
 use std::ptr;
-
-fn device_from_preferred_type(
-    instance: &goldy::Instance,
-    preferred_type: DeviceType,
-) -> anyhow::Result<goldy::Device> {
-    #[cfg(all(feature = "dx12", target_os = "windows"))]
-    {
-        if instance.backend_type() == goldy::BackendType::Dx12
-            && std::env::var("GOLDY_DX12_FORCE_WARP")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        {
-            return device_for_adapter(instance, goldy::WARP_ADAPTER_ID);
-        }
-    }
-
-    let adapters = instance.enumerate_adapters();
-    let adapter = adapters
-        .iter()
-        .find(|a| a.device_type() == preferred_type)
-        .or(adapters.first())
-        .context("No GPU adapters available")?;
-    adapter.request_device(&DeviceDescriptor::default())
-}
 
 fn device_for_adapter(
     instance: &goldy::Instance,
@@ -122,31 +98,6 @@ pub unsafe extern "C" fn goldy_instance_get_adapter(
 
     *info = GoldyAdapterInfo::from_adapter(&adapters[index as usize]);
     GoldyResult::Ok
-}
-
-/// Create a device with a preferred device type.
-///
-/// Returns a pointer to the device, or null on failure.
-///
-/// # Safety
-/// The instance pointer must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_instance_create_device(
-    instance: *const GoldyInstance,
-    preferred_type: GoldyDeviceType,
-) -> *mut GoldyDevice {
-    if instance.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("Instance is null"));
-        return ptr::null_mut();
-    }
-
-    match device_from_preferred_type(&(*instance).inner, preferred_type.into()) {
-        Ok(device) => Box::into_raw(Box::new(GoldyDevice { inner: device })),
-        Err(e) => {
-            set_last_error_from_anyhow(&e);
-            ptr::null_mut()
-        }
-    }
 }
 
 /// Create a device for a specific adapter ID.

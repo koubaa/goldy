@@ -96,7 +96,7 @@ static class Triangle
         foreach (var adapter in adapters)
             Console.WriteLine($"  [{adapter.Id}] {adapter.Name} ({adapter.DeviceType})");
 
-        _device = _instance.CreateDevice(DeviceType.DiscreteGpu);
+        _device = _instance.RequestAdapter().RequestDevice();
         Console.WriteLine($"Using adapter {_device.AdapterId}");
 
         // Get native window handle
