@@ -18,6 +18,9 @@ use goldy::task_graph::TaskGraph;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{Buffer, DataAccess, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
+mod common;
+use common::submission_context;
+
 fn make_device() -> Device {
     let instance = Instance::new().expect("Instance::new");
     instance
@@ -98,13 +101,14 @@ fn gpu_only_buffer_does_not_use_heap() {
 #[test]
 fn buffer_drop_frees_heap_space_after_flush() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Submit trivial work so timeline advances.
     let mut graph = TaskGraph::new();
     let setup_buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&setup_buf, 0, 256);
     let tv = device.submit_pipelined(&mut graph).unwrap();
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
 
     // Allocate a large buffer to create overflow.
     let alloc_size = 32 * 1024 * 1024u64;
@@ -133,7 +137,7 @@ fn buffer_drop_frees_heap_space_after_flush() {
     let mut graph2 = TaskGraph::new();
     graph2.clear_buffer(&setup_buf, 0, 256);
     let tv2 = device.submit_pipelined(&mut graph2).unwrap();
-    device.wait_until(tv2).unwrap();
+    ctx.wait_until(tv2).unwrap();
     device.flush_deferred_deletions();
     device.compact_overflow_heaps();
 
@@ -225,6 +229,7 @@ fn compact_overflow_removes_empty_heaps() {
 #[test]
 fn allocation_survives_heap_pressure_with_gpu_work() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let alloc_size = 4 * 1024 * 1024u64;
 
     // Submit some trivial GPU work so we have a timeline and in-flight CBs.
@@ -256,7 +261,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
     // Now allocate more buffers. The heap may be under pressure, but the
     // self-regulation logic should wait for tv to retire, flush, and succeed.
     // First, make sure the GPU has completed (wait).
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
     device.flush_deferred_deletions();
 
     // Now allocating should succeed because we reclaimed the deferred buffers.
@@ -323,6 +328,7 @@ fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
 #[test]
 fn steady_state_overflow_stays_bounded() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let alloc_size = 1024 * 1024u64;
     let warmup_frames = 10;
     let steady_frames = 30;
@@ -352,7 +358,7 @@ fn steady_state_overflow_stays_bounded() {
             payload.push(b);
         }
         device.defer_release(tv, payload);
-        device.wait_until(tv).unwrap();
+        ctx.wait_until(tv).unwrap();
         device.flush_deferred_deletions();
         device.flush_deferred_deletions();
     }
@@ -387,7 +393,7 @@ fn steady_state_overflow_stays_bounded() {
             payload.push(b);
         }
         device.defer_release(tv, payload);
-        device.wait_until(tv).unwrap();
+        ctx.wait_until(tv).unwrap();
         device.flush_deferred_deletions();
         device.flush_deferred_deletions();
         device.compact_overflow_heaps();
@@ -462,6 +468,7 @@ fn many_textures_create_overflow_then_compact() {
 #[test]
 fn texture_allocation_survives_pressure_with_gpu_work() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Submit trivial GPU work.
     let mut graph = TaskGraph::new();
@@ -486,7 +493,7 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
     device.defer_release(tv, payload);
 
     // Wait and flush.
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
     device.flush_deferred_deletions();
 
     // Should succeed now.
@@ -508,6 +515,7 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
 #[test]
 fn flush_deferred_deletions_advances_with_gpu_progress() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Submit 3 frames worth of work.
     let mut timelines = Vec::new();
@@ -524,7 +532,7 @@ fn flush_deferred_deletions_advances_with_gpu_progress() {
     let oldest_before = device.oldest_deferred_epoch().unwrap();
 
     // Wait for the first frame and flush.
-    device.wait_until(timelines[0]).unwrap();
+    ctx.wait_until(timelines[0]).unwrap();
     device.flush_deferred_deletions();
 
     let oldest_after = device.oldest_deferred_epoch();
@@ -546,6 +554,7 @@ fn oldest_deferred_epoch_is_none_when_empty() {
 #[test]
 fn wait_and_flush_reclaims_all_deferred() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
@@ -555,7 +564,7 @@ fn wait_and_flush_reclaims_all_deferred() {
     device.defer_until(tv, buf);
     assert!(device.has_deferred_payloads());
 
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
     device.flush_deferred_deletions();
 
     assert!(!device.has_deferred_payloads());
@@ -586,6 +595,7 @@ fn in_flight_cb_count_increases_after_submit() {
 #[test]
 fn in_flight_cbs_drain_after_wait() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
@@ -595,7 +605,7 @@ fn in_flight_cbs_drain_after_wait() {
     let before = device.in_flight_command_buffer_count();
     assert!(before > 0);
 
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
 
     let after = device.in_flight_command_buffer_count();
     assert!(
@@ -611,15 +621,16 @@ fn in_flight_cbs_drain_after_wait() {
 #[test]
 fn gpu_progress_advances_after_wait() {
     let device = make_device();
-    let initial = device.gpu_progress();
+    let ctx = submission_context(&device);
+    let initial = ctx.gpu_progress();
 
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = device.submit_pipelined(&mut graph).unwrap();
 
-    device.wait_until(tv).unwrap();
-    let after = device.gpu_progress();
+    ctx.wait_until(tv).unwrap();
+    let after = ctx.gpu_progress();
     assert!(
         after >= tv,
         "gpu_progress should reach submitted timeline value: initial={initial} tv={tv} after={after}"
@@ -668,6 +679,7 @@ fn deletion_queue_populated_after_buffer_drop() {
 #[test]
 fn deletion_queue_drains_after_flush() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
@@ -678,7 +690,7 @@ fn deletion_queue_drains_after_flush() {
     drop(extra);
 
     let pending = device.deferred_deletion_pending_count();
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
     device.flush_deferred_deletions();
     let after = device.deferred_deletion_pending_count();
 
@@ -861,6 +873,7 @@ fn mixed_buffer_and_texture_allocation_survives_30_frames() {
 #[test]
 fn buffer_resize_works_under_heap_pressure() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Allocate a buffer, submit work so it has a timeline.
     let mut buf = Buffer::new(&device, 1024, DataAccess::Scattered).unwrap();
@@ -868,7 +881,7 @@ fn buffer_resize_works_under_heap_pressure() {
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&buf, 0, 1024);
     let tv = device.submit_pipelined(&mut graph).unwrap();
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
 
     // Resize multiple times (triggers realloc + blit-copy on Metal).
     for size in [4096u64, 16384, 65536, 262144] {
@@ -882,6 +895,7 @@ fn buffer_resize_works_under_heap_pressure() {
 #[test]
 fn buffer_resize_preserves_contents() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let initial_data: Vec<u32> = (0..64).collect();
     let mut buf = Buffer::with_data(&device, &initial_data, DataAccess::Scattered).unwrap();
 
@@ -894,7 +908,7 @@ fn buffer_resize_preserves_contents() {
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&buf, 256, 256); // Touch bytes past the original data
     let tv = device.submit_pipelined(&mut graph).unwrap();
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
 
     // Read back — first 256 bytes should be preserved.
     let mut readback = vec![0u8; 256];
@@ -912,6 +926,7 @@ fn deferred_buffers_returned_to_caller_after_flush() {
     use std::sync::{Arc, Mutex};
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let pending: Arc<Mutex<Vec<Buffer>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Simulate ekrano's DeferredOwnedBuffersToken pattern.
@@ -947,7 +962,7 @@ fn deferred_buffers_returned_to_caller_after_flush() {
     assert_eq!(pending.lock().unwrap().len(), 0);
 
     // Wait and flush: token drops, buffers move to pending.
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
     device.flush_deferred_deletions();
 
     let returned = pending.lock().unwrap().len();
@@ -972,13 +987,14 @@ fn zero_byte_flush_is_no_op() {
 #[test]
 fn double_flush_is_idempotent() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = device.submit_pipelined(&mut graph).unwrap();
     device.defer_until(tv, buf);
 
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
     device.flush_deferred_deletions();
     // Second flush should be safe and not crash.
     device.flush_deferred_deletions();
@@ -988,8 +1004,9 @@ fn double_flush_is_idempotent() {
 #[test]
 fn wait_until_timeout_returns_error_on_far_future() {
     let device = make_device();
+    let ctx = submission_context(&device);
     // Waiting for a timeline value nobody submitted should timeout.
-    let result = device.wait_until_timeout(u64::MAX / 2, 10);
+    let result = ctx.wait_until_timeout(u64::MAX / 2, 10);
     // Should either succeed (if GPU is actually idle at that value) or timeout.
     // On a fresh device with no work, timeline is 0 so this should timeout.
     assert!(

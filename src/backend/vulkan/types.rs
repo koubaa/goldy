@@ -563,6 +563,11 @@ pub(crate) struct FrameSync {
     pub work_done_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
+    /// True when `in_flight_fence` has been submitted to the queue and not yet waited on.
+    /// Only the render (graphics) path submits this fence; the compute path does not.
+    /// `acquire()` must check this before calling `wait_for_fences` to avoid hanging
+    /// when the slot was last used via the compute path.
+    pub fence_pending: bool,
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
     /// presentation uses the scratch-texture copy path in `present` instead (see
     /// `surface::present`).

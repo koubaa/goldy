@@ -6,6 +6,7 @@
 
 mod common;
 
+use common::submission_context;
 use goldy::{
     types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
     Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceDescriptor,
@@ -293,6 +294,7 @@ fn vk_api_validation_timeline_semaphore() {
 
     let instance = Instance::new().expect("instance");
     let device = request_default_device(&instance);
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -308,7 +310,7 @@ fn vk_api_validation_timeline_semaphore() {
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
     drop(buf);
 
-    device.wait_until(tv).expect("wait_until");
+    ctx.wait_until(tv).expect("wait_until");
 }
 
 /// Vulkan validation layer regression: per-device resource teardown (no cross-device pool key bugs).
@@ -1666,6 +1668,7 @@ fn test_write_buffer_reuse_across_submissions() {
     use goldy::{NodeAccess, TaskGraph};
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -1715,8 +1718,8 @@ fn test_write_buffer_reuse_across_submissions() {
     let tv1 = g1.submit(&device).expect("submit 1");
     let tv2 = g2.submit(&device).expect("submit 2");
 
-    device.wait_until(tv1).expect("wait 1");
-    device.wait_until(tv2).expect("wait 2");
+    ctx.wait_until(tv1).expect("wait 1");
+    ctx.wait_until(tv2).expect("wait 2");
 
     let read_u32 = |buf: &Buffer| -> Vec<u32> {
         let mut raw = vec![0u8; N * core::mem::size_of::<u32>()];
@@ -2032,6 +2035,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
@@ -2054,7 +2058,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         "expected deferred deletion queue to retain GPU resources until the timeline catches up"
     );
 
-    device.wait_until(tv).expect("wait_until");
+    ctx.wait_until(tv).expect("wait_until");
 
     assert_eq!(
         device.deferred_deletion_pending_count(),
@@ -2070,6 +2074,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 #[test]
 fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Allocate, submit some work, then drop the buffer so its slot enters
     // the pending-free list.
@@ -2078,7 +2083,7 @@ fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
         let encoder = ComputeEncoder::new();
         encoder.submit(&device).expect("submit empty work")
     };
-    device.wait_until(tv).expect("wait");
+    ctx.wait_until(tv).expect("wait");
 
     // Drop happens *after* wait_until, so the GPU is idle but the slot may
     // still be in the pending list depending on when the backend last ran
@@ -2098,6 +2103,7 @@ fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
 #[test]
 fn flush_deferred_deletions_respects_gpu_progress() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Submit work so the timeline advances past zero.
     let tv = {
@@ -2114,7 +2120,7 @@ fn flush_deferred_deletions_respects_gpu_progress() {
     device.flush_deferred_deletions();
 
     // After waiting, flushing again must fully drain the queue.
-    device.wait_until(tv).expect("wait");
+    ctx.wait_until(tv).expect("wait");
     device.flush_deferred_deletions();
 
     assert_eq!(
@@ -2414,6 +2420,7 @@ fn transient_allocator_strategy_default_and_parse() {
 #[test]
 fn bump_reset_blocks_on_prev_epoch() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let mut a = BumpResetAllocator::new(&device, small_config()).expect("create");
 
     a.begin_frame(&device, 0).expect("begin");
@@ -2425,7 +2432,7 @@ fn bump_reset_blocks_on_prev_epoch() {
     // gpu_progress must be at least tv.
     a.begin_frame(&device, 0).expect("begin 2");
     assert!(
-        device.gpu_progress() >= tv,
+        ctx.gpu_progress() >= tv,
         "BumpReset must not allow reuse until prev epoch has been signaled"
     );
 }
@@ -2435,6 +2442,7 @@ fn bump_reset_blocks_on_prev_epoch() {
 #[test]
 fn transient_allocator_clear_resets_state() {
     let device = make_device();
+    let ctx = submission_context(&device);
     for strategy in [
         TransientAllocatorStrategy::BumpReset,
         TransientAllocatorStrategy::Heap,
@@ -2446,7 +2454,7 @@ fn transient_allocator_clear_resets_state() {
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
         let tv = ComputeEncoder::new().submit(&device).expect("submit");
         a.end_frame(&device, tv);
-        device.wait_until(tv).expect("wait");
+        ctx.wait_until(tv).expect("wait");
         a.clear();
         // After clear, used_this_frame should be zero and we can begin a new frame.
         assert_eq!(a.used_this_frame(), 0);

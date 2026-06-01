@@ -29,7 +29,7 @@
 //!
 //! # Comparison with blocking
 //!
-//! Without `GpuGuard`, safe resource cleanup requires `device.wait_until(tv)` before
+//! Without `GpuGuard`, safe resource cleanup requires `context.wait_until(tv)` before
 //! dropping — which stalls the CPU. `GpuGuard` defers the drop to the next
 //! [`flush_deferred_deletions`](crate::device::Device::flush_deferred_deletions) call
 //! once the timeline has naturally advanced, keeping the CPU–GPU pipeline full.
@@ -61,7 +61,7 @@ impl GpuGuard {
     /// Create a new guard tied to `device` and `epoch`.
     ///
     /// Resources added via [`hold`](Self::hold) will not be dropped until
-    /// `device.gpu_progress() >= epoch`.
+    /// `context.gpu_progress() >= epoch`.
     pub fn new(device: &Device, epoch: TimelineValue) -> Self {
         Self {
             device: device.clone(),
@@ -183,7 +183,7 @@ mod tests {
         drop(guard);
 
         // Advance GPU to tv and flush — resource must be dropped.
-        device.wait_until(tv).unwrap();
+        device.wait_until_impl(tv).unwrap();
         device.flush_deferred_deletions();
         assert!(
             weak.upgrade().is_none(),
@@ -215,7 +215,7 @@ mod tests {
         drop(guard_future);
 
         // Advance to tv — past guard's resource should be reclaimed, future's should not.
-        device.wait_until(tv).unwrap();
+        device.wait_until_impl(tv).unwrap();
         device.flush_deferred_deletions();
         assert!(
             weak_past.upgrade().is_none(),
@@ -227,7 +227,7 @@ mod tests {
         );
 
         // Advance to tv_future — future guard's resource should now be reclaimed.
-        device.wait_until(tv_future).unwrap();
+        device.wait_until_impl(tv_future).unwrap();
         device.flush_deferred_deletions();
         assert!(
             weak_future.upgrade().is_none(),
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(guard.resource_count(), 2);
         drop(guard);
 
-        device.wait_until(tv).unwrap();
+        device.wait_until_impl(tv).unwrap();
         device.flush_deferred_deletions();
         assert!(weak.upgrade().is_none());
     }

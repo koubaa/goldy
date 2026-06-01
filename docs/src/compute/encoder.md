@@ -120,11 +120,12 @@ encoder.dispatch(&device)?;
 **Non-blocking** — submit and get a `TimelineValue` for later synchronization:
 
 ```rust
+let ctx = device.create_context();
 let tv = encoder.submit(&device)?;
 
 // CPU work while GPU is busy...
 
-device.wait_until(tv)?;
+ctx.wait_until(tv)?;
 ```
 
 See [Device Timeline](./timeline.md) for more on `TimelineValue` and `gpu_progress`.

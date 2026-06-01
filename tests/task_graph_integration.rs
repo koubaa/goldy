@@ -10,6 +10,9 @@ use goldy::{
     Buffer, ComputeEncoder, ComputePipeline, DataAccess, NodeAccess, ShaderModule, TaskGraph,
 };
 
+mod common;
+use common::submission_context;
+
 /// Doubles each element: out[i] = in[i] * 2
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
@@ -356,6 +359,7 @@ fn graph_matches_encoder() {
 #[test]
 fn graph_nonblocking_submit() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let fill_shader = ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap();
     let pipe = ComputePipeline::new(&device, &fill_shader).unwrap();
@@ -371,7 +375,7 @@ fn graph_nonblocking_submit() {
         .dispatch(1, 1, 1);
 
     let tv = graph.submit(&device).unwrap();
-    device.wait_until(tv).unwrap();
+    ctx.wait_until(tv).unwrap();
 
     let result = readback_u32(&device, &buf, 64);
     for &v in &result {
@@ -632,6 +636,7 @@ fn stress_clear_write_dispatch_chain() {
 #[test]
 fn stress_two_phase_submission() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let double_shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap();
     let add_shader = ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap();
@@ -657,7 +662,7 @@ fn stress_two_phase_submission() {
             .bind_resources_raw_slice(&[buf_idx, tmp_idx])
             .dispatch((N / 64) as u32, 1, 1);
         let tv = graph.submit(&device).unwrap();
-        device.wait_until(tv).unwrap();
+        ctx.wait_until(tv).unwrap();
     }
 
     // Phase 2: add 10 to the doubled values.
@@ -686,6 +691,7 @@ fn stress_two_phase_submission() {
 #[test]
 fn stress_rapid_submissions() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let add_shader = ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap();
     let add_pipe = ComputePipeline::new(&device, &add_shader).unwrap();
@@ -707,7 +713,7 @@ fn stress_rapid_submissions() {
         last_tv = Some(graph.submit(&device).unwrap());
     }
 
-    device.wait_until(last_tv.unwrap()).unwrap();
+    ctx.wait_until(last_tv.unwrap()).unwrap();
 
     let result = readback_u32(&device, &buf, N);
     let expected = ROUNDS * 10;

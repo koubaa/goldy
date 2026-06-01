@@ -743,15 +743,23 @@ impl Device {
         signals
     }
 
+    /// Create a submission/timeline context bound to this device.
+    ///
+    /// The context holds an `Arc` clone of the device substrate, so the device
+    /// outlives the context. Timeline read/wait APIs live on [`Context`].
+    pub fn create_context(&self) -> crate::context::Context {
+        crate::context::Context::new(self.clone())
+    }
+
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
-    pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
+    pub(crate) fn peek_oldest_in_flight_impl(&self) -> Option<TimelineValue> {
         let backend = self.inner.backend.lock().unwrap();
         backend.peek_oldest_in_flight(self.inner.handle)
     }
 
-    /// Latest GPU completion counter on this device's timeline (`wait_until(value)` is valid once
-    /// `gpu_progress() >= value`).
-    pub fn gpu_progress(&self) -> TimelineValue {
+    /// Latest GPU completion counter on this device's timeline (`Context::wait_until(value)` is valid once
+    /// `Context::gpu_progress() >= value`).
+    pub(crate) fn gpu_progress_impl(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("device.gpu_progress");
         let backend = {
             let _lock = crate::tracy_zone!("device.gpu_progress.lock");
@@ -791,7 +799,7 @@ impl Device {
     }
 
     /// Block until the device timeline reaches at least `value`.
-    pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
+    pub(crate) fn wait_until_impl(&self, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("device.wait_until");
         let mut backend = {
             let _lock = crate::tracy_zone!("device.wait_until.lock");
@@ -804,8 +812,8 @@ impl Device {
         })
     }
 
-    /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
-    pub fn wait_until_timeout(
+    /// Like [`Context::wait_until`](crate::Context::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
+    pub(crate) fn wait_until_timeout_impl(
         &self,
         value: TimelineValue,
         timeout_ms: u32,
@@ -852,7 +860,7 @@ impl Device {
     ///
     /// `epoch` is the retirement horizon: the VRAM deferred ring drops payloads whose
     /// registered epoch is `<= epoch`. Callers typically pass either
-    /// [`gpu_progress`](Self::gpu_progress) (pull) or a `Signal::BoundaryCrossed { epoch }`
+    /// [`Context::gpu_progress`](crate::Context::gpu_progress) (pull) or a `Signal::BoundaryCrossed { epoch }`
     /// value (push notification). Calling this twice for the same epoch is safe: already-
     /// reclaimed payloads are not dropped again.
     ///
@@ -910,26 +918,26 @@ impl Device {
     /// rather than waiting for the next internal call.
     ///
     /// Pull-side wrapper around [`boundary_crossed`](Self::boundary_crossed) using the
-    /// authoritative latest retired epoch from [`gpu_progress`](Self::gpu_progress).
+    /// authoritative latest retired epoch from [`Context::gpu_progress`](crate::Context::gpu_progress).
     ///
     /// Drives device-owned epoch-based reclamation via [`boundary_crossed`](Self::boundary_crossed):
     /// the VRAM deferred ring drops [`DeferredPayload`]s registered via [`defer_release`]
     /// (including evicted placement-heap views/textures), and the placement-heap ring
     /// reclaims retired regions. Transient allocators (`BumpResetAllocator`,
     /// `HeapTransientAllocator`) self-service by comparing stored epochs to
-    /// [`gpu_progress`](Self::gpu_progress) at `begin_frame`.
+    /// [`Context::gpu_progress`](crate::Context::gpu_progress) at `begin_frame`.
     ///
     /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
     /// [`defer_release`]: Self::defer_release
     pub fn flush_deferred_deletions(&self) {
         let _tz = crate::tracy_zone!("device.flush_deferred_deletions");
-        self.boundary_crossed(self.gpu_progress());
+        self.boundary_crossed(self.gpu_progress_impl());
     }
 
     /// Returns `true` if the device's [`VramAllocator`] holds deferred payloads that
     /// have not yet been reclaimed (i.e. their GPU epoch has not been reached).
     ///
-    /// Useful as a precondition before calling [`wait_until`](Self::wait_until) to avoid
+    /// Useful as a precondition before calling [`Context::wait_until`](crate::Context::wait_until) to avoid
     /// blocking indefinitely when there is nothing to wait for.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
@@ -1045,7 +1053,7 @@ impl Device {
     ///
     /// Use this only when building a pipelined frame loop that records multiple
     /// consecutive graphs (for example [`FrameOrchestrator::flush`](crate::FrameOrchestrator::flush)) or when the
-    /// caller tracks completion via [`TimelineValue`] / [`Self::gpu_progress`].
+    /// caller tracks completion via [`TimelineValue`] / [`Context::gpu_progress`](crate::Context::gpu_progress).
     ///
     /// [`Self::submit`] still waits on transient resources — that path remains the
     /// safe default for one-shot submission.
@@ -1239,7 +1247,7 @@ impl Device {
     /// Submit a task graph and block until it completes.
     pub fn dispatch(&self, graph: &mut TaskGraph) -> Result<(), GoldyError> {
         let v = self.submit(graph)?;
-        self.wait_until(v)
+        self.wait_until_impl(v)
     }
 
     /// Snapshot of the device-owned placement heap's state for diagnostics.
@@ -1635,7 +1643,7 @@ mod tests {
         device.defer_until(tv, alive);
 
         // After advancing GPU to tv and flushing, resource should be dropped.
-        device.wait_until(tv).unwrap();
+        device.wait_until_impl(tv).unwrap();
         device.flush_deferred_deletions();
         assert!(
             weak.upgrade().is_none(),

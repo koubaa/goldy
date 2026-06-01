@@ -145,7 +145,7 @@ pub trait TransientAllocator: Send {
     ///
     /// `offset` and `size` identify the byte range within the backing buffer.
     /// `epoch` is the timeline value of the last GPU dispatch that reads this buffer. The
-    /// allocator must not reuse the byte range until `device.gpu_progress() >= epoch`.
+    /// allocator must not reuse the byte range until `context.gpu_progress() >= epoch`.
     /// If `epoch` is `None`, the range is immediately available (caller guarantees no GPU use).
     ///
     /// The caller retains ownership of the `BufferView` (and its bindless slot) for deferred
@@ -261,8 +261,8 @@ impl TransientAllocator for BumpResetAllocator {
             // (wait_until returns immediately when the semaphore/fence has already
             // fired). The opposite direction (progress reads stale-low on a poller
             // backend) causes an unnecessary but correct wait of at most ~1 ms.
-            if device.gpu_progress() < tv {
-                device.wait_until(tv)?;
+            if device.gpu_progress_impl() < tv {
+                device.wait_until_impl(tv)?;
             }
         }
 
@@ -384,7 +384,7 @@ impl HeapTransientAllocator {
 
     /// Return deferred frees whose epoch has retired to the coalescing free list.
     fn reclaim_retired_frees(&mut self, device: &Device) {
-        let progress = device.gpu_progress();
+        let progress = device.gpu_progress_impl();
         let mut i = 0;
         while i < self.deferred.len() {
             if self.deferred[i]
@@ -732,7 +732,7 @@ mod tests {
             let mut graph = crate::task_graph::TaskGraph::new();
             let tv = device.submit(&mut graph).expect("submit");
             alloc.end_frame(&device, tv);
-            device.wait_until(tv).expect("wait");
+            device.wait_until_impl(tv).expect("wait");
 
             let cap = alloc.capacity();
             assert!(
@@ -785,7 +785,7 @@ mod tests {
         assert_ne!(v2.offset(), v1_off, "epoch not retired — should not reuse");
 
         // Now advance GPU timeline past epoch=5.
-        device.wait_until(5).unwrap();
+        device.wait_until_impl(5).unwrap();
 
         alloc.begin_frame(&device, 0).unwrap();
 
@@ -865,7 +865,7 @@ mod tests {
         );
 
         // Advance past epoch=1.
-        device.wait_until(1).unwrap();
+        device.wait_until_impl(1).unwrap();
         alloc.begin_frame(&device, 0).unwrap();
         let v4 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         assert_eq!(
@@ -950,7 +950,7 @@ mod tests {
         alloc.free(offset, 1024, Some(tv));
         alloc.end_frame(&device, tv);
 
-        device.wait_until(tv).expect("wait");
+        device.wait_until_impl(tv).expect("wait");
         alloc.begin_frame(&device, 0).unwrap();
         let v2 = alloc
             .alloc(&device, 1024, Some(4))
@@ -974,7 +974,7 @@ mod tests {
         let tv = device.submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
-        device.wait_until(tv).expect("wait");
+        device.wait_until_impl(tv).expect("wait");
         a.begin_frame(&device, 0).expect("begin 2 should not block");
     }
 }

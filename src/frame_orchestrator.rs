@@ -4,6 +4,7 @@
 //! [`TimelineValue`], including swapchain paths where the epoch arrives only after
 //! [`crate::surface::Frame::present`].
 
+use crate::context::Context;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::surface::{Frame, Surface};
@@ -43,6 +44,7 @@ struct FrameSlot<T> {
 /// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
 pub struct FrameOrchestrator<T> {
     device: Device,
+    context: Context,
     max_depth: usize,
     ring: VecDeque<FrameSlot<T>>,
     /// Monotonic id for the next [`FrameHandle`].
@@ -61,6 +63,7 @@ impl<T> FrameOrchestrator<T> {
     pub fn new(device: &Device, max_depth: usize) -> Self {
         Self {
             device: device.clone(),
+            context: device.create_context(),
             max_depth: max_depth.max(1),
             ring: VecDeque::new(),
             next_id: 1,
@@ -174,7 +177,7 @@ impl<T> FrameOrchestrator<T> {
     /// zero-cost resubmission is attempted first, falling back to a retain-and-record submit.
     ///
     /// If `graph` is empty, `fallback_timeline` is used (e.g. the value from previous
-    /// [`Self::flush`] calls). If that is `None`, [`Device::gpu_progress`] is used.
+    /// [`Self::flush`] calls). If that is `None`, [`Context::gpu_progress`](crate::Context::gpu_progress) is used.
     pub fn end_frame_standalone(
         &mut self,
         handle: FrameHandle,
@@ -185,7 +188,7 @@ impl<T> FrameOrchestrator<T> {
         let _tz = tracy_zone!("orchestrator.end_frame_standalone");
         self.expect_open(handle)?;
         let tv = if graph.is_empty() {
-            fallback_timeline.unwrap_or_else(|| self.device.gpu_progress())
+            fallback_timeline.unwrap_or_else(|| self.context.gpu_progress())
         } else {
             self.submit_with_retention(graph)?
         };
@@ -337,10 +340,10 @@ impl<T> FrameOrchestrator<T> {
                 None => self
                     .device
                     .high_water_timeline()
-                    .max(self.device.gpu_progress()),
+                    .max(self.context.gpu_progress()),
             };
-            if self.device.gpu_progress() < timeline {
-                self.device.wait_until(timeline)?;
+            if self.context.gpu_progress() < timeline {
+                self.context.wait_until(timeline)?;
             }
             retire(
                 &self.device,
@@ -374,7 +377,7 @@ impl<T> FrameOrchestrator<T> {
         let _tz = tracy_zone!("orchestrator.drain_ring");
         let mut progress = {
             let _pg = tracy_zone!("orchestrator.drain_ring.gpu_progress");
-            self.device.gpu_progress()
+            self.context.gpu_progress()
         };
         while let Some(front) = self.ring.front() {
             let done = match front.timeline {
@@ -387,7 +390,7 @@ impl<T> FrameOrchestrator<T> {
                 if let Some(tv) = slot.timeline {
                     if progress < tv && must_wait {
                         let _wz = tracy_zone!("orchestrator.wait_gpu");
-                        self.device.wait_until(tv)?;
+                        self.context.wait_until(tv)?;
                         progress = tv;
                     }
                 }

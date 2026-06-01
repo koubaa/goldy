@@ -69,7 +69,7 @@ mod tests {
             "payload must stay alive before flush"
         );
 
-        device.wait_until(tv).expect("wait");
+        device.wait_until_impl(tv).expect("wait");
 
         // GPU has retired the epoch, but reclaim has not run yet.
         assert!(
@@ -117,7 +117,7 @@ mod tests {
             "freed range must not be reused before epoch retires"
         );
 
-        device.wait_until(far_epoch).expect("wait");
+        device.wait_until_impl(far_epoch).expect("wait");
         alloc.begin_frame(&device, 0).unwrap();
         let reused = alloc
             .alloc(&device, 1024, Some(4))
@@ -231,7 +231,7 @@ mod tests {
         device.defer_until(tv, alive);
         assert!(device.has_deferred_payloads());
 
-        device.wait_until(tv).expect("wait");
+        device.wait_until_impl(tv).expect("wait");
         device.flush_deferred_deletions();
 
         assert!(
@@ -256,7 +256,7 @@ mod tests {
         device.defer_until(tv, alive);
         assert!(device.has_deferred_payloads());
 
-        device.wait_until(tv).expect("wait");
+        device.wait_until_impl(tv).expect("wait");
 
         device.boundary_crossed(tv);
         assert!(
@@ -294,7 +294,7 @@ mod tests {
         device.defer_until(tv2, alive2);
         assert!(device.has_deferred_payloads());
 
-        device.wait_until(tv2).expect("wait");
+        device.wait_until_impl(tv2).expect("wait");
 
         // High-water reclaim retires both payloads (epoch <= tv2).
         device.boundary_crossed(tv2);
@@ -345,7 +345,7 @@ mod tests {
         );
         // gpu_progress should now be >= far_epoch (mock wait_until advanced it).
         assert!(
-            device.gpu_progress() >= far_epoch,
+            device.gpu_progress_impl() >= far_epoch,
             "begin_frame must have called wait_until to advance progress"
         );
     }

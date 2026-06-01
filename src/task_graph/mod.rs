@@ -42,7 +42,7 @@
 //!     .dispatch(16, 1, 1);
 //!
 //! let tv = graph.submit(&device)?;
-//! device.wait_until(tv)?;
+//! context.wait_until(tv)?;
 //! ```
 //!
 //! # Node kinds

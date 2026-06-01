@@ -150,7 +150,7 @@ fn lcm(a: u64, b: u64) -> u64 {
 ///     .dispatch(64, 1, 1);
 ///
 /// let tv = graph.submit(&device)?;
-/// device.wait_until(tv)?;
+/// context.wait_until(tv)?;
 /// ```
 pub struct TaskGraph {
     ir: GraphIR,
@@ -998,7 +998,7 @@ impl TaskGraph {
     }
 
     /// Analyze the graph and submit all tasks with optimal barriers.
-    /// Returns the device [`TimelineValue`] to pass to [`Device::wait_until`].
+    /// Returns the device [`TimelineValue`] to pass to [`Context::wait_until`](crate::Context::wait_until).
     pub fn submit(&mut self, device: &Device) -> Result<TimelineValue, GoldyError> {
         device.submit(self)
     }
@@ -1950,8 +1950,8 @@ mod tests {
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&device).unwrap();
-        assert!(device.gpu_progress() >= tv);
-        device.wait_until(tv).unwrap();
+        assert!(device.gpu_progress_impl() >= tv);
+        device.wait_until_impl(tv).unwrap();
     }
 
     #[test]

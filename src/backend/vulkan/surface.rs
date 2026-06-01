@@ -302,6 +302,7 @@ pub(super) fn create(
             work_done_semaphore,
             render_finished_semaphore,
             in_flight_fence,
+            fence_pending: false,
             render_pass_submitted: false,
             frame_timeline_value: None,
             last_compute_timeline_value: 0,
@@ -743,6 +744,49 @@ pub(super) fn acquire(
         );
     }
 
+    // Wait until this slot's graphics submit (Submit 1 in `render`) has finished,
+    // then reset the fence so the next `queue_submit2` is valid (VUID-vkQueueSubmit2-fence-04894).
+    //
+    // Only the render (graphics) path submits the fence. The compute path does not,
+    // so `fence_pending` guards against waiting on an unsignaled fence (which would hang).
+    {
+        let fence_pending = state
+            .surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?
+            .frame_sync[current_frame]
+            .fence_pending;
+        if fence_pending {
+            let _fz = crate::tracy_zone!("vk.surface.acquire.fence_wait");
+            let logical_device = state
+                .devices
+                .get(&device_handle)
+                .context("Surface's device is invalid")?;
+            let in_flight_fence = state
+                .surfaces
+                .get(&surface_handle)
+                .context("Invalid surface handle")?
+                .frame_sync[current_frame]
+                .in_flight_fence;
+            unsafe {
+                logical_device
+                    .device
+                    .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+                    .context("Failed to wait on in-flight fence")?;
+                logical_device
+                    .device
+                    .reset_fences(&[in_flight_fence])
+                    .context("Failed to reset in-flight fence")?;
+            }
+            state
+                .surfaces
+                .get_mut(&surface_handle)
+                .unwrap()
+                .frame_sync[current_frame]
+                .fence_pending = false;
+        }
+    }
+
     // CPU cleanup: drain the GPU timeline and reset the frame slot.
     let completed = {
         let _tz = crate::tracy_zone!("vk.surface.acquire.timeline_query");
@@ -950,7 +994,13 @@ where
             .get(&device_handle)
             .context("Surface's device is invalid")?;
 
-        // Begin command buffer
+        // Begin command buffer (reset after acquire waited on in_flight_fence)
+        unsafe {
+            logical_device
+                .device
+                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .context("Failed to reset render command buffer")?;
+        }
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -1114,22 +1164,48 @@ where
         // End dynamic rendering
         unsafe { logical_device.device.cmd_end_rendering(cmd) };
 
-        // End command buffer — the present barrier is pre-recorded in
-        // render_present_cmd and submitted as a separate batch (Submit 2).
+        // Transition swapchain image COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR.
+        // Inlined here instead of using a pre-recorded per-image CB (render_present_cmd)
+        // to avoid VUID-vkQueueSubmit2-commandBuffer-03875: the validation layer cannot
+        // see through the WSI semaphore chain to verify prior completion of pre-recorded
+        // per-image CBs when they are resubmitted.
+        let present_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+            .dst_access_mask(vk::AccessFlags2::NONE)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let dep_present =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&present_barrier));
+        unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_present) };
+
         unsafe { logical_device.device.end_command_buffer(cmd) }
             .context("Failed to end command buffer")?;
     }
 
-    // Submit 1: prep barrier + render commands.
+    // Single submit: render CB (with inlined present barrier) + fence + semaphores.
     //   waits:   image_available_sem
-    //   signals: in_flight_fence (fires after render work, NOT after present barrier)
-    //            work_done_sem (consumed by Submit 2)
-    //            timeline_sem
+    //   signals: in_flight_fence
+    //            timeline_sem  (frame boundary value)
+    //            render_finished_sem  (consumed by queue_present)
     //
-    // Submit 2: pre-recorded COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR barrier.
-    //   waits:   work_done_sem
-    //   signals: render_finished_sem
-    //   fence:   none
+    // prep_cmd (UNDEFINED→GENERAL) and render_present_cmd are NOT used: both barriers
+    // are now inlined in cmd, avoiding VUID-vkQueueSubmit2-commandBuffer-03875 from
+    // pre-recorded per-image CBs whose completion the validation layer cannot verify
+    // without seeing through the WSI semaphore chain.
+    let _ = prep_cmd;
+    let _ = render_present_cmd;
+    let _ = work_done_semaphore;
+
     let signal_timeline_value = {
         let ld = devices
             .get(&device_handle)
@@ -1145,37 +1221,20 @@ where
         .semaphore(image_available_semaphore)
         .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let cmd_infos_1 = [
-        vk::CommandBufferSubmitInfo::default().command_buffer(prep_cmd),
-        vk::CommandBufferSubmitInfo::default().command_buffer(cmd),
-    ];
-    let sig_work_done = vk::SemaphoreSubmitInfo::default()
-        .semaphore(work_done_semaphore)
-        .value(0)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let sig_timeline = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_timeline_value)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let signals_1 = [sig_work_done, sig_timeline];
-    let submit_1 = vk::SubmitInfo2::default()
-        .wait_semaphore_infos(std::slice::from_ref(&wait_acq))
-        .command_buffer_infos(&cmd_infos_1)
-        .signal_semaphore_infos(&signals_1);
-
-    let cmd_info_2 = vk::CommandBufferSubmitInfo::default().command_buffer(render_present_cmd);
-    let wait_work_done = vk::SemaphoreSubmitInfo::default()
-        .semaphore(work_done_semaphore)
-        .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
     let sig_rf = vk::SemaphoreSubmitInfo::default()
         .semaphore(render_finished_semaphore)
         .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let submit_2 = vk::SubmitInfo2::default()
-        .wait_semaphore_infos(std::slice::from_ref(&wait_work_done))
-        .command_buffer_infos(std::slice::from_ref(&cmd_info_2))
-        .signal_semaphore_infos(std::slice::from_ref(&sig_rf));
+    let signals = [sig_timeline, sig_rf];
+    let submit = vk::SubmitInfo2::default()
+        .wait_semaphore_infos(std::slice::from_ref(&wait_acq))
+        .command_buffer_infos(std::slice::from_ref(&cmd_info))
+        .signal_semaphore_infos(&signals);
 
     let logical_device = devices
         .get(&device_handle)
@@ -1184,20 +1243,11 @@ where
     unsafe {
         logical_device.device.queue_submit2(
             logical_device.queue,
-            std::slice::from_ref(&submit_1),
+            std::slice::from_ref(&submit),
             in_flight_fence,
         )
     }
     .context("Failed to submit render command buffer")?;
-
-    unsafe {
-        logical_device.device.queue_submit2(
-            logical_device.queue,
-            std::slice::from_ref(&submit_2),
-            vk::Fence::null(),
-        )
-    }
-    .context("Failed to submit render present barrier")?;
 
     if let Some(ld) = devices.get_mut(&device_handle) {
         ld.timeline_next = signal_timeline_value.saturating_add(1);
@@ -1206,6 +1256,7 @@ where
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[current_frame];
         fs.render_pass_submitted = true;
+        fs.fence_pending = true;
         fs.frame_timeline_value = Some(signal_timeline_value);
         fs.last_compute_timeline_value = signal_timeline_value;
     }
