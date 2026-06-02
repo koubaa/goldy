@@ -516,9 +516,7 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
-        self.state
-            .contexts
-            .retain(|_, d| *d != device_handle);
+        self.state.contexts.retain(|_, d| *d != device_handle);
         self.destroy_device_inner(device_handle);
     }
 
@@ -894,10 +892,7 @@ impl GpuBackend for Dx12Backend {
         crate::signal::drain_all_signals(&signal_queue)
     }
 
-    fn peek_oldest_in_flight(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<crate::timeline::TimelineValue> {
+    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
         let device_handle = self.context_device(ctx);
         let ld = self.state.devices.get(&device_handle)?;
         let progress = self.gpu_progress(ctx);

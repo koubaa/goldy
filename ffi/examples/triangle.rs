@@ -9,13 +9,13 @@ use goldy_ffi::{
     goldy_encoder_create, goldy_encoder_draw, goldy_encoder_set_pipeline,
     goldy_encoder_set_vertex_buffer, goldy_get_last_error, goldy_instance_adapter_count,
     goldy_instance_create, goldy_instance_create_device_for_adapter, goldy_instance_destroy,
-    goldy_instance_get_adapter, goldy_render_pipeline_create,
-    goldy_render_pipeline_destroy, goldy_shader_builtin_vertex_color_2d, goldy_shader_create,
-    goldy_shader_destroy, goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format,
-    goldy_surface_frame_render, goldy_surface_present, goldy_surface_resize, GoldyBuffer,
-    GoldyColor, GoldyDataAccess, GoldyDevice, GoldyAdapterInfo, GoldyDeviceType, GoldyInstance,
-    GoldyPrimitiveTopology, GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult,
-    GoldyShaderModule, GoldySurface, GoldyVertexAttribute, GoldyVertexFormat,
+    goldy_instance_get_adapter, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
+    goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy,
+    goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format, goldy_surface_frame_render,
+    goldy_surface_present, goldy_surface_resize, GoldyAdapterInfo, GoldyBuffer, GoldyColor,
+    GoldyDataAccess, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
+    GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult, GoldyShaderModule, GoldySurface,
+    GoldyVertexAttribute, GoldyVertexFormat,
 };
 use std::ffi::CStr;
 use std::mem::size_of;

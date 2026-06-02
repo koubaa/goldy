@@ -615,7 +615,7 @@ pub(crate) struct LogicalDevice {
     pub timeline_event: SharedEvent,
     /// Event-driven waiter for GPU timeline completion (replaces poll loop).
     pub timeline_waiter: TimelineWaiter,
-    /// Async + sync signal delivery for [`crate::Device::poll_signals`].
+    /// Async + sync signal delivery for [`crate::Context::poll_signals`].
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     /// Swapchain returns posted from completion handlers; drained on `poll_signals`.
     pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,

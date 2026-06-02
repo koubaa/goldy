@@ -715,8 +715,7 @@ pub trait GpuBackend: Send + Sync {
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal>;
 
     /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle)
-        -> Option<crate::timeline::TimelineValue>;
+    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue>;
 
     /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;

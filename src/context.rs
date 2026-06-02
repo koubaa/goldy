@@ -53,7 +53,7 @@ impl Context {
             let mut backend = device.inner.backend.lock().unwrap();
             backend
                 .create_context(device.inner.handle)
-                .map_err(|e| GoldyError::Backend(e))?
+                .map_err(GoldyError::Backend)?
         };
         Ok(Self {
             inner: Arc::new(ContextInner {
@@ -99,12 +99,10 @@ impl Context {
             self.inner.device.inner.backend.lock().unwrap()
         };
         let _backend = crate::tracy_zone!("context.wait_until.backend");
-        backend
-            .wait_until(self.inner.handle, value)
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })
+        backend.wait_until(self.inner.handle, value).map_err(|e| {
+            drop(backend);
+            self.classify(e)
+        })
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.

@@ -2,8 +2,8 @@
 //!
 //! Each successful standalone submission or completed frame bracket is assigned a
 //! [`TimelineValue`] that the GPU signals when that work finishes. Use
-//! [`crate::Device::gpu_progress`] to query completion without blocking, and
-//! [`crate::Device::wait_until`] / [`crate::Device::wait_until_timeout`] to block.
+//! [`crate::Context::gpu_progress`] to query completion without blocking, and
+//! [`crate::Context::wait_until`] / [`crate::Context::wait_until_timeout`] to block.
 //!
 //! ## Resource lifetime vs the timeline
 //!

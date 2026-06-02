@@ -132,7 +132,7 @@ impl ComputeEncoder {
 
     /// Submit the recorded compute commands without blocking.
     ///
-    /// Returns the device timeline value for use with [`Context::gpu_progress`] / [`Context::wait_until`].
+    /// Returns the device timeline value for use with [`crate::Context::gpu_progress`] / [`crate::Context::wait_until`].
     pub fn submit(&self, context: &crate::Context) -> Result<crate::timeline::TimelineValue> {
         let mut backend = context.device().inner.backend.lock().unwrap();
         backend.submit_standalone(context.backend_handle(), &self.commands)

@@ -15,8 +15,8 @@
 pub mod backend;
 pub mod buffer;
 pub mod common_types;
-pub mod context;
 pub mod compute;
+pub mod context;
 pub mod device;
 pub mod encoder;
 pub mod error;

@@ -144,9 +144,9 @@ impl<T> FrameOrchestrator<T> {
     /// Mid-frame submit: dispatches the current graph and starts a fresh one.
     ///
     /// When [`Self::retains_command_buffers`] is true the graph is submitted via
-    /// [`Device::submit_pipelined_and_retain`] and on subsequent frames zero-cost
-    /// resubmission is attempted first via [`Device::try_resubmit_retained`].
-    /// All other strategies use [`Device::submit_pipelined`] unconditionally.
+    /// [`crate::Context::submit_pipelined_and_retain`] and on subsequent frames zero-cost
+    /// resubmission is attempted first via [`crate::Context::try_resubmit_retained`].
+    /// All other strategies use [`crate::Context::submit_pipelined`] unconditionally.
     ///
     /// This creates a real command-buffer boundary on all backends, including windowed/
     /// surface frames where the fine pass and present are submitted later via
@@ -203,11 +203,11 @@ impl<T> FrameOrchestrator<T> {
 
     /// Submit `graph`, using command-buffer retention when [`Self::retains_command_buffers`].
     ///
-    /// - **depth == 1**: tries [`Device::try_resubmit_retained`] first
+    /// - **depth == 1**: tries [`crate::Context::try_resubmit_retained`] first
     ///   (zero CPU recording cost on a hit); on a miss (first frame or fingerprint change)
-    ///   falls back to [`Device::submit_pipelined_and_retain`] so the next frame can hit.
+    ///   falls back to [`crate::Context::submit_pipelined_and_retain`] so the next frame can hit.
     ///   The last successful retention key is stored in `self.last_retention_key`.
-    /// - **All other strategies**: always [`Device::submit_pipelined`].  Retention would be
+    /// - **All other strategies**: always [`crate::Context::submit_pipelined`].  Retention would be
     ///   unsafe at pipeline depth > 1 because the same CB can still be in-flight from the
     ///   previous frame when a new submission begins.
     fn submit_with_retention(
@@ -327,7 +327,7 @@ impl<T> FrameOrchestrator<T> {
     /// Block until every pending slot has retired and invoke `retire` for each.
     ///
     /// Slots whose timeline is still unknown (`None`, i.e. surface path before
-    /// [`Self::note_presented`]) use [`Device::high_water_timeline`] as a completion fence —
+    /// [`Self::note_presented`]) use [`crate::Context::high_water_timeline`] as a completion fence —
     /// callers draining mid-presentation should prefer [`Self::reclaim`] / presenting first.
     pub fn drain_all<E, F>(&mut self, mut retire: F) -> Result<(), GoldyError>
     where

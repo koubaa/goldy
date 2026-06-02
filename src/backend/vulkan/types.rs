@@ -336,7 +336,7 @@ pub(crate) struct LogicalDevice {
     /// Next timeline value to signal on `timeline_semaphore`.
     pub timeline_next: u64,
 
-    /// Async signal delivery (fence thread → [`crate::Device::poll_signals`]).
+    /// Async signal delivery (fence thread → [`crate::Context::poll_signals`]).
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fence_thread: Option<std::thread::JoinHandle<()>>,

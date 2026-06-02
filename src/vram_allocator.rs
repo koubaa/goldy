@@ -234,7 +234,7 @@ pub trait VramAllocator: Send + Sync {
     /// Reclaim all deferred payloads whose epoch is `<= gpu_progress`, dropping them.
     ///
     /// Returns the number of entries reclaimed. Typically called from
-    /// [`Device::flush_deferred_deletions`](crate::device::Device::flush_deferred_deletions)
+    /// [`Context::flush_deferred_deletions`](crate::Context::flush_deferred_deletions)
     /// at frame boundaries.
     ///
     /// The default implementation is a no-op and returns 0.

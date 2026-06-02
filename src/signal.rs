@@ -1,4 +1,4 @@
-//! GPU backend signals and the delivery queue used by [`crate::Device::poll_signals`].
+//! GPU backend signals and the delivery queue used by [`crate::Context::poll_signals`].
 //!
 //! Async signals (`BoundaryCrossed`, swapchain events) are pushed from driver callback
 //! threads or backend internals into a per-device [`SignalQueue`] (mutex-protected `Vec`;

@@ -2,7 +2,7 @@
 //!
 //! [`GpuGuard`] pairs a set of GPU resources with a [`TimelineValue`] epoch. When the
 //! guard is dropped, the resources are handed to the device's [`VramAllocator`] for
-//! deferred release — they remain alive until [`Device::flush_deferred_deletions`]
+//! deferred release — they remain alive until [`crate::Context::flush_deferred_deletions`]
 //! observes `gpu_progress >= epoch`, at which point they are dropped.
 //!
 //! This is the correct, non-blocking pattern for ensuring owned resources outlive the

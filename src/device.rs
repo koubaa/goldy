@@ -26,9 +26,9 @@
 
 use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
 use crate::error::GoldyError;
-use crate::timeline::TimelineValue;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
+use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;

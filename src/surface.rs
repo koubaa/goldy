@@ -71,7 +71,11 @@ impl Surface {
         )
     }
 
-    pub fn new_with_config<W>(context: &GpuContext, window: &W, config: SurfaceConfig) -> Result<Self>
+    pub fn new_with_config<W>(
+        context: &GpuContext,
+        window: &W,
+        config: SurfaceConfig,
+    ) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
@@ -457,13 +461,8 @@ impl Surface {
             for spec in graph.transient_specs() {
                 let offset = base_offset + layout[&spec.id];
                 let view_stride = spec.stride.max(1);
-                let (uav, srv, _hit) = heap.get_or_create_view(
-                    spec.id,
-                    offset,
-                    spec.size,
-                    view_stride,
-                    device,
-                )?;
+                let (uav, srv, _hit) =
+                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, device)?;
                 resolver.buffers.insert(
                     spec.id,
                     ResolvedTransientBuffer {

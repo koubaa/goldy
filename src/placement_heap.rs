@@ -94,7 +94,7 @@ struct CachedTexture {
 ///
 /// [`Self::get_or_create_view`] and `get_or_create_textures` implement a
 /// stable-slot cache. In steady state (same spec, same placement) all backend
-/// descriptor work is skipped. Eviction via [`Device::defer_release`] ensures
+/// descriptor work is skipped. Eviction via `Device::defer_release` ensures
 /// GPU safety when shapes or placements change.
 pub struct PlacementHeap {
     buffer: Buffer,

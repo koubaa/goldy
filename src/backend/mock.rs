@@ -301,10 +301,7 @@ impl GpuBackend for MockBackend {
     }
 
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
-        *self
-            .contexts
-            .get(&ctx)
-            .expect("invalid context handle")
+        *self.contexts.get(&ctx).expect("invalid context handle")
     }
 
     fn create_buffer(
@@ -1076,10 +1073,7 @@ impl GpuBackend for MockBackend {
         Vec::new()
     }
 
-    fn peek_oldest_in_flight(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<crate::timeline::TimelineValue> {
+    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
         let device = self.context_device(ctx);
         let progress = self.gpu_progress(ctx);
         let scheduled = self.device_timeline_next.get(&device).copied().unwrap_or(0);

@@ -8,12 +8,12 @@ mod common;
 #[path = "common/submission.rs"]
 mod submission;
 
-use submission::submission_context;
 use goldy::{
     types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
     Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceDescriptor,
     DeviceType, Instance, RequestAdapterOptions, ShaderModule, Texture,
 };
+use submission::submission_context;
 
 fn request_default_device(instance: &Instance) -> Device {
     instance

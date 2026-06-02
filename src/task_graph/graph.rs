@@ -228,12 +228,12 @@ impl TaskGraph {
     /// Register a transient GPU buffer suballocation for this graph.
     ///
     /// The backing memory is a single device buffer allocated for the duration of
-    /// [`crate::Device::submit`]. Transients whose live ranges (in the compiled wave
+    /// [`crate::Context::submit`]. Transients whose live ranges (in the compiled wave
     /// schedule) do not overlap may alias within that heap to reduce allocation size.
     /// Graphs using transients **block until the submit completes** when using
-    /// [`crate::Device::submit`] (so the CPU does not record overlapping standalone graphs that
+    /// [`crate::Context::submit`] (so the CPU does not record overlapping standalone graphs that
     /// reuse the same placement-heap protocol). For pipelined multi-submit frames, use
-    /// [`crate::Device::submit_pipelined`] or the surface path / [`crate::FrameOrchestrator`].
+    /// [`crate::Context::submit_pipelined`] or the surface path / [`crate::FrameOrchestrator`].
     pub fn transient_buffer(&mut self, size: u64) -> TransientId {
         self.transient_buffer_with_stride(size, 4)
     }
@@ -281,8 +281,8 @@ impl TaskGraph {
     /// Register a transient texture (same dimensions and format) for this graph.
     ///
     /// Non-overlapping wave lifetimes may alias onto one backing texture; see
-    /// [`Self::transient_buffer`] for scheduling behavior. [`crate::Device::submit`]
-    /// waits until completion when transients are used; use [`crate::Device::submit_pipelined`]
+    /// [`Self::transient_buffer`] for scheduling behavior. [`crate::Context::submit`]
+    /// waits until completion when transients are used; use [`crate::Context::submit_pipelined`]
     /// for overlapping submissions in a managed frame loop.
     ///
     /// ## Stable slot identity contract
@@ -1133,8 +1133,8 @@ impl TaskGraph {
     /// a CB that contains upload commands is currently unsupported (those graphs fall back
     /// to a normal submit).
     ///
-    /// Pass this value to [`crate::Device::try_resubmit_retained`] to attempt zero-cost
-    /// resubmission; [`crate::Device::submit_pipelined_and_retain`] derives and stores the
+    /// Pass this value to [`crate::Context::try_resubmit_retained`] to attempt zero-cost
+    /// resubmission; [`crate::Context::submit_pipelined_and_retain`] derives and stores the
     /// same key internally.
     pub fn compute_retention_fingerprint(&self) -> u64 {
         Self::retention_fingerprint(&self.ir)
@@ -1368,7 +1368,7 @@ impl TaskGraph {
     /// # Panics
     ///
     /// If the graph contains render-pass nodes or transient buffers, use
-    /// [`Self::compile_graph_commands`] or [`Device::submit`](crate::Device::submit) instead.
+    /// [`Self::compile_graph_commands`] or [`Context::submit`](crate::Context::submit) instead.
     pub fn compile_commands(&mut self) -> Vec<crate::backend::GpuCommand> {
         assert!(
             self.transient_specs.is_empty(),

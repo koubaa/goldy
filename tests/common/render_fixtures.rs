@@ -2,9 +2,9 @@
 
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DataAccess,
-    DepthFormat, DepthStencilState, Device, DeviceDescriptor, Instance,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
-    ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    DepthFormat, DepthStencilState, Device, DeviceDescriptor, Instance, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
+    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 pub fn create_device() -> Option<Device> {

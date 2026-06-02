@@ -781,11 +781,7 @@ pub(super) fn acquire(
                     .reset_fences(&[in_flight_fence])
                     .context("Failed to reset in-flight fence")?;
             }
-            state
-                .surfaces
-                .get_mut(&surface_handle)
-                .unwrap()
-                .frame_sync[current_frame]
+            state.surfaces.get_mut(&surface_handle).unwrap().frame_sync[current_frame]
                 .fence_pending = false;
         }
     }
@@ -1187,9 +1183,13 @@ where
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        let dep_present =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&present_barrier));
-        unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_present) };
+        let dep_present = vk::DependencyInfo::default()
+            .image_memory_barriers(std::slice::from_ref(&present_barrier));
+        unsafe {
+            logical_device
+                .device
+                .cmd_pipeline_barrier2(cmd, &dep_present)
+        };
 
         unsafe { logical_device.device.end_command_buffer(cmd) }
             .context("Failed to end command buffer")?;

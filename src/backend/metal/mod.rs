@@ -176,9 +176,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
-        self.state
-            .contexts
-            .retain(|_, d| *d != device);
+        self.state.contexts.retain(|_, d| *d != device);
         device::destroy(&mut self.state, device);
     }
 
@@ -624,10 +622,7 @@ impl GpuBackend for MetalBackend {
         Vec::new()
     }
 
-    fn peek_oldest_in_flight(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<crate::timeline::TimelineValue> {
+    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
         let device = self.context_device(ctx);
         let ld = self.state.devices.get(&device)?;
         let progress = ld.timeline_event.as_ref().signaled_value();
