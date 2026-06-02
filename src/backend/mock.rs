@@ -227,7 +227,7 @@ impl MockBackend {
         floor.max(max_ctx)
     }
 
-    /// Device-scoped frame ops complete on every context sharing the device (shared queue).
+    /// Device-scoped idle: advance every context on `device` to the scheduled horizon.
     fn complete_device_seq_on_all_contexts(&mut self, device: DeviceHandle, seq: u64) {
         for ctx in self.contexts.values_mut() {
             if ctx.device == device {
@@ -237,16 +237,14 @@ impl MockBackend {
         }
     }
 
-    fn push_signal_all_contexts_on_device(
-        &self,
-        device: DeviceHandle,
-        signal: crate::signal::Signal,
-    ) {
-        for ctx in self.contexts.values() {
-            if ctx.device == device {
-                ctx.signal_queue.push(signal.clone());
-            }
-        }
+    fn complete_context_seq(&mut self, ctx: ContextHandle, seq: u64) {
+        let state = self.context_state_mut(ctx);
+        state.completed = seq;
+        state.last_submitted_seq = seq;
+    }
+
+    fn push_context_signal(&self, ctx: ContextHandle, signal: crate::signal::Signal) {
+        self.context_state(ctx).signal_queue.push(signal);
     }
 
     /// Set the default surface format for testing different GPU preferences.
@@ -845,7 +843,11 @@ impl GpuBackend for MockBackend {
         self.surface_pending_acquire.remove(&surface);
     }
 
-    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
+    fn begin_frame(
+        &mut self,
+        surface: SurfaceHandle,
+        ctx: ContextHandle,
+    ) -> Result<(FrameToken, TextureHandle)> {
         let surf = self
             .surfaces
             .get_mut(&surface)
@@ -879,8 +881,8 @@ impl GpuBackend for MockBackend {
         );
 
         *self.surface_pending_acquire.entry(surface).or_insert(0) += 1;
-        self.push_signal_all_contexts_on_device(
-            device_handle,
+        self.push_context_signal(
+            ctx,
             crate::signal::Signal::SwapchainAcquired {
                 image_index: image as u32,
             },
@@ -890,7 +892,7 @@ impl GpuBackend for MockBackend {
             FrameToken {
                 surface,
                 image,
-                context: 0,
+                context: ctx,
             },
             tex_handle,
         ))
@@ -1274,7 +1276,7 @@ impl GpuBackend for MockBackend {
         let next = self.device_timeline_next.entry(device).or_insert(0);
         *next += 1;
         let tv = *next;
-        self.complete_device_seq_on_all_contexts(device, tv);
+        self.complete_context_seq(frame.context, tv);
         Ok(tv)
     }
 
@@ -1299,8 +1301,8 @@ impl GpuBackend for MockBackend {
         self.surface_present_count += 1;
 
         let image_index = frame.image as u32;
-        self.push_signal_all_contexts_on_device(
-            device,
+        self.push_context_signal(
+            frame.context,
             crate::signal::Signal::SwapchainReturned { image_index },
         );
         if let Some(count) = self.surface_pending_acquire.get_mut(&frame.surface) {
@@ -1310,9 +1312,9 @@ impl GpuBackend for MockBackend {
         let next = self.device_timeline_next.entry(device).or_insert(0);
         *next += 1;
         let tv = *next;
-        self.complete_device_seq_on_all_contexts(device, tv);
-        self.push_signal_all_contexts_on_device(
-            device,
+        self.complete_context_seq(frame.context, tv);
+        self.push_context_signal(
+            frame.context,
             crate::signal::Signal::BoundaryCrossed { epoch: tv },
         );
         Ok(tv)
@@ -2129,7 +2131,7 @@ mod tests {
             .create_surface(device, &MockWindow, &MockWindow, None)
             .unwrap();
 
-        let (frame, _tex) = backend.begin_frame(surface).unwrap();
+        let (frame, _tex) = backend.begin_frame(surface, ctx).unwrap();
         assert_eq!(backend.pending_acquire_count(surface), 1);
 
         backend.present_frame(frame, 0).unwrap();
@@ -2142,6 +2144,61 @@ mod tests {
         assert!(signals
             .iter()
             .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+    }
+
+    #[test]
+    fn surface_frame_signals_stay_on_presenting_context() {
+        struct MockWindow;
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(
+                        raw_window_handle::RawWindowHandle::Web(
+                            raw_window_handle::WebWindowHandle::new(0),
+                        ),
+                    )
+                })
+            }
+        }
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(
+                        raw_window_handle::RawDisplayHandle::Web(
+                            raw_window_handle::WebDisplayHandle::new(),
+                        ),
+                    )
+                })
+            }
+        }
+
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let ctx_a = backend.create_context(device).unwrap();
+        let ctx_b = backend.create_context(device).unwrap();
+        let surface = backend
+            .create_surface(device, &MockWindow, &MockWindow, None)
+            .unwrap();
+
+        let (frame, _tex) = backend.begin_frame(surface, ctx_a).unwrap();
+        assert!(backend.poll_signals(ctx_b).is_empty());
+
+        let tv = backend.submit_frame(&frame).unwrap();
+        assert_eq!(backend.gpu_progress(ctx_a), tv);
+        assert_eq!(backend.gpu_progress(ctx_b), 0);
+
+        backend.present_frame(frame, tv).unwrap();
+        let a_signals = backend.poll_signals(ctx_a);
+        assert!(a_signals
+            .iter()
+            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+        assert!(backend.poll_signals(ctx_b).is_empty());
     }
 
     #[test]
@@ -2183,7 +2240,7 @@ mod tests {
             .create_surface(device, &MockWindow, &MockWindow, None)
             .unwrap();
 
-        let (_frame, _tex) = backend.begin_frame(surface).unwrap();
+        let (_frame, _tex) = backend.begin_frame(surface, ctx).unwrap();
         assert_eq!(backend.pending_acquire_count(surface), 1);
 
         backend.surface_resize(surface, 1024, 768).unwrap();

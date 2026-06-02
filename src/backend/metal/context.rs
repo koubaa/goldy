@@ -78,24 +78,32 @@ pub(super) fn context_device(state: &MetalState, ctx: ContextHandle) -> DeviceHa
 }
 
 /// Block until the device-global submission sequence `seq` has retired.
+///
+/// Returns `false` if `timeout` elapses before retirement completes.
 pub(super) fn wait_until_device_seq_at_least(
     state: &MetalState,
     device: DeviceHandle,
     seq: u64,
-) {
+    timeout: std::time::Duration,
+) -> bool {
     if seq == 0 {
-        return;
+        return true;
     }
+    let start = std::time::Instant::now();
     while device_retired(state, device) < seq {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        let remaining = timeout.saturating_sub(start.elapsed());
         for sc in state.contexts.values().filter(|c| c.device == device) {
             if sc.timeline_event.as_ref().signaled_value() < seq {
-                let _ = sc
-                    .timeline_waiter
-                    .wait_until(seq, std::time::Duration::from_millis(1));
+                let chunk = remaining.min(std::time::Duration::from_millis(1));
+                let _ = sc.timeline_waiter.wait_until(seq, chunk);
                 break;
             }
         }
     }
+    true
 }
 
 /// Oldest in-flight command buffer across all contexts on `device` (by timeline value).

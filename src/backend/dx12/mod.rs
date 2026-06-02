@@ -805,15 +805,16 @@ impl GpuBackend for Dx12Backend {
     fn begin_frame(
         &mut self,
         surface_handle: SurfaceHandle,
+        ctx: ContextHandle,
     ) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface_handle)?;
+        let image = surface::acquire(&mut self.state, surface_handle, ctx)?;
         let tex = surface::frame_texture(&self.state, surface_handle)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
             FrameToken {
                 surface: surface_handle,
                 image,
-                context: 0,
+                context: ctx,
             },
             tex,
         ))

@@ -357,6 +357,7 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
 pub(super) fn acquire(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
+    ctx: super::ContextHandle,
 ) -> Result<SwapchainImageHandle> {
     if state
         .surfaces
@@ -448,11 +449,9 @@ pub(super) fn acquire(
         surface.pending_acquire_count = surface.pending_acquire_count.saturating_add(1);
     }
 
-    for sc in state.contexts.values() {
-        if sc.device == device_handle {
-            sc.signal_queue
-                .push(crate::signal::Signal::SwapchainAcquired { image_index });
-        }
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.signal_queue
+            .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
     Ok(image_index as SwapchainImageHandle)
@@ -502,7 +501,7 @@ pub(super) fn present_frame(
     frame: FrameToken,
     _submit_tv: u64,
 ) -> Result<u64> {
-    present(state, frame.surface, frame.image)?;
+    present(state, frame.surface, frame.image, frame.context)?;
     let device_handle = state
         .surfaces
         .get(&frame.surface)
@@ -739,6 +738,7 @@ pub(super) fn present(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
+    ctx: super::ContextHandle,
 ) -> Result<()> {
     let (
         device_handle,
@@ -917,13 +917,11 @@ pub(super) fn present(
         }
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
-        for sc in state.contexts.values() {
-            if sc.device == device_handle {
-                sc.signal_queue
-                    .push(crate::signal::Signal::SwapchainReturned {
-                        image_index: return_image,
-                    });
-            }
+        if let Some(sc) = state.contexts.get(&ctx) {
+            sc.signal_queue
+                .push(crate::signal::Signal::SwapchainReturned {
+                    image_index: return_image,
+                });
         }
     }
 

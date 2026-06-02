@@ -160,10 +160,37 @@ pub(super) fn wait_until_device_seq_at_least(
             .values(std::slice::from_ref(&seq));
         let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
     } else {
-        // Seq not yet submitted on any known context; spin-yield until it appears.
-        // This is a rare transient race and resolves within a frame.
+        // Seq not yet submitted on any known context — rare transient race. Poll with
+        // bounded spin then sleep; re-check for a covering context before each sleep.
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const MAX_SPIN: u32 = 10_000;
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        let mut spins = 0u32;
         while device_retired(state, device) < seq {
-            std::hint::spin_loop();
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "wait_until_device_seq_at_least timed out waiting for seq {seq} on device {device}"
+                );
+                return;
+            }
+            if let Some(sem) = state
+                .contexts
+                .values()
+                .find(|c| c.device == device && c.last_submitted_seq >= seq)
+                .map(|c| c.timeline_semaphore)
+            {
+                let wait = vk::SemaphoreWaitInfo::default()
+                    .semaphores(std::slice::from_ref(&sem))
+                    .values(std::slice::from_ref(&seq));
+                let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
+                return;
+            }
+            if spins < MAX_SPIN {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
         }
     }
 }

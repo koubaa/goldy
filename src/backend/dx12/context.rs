@@ -85,6 +85,12 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
         return;
     };
     let device = sc.device;
+
+    // Drain in-flight GPU work before releasing command allocators / retained CLs.
+    if sc.last_submitted_seq > 0 {
+        let _ = super::utils::wait_for_fence(&sc.fence, sc.last_submitted_seq);
+    }
+
     let completed = unsafe { sc.fence.GetCompletedValue() };
     if let Some(ld) = state.devices.get_mut(&device) {
         ld.retired_floor = ld.retired_floor.max(completed);

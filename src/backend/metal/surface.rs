@@ -190,6 +190,7 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
 pub(super) fn acquire(
     state: &mut MetalState,
     surface: SurfaceHandle,
+    ctx: super::ContextHandle,
 ) -> Result<SwapchainImageHandle> {
     let _tz = crate::tracy_zone!("mtl.surface.acquire");
     // Clean up any previously acquired drawable that wasn't presented
@@ -329,11 +330,9 @@ pub(super) fn acquire(
         image_index
     };
 
-    for sc in state.contexts.values() {
-        if sc.device == device_handle {
-            sc.signal_queue
-                .push(crate::signal::Signal::SwapchainAcquired { image_index });
-        }
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.signal_queue
+            .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
     {

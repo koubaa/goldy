@@ -79,10 +79,13 @@ pub(in crate::backend::metal) fn wait_device_idle(
     if target == 0 {
         return Ok(());
     }
-    context::wait_until_device_seq_at_least(state, device, target);
-    if context::device_retired(state, device) < target {
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+    if !context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT) {
         state.device_lost.store(true, Ordering::Relaxed);
-        anyhow::bail!("GPU wait_device_idle timed out waiting for timeline {target}");
+        anyhow::bail!(
+            "GPU wait_device_idle timed out after {}ms waiting for timeline {target}",
+            IDLE_TIMEOUT.as_millis()
+        );
     }
     Ok(())
 }
@@ -567,15 +570,19 @@ impl GpuBackend for MetalBackend {
         surface::destroy(&mut self.state, surface);
     }
 
-    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface)?;
+    fn begin_frame(
+        &mut self,
+        surface: SurfaceHandle,
+        ctx: ContextHandle,
+    ) -> Result<(FrameToken, TextureHandle)> {
+        let image = surface::acquire(&mut self.state, surface, ctx)?;
         let tex = surface::frame_texture(&self.state, surface)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
             FrameToken {
                 surface,
                 image,
-                context: 0,
+                context: ctx,
             },
             tex,
         ))

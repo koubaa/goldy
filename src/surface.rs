@@ -71,6 +71,12 @@ impl Surface {
         )
     }
 
+    /// Create a surface bound to `context`'s submission timeline.
+    ///
+    /// The same [`GpuContext`] must be used for frame submission (`Frame::submit`,
+    /// `Frame::present`) and for [`GpuContext::poll_signals`] / reclamation on this
+    /// surface. Creating the surface on one context while submitting or polling on
+    /// another leaves `gpu_progress()` and swapchain signals on mismatched clocks.
     pub fn new_with_config<W>(
         context: &GpuContext,
         window: &W,
@@ -118,7 +124,7 @@ impl Surface {
         let _tz = tracy_zone!("surface.begin");
         let (token, texture_handle, w, h, format) = {
             let mut backend = self.backend.lock().unwrap();
-            let (tok, th) = backend.begin_frame(self.handle)?;
+            let (tok, th) = backend.begin_frame(self.handle, self.ctx_handle)?;
             let (w, h) = backend.surface_size(self.handle);
             let format = backend.surface_format(self.handle);
             (tok, th, w, h, format)
@@ -131,12 +137,6 @@ impl Surface {
             h,
             format,
         ));
-
-        let token = crate::backend::FrameToken {
-            surface: token.surface,
-            image: token.image,
-            context: self.ctx_handle,
-        };
 
         Ok(Frame {
             context: self.context.clone(),

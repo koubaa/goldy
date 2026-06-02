@@ -645,6 +645,7 @@ fn destroy_impl(
 pub(super) fn acquire(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
+    ctx: super::ContextHandle,
 ) -> Result<SwapchainImageHandle> {
     let _tz = crate::tracy_zone!("vk.surface.acquire");
 
@@ -776,12 +777,13 @@ pub(super) fn acquire(
 
     {
         let _tz = crate::tracy_zone!("vk.surface.acquire.reap_timeline");
-        for ctx in state
+        let ctxs: Vec<_> = state
             .contexts
-            .keys()
-            .copied()
-            .collect::<Vec<_>>()
-        {
+            .iter()
+            .filter(|(_, sc)| sc.device == device_handle)
+            .map(|(k, _)| *k)
+            .collect();
+        for ctx in ctxs {
             super::compute::reap_timeline_cmd_buffers_up_to(state, ctx, completed);
         }
     }
@@ -853,11 +855,9 @@ pub(super) fn acquire(
                     surface_state.pending_acquire_count.saturating_add(1);
             }
 
-            for sc in state.contexts.values() {
-                if sc.device == device_handle {
-                    sc.signal_queue
-                        .push(crate::signal::Signal::SwapchainAcquired { image_index });
-                }
+            if let Some(sc) = state.contexts.get_mut(&ctx) {
+                sc.signal_queue
+                    .push(crate::signal::Signal::SwapchainAcquired { image_index });
             }
 
             Ok(image_index as SwapchainImageHandle)

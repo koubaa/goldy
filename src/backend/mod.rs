@@ -828,7 +828,14 @@ pub trait GpuBackend: Send + Sync {
     fn evict_retained(&mut self, _ctx: ContextHandle, _key: u64) {}
 
     /// Acquire the next swapchain image and begin a frame bracket.
-    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)>;
+    ///
+    /// `ctx` is the submission context that owns this surface's timeline; frame
+    /// submit/present and swapchain signals are routed through it.
+    fn begin_frame(
+        &mut self,
+        surface: SurfaceHandle,
+        ctx: ContextHandle,
+    ) -> Result<(FrameToken, TextureHandle)>;
 
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()>;
 
