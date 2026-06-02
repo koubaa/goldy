@@ -1005,6 +1005,72 @@ mod tests {
         assert!(!backend.is_device_valid(device));
     }
 
+    /// Regression test for issue #162 (secondary concern): the sampler argument
+    /// encoder's stride must match the 8-byte-per-slot assumption baked into
+    /// `ARGUMENT_BUFFER_SIZE` and the sampler category layout.
+    ///
+    /// Before the fix, `sampler.rs` hardcoded `GPU_RESOURCE_ID_BYTES = 8` as the
+    /// per-slot stride and wrote sampler GPU resource IDs via an unsafe pointer
+    /// cast.  If Metal ever returned a different `encoded_length()` for a sampler
+    /// argument encoder (e.g. on a future GPU family), the sampler slots would
+    /// silently diverge from the buffer/texture slots, corrupting all bindless
+    /// sampler reads.
+    ///
+    /// The fix:
+    ///   1. A `sampler_encoder` (`MTLDataType::Sampler`) is created at device
+    ///      construction and stored in `LogicalDevice`.
+    ///   2. `sampler.rs` derives the stride from `sampler_encoder.encoded_length()`
+    ///      and uses `set_argument_buffer` + `set_sampler_state` to write — the
+    ///      same pattern as buffer and texture encoding.
+    ///   3. Device creation asserts `encoded_length() == 8` and panics loudly if
+    ///      the assumption is ever violated.
+    ///
+    /// This test verifies that a freshly-constructed device reports stride 8 for
+    /// the sampler encoder, and that the stride exposed by `create_argument_encoders`
+    /// matches the per-slot size implied by `ARGUMENT_BUFFER_SIZE`.
+    #[test]
+    fn test_sampler_encoder_stride() {
+        use super::device::create_argument_encoders;
+        use super::types::ARGUMENT_BUFFER_SIZE;
+        use ::metal::Device as MTLDevice;
+
+        let device = MTLDevice::system_default().expect("No Metal device available");
+        let (buf_enc, tex_enc, si_enc, smp_enc) = create_argument_encoders(&device);
+
+        // All four encoders must report the same 8-byte stride.
+        assert_eq!(
+            smp_enc.encoded_length(),
+            8,
+            "sampler encoder stride is {}, expected 8",
+            smp_enc.encoded_length()
+        );
+        assert_eq!(
+            buf_enc.encoded_length(),
+            smp_enc.encoded_length(),
+            "buffer and sampler encoder strides differ"
+        );
+        assert_eq!(
+            tex_enc.encoded_length(),
+            smp_enc.encoded_length(),
+            "texture and sampler encoder strides differ"
+        );
+        assert_eq!(
+            si_enc.encoded_length(),
+            smp_enc.encoded_length(),
+            "storage-image and sampler encoder strides differ"
+        );
+
+        // The stride must evenly divide ARGUMENT_BUFFER_SIZE so that all 5
+        // resource categories fit without overflow.
+        assert_eq!(
+            ARGUMENT_BUFFER_SIZE % smp_enc.encoded_length(),
+            0,
+            "ARGUMENT_BUFFER_SIZE={ARGUMENT_BUFFER_SIZE} is not a multiple of \
+             sampler stride={}",
+            smp_enc.encoded_length()
+        );
+    }
+
     #[test]
     fn test_metal_buffer_operations() {
         let mut backend = MetalBackend::new().unwrap();

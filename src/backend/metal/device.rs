@@ -92,7 +92,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     let heap_size = INITIAL_HEAP_SIZE;
     let (heap_allocator, texture_heap) = create_heaps(&device, heap_size);
 
-    let (argument_encoder, texture_encoder, storage_image_encoder) =
+    let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder) =
         create_argument_encoders(&device);
 
     let handle = state.next_device_handle;
@@ -116,6 +116,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             argument_encoder,
             texture_encoder,
             storage_image_encoder,
+            sampler_encoder,
             resource_registry: ResourceRegistry::new(),
             timeline_next: 1,
             timeline_scheduled_max: 0,
@@ -189,10 +190,12 @@ fn create_heaps(device: &MTLDevice, heap_size: u64) -> (HeapAllocator, TextureHe
     (heap_allocator, texture_heap)
 }
 
-/// Create the three argument encoders used for buffers, sampled textures, and storage images.
-fn create_argument_encoders(
+/// Create the four argument encoders used for buffers, sampled textures, storage images,
+/// and samplers.
+pub(super) fn create_argument_encoders(
     device: &MTLDevice,
 ) -> (
+    mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
@@ -235,7 +238,37 @@ fn create_argument_encoders(
         storage_image_encoder.encoded_length()
     );
 
-    (argument_encoder, texture_encoder, storage_image_encoder)
+    // Encoder for samplers.  Samplers are read-only by nature; the access field
+    // is ignored by Metal for sampler descriptors but we set ReadOnly for clarity.
+    let sampler_arg_desc = mtl::ArgumentDescriptor::new();
+    sampler_arg_desc.set_index(0);
+    sampler_arg_desc.set_data_type(mtl::MTLDataType::Sampler);
+    sampler_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
+    let sampler_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[sampler_arg_desc]));
+    let sampler_stride = sampler_encoder.encoded_length();
+    tracing::info!(
+        "Created sampler ArgumentEncoder (encoded_length={})",
+        sampler_stride
+    );
+
+    // Every resource category in the argument buffer is laid out as
+    // MAX_RESOURCES_PER_CATEGORY × 8 bytes.  ARGUMENT_BUFFER_SIZE is derived
+    // from that assumption.  Fail loudly at device creation if this GPU returns
+    // a different stride so that sampler offsets never silently diverge.
+    assert_eq!(
+        sampler_stride, 8,
+        "Metal sampler argument encoder reported encoded_length={sampler_stride}, \
+         expected 8 (MTLResourceID size on Apple Silicon / Intel / AMD). \
+         ARGUMENT_BUFFER_SIZE and the sampler slot layout assume an 8-byte stride; \
+         please update ARGUMENT_BUFFER_SIZE and GPU_RESOURCE_STRIDE to match."
+    );
+
+    (
+        argument_encoder,
+        texture_encoder,
+        storage_image_encoder,
+        sampler_encoder,
+    )
 }
 
 /// Destroy a logical device and clean up resources owned by it.

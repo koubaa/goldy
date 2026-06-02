@@ -626,6 +626,10 @@ pub(crate) struct LogicalDevice {
     pub texture_encoder: ArgumentEncoder,
     /// Encoder for writing storage images (ReadWrite) to the argument buffer
     pub storage_image_encoder: ArgumentEncoder,
+    /// Encoder for writing samplers to the argument buffer (MTLDataType::Sampler).
+    /// Its `encoded_length()` is the authoritative per-slot stride for the sampler
+    /// category; never hardcode 8 when encoding sampler offsets.
+    pub sampler_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
     /// Device-global submission sequence (contexts signal their own shared events).
