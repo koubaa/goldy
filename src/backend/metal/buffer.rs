@@ -25,23 +25,31 @@ fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
 /// buffer to complete, drains again, and retries. This makes the Metal backend
 /// self-regulating: the caller never sees heap exhaustion in steady state.
 fn allocate_mtl_storage_buffer(
-    logical_device: &mut super::types::LogicalDevice,
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
     allocation_size: u64,
     flags: BufferFlags,
 ) -> Result<(mtl::Buffer, bool)> {
     let options = mtl_resource_options(flags);
     let gpu_only = flags.contains(BufferFlags::GPU_ONLY);
-    if gpu_only || allocation_size > MAX_HEAP_SIZE {
-        let buf = logical_device.device.new_buffer(allocation_size, options);
-        return Ok((buf, true));
-    }
 
-    // Attempt 1: fast path — heap has space.
-    if let Some(buf) = logical_device
-        .heap_allocator
-        .allocate(allocation_size, options)
     {
-        return Ok((buf, false));
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        if gpu_only || allocation_size > MAX_HEAP_SIZE {
+            let buf = logical_device.device.new_buffer(allocation_size, options);
+            return Ok((buf, true));
+        }
+
+        // Attempt 1: fast path — heap has space.
+        if let Some(buf) = logical_device
+            .heap_allocator
+            .allocate(allocation_size, options)
+        {
+            return Ok((buf, false));
+        }
     }
 
     // Attempt 2 (non-blocking): drain any GPU work that has already signaled,
@@ -49,24 +57,32 @@ fn allocate_mtl_storage_buffer(
     // the GPU finished a frame between the last flush and this allocation.
     {
         let _tz = crate::tracy_zone!("mtl.heap_allocator.drain_reclaim");
-        logical_device.process_deletion_queue_up_to_signaled();
+        let retired = super::context::device_retired(state, device_handle);
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        logical_device.process_deletion_queue_up_to(retired);
         logical_device.heap_allocator.compact_overflow();
     }
-    if let Some(buf) = logical_device
-        .heap_allocator
-        .allocate(allocation_size, options)
     {
-        return Ok((buf, false));
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        if let Some(buf) = logical_device
+            .heap_allocator
+            .allocate(allocation_size, options)
+        {
+            return Ok((buf, false));
+        }
     }
 
     // Attempt 3 (blocking): wait for the oldest in-flight command buffer to
     // complete — a runtime boundary action that reclaims one frame's worth of
     // archive. Invisible to the caller; fires only during warmup when the CPU
     // races ahead of the GPU before caches are warm.
-    let oldest_cb = logical_device
-        .in_flight_command_buffers
-        .front()
-        .map(|(_, cb)| cb.to_owned());
+    let oldest_cb = super::context::oldest_in_flight_cb(state, device_handle);
 
     if let Some(cb) = oldest_cb {
         let _tz = crate::tracy_zone!("mtl.heap_allocator.wait_reclaim");
@@ -76,7 +92,12 @@ fn allocate_mtl_storage_buffer(
             allocation_size / 1024 / 1024,
         );
         cb.wait_until_completed();
-        logical_device.process_deletion_queue_up_to_signaled();
+        let retired = super::context::device_retired(state, device_handle);
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        logical_device.process_deletion_queue_up_to(retired);
         logical_device.heap_allocator.compact_overflow();
         if let Some(buf) = logical_device
             .heap_allocator
@@ -201,12 +222,8 @@ pub(super) fn create(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
-
-    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(logical_device, size, flags)?;
+    let (buffer, is_device_allocated) =
+        allocate_mtl_storage_buffer(state, device_handle, size, flags)?;
 
     insert_buffer_common(
         state,
@@ -256,13 +273,8 @@ pub(super) fn create_with_capacity(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
-
     let (buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(logical_device, capacity, flags)?;
+        allocate_mtl_storage_buffer(state, device_handle, capacity, flags)?;
 
     insert_buffer_common(
         state,
@@ -453,13 +465,13 @@ pub(super) fn resize(
         anyhow::bail!("buffer size must be non-zero");
     }
 
+    let (new_buffer, is_device_allocated) =
+        allocate_mtl_storage_buffer(state, device_handle, new_size, old_state.flags)?;
+
     let logical_device = state
         .devices
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
-
-    let (new_buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(logical_device, new_size, old_state.flags)?;
 
     let copy_len = if preserve_contents {
         old_state.size.min(new_size)
@@ -576,13 +588,13 @@ pub(super) fn resize(
 pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
+        // When called during VRAM reclamation, the installing thread's explicit
+        // reclamation epoch has already been GPU-completed, so using it as the
+        // deletion-queue barrier lets the next process_deletion_queue_up_to_signaled
+        // call free the Metal heap allocation immediately rather than waiting for
+        // the (often much larger) timeline_scheduled_max.
+        let barrier = super::context::reclamation_barrier(state, buffer.device_handle, gpu_idle);
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
-            // When called during VRAM reclamation, the installing thread's explicit
-            // reclamation epoch has already been GPU-completed, so using it as the
-            // deletion-queue barrier lets the next process_deletion_queue_up_to_signaled
-            // call free the Metal heap allocation immediately rather than waiting for
-            // the (often much larger) timeline_scheduled_max.
-            let barrier = device.buffer_deletion_barrier(gpu_idle);
             device
                 .resource_registry
                 .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });

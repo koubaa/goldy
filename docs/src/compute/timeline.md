@@ -2,11 +2,14 @@
 
 Goldy tracks GPU completion with a monotonic **timeline counter** — a `u64` value (`TimelineValue`) that increments with each submission. This replaces fence-per-submission models with a single, always-increasing counter on the device.
 
+Timeline read/wait APIs live on [`Context`](https://docs.rs/goldy/latest/goldy/struct.Context.html), created via `device.create_context()`.
+
 ## TimelineValue
 
 Every non-blocking submission returns a `TimelineValue`:
 
 ```rust
+let ctx = device.create_context();
 let tv: TimelineValue = graph.submit(&device)?;
 ```
 
@@ -16,10 +19,10 @@ Both `TaskGraph::submit` and `ComputeEncoder::submit` return timeline values. Su
 
 ## Querying GPU progress
 
-`device.gpu_progress()` returns the latest completed timeline value without blocking:
+`ctx.gpu_progress()` returns the latest completed timeline value without blocking:
 
 ```rust
-let current = device.gpu_progress();
+let current = ctx.gpu_progress();
 if current >= tv {
     // submission has finished — safe to read back results
 }
@@ -29,7 +32,7 @@ This is a lightweight query (single atomic read on most backends) suitable for p
 
 ## Waiting for completion
 
-`device.wait_until(value)` blocks the current thread until the GPU timeline reaches at least `value`:
+`ctx.wait_until(value)` blocks the current thread until the GPU timeline reaches at least `value`:
 
 ```rust
 let tv = graph.submit(&device)?;
@@ -38,13 +41,13 @@ let tv = graph.submit(&device)?;
 prepare_next_frame();
 
 // Block until this specific submission completes
-device.wait_until(tv)?;
+ctx.wait_until(tv)?;
 ```
 
 For bounded waits, use `wait_until_timeout`:
 
 ```rust
-let completed = device.wait_until_timeout(tv, 1000)?; // 1 second timeout
+let completed = ctx.wait_until_timeout(tv, 1000)?; // 1 second timeout
 if !completed {
     // GPU hasn't finished yet — handle timeout
 }
@@ -58,12 +61,7 @@ For simple cases where you don't need CPU/GPU overlap, `dispatch` combines submi
 graph.dispatch(&device)?; // submits and blocks until complete
 ```
 
-This is equivalent to:
-
-```rust
-let tv = graph.submit(&device)?;
-device.wait_until(tv)?;
-```
+`dispatch` waits internally via the device's context; you do not need a separate `Context` for that path.
 
 ## How this differs from fence-based synchronization
 
@@ -86,8 +84,9 @@ Because timeline values are ordered, you can reason about completion transitivel
 ### CPU readback after compute
 
 ```rust
+let ctx = device.create_context();
 let tv = graph.submit(&device)?;
-device.wait_until(tv)?;
+ctx.wait_until(tv)?;
 
 let result: Vec<f32> = buffer.read_data(0)?;
 ```
@@ -111,12 +110,13 @@ orch.drain_all(|dev, retired| my_cleanup(dev, retired))?;
 When you only need a one-off overlap without full frame management, the raw `TimelineValue` pattern works:
 
 ```rust
+let ctx = device.create_context();
 let mut pending: Option<TimelineValue> = None;
 
 loop {
     // Wait for the previous frame to finish before reusing its resources
     if let Some(tv) = pending {
-        device.wait_until(tv)?;
+        ctx.wait_until(tv)?;
     }
 
     // Prepare frame N+1 on the CPU
@@ -135,10 +135,11 @@ loop {
 Check completion in a non-blocking render loop:
 
 ```rust
+let ctx = device.create_context();
 let tv = graph.submit(&device)?;
 
 loop {
-    if device.gpu_progress() >= tv {
+    if ctx.gpu_progress() >= tv {
         break; // done
     }
     // do other work, yield, etc.

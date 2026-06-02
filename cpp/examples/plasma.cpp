@@ -70,8 +70,17 @@ int main() {
         }
         std::cout << "\n";
 
+        auto adapters = instance.enumerate_adapters();
+        uint32_t adapter_id = adapters.empty() ? 0 : adapters[0].id;
+        for (const auto& adapter : adapters) {
+            if (adapter.device_type == GOLDY_DEVICE_TYPE_DISCRETE_GPU) {
+                adapter_id = adapter.id;
+                break;
+            }
+        }
+
         // Create device (prefer discrete GPU)
-        goldy::Device device = instance.create_device(GOLDY_DEVICE_TYPE_DISCRETE_GPU);
+        goldy::Device device = instance.create_device_for_adapter(adapter_id);
         std::cout << "Created device on adapter " << device.adapter_id() << "\n";
         std::cout << "Has goldy_exp library: " << (device.has_library("goldy_exp") ? "yes" : "no") << "\n\n";
 

@@ -51,6 +51,7 @@ impl App {
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.request_adapter(&RequestAdapterOptions::default())?.request_device(&DeviceDescriptor::default())?);
+        let ctx = device.create_context()?;
 
         // Create vertex buffer with a triangle
         let vertices = [
@@ -61,7 +62,7 @@ impl App {
         let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
 
         // Create Surface for zero-copy presentation
-        let surface = Surface::new(&device, window.as_ref())?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Create shader and pipeline using surface's actual format
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;

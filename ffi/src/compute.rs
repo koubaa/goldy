@@ -151,7 +151,15 @@ pub unsafe extern "C" fn goldy_compute_encoder_execute(
         return GoldyResult::NullPointer;
     }
 
-    match (*encoder).inner.dispatch(&(*device).inner) {
+    let device = &(*device).inner;
+    let ctx = match device.create_context() {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            crate::error::set_last_error(format!("{e}"));
+            return GoldyResult::GpuError;
+        }
+    };
+    match (*encoder).inner.dispatch(&ctx) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error_from_anyhow(&e);

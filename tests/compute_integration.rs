@@ -5,12 +5,15 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 mod common;
+#[path = "common/submission.rs"]
+mod submission;
 
 use goldy::{
     types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
     Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceDescriptor,
     DeviceType, Instance, RequestAdapterOptions, ShaderModule, Texture,
 };
+use submission::submission_context;
 
 fn request_default_device(instance: &Instance) -> Device {
     instance
@@ -109,6 +112,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
+    let ctx = submission_context(&device);
 
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
@@ -123,7 +127,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         pass.dispatch(1, 1, 1);
     }
 
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
     assert!(result.is_ok(), "Failed to dispatch: {:?}", result.err());
 }
 
@@ -131,6 +135,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 fn test_compute_with_uav_buffer() {
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
+    let ctx = submission_context(&device);
 
     let shader =
         ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
@@ -153,7 +158,7 @@ fn test_compute_with_uav_buffer() {
         pass.dispatch(1, 1, 1); // 64 threads total
     }
 
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
     assert!(result.is_ok(), "Failed to dispatch: {:?}", result.err());
 
     // Note: We can't easily read back the buffer without mapping support
@@ -164,6 +169,7 @@ fn test_compute_with_uav_buffer() {
 fn test_compute_with_srv_and_uav() {
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("Failed to compile shader");
 
@@ -191,7 +197,7 @@ fn test_compute_with_srv_and_uav() {
         pass.dispatch(1, 1, 1); // 64 threads
     }
 
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
     assert!(
         result.is_ok(),
         "Failed to dispatch with SRV+UAV: {:?}",
@@ -293,6 +299,7 @@ fn vk_api_validation_timeline_semaphore() {
 
     let instance = Instance::new().expect("instance");
     let device = request_default_device(&instance);
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -303,12 +310,12 @@ fn vk_api_validation_timeline_semaphore() {
         pass.set_pipeline(&pipeline);
         pass.dispatch(1, 1, 1);
     }
-    let tv = encoder.submit(&device).expect("submit");
+    let tv = encoder.submit(&ctx).expect("submit");
 
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
     drop(buf);
 
-    device.wait_until(tv).expect("wait_until");
+    ctx.wait_until(tv).expect("wait_until");
 }
 
 /// Vulkan validation layer regression: per-device resource teardown (no cross-device pool key bugs).
@@ -324,6 +331,7 @@ fn vk_api_validation_two_device_teardown() {
     }
 
     let submit_minimal = |device: &goldy::Device| {
+        let ctx = submission_context(device);
         let shader =
             ShaderModule::from_slang(device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
         let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
@@ -333,7 +341,7 @@ fn vk_api_validation_two_device_teardown() {
             pass.set_pipeline(&pipeline);
             pass.dispatch(1, 1, 1);
         }
-        encoder.dispatch(device).expect("dispatch");
+        encoder.dispatch(&ctx).expect("dispatch");
     };
 
     let i1 = Instance::new().expect("i1");
@@ -476,6 +484,7 @@ fn device_capabilities_metal_reports_constant_resize() {
     use goldy::{types::BufferResizeCost, BackendType, Instance};
     let inst = Instance::new().expect("i");
     let device = request_device_preferring(&inst, goldy::DeviceType::IntegratedGpu);
+    let _ctx = device.create_context().expect("context");
     assert_eq!(device.backend_type(), BackendType::Metal);
     let caps = device.capabilities();
     assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);
@@ -555,6 +564,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 "#;
     let inst = Instance::new().expect("i");
     let device = request_device_preferring(&inst, DeviceType::DiscreteGpu);
+    let ctx = device.create_context().expect("context");
     if device.backend_type() != BackendType::Dx12 {
         return;
     }
@@ -587,7 +597,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
         .expect("read2");
@@ -611,7 +621,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch2");
+    encoder.dispatch(&ctx).expect("dispatch2");
 
     buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
         .expect("read3");
@@ -634,6 +644,7 @@ fn hint_unused_above_smoke() {
 #[test]
 fn test_compute_write_and_readback() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -649,7 +660,7 @@ fn test_compute_write_and_readback() {
         pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1); // 64 threads, each doubles one element
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
     buffer
@@ -757,6 +768,7 @@ fn test_buffer_clear_to_end() {
 #[test]
 fn test_compute_batched_clear_before_dispatch() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -776,7 +788,7 @@ fn test_compute_batched_clear_before_dispatch() {
         pass.bind_resources(&[&input_buf, &output_buf]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; 64 * 4];
     output_buf.read_to_cpu(&device, &mut out).expect("readback");
@@ -796,6 +808,7 @@ fn test_compute_batched_clear_before_dispatch() {
 #[test]
 fn test_compute_clear_between_dispatches() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy");
     let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
@@ -823,7 +836,7 @@ fn test_compute_clear_between_dispatches() {
         pass.bind_resources(&[&output_buf]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; 64 * 4];
     output_buf.read_to_cpu(&device, &mut out).expect("readback");
@@ -846,6 +859,7 @@ fn test_compute_clear_between_dispatches() {
 #[test]
 fn test_compute_dispatch_indirect() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -864,7 +878,7 @@ fn test_compute_dispatch_indirect() {
         pass.bind_resources(&[&data_buf]);
         pass.dispatch_indirect(&args_buf, 0);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
     data_buf
@@ -888,6 +902,7 @@ fn test_compute_dispatch_indirect() {
 #[test]
 fn test_dispatch_indirect_invalid_buffer() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -910,7 +925,7 @@ fn test_dispatch_indirect_invalid_buffer() {
         } // temp dropped — backend destroys the buffer here
     }
 
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
     assert!(
         result.is_err(),
         "Expected error dispatching with a destroyed indirect args buffer"
@@ -924,6 +939,7 @@ fn test_dispatch_indirect_invalid_buffer() {
 #[test]
 fn test_compute_many_resource_slots() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, SIX_SLOT_SUM_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -944,7 +960,7 @@ fn test_compute_many_resource_slots() {
         pass.bind_resources(&[&a, &b, &c, &d, &e, &out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; N * 4];
     out.read_to_cpu(&device, &mut output).expect("readback");
@@ -983,6 +999,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
 
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
+    let ctx = submission_context(&device);
 
     let shader =
         ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("Failed to compile shader");
@@ -1017,7 +1034,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
         pass.dispatch(1, 1, 1);
     }
 
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
     assert!(
         result.is_ok(),
         "Failed to dispatch with struct buffer: {:?}",
@@ -1032,6 +1049,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
 #[test]
 fn test_buffer_view_copy_between_sub_regions() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -1064,7 +1082,7 @@ fn test_buffer_view_copy_between_sub_regions() {
         pass.bind_resources_raw(&[idx_a, idx_b]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     // Read back the entire pool buffer and check the second half
     let mut output = vec![0u8; N * 2 * 4];
@@ -1089,6 +1107,7 @@ fn test_buffer_view_copy_between_sub_regions() {
 #[test]
 fn test_buffer_view_isolation() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -1117,7 +1136,7 @@ fn test_buffer_view_isolation() {
         pass.bind_resources_raw(&[idx]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; N * 2 * 4];
     pool_buf
@@ -1152,6 +1171,7 @@ fn test_buffer_view_isolation() {
 #[test]
 fn test_buffer_pool_alloc_and_dispatch() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -1178,7 +1198,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
         pass.bind_resources_raw(&[src_idx, dst_idx]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     // Read back entire pool and verify the destination region
     let mut output = vec![0u8; pool_size];
@@ -1267,6 +1287,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile positive_mod shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -1280,7 +1301,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
         pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 7 * 4];
     buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
@@ -1354,6 +1375,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile billboard shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -1367,7 +1389,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
         pass.bind_resources(&[&buf]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 9 * 4];
     buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
@@ -1420,6 +1442,7 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile typed-var shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -1452,7 +1475,7 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
         ]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 8 * std::mem::size_of::<Pair>()];
     output_buf.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1494,6 +1517,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, LARGE_COPY_SHADER).expect("compile large copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -1523,7 +1547,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
         pass.bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]);
         pass.dispatch(workgroups, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; BUF_SIZE as usize];
     buffers[NUM_BUFFERS - 1]
@@ -1558,6 +1582,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 
     let instance = Instance::new().expect("instance");
     let device = request_default_device(&instance);
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, SHADER).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -1583,7 +1608,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
         pass.bind_resources_raw(&[texture.bindless_index().expect("tex bindless")]);
         pass.dispatch(wg_x, wg_y, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; (width * height * 4) as usize];
     texture.read_to_cpu(&mut output).expect("readback");
@@ -1619,6 +1644,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 #[test]
 fn test_cpu_readable_compute_write_and_read() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER_COHERENT).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -1642,7 +1668,7 @@ fn test_cpu_readable_compute_write_and_read() {
         pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; N * size_of::<u32>()];
     buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
@@ -1666,6 +1692,7 @@ fn test_write_buffer_reuse_across_submissions() {
     use goldy::{NodeAccess, TaskGraph};
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -1712,11 +1739,11 @@ fn test_write_buffer_reuse_across_submissions() {
         .bind_resources_raw_slice(&[idx_in, idx_out_b])
         .dispatch(1, 1, 1);
 
-    let tv1 = g1.submit(&device).expect("submit 1");
-    let tv2 = g2.submit(&device).expect("submit 2");
+    let tv1 = g1.submit(&ctx).expect("submit 1");
+    let tv2 = g2.submit(&ctx).expect("submit 2");
 
-    device.wait_until(tv1).expect("wait 1");
-    device.wait_until(tv2).expect("wait 2");
+    ctx.wait_until(tv1).expect("wait 1");
+    ctx.wait_until(tv2).expect("wait 2");
 
     let read_u32 = |buf: &Buffer| -> Vec<u32> {
         let mut raw = vec![0u8; N * core::mem::size_of::<u32>()];
@@ -1797,6 +1824,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
     let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
@@ -1810,7 +1838,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         pass.bind_resources_raw_with_user(&[heap_idx], &[EXPECTED]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1831,6 +1859,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
     let out = Buffer::with_data(&device, &[0xDEAD_BEEFu32; 1], DataAccess::Scattered).expect("out");
@@ -1843,7 +1872,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         pass.bind_resources_raw_with_user(&[heap_idx], &[0u32]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1867,6 +1896,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
     let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
@@ -1879,7 +1909,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         pass.bind_resources_raw_with_user(&[heap_idx], &[u32::MAX]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1906,6 +1936,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
     let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
@@ -1922,7 +1953,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
         pass.bind_resources_raw_with_user(&[heap_idx], &[bits]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1948,6 +1979,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
     let out = Buffer::with_data(&device, &[0u32; 2], DataAccess::Scattered).expect("out");
@@ -1963,7 +1995,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
         pass.bind_resources_raw_with_user(&[heap_idx], &[A, B]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 8];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1986,6 +2018,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
@@ -2005,7 +2038,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
         pass.bind_resources_raw_with_user(&[inp_idx, out_idx], &[OFFSET]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; N * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2032,6 +2065,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
@@ -2041,23 +2075,23 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
         pass.set_pipeline(&pipeline);
         pass.dispatch(1, 1, 1);
     }
-    let tv = encoder.submit(&device).expect("submit");
+    let tv = encoder.submit(&ctx).expect("submit");
 
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
 
     let pending_after_drop = {
         drop(buf);
-        device.deferred_deletion_pending_count()
+        ctx.deferred_deletion_pending_count()
     };
     assert!(
         pending_after_drop > 0,
         "expected deferred deletion queue to retain GPU resources until the timeline catches up"
     );
 
-    device.wait_until(tv).expect("wait_until");
+    ctx.wait_until(tv).expect("wait_until");
 
     assert_eq!(
-        device.deferred_deletion_pending_count(),
+        ctx.deferred_deletion_pending_count(),
         0,
         "wait_until should drain deferred destruction for completed timeline values"
     );
@@ -2070,24 +2104,25 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 #[test]
 fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Allocate, submit some work, then drop the buffer so its slot enters
     // the pending-free list.
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
     let tv = {
         let encoder = ComputeEncoder::new();
-        encoder.submit(&device).expect("submit empty work")
+        encoder.submit(&ctx).expect("submit empty work")
     };
-    device.wait_until(tv).expect("wait");
+    ctx.wait_until(tv).expect("wait");
 
     // Drop happens *after* wait_until, so the GPU is idle but the slot may
     // still be in the pending list depending on when the backend last ran
     // its internal cleanup. `flush_deferred_deletions` must drain it.
     drop(buf);
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
 
     assert_eq!(
-        device.deferred_deletion_pending_count(),
+        ctx.deferred_deletion_pending_count(),
         0,
         "flush_deferred_deletions must reclaim all slots when GPU is idle"
     );
@@ -2098,11 +2133,12 @@ fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
 #[test]
 fn flush_deferred_deletions_respects_gpu_progress() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Submit work so the timeline advances past zero.
     let tv = {
         let encoder = ComputeEncoder::new();
-        encoder.submit(&device).expect("submit")
+        encoder.submit(&ctx).expect("submit")
     };
 
     // Drop a buffer while GPU may still be in flight.
@@ -2111,14 +2147,14 @@ fn flush_deferred_deletions_respects_gpu_progress() {
 
     // Without waiting for the GPU, calling flush is safe (no panic/crash).
     // Slots that haven't been signaled yet should remain pending.
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
 
     // After waiting, flushing again must fully drain the queue.
-    device.wait_until(tv).expect("wait");
-    device.flush_deferred_deletions();
+    ctx.wait_until(tv).expect("wait");
+    ctx.flush_deferred_deletions();
 
     assert_eq!(
-        device.deferred_deletion_pending_count(),
+        ctx.deferred_deletion_pending_count(),
         0,
         "pending slots must be zero after wait_until + flush_deferred_deletions"
     );
@@ -2129,8 +2165,9 @@ fn flush_deferred_deletions_respects_gpu_progress() {
 #[test]
 fn flush_deferred_deletions_noop_on_idle_device() {
     let device = make_device();
-    device.flush_deferred_deletions();
-    assert_eq!(device.deferred_deletion_pending_count(), 0);
+    let ctx = submission_context(&device);
+    ctx.flush_deferred_deletions();
+    assert_eq!(ctx.deferred_deletion_pending_count(), 0);
 }
 
 // ============================================================================
@@ -2186,6 +2223,7 @@ fn stride_validation_matching_uint_passes() {
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2201,7 +2239,7 @@ fn stride_validation_matching_uint_passes() {
         pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1);
     }
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     result.expect("dispatch with matching stride must succeed");
@@ -2216,6 +2254,7 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2231,7 +2270,7 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
         pass.bind_resources(&[&buffer]);
         pass.dispatch(1, 1, 1);
     }
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     let err = result.expect_err("dispatch with wrong stride must fail");
@@ -2252,6 +2291,7 @@ fn stride_validation_disabled_allows_mismatch() {
     std::env::remove_var("GOLDY_VALIDATION");
 
     let device = make_device_for_stride_tests();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2268,7 +2308,7 @@ fn stride_validation_disabled_allows_mismatch() {
         pass.dispatch(1, 1, 1);
     }
     encoder
-        .dispatch(&device)
+        .dispatch(&ctx)
         .expect("dispatch must succeed when validation is off");
 }
 
@@ -2281,6 +2321,7 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2300,7 +2341,7 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
         pass.bind_resources(&[&params, &data_buf]);
         pass.dispatch(1, 1, 1);
     }
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     let err = result.expect_err("dispatch with wrong stride on slot 1 must fail");
@@ -2320,6 +2361,7 @@ fn stride_validation_multi_binding_all_correct_passes() {
     std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
     let device = make_device_for_stride_tests();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2339,7 +2381,7 @@ fn stride_validation_multi_binding_all_correct_passes() {
         pass.bind_resources(&[&params, &data_buf]);
         pass.dispatch(1, 1, 1);
     }
-    let result = encoder.dispatch(&device);
+    let result = encoder.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     result.expect("dispatch with all-correct strides must succeed");
@@ -2369,6 +2411,7 @@ fn small_config() -> TransientAllocatorConfig {
 #[test]
 fn transient_allocator_smoke_all_strategies() {
     let device = make_device();
+    let ctx = submission_context(&device);
     for strategy in [
         TransientAllocatorStrategy::BumpReset,
         TransientAllocatorStrategy::Heap,
@@ -2379,7 +2422,7 @@ fn transient_allocator_smoke_all_strategies() {
         a.begin_frame(&device, 0).expect("begin");
         let view = a.alloc(&device, 256, Some(4)).expect("alloc");
         // Submit empty work to advance the timeline.
-        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        let tv = ComputeEncoder::new().submit(&ctx).expect("submit");
         drop(view);
         a.end_frame(&device, tv);
         // Next frame: should not panic, and BumpReset should wait for tv internally.
@@ -2414,18 +2457,19 @@ fn transient_allocator_strategy_default_and_parse() {
 #[test]
 fn bump_reset_blocks_on_prev_epoch() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let mut a = BumpResetAllocator::new(&device, small_config()).expect("create");
 
     a.begin_frame(&device, 0).expect("begin");
     let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-    let tv = ComputeEncoder::new().submit(&device).expect("submit");
+    let tv = ComputeEncoder::new().submit(&ctx).expect("submit");
     a.end_frame(&device, tv);
 
     // begin_frame should wait for `tv` if it hasn't completed. After it returns,
     // gpu_progress must be at least tv.
     a.begin_frame(&device, 0).expect("begin 2");
     assert!(
-        device.gpu_progress() >= tv,
+        ctx.gpu_progress() >= tv,
         "BumpReset must not allow reuse until prev epoch has been signaled"
     );
 }
@@ -2435,6 +2479,7 @@ fn bump_reset_blocks_on_prev_epoch() {
 #[test]
 fn transient_allocator_clear_resets_state() {
     let device = make_device();
+    let ctx = submission_context(&device);
     for strategy in [
         TransientAllocatorStrategy::BumpReset,
         TransientAllocatorStrategy::Heap,
@@ -2444,9 +2489,9 @@ fn transient_allocator_clear_resets_state() {
             .expect("create allocator");
         a.begin_frame(&device, 0).expect("begin");
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-        let tv = ComputeEncoder::new().submit(&device).expect("submit");
+        let tv = ComputeEncoder::new().submit(&ctx).expect("submit");
         a.end_frame(&device, tv);
-        device.wait_until(tv).expect("wait");
+        ctx.wait_until(tv).expect("wait");
         a.clear();
         // After clear, used_this_frame should be zero and we can begin a new frame.
         assert_eq!(a.used_this_frame(), 0);
@@ -2493,7 +2538,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 /// 1. Graph has one transient buffer T.
 /// 2. Dispatch A writes `id.x + 1` into T.
 /// 3. Dispatch B copies T -> output (a regular CPU-readable buffer).
-/// 4. `graph.dispatch(&device)` resolves transients via the device-owned
+/// 4. `graph.dispatch(&ctx)` resolves transients via the device-owned
 ///    placement heap (view creation, bindless patching, submission).
 /// 5. Read back output and verify values.
 #[test]
@@ -2501,6 +2546,7 @@ fn test_transient_buffer_write_then_copy() {
     use goldy::{NodeAccess, TaskGraph};
 
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let write_shader =
         ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
@@ -2532,7 +2578,7 @@ fn test_transient_buffer_write_then_copy() {
         .bind_resources_raw_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
 
-    graph.dispatch(&device).expect("dispatch transient graph");
+    graph.dispatch(&ctx).expect("dispatch transient graph");
 
     let mut raw = vec![0u8; byte_size as usize];
     output.read_to_cpu(&device, &mut raw).expect("read output");
@@ -2554,6 +2600,7 @@ fn test_regular_buffer_write_then_copy() {
     use goldy::{NodeAccess, TaskGraph};
 
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let write_shader =
         ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
@@ -2589,7 +2636,7 @@ fn test_regular_buffer_write_then_copy() {
         .bind_resources_raw_slice(&[scratch_uav, output_uav])
         .dispatch(1, 1, 1);
 
-    graph.dispatch(&device).expect("dispatch graph");
+    graph.dispatch(&ctx).expect("dispatch graph");
 
     let mut raw = vec![0u8; byte_size as usize];
     output.read_to_cpu(&device, &mut raw).expect("read output");
@@ -2806,6 +2853,7 @@ void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
 #[test]
 fn test_wave_inclusive_scan_uniform_64() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_UNIFORM)
         .expect("compile WAVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2818,7 +2866,7 @@ fn test_wave_inclusive_scan_uniform_64() {
         pass.bind_resources(&[&out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2837,6 +2885,7 @@ fn test_wave_inclusive_scan_uniform_64() {
 #[test]
 fn test_wave_inclusive_scan_ramp_64() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP).expect("compile WAVE_SCAN_64_RAMP");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2849,7 +2898,7 @@ fn test_wave_inclusive_scan_ramp_64() {
         pass.bind_resources(&[&out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2869,6 +2918,7 @@ fn test_wave_inclusive_scan_ramp_64() {
 #[test]
 fn test_wave_inclusive_scan_uniform_256() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, WAVE_SCAN_256_UNIFORM)
         .expect("compile WAVE_SCAN_256_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2881,7 +2931,7 @@ fn test_wave_inclusive_scan_uniform_256() {
         pass.bind_resources(&[&out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 256 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2900,6 +2950,7 @@ fn test_wave_inclusive_scan_uniform_256() {
 #[test]
 fn test_workgroup_reduce_uint_correct() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader =
         ShaderModule::from_slang(&device, REDUCE_64_UNIFORM).expect("compile REDUCE_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2912,7 +2963,7 @@ fn test_workgroup_reduce_uint_correct() {
         pass.bind_resources(&[&out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2929,6 +2980,7 @@ fn test_workgroup_reduce_uint_correct() {
 #[test]
 fn test_workgroup_inclusive_scan_uint_correct() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, INCLUSIVE_SCAN_64_UNIFORM)
         .expect("compile INCLUSIVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -2941,7 +2993,7 @@ fn test_workgroup_inclusive_scan_uint_correct() {
         pass.bind_resources(&[&out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2960,6 +3012,7 @@ fn test_workgroup_inclusive_scan_uint_correct() {
 #[test]
 fn test_workgroup_broadcast_correct() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, BROADCAST_64).expect("compile BROADCAST_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -2971,7 +3024,7 @@ fn test_workgroup_broadcast_correct() {
         pass.bind_resources(&[&out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2985,6 +3038,7 @@ fn test_workgroup_broadcast_correct() {
 #[test]
 fn test_workgroup_upper_bound_linear() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, UPPER_BOUND_64).expect("compile UPPER_BOUND_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
@@ -2996,7 +3050,7 @@ fn test_workgroup_upper_bound_linear() {
         pass.bind_resources(&[&out]);
         pass.dispatch(1, 1, 1);
     }
-    encoder.dispatch(&device).expect("dispatch");
+    encoder.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -3060,6 +3114,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 "#;
 
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Check that the device supports DirectInterpolated (all backends should).
     let tex = Texture::new(
@@ -3092,7 +3147,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         pass.bind_resources_raw(&[storage_idx]);
         pass.dispatch(1, 1, 1);
     }
-    enc.dispatch(&device).expect("write dispatch");
+    enc.dispatch(&ctx).expect("write dispatch");
 
     // Read pass (SRV + sampler).
     let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
@@ -3111,7 +3166,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         ]);
         pass.dispatch(1, 1, 1);
     }
-    enc2.dispatch(&device).expect("read dispatch");
+    enc2.dispatch(&ctx).expect("read dispatch");
 
     let mut raw = vec![0u8; N * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");

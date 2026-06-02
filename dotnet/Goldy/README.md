@@ -9,7 +9,7 @@ using Goldy;
 
 // Create instance and device
 using var instance = new Instance();
-using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
+using var device = instance.RequestAdapter().RequestDevice();
 
 // Create a render target
 using var target = new RenderTarget(device, 800, 600, TextureFormat.Rgba8Unorm);

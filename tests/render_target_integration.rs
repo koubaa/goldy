@@ -3,8 +3,6 @@
 //! These tests require a GPU and are skipped in CI if no GPU is available.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
-mod common;
-
 use goldy::{
     Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
     DeviceDescriptor, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,

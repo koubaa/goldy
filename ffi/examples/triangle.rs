@@ -7,14 +7,15 @@ use goldy_ffi::winit_surface::goldy_surface_from_winit_window;
 use goldy_ffi::{
     goldy_buffer_create_with_data, goldy_buffer_destroy, goldy_device_destroy, goldy_encoder_clear,
     goldy_encoder_create, goldy_encoder_draw, goldy_encoder_set_pipeline,
-    goldy_encoder_set_vertex_buffer, goldy_get_last_error, goldy_instance_create,
-    goldy_instance_create_device, goldy_instance_destroy, goldy_render_pipeline_create,
-    goldy_render_pipeline_destroy, goldy_shader_builtin_vertex_color_2d, goldy_shader_create,
-    goldy_shader_destroy, goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format,
-    goldy_surface_frame_render, goldy_surface_present, goldy_surface_resize, GoldyBuffer,
-    GoldyColor, GoldyDataAccess, GoldyDevice, GoldyDeviceType, GoldyInstance,
-    GoldyPrimitiveTopology, GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult,
-    GoldyShaderModule, GoldySurface, GoldyVertexAttribute, GoldyVertexFormat,
+    goldy_encoder_set_vertex_buffer, goldy_get_last_error, goldy_instance_adapter_count,
+    goldy_instance_create, goldy_instance_create_device_for_adapter, goldy_instance_destroy,
+    goldy_instance_get_adapter, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
+    goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy,
+    goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format, goldy_surface_frame_render,
+    goldy_surface_present, goldy_surface_resize, GoldyAdapterInfo, GoldyBuffer, GoldyColor,
+    GoldyDataAccess, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
+    GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult, GoldyShaderModule, GoldySurface,
+    GoldyVertexAttribute, GoldyVertexFormat,
 };
 use std::ffi::CStr;
 use std::mem::size_of;
@@ -42,6 +43,30 @@ fn last_ffi_message() -> String {
         }
         CStr::from_ptr(p).to_string_lossy().into_owned()
     }
+}
+
+unsafe fn request_device_for_discrete_gpu(instance: *const GoldyInstance) -> *mut GoldyDevice {
+    let count = goldy_instance_adapter_count(instance);
+    let mut best_id: u32 = 0;
+    for i in 0..count {
+        let mut info = GoldyAdapterInfo {
+            id: 0,
+            device_type: GoldyDeviceType::Other,
+            name: [0; 256],
+            vendor: [0; 64],
+        };
+        if goldy_instance_get_adapter(instance, i, &mut info) != GoldyResult::Ok {
+            continue;
+        }
+        if i == 0 {
+            best_id = info.id;
+        }
+        if info.device_type == GoldyDeviceType::DiscreteGpu {
+            best_id = info.id;
+            break;
+        }
+    }
+    goldy_instance_create_device_for_adapter(instance, best_id)
 }
 
 struct App {
@@ -75,10 +100,10 @@ impl App {
             return Err(format!("goldy_instance_create: {}", last_ffi_message()));
         }
 
-        self.device = goldy_instance_create_device(self.instance, GoldyDeviceType::DiscreteGpu);
+        self.device = request_device_for_discrete_gpu(self.instance);
         if self.device.is_null() {
             return Err(format!(
-                "goldy_instance_create_device: {}",
+                "goldy_instance_create_device_for_adapter: {}",
                 last_ffi_message()
             ));
         }

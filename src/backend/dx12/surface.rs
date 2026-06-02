@@ -357,6 +357,7 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
 pub(super) fn acquire(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
+    ctx: super::ContextHandle,
 ) -> Result<SwapchainImageHandle> {
     if state
         .surfaces
@@ -409,9 +410,10 @@ pub(super) fn acquire(
     }
 
     // Process deferred deletions now that the fence wait has completed.
+    let retired = super::context::device_retired(state, device_handle);
     if let Some(device) = state.devices.get_mut(&device_handle) {
         let _tz = crate::tracy_zone!("surface.acquire.deletion_queue");
-        device.process_deletion_queue();
+        device.process_deletion_queue_up_to(retired);
     }
 
     let surface = state
@@ -447,8 +449,8 @@ pub(super) fn acquire(
         surface.pending_acquire_count = surface.pending_acquire_count.saturating_add(1);
     }
 
-    if let Some(ld) = state.devices.get(&device_handle) {
-        ld.signal_queue
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.signal_queue
             .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
@@ -484,14 +486,14 @@ pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<
     };
 
     if !pending.is_empty() {
-        return super::compute::submit(state, device_handle, &pending);
+        return super::compute::submit(state, frame.context, &pending);
     }
 
     let dev = state
         .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
-    Ok(dev.fence_value.saturating_sub(1))
+    Ok(dev.timeline_next.saturating_sub(1))
 }
 
 pub(super) fn present_frame(
@@ -499,7 +501,7 @@ pub(super) fn present_frame(
     frame: FrameToken,
     _submit_tv: u64,
 ) -> Result<u64> {
-    present(state, frame.surface, frame.image)?;
+    present(state, frame.surface, frame.image, frame.context)?;
     let device_handle = state
         .surfaces
         .get(&frame.surface)
@@ -509,7 +511,7 @@ pub(super) fn present_frame(
         .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
-    Ok(dev.fence_value.saturating_sub(1))
+    Ok(dev.timeline_next.saturating_sub(1))
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -707,7 +709,7 @@ pub(super) fn render(
     }
 
     // Signal fence for this frame
-    let fence_value = logical_device.fence_value;
+    let fence_value = logical_device.timeline_next;
     unsafe {
         logical_device
             .command_queue
@@ -717,7 +719,7 @@ pub(super) fn render(
 
     // Update fence value for next operation
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
+        dev.timeline_next += 1;
     }
 
     if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
@@ -736,6 +738,7 @@ pub(super) fn present(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
+    ctx: super::ContextHandle,
 ) -> Result<()> {
     let (
         device_handle,
@@ -868,7 +871,7 @@ pub(super) fn present(
                 .ExecuteCommandLists(&[Some(cmd_list)]);
         }
 
-        let fence_value = logical_device.fence_value;
+        let fence_value = logical_device.timeline_next;
         unsafe {
             logical_device
                 .command_queue
@@ -877,7 +880,7 @@ pub(super) fn present(
         .context("Failed to signal fence after present copy")?;
 
         if let Some(dev) = state.devices.get_mut(&device_handle) {
-            dev.fence_value += 1;
+            dev.timeline_next += 1;
         }
 
         // Record the fence so acquire() can wait for it before reusing this slot.
@@ -914,8 +917,8 @@ pub(super) fn present(
         }
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
-        if let Some(ld) = state.devices.get(&device_handle) {
-            ld.signal_queue
+        if let Some(sc) = state.contexts.get(&ctx) {
+            sc.signal_queue
                 .push(crate::signal::Signal::SwapchainReturned {
                     image_index: return_image,
                 });
@@ -1212,7 +1215,7 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 }
 
 fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
-    let fence_value = device.fence_value;
+    let fence_value = device.timeline_next;
     unsafe { device.command_queue.Signal(&device.fence, fence_value) }
         .context("Failed to signal fence")?;
     wait_for_fence(&device.fence, fence_value)

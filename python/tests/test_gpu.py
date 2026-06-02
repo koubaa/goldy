@@ -13,7 +13,7 @@ def skip_if_no_gpu():
     import goldy
     try:
         instance = goldy.Instance()
-        device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+        device = instance.request_adapter().request_device()
         return device
     except goldy.GoldyError:
         pytest.skip("No GPU available")

@@ -37,7 +37,11 @@ def main():
     # Create a device on the first discrete GPU (or first available)
     print("Creating device...")
     try:
-        device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+        discrete = next(
+            (a for a in adapters if a.device_type == goldy.DeviceType.DISCRETE_GPU),
+            None,
+        )
+        device = (discrete or adapters[0]).request_device()
         print(f"Created device on adapter {device.adapter_id}")
         print(f"Device valid: {device.is_valid()}")
         print(f"Shader libraries: {device.list_libraries()}")

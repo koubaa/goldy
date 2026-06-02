@@ -13,6 +13,7 @@
 
 mod buffer;
 mod compute;
+mod context;
 mod device;
 mod pipeline;
 mod render_commands;
@@ -32,9 +33,9 @@ use types::MetalState;
 
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
-    state.devices.values().all(|ld| {
+    state.devices.iter().all(|(device, ld)| {
         ld.timeline_scheduled_max == 0
-            || ld.timeline_event.as_ref().signaled_value() >= ld.timeline_scheduled_max
+            || context::device_retired(state, *device) >= ld.timeline_scheduled_max
     })
 }
 
@@ -48,17 +49,45 @@ pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState)
     }
 }
 
-/// Drop all entries from the front of the in-flight CB deque whose timeline
+/// Drop all entries from the front of a context's in-flight CB deque whose timeline
 /// value is <= the current signaled value.  Safe to call at any time.
-pub(in crate::backend::metal) fn drain_completed_cbs(ld: &mut types::LogicalDevice) {
-    let signaled = ld.timeline_event.as_ref().signaled_value();
-    while ld
+pub(in crate::backend::metal) fn drain_completed_cbs(sc: &mut types::MetalSubmissionContext) {
+    let signaled = sc.timeline_event.as_ref().signaled_value();
+    while sc
         .in_flight_command_buffers
         .front()
         .is_some_and(|(tv, _)| *tv <= signaled)
     {
-        ld.in_flight_command_buffers.pop_front();
+        sc.in_flight_command_buffers.pop_front();
     }
+}
+
+/// Block until scheduled timeline values have been signaled on one device, or timeout.
+pub(in crate::backend::metal) fn wait_device_idle(
+    state: &MetalState,
+    device: DeviceHandle,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    if state.device_lost.load(Ordering::Relaxed) {
+        anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
+    }
+    let ld = state
+        .devices
+        .get(&device)
+        .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
+    let target = ld.timeline_scheduled_max;
+    if target == 0 {
+        return Ok(());
+    }
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+    if !context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT) {
+        state.device_lost.store(true, Ordering::Relaxed);
+        anyhow::bail!(
+            "GPU wait_device_idle timed out after {}ms waiting for timeline {target}",
+            IDLE_TIMEOUT.as_millis()
+        );
+    }
+    Ok(())
 }
 
 /// Block until scheduled timeline values have been signaled on every device, or timeout.
@@ -67,19 +96,8 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
     }
-    let timeout = std::time::Duration::from_millis(5000);
-    for ld in state.devices.values() {
-        let target = ld.timeline_scheduled_max;
-        if target == 0 {
-            continue;
-        }
-        if !ld.timeline_waiter.wait_until(target, timeout) {
-            state.device_lost.store(true, Ordering::Relaxed);
-            anyhow::bail!(
-                "GPU wait_all_in_flight timed out after {}ms",
-                timeout.as_millis()
-            );
-        }
+    for device in state.devices.keys().copied().collect::<Vec<_>>() {
+        wait_device_idle(state, device)?;
     }
     Ok(())
 }
@@ -124,6 +142,8 @@ impl MetalBackend {
                 device_lost: std::sync::atomic::AtomicBool::new(false),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
+                contexts: std::collections::HashMap::new(),
+                next_context_id: 1,
                 buffers: std::collections::HashMap::new(),
                 next_buffer_handle: 1,
                 shaders: std::collections::HashMap::new(),
@@ -174,7 +194,33 @@ impl GpuBackend for MetalBackend {
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
+        let ctxs: Vec<_> = self
+            .state
+            .contexts
+            .iter()
+            .filter(|(_, sc)| sc.device == device)
+            .map(|(id, _)| *id)
+            .collect();
+        for ctx in ctxs {
+            context::destroy(&mut self.state, ctx);
+        }
         device::destroy(&mut self.state, device);
+    }
+
+    fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
+        wait_device_idle(&self.state, device)
+    }
+
+    fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
+        context::create(&mut self.state, device)
+    }
+
+    fn destroy_context(&mut self, ctx: ContextHandle) {
+        context::destroy(&mut self.state, ctx);
+    }
+
+    fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
+        context::context_device(&self.state, ctx)
     }
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {
@@ -524,11 +570,22 @@ impl GpuBackend for MetalBackend {
         surface::destroy(&mut self.state, surface);
     }
 
-    fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface)?;
+    fn begin_frame(
+        &mut self,
+        surface: SurfaceHandle,
+        ctx: ContextHandle,
+    ) -> Result<(FrameToken, TextureHandle)> {
+        let image = surface::acquire(&mut self.state, surface, ctx)?;
         let tex = surface::frame_texture(&self.state, surface)
             .context("begin_frame: surface frame texture unavailable")?;
-        Ok((FrameToken { surface, image }, tex))
+        Ok((
+            FrameToken {
+                surface,
+                image,
+                context: ctx,
+            },
+            tex,
+        ))
     }
 
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
@@ -567,38 +624,55 @@ impl GpuBackend for MetalBackend {
         compute::create(&mut self.state, device, compute_shader)
     }
 
-    fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+    fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
         self.state
-            .devices
-            .get(&device)
-            .map(|ld| ld.timeline_event.as_ref().signaled_value())
+            .contexts
+            .get(&ctx)
+            .map(|sc| sc.timeline_event.as_ref().signaled_value())
             .unwrap_or(0)
     }
 
-    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal> {
-        if let Some(ld) = self.state.devices.get(&device) {
-            let returns: Vec<(SurfaceHandle, u32)> =
-                std::mem::take(&mut *ld.pending_swapchain_returns.lock().unwrap());
-            // SwapchainReturned was already pushed from the completion handler;
-            // pending_swapchain_returns only tracks which surfaces need counter decrements.
-            for (surface_handle, _image_index) in returns {
-                if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
+    fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+        context::device_retired(&self.state, device)
+    }
+
+    fn device_wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> anyhow::Result<()> {
+        let timeout = std::time::Duration::from_secs(60);
+        if context::wait_until_device_seq_at_least(&self.state, device, value, timeout) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "device_wait_until: timed out after 60 s waiting for timeline value {value}"
+            )
+        }
+    }
+
+    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+        let device = self.context_device(ctx);
+        let sc = match self.state.contexts.get(&ctx) {
+            Some(sc) => sc,
+            None => return Vec::new(),
+        };
+        let returns: Vec<(SurfaceHandle, u32)> =
+            std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
+        for (surface_handle, _image_index) in returns {
+            if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
+                if surf.device_handle == device {
                     surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
                 }
             }
-            return crate::signal::drain_all_signals(&ld.signal_queue);
         }
-        Vec::new()
+        crate::signal::drain_all_signals(&sc.signal_queue)
     }
 
-    fn peek_oldest_in_flight(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<crate::timeline::TimelineValue> {
-        let ld = self.state.devices.get(&device)?;
-        let progress = ld.timeline_event.as_ref().signaled_value();
-        let scheduled = ld.timeline_next.saturating_sub(1);
-        if progress < scheduled {
+    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
+        let sc = self.state.contexts.get(&ctx)?;
+        let progress = self.gpu_progress(ctx);
+        if progress < sc.last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {
             None
@@ -615,10 +689,11 @@ impl GpuBackend for MetalBackend {
 
     fn wait_until(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
+        let device = self.context_device(ctx);
         let _tz = crate::tracy_zone!("mtl.wait_until");
 
         if self.state.device_lost.load(Ordering::Relaxed) {
@@ -626,11 +701,14 @@ impl GpuBackend for MetalBackend {
         }
 
         // Fast path: GPU has already passed this timeline value.
-        if self.gpu_progress(device) >= value {
+        if self.gpu_progress(ctx) >= value {
             let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
+            let retired = context::device_retired(&self.state, device);
+            if let Some(sc) = self.state.contexts.get_mut(&ctx) {
+                drain_completed_cbs(sc);
+            }
             if let Some(ld) = self.state.devices.get_mut(&device) {
-                drain_completed_cbs(ld);
-                ld.process_deletion_queue_up_to_signaled();
+                ld.process_deletion_queue_up_to(value.min(retired));
             }
             drain_all_pending_slots(&mut self.state);
             return Ok(());
@@ -641,8 +719,8 @@ impl GpuBackend for MetalBackend {
         // that CB guarantees all earlier CBs (and timeline values) are also done.
         // This uses the Metal runtime's native Mach-semaphore wait rather than
         // routing through completedHandler -> condvar, eliminating GCD dispatch latency.
-        let cb_to_wait = self.state.devices.get(&device).and_then(|ld| {
-            ld.in_flight_command_buffers
+        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc| {
+            sc.in_flight_command_buffers
                 .iter()
                 .find(|(tv, _)| *tv >= value)
                 .map(|(_, cb)| cb.to_owned())
@@ -656,9 +734,9 @@ impl GpuBackend for MetalBackend {
             // future value with no submit yet). Fall back to condvar.
             let waiter = self
                 .state
-                .devices
-                .get(&device)
-                .context("Invalid device handle")?
+                .contexts
+                .get(&ctx)
+                .context("Invalid context handle")?
                 .timeline_waiter
                 .clone();
             let timeout = std::time::Duration::from_secs(300);
@@ -676,9 +754,12 @@ impl GpuBackend for MetalBackend {
 
         {
             let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
+            let retired = context::device_retired(&self.state, device);
+            if let Some(sc) = self.state.contexts.get_mut(&ctx) {
+                drain_completed_cbs(sc);
+            }
             if let Some(ld) = self.state.devices.get_mut(&device) {
-                drain_completed_cbs(ld);
-                ld.process_deletion_queue_up_to_signaled();
+                ld.process_deletion_queue_up_to(value.min(retired));
             }
         }
         {
@@ -690,11 +771,12 @@ impl GpuBackend for MetalBackend {
 
     fn wait_until_timeout(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
         timeout_ms: u32,
     ) -> Result<bool> {
         use std::sync::atomic::Ordering;
+        let device = self.context_device(ctx);
 
         if self.state.device_lost.load(Ordering::Relaxed) {
             anyhow::bail!("Metal device lost");
@@ -702,9 +784,9 @@ impl GpuBackend for MetalBackend {
 
         let waiter = self
             .state
-            .devices
-            .get(&device)
-            .context("Invalid device handle")?
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
             .timeline_waiter
             .clone();
 
@@ -716,8 +798,9 @@ impl GpuBackend for MetalBackend {
             return Ok(false);
         }
 
+        let retired = context::device_retired(&self.state, device);
         if let Some(ld) = self.state.devices.get_mut(&device) {
-            ld.process_deletion_queue_up_to_signaled();
+            ld.process_deletion_queue_up_to(value.min(retired));
         }
         drain_all_pending_slots(&mut self.state);
         Ok(true)
@@ -725,18 +808,18 @@ impl GpuBackend for MetalBackend {
 
     fn submit_standalone(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&mut self.state, device, commands)
+        compute::submit(&mut self.state, ctx, commands)
     }
 
     fn submit_graph(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, device, commands)
+        compute::submit_graph(&mut self.state, ctx, commands)
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
@@ -785,19 +868,21 @@ impl GpuBackend for MetalBackend {
         types::MAX_RESOURCES_PER_CATEGORY
     }
 
-    fn flush_deferred_deletions(&mut self, device: DeviceHandle) {
+    fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
+        let device = self.context_device(ctx);
+        let retired = context::device_retired(&self.state, device);
         if let Some(ld) = self.state.devices.get_mut(&device) {
-            ld.process_deletion_queue_up_to_signaled();
+            ld.process_deletion_queue_up_to(retired);
         }
     }
 
     fn set_reclamation_context(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         epoch: Option<crate::timeline::TimelineValue>,
     ) {
-        if let Some(ld) = self.state.devices.get_mut(&device) {
-            ld.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
+        if let Some(sc) = self.state.contexts.get_mut(&ctx) {
+            sc.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
         }
     }
 
@@ -839,7 +924,8 @@ impl GpuBackend for MetalBackend {
         tracing::info!("Released Metal Slang compiler session (freed host-side compiler memory)");
     }
 
-    fn deferred_deletion_pending_count(&self, device: DeviceHandle) -> usize {
+    fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
+        let device = self.context_device(ctx);
         self.state
             .devices
             .get(&device)
@@ -869,11 +955,11 @@ impl GpuBackend for MetalBackend {
             })
     }
 
-    fn in_flight_command_buffer_count(&self, device: DeviceHandle) -> usize {
+    fn in_flight_command_buffer_count(&self, ctx: ContextHandle) -> usize {
         self.state
-            .devices
-            .get(&device)
-            .map(|ld| ld.in_flight_command_buffers.len())
+            .contexts
+            .get(&ctx)
+            .map(|sc| sc.in_flight_command_buffers.len())
             .unwrap_or(0)
     }
 }

@@ -30,7 +30,7 @@ def main():
     
     # Create device
     instance = goldy.Instance()
-    device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+    device = instance.request_adapter().request_device()
     
     print(f"Backend: {instance.backend_type}")
     print()

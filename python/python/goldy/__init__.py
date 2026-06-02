@@ -7,7 +7,7 @@ Example:
     >>> import numpy as np
     >>> 
     >>> instance = goldy.Instance()
-    >>> device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+    >>> device = instance.request_adapter().request_device()
     >>> 
     >>> # Create a render target
     >>> target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)

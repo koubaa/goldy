@@ -15,7 +15,7 @@ def device():
     
     try:
         instance = goldy.Instance()
-        return instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+        return instance.request_adapter().request_device()
     except goldy.GoldyError:
         pytest.skip("No GPU available")
 

@@ -100,7 +100,7 @@ pub(super) fn init_storage_texture_uav_layout(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.fence_value;
+    let fence_value = logical_device.timeline_next;
     unsafe {
         logical_device
             .command_queue
@@ -110,7 +110,7 @@ pub(super) fn init_storage_texture_uav_layout(
     super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
+        dev.timeline_next += 1;
     }
 
     Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
@@ -811,7 +811,7 @@ pub(super) fn execute_staged_uploads_sync(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.fence_value;
+    let fence_value = logical_device.timeline_next;
     unsafe {
         logical_device
             .command_queue
@@ -821,7 +821,7 @@ pub(super) fn execute_staged_uploads_sync(
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
+        dev.timeline_next += 1;
     }
 
     // Release and reclaim the staging entries back to the pool immediately.
@@ -1009,7 +1009,7 @@ pub(super) fn read_to_cpu(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.fence_value;
+    let fence_value = logical_device.timeline_next;
     unsafe {
         logical_device
             .command_queue
@@ -1019,7 +1019,7 @@ pub(super) fn read_to_cpu(
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
+        dev.timeline_next += 1;
         // Check for device removal (compute passes may have caused TDR)
         let removed = unsafe { dev.device.GetDeviceRemovedReason() };
         if removed.is_err() {
@@ -1065,7 +1065,7 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
                 dev.resource_registry.unregister_texture(texture_handle);
                 return;
             }
-            let last_fence = dev.fence_value.saturating_sub(1);
+            let last_fence = dev.timeline_next.saturating_sub(1);
             dev.deletion_queue.queue(
                 last_fence,
                 PendingDeletion::Texture {

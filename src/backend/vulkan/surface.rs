@@ -279,8 +279,11 @@ pub(super) fn create(
         }
         .context("Failed to create work-done semaphore")?;
 
-        // Create per-slot in-flight fence (starts signaled so first-frame wait is a no-op)
-        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        // Create per-slot in-flight fence unsignaled. The wait in acquire() is guarded
+        // by `fence_pending`, so we never wait on an unsignaled fence. Submitting a
+        // SIGNALED fence to vkQueueSubmit2 without resetting it first violates
+        // VUID-vkQueueSubmit2-fence-04894.
+        let fence_info = vk::FenceCreateInfo::default();
         let in_flight_fence = unsafe { logical_device.device.create_fence(&fence_info, None) }
             .context("Failed to create in-flight fence")?;
 
@@ -302,6 +305,7 @@ pub(super) fn create(
             work_done_semaphore,
             render_finished_semaphore,
             in_flight_fence,
+            fence_pending: false,
             render_pass_submitted: false,
             frame_timeline_value: None,
             last_compute_timeline_value: 0,
@@ -641,6 +645,7 @@ fn destroy_impl(
 pub(super) fn acquire(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
+    ctx: super::ContextHandle,
 ) -> Result<SwapchainImageHandle> {
     let _tz = crate::tracy_zone!("vk.surface.acquire");
 
@@ -681,10 +686,6 @@ pub(super) fn acquire(
     // max(copy, next_compute) is monotonic; no WSI dependency on this wait.
     {
         let _wz = crate::tracy_zone!("vk.surface.wait_compute");
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
         let surface_state = state
             .surfaces
             .get(&surface_handle)
@@ -696,21 +697,10 @@ pub(super) fn acquire(
         let next_compute = surface_state.frame_sync[next_slot].last_compute_timeline_value;
         let slot_timeline = slot_copy.max(next_compute);
         if slot_timeline > 0 {
-            let sems = [logical_device.timeline_semaphore];
-            let vals = [slot_timeline];
-            let wait = vk::SemaphoreWaitInfo::default()
-                .semaphores(&sems)
-                .values(&vals);
-            unsafe { logical_device.device.wait_semaphores(&wait, u64::MAX) }
-                .context("Failed to wait on frame slot timeline value")?;
+            super::context::wait_until_device_seq_at_least(state, device_handle, slot_timeline);
 
             if crate::validation_env::timeline_validation_enabled() {
-                let completed = unsafe {
-                    logical_device
-                        .device
-                        .get_semaphore_counter_value(logical_device.timeline_semaphore)
-                }
-                .unwrap_or(0);
+                let completed = super::context::device_retired(state, device_handle);
                 assert!(
                     completed >= slot_timeline,
                     "vk.acquire: post-wait semaphore counter {completed} < \
@@ -743,19 +733,59 @@ pub(super) fn acquire(
         );
     }
 
+    // Wait until this slot's graphics submit (Submit 1 in `render`) has finished,
+    // then reset the fence so the next `queue_submit2` is valid (VUID-vkQueueSubmit2-fence-04894).
+    //
+    // Only the render (graphics) path submits the fence. The compute path does not,
+    // so `fence_pending` guards against waiting on an unsignaled fence (which would hang).
+    {
+        let fence_pending = state
+            .surfaces
+            .get(&surface_handle)
+            .context("Invalid surface handle")?
+            .frame_sync[current_frame]
+            .fence_pending;
+        if fence_pending {
+            let _fz = crate::tracy_zone!("vk.surface.acquire.fence_wait");
+            let logical_device = state
+                .devices
+                .get(&device_handle)
+                .context("Surface's device is invalid")?;
+            let in_flight_fence = state
+                .surfaces
+                .get(&surface_handle)
+                .context("Invalid surface handle")?
+                .frame_sync[current_frame]
+                .in_flight_fence;
+            unsafe {
+                logical_device
+                    .device
+                    .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+                    .context("Failed to wait on in-flight fence")?;
+                logical_device
+                    .device
+                    .reset_fences(&[in_flight_fence])
+                    .context("Failed to reset in-flight fence")?;
+            }
+            state.surfaces.get_mut(&surface_handle).unwrap().frame_sync[current_frame]
+                .fence_pending = false;
+        }
+    }
+
     // CPU cleanup: drain the GPU timeline and reset the frame slot.
-    let completed = {
-        let _tz = crate::tracy_zone!("vk.surface.acquire.timeline_query");
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
-        unsafe { ld.device.get_semaphore_counter_value(ld.timeline_semaphore) }.unwrap_or(0)
-    };
+    let completed = super::context::device_retired(state, device_handle);
 
     {
         let _tz = crate::tracy_zone!("vk.surface.acquire.reap_timeline");
-        super::compute::reap_timeline_cmd_buffers_up_to(state, device_handle, completed);
+        let ctxs: Vec<_> = state
+            .contexts
+            .iter()
+            .filter(|(_, sc)| sc.device == device_handle)
+            .map(|(k, _)| *k)
+            .collect();
+        for ctx in ctxs {
+            super::compute::reap_timeline_cmd_buffers_up_to(state, ctx, completed);
+        }
     }
 
     {
@@ -825,8 +855,8 @@ pub(super) fn acquire(
                     surface_state.pending_acquire_count.saturating_add(1);
             }
 
-            if let Some(ld) = state.devices.get(&device_handle) {
-                ld.signal_queue
+            if let Some(sc) = state.contexts.get_mut(&ctx) {
+                sc.signal_queue
                     .push(crate::signal::Signal::SwapchainAcquired { image_index });
             }
 
@@ -870,6 +900,7 @@ pub(super) fn render<F>(
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
+    timeline_sem: vk::Semaphore,
     commands: &[RenderCommand],
     record_commands_fn: F,
 ) -> Result<()>
@@ -950,7 +981,13 @@ where
             .get(&device_handle)
             .context("Surface's device is invalid")?;
 
-        // Begin command buffer
+        // Begin command buffer (reset after acquire waited on in_flight_fence)
+        unsafe {
+            logical_device
+                .device
+                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .context("Failed to reset render command buffer")?;
+        }
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -1114,68 +1151,76 @@ where
         // End dynamic rendering
         unsafe { logical_device.device.cmd_end_rendering(cmd) };
 
-        // End command buffer — the present barrier is pre-recorded in
-        // render_present_cmd and submitted as a separate batch (Submit 2).
+        // Transition swapchain image COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR.
+        // Inlined here instead of using a pre-recorded per-image CB (render_present_cmd)
+        // to avoid VUID-vkQueueSubmit2-commandBuffer-03875: the validation layer cannot
+        // see through the WSI semaphore chain to verify prior completion of pre-recorded
+        // per-image CBs when they are resubmitted.
+        let present_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+            .dst_access_mask(vk::AccessFlags2::NONE)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let dep_present = vk::DependencyInfo::default()
+            .image_memory_barriers(std::slice::from_ref(&present_barrier));
+        unsafe {
+            logical_device
+                .device
+                .cmd_pipeline_barrier2(cmd, &dep_present)
+        };
+
         unsafe { logical_device.device.end_command_buffer(cmd) }
             .context("Failed to end command buffer")?;
     }
 
-    // Submit 1: prep barrier + render commands.
+    // Single submit: render CB (with inlined present barrier) + fence + semaphores.
     //   waits:   image_available_sem
-    //   signals: in_flight_fence (fires after render work, NOT after present barrier)
-    //            work_done_sem (consumed by Submit 2)
-    //            timeline_sem
+    //   signals: in_flight_fence
+    //            timeline_sem  (frame boundary value)
+    //            render_finished_sem  (consumed by queue_present)
     //
-    // Submit 2: pre-recorded COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR barrier.
-    //   waits:   work_done_sem
-    //   signals: render_finished_sem
-    //   fence:   none
+    // prep_cmd (UNDEFINED→GENERAL) and render_present_cmd are NOT used: both barriers
+    // are now inlined in cmd, avoiding VUID-vkQueueSubmit2-commandBuffer-03875 from
+    // pre-recorded per-image CBs whose completion the validation layer cannot verify
+    // without seeing through the WSI semaphore chain.
+    let _ = prep_cmd;
+    let _ = render_present_cmd;
+    let _ = work_done_semaphore;
+
     let signal_timeline_value = {
         let ld = devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
         ld.timeline_next
     };
-    let timeline_sem = devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?
-        .timeline_semaphore;
-
     let wait_acq = vk::SemaphoreSubmitInfo::default()
         .semaphore(image_available_semaphore)
         .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let cmd_infos_1 = [
-        vk::CommandBufferSubmitInfo::default().command_buffer(prep_cmd),
-        vk::CommandBufferSubmitInfo::default().command_buffer(cmd),
-    ];
-    let sig_work_done = vk::SemaphoreSubmitInfo::default()
-        .semaphore(work_done_semaphore)
-        .value(0)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let sig_timeline = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_timeline_value)
-        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let signals_1 = [sig_work_done, sig_timeline];
-    let submit_1 = vk::SubmitInfo2::default()
-        .wait_semaphore_infos(std::slice::from_ref(&wait_acq))
-        .command_buffer_infos(&cmd_infos_1)
-        .signal_semaphore_infos(&signals_1);
-
-    let cmd_info_2 = vk::CommandBufferSubmitInfo::default().command_buffer(render_present_cmd);
-    let wait_work_done = vk::SemaphoreSubmitInfo::default()
-        .semaphore(work_done_semaphore)
-        .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
     let sig_rf = vk::SemaphoreSubmitInfo::default()
         .semaphore(render_finished_semaphore)
         .value(0)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let submit_2 = vk::SubmitInfo2::default()
-        .wait_semaphore_infos(std::slice::from_ref(&wait_work_done))
-        .command_buffer_infos(std::slice::from_ref(&cmd_info_2))
-        .signal_semaphore_infos(std::slice::from_ref(&sig_rf));
+    let signals = [sig_timeline, sig_rf];
+    let submit = vk::SubmitInfo2::default()
+        .wait_semaphore_infos(std::slice::from_ref(&wait_acq))
+        .command_buffer_infos(std::slice::from_ref(&cmd_info))
+        .signal_semaphore_infos(&signals);
 
     let logical_device = devices
         .get(&device_handle)
@@ -1184,20 +1229,11 @@ where
     unsafe {
         logical_device.device.queue_submit2(
             logical_device.queue,
-            std::slice::from_ref(&submit_1),
+            std::slice::from_ref(&submit),
             in_flight_fence,
         )
     }
     .context("Failed to submit render command buffer")?;
-
-    unsafe {
-        logical_device.device.queue_submit2(
-            logical_device.queue,
-            std::slice::from_ref(&submit_2),
-            vk::Fence::null(),
-        )
-    }
-    .context("Failed to submit render present barrier")?;
 
     if let Some(ld) = devices.get_mut(&device_handle) {
         ld.timeline_next = signal_timeline_value.saturating_add(1);
@@ -1206,6 +1242,7 @@ where
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[current_frame];
         fs.render_pass_submitted = true;
+        fs.fence_pending = true;
         fs.frame_timeline_value = Some(signal_timeline_value);
         fs.last_compute_timeline_value = signal_timeline_value;
     }
@@ -1232,7 +1269,7 @@ pub(super) fn submit_frame(
     };
 
     if !pending.is_empty() {
-        return super::compute::submit(state, dh, &pending);
+        return super::compute::submit(state, frame.context, &pending);
     }
 
     let ld = state
@@ -1247,7 +1284,7 @@ pub(super) fn present_frame(
     frame: crate::backend::FrameToken,
     submit_tv: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
-    present(state, frame.surface, frame.image, submit_tv)
+    present(state, frame.surface, frame.image, frame.context, submit_tv)
 }
 
 /// Present the rendered image to the screen.
@@ -1258,6 +1295,7 @@ pub(super) fn present(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
+    ctx: super::ContextHandle,
     frame_compute_timeline_value: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
     let _tz = crate::tracy_zone!("vk.surface.present");
@@ -1476,9 +1514,9 @@ pub(super) fn present(
         };
 
         let timeline_sem = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
             .timeline_semaphore;
 
         // WSI submit: [copy_cb]
@@ -1542,6 +1580,9 @@ pub(super) fn present(
             let _bk = crate::tracy_zone!("vk.present.post_submit");
             let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
             ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
+            if let Some(sc) = state.contexts.get_mut(&ctx) {
+                sc.last_submitted_seq = signal_timeline_value;
+            }
 
             // Expose the *compute* timeline value to callers (not the copy's).
             // Render targets and other resources are safe to reuse once compute
@@ -1631,8 +1672,8 @@ pub(super) fn present(
         }
     } else if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
         surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_sub(1);
-        if let Some(ld) = state.devices.get(&device_handle) {
-            ld.signal_queue
+        if let Some(sc) = state.contexts.get(&ctx) {
+            sc.signal_queue
                 .push(crate::signal::Signal::SwapchainReturned {
                     image_index: image_idx_for_return,
                 });

@@ -82,7 +82,7 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    device: Arc<goldy::Device>,
+    context: goldy::Context,
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
@@ -105,7 +105,8 @@ impl RenderState {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
-        let surface = Surface::new(&device, window.as_ref())?;
+        let ctx = device.create_context()?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Compute shader for particle physics
         let compute_shader =
@@ -151,7 +152,7 @@ impl RenderState {
 
         Ok(Self {
             window,
-            device,
+            context: ctx,
             surface,
             compute_pipeline,
             particle_buffer,
@@ -234,7 +235,7 @@ impl RenderState {
                 self.params_buffer.bindless_index().unwrap(),
             ])
             .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
-        graph.dispatch(&self.device)?;
+        graph.dispatch(&self.context)?;
 
         // Render particles
         let frame = self.surface.begin()?;

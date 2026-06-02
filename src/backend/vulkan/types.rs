@@ -293,6 +293,22 @@ pub(crate) struct PhysicalDeviceInfo {
     pub vk_timestamp_period_ns: f32,
 }
 
+/// Per-context async submission stream (timeline, poller, command pool).
+pub(crate) struct SubmissionContext {
+    pub device: super::DeviceHandle,
+    pub timeline_semaphore: vk::Semaphore,
+    /// Last device-global seq value submitted on this context.
+    pub last_submitted_seq: u64,
+    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fence_thread: Option<std::thread::JoinHandle<()>>,
+    pub command_pool: vk::CommandPool,
+    pub free_cmd_buffers: Vec<vk::CommandBuffer>,
+    pub retained_compute_cb: Option<RetainedVkCb>,
+    /// Command buffers to free once this context's timeline reaches the key.
+    pub timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
+}
+
 /// A logical Vulkan device with associated resources.
 pub(crate) struct LogicalDevice {
     pub device: ash::Device,
@@ -331,15 +347,10 @@ pub(crate) struct LogicalDevice {
     pub resource_registry: ResourceRegistry,
     /// Deferred deletion queue for resources that are still in-flight
     pub deletion_queue: DeletionQueue,
-    /// Device timeline semaphore for monotonic GPU progress ([`GpuBackend::gpu_progress`](crate::backend::GpuBackend::gpu_progress)).
-    pub timeline_semaphore: vk::Semaphore,
-    /// Next timeline value to signal on `timeline_semaphore`.
+    /// Device-global submission sequence (shared value space; contexts signal their own semaphores).
     pub timeline_next: u64,
-
-    /// Async signal delivery (fence thread → [`crate::Device::poll_signals`]).
-    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
-    pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub fence_thread: Option<std::thread::JoinHandle<()>>,
+    /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
+    pub retired_floor: u64,
 
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
@@ -347,14 +358,6 @@ pub(crate) struct LogicalDevice {
     /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
     pub vk_timestamp_compute_and_graphics: bool,
     pub vk_timestamp_period_ns: f32,
-
-    /// Recycled command buffers available for reuse (avoids alloc/free per submit).
-    pub free_cmd_buffers: Vec<vk::CommandBuffer>,
-    /// Retained dispatch command buffer for resubmission without re-recording.
-    /// `None` until a `submit_graph_and_retain` call stores a completed CB here.
-    /// At `cleanup_depth=1` the CB is guaranteed to be in executable state at
-    /// the start of the next frame (GPU has completed it via `wait_until`).
-    pub retained_compute_cb: Option<RetainedVkCb>,
 }
 
 /// A Vulkan command buffer retained for resubmission.
@@ -563,6 +566,11 @@ pub(crate) struct FrameSync {
     pub work_done_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
+    /// True when `in_flight_fence` has been submitted to the queue and not yet waited on.
+    /// Only the render (graphics) path submits this fence; the compute path does not.
+    /// `acquire()` must check this before calling `wait_for_fences` to avoid hanging
+    /// when the slot was last used via the compute path.
+    pub fence_pending: bool,
     /// Set after `surface_render` submits the graphics command buffer. Compute-only
     /// presentation uses the scratch-texture copy path in `present` instead (see
     /// `surface::present`).
@@ -898,13 +906,8 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
 }
 
 impl LogicalDevice {
-    /// Drop deferred resources for which the device timeline counter has caught up (non-blocking).
-    pub(crate) fn process_deletion_queue_up_to_gpu_progress(&mut self) {
-        let completed = unsafe {
-            self.device
-                .get_semaphore_counter_value(self.timeline_semaphore)
-                .unwrap_or(0)
-        };
+    /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
+    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
         let drained = self.deletion_queue.drain_up_to(completed);
         for r in drained {
             destroy_pending_deletion(self, r);
@@ -920,6 +923,8 @@ pub(super) struct VulkanState {
     pub physical_devices: Vec<PhysicalDeviceInfo>,
     pub devices: HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
+    pub contexts: HashMap<super::ContextHandle, SubmissionContext>,
+    pub next_context_id: super::ContextHandle,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: HashMap<ShaderHandle, ShaderState>,
@@ -948,9 +953,6 @@ pub(super) struct VulkanState {
         HashMap<DeviceHandle, crate::backend::vulkan::staging::TextureStagingPool>,
     /// Per-device staging belts for batched WriteBuffer uploads.
     pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
-    /// Command buffers to free once the device timeline reaches the given value
-    /// (one submit may register multiple buffers at the same timeline point).
-    pub timeline_cmd_buffers: HashMap<u64, Vec<(DeviceHandle, vk::CommandBuffer)>>,
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_lost: std::sync::atomic::AtomicBool,

@@ -13,7 +13,7 @@ pub fn to_py_err(err: anyhow::Error) -> PyErr {
     GoldyError::new_err(err.to_string())
 }
 
-/// Extension trait for converting Result<T, anyhow::Error> to PyResult<T>
+/// Extension trait for converting Goldy results to PyResult<T>
 pub trait IntoPyResult<T> {
     fn into_py_result(self) -> PyResult<T>;
 }
@@ -21,5 +21,11 @@ pub trait IntoPyResult<T> {
 impl<T> IntoPyResult<T> for anyhow::Result<T> {
     fn into_py_result(self) -> PyResult<T> {
         self.map_err(to_py_err)
+    }
+}
+
+impl<T> IntoPyResult<T> for Result<T, goldy::GoldyError> {
+    fn into_py_result(self) -> PyResult<T> {
+        self.map_err(|err| GoldyError::new_err(err.to_string()))
     }
 }

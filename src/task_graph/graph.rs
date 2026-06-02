@@ -149,8 +149,8 @@ fn lcm(a: u64, b: u64) -> u64 {
 ///     .bind_resources_raw_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
-/// let tv = graph.submit(&device)?;
-/// device.wait_until(tv)?;
+/// let tv = graph.submit(&ctx)?;
+/// context.wait_until(tv)?;
 /// ```
 pub struct TaskGraph {
     ir: GraphIR,
@@ -228,12 +228,12 @@ impl TaskGraph {
     /// Register a transient GPU buffer suballocation for this graph.
     ///
     /// The backing memory is a single device buffer allocated for the duration of
-    /// [`crate::Device::submit`]. Transients whose live ranges (in the compiled wave
+    /// [`crate::Context::submit`]. Transients whose live ranges (in the compiled wave
     /// schedule) do not overlap may alias within that heap to reduce allocation size.
     /// Graphs using transients **block until the submit completes** when using
-    /// [`crate::Device::submit`] (so the CPU does not record overlapping standalone graphs that
+    /// [`crate::Context::submit`] (so the CPU does not record overlapping standalone graphs that
     /// reuse the same placement-heap protocol). For pipelined multi-submit frames, use
-    /// [`crate::Device::submit_pipelined`] or the surface path / [`crate::FrameOrchestrator`].
+    /// [`crate::Context::submit_pipelined`] or the surface path / [`crate::FrameOrchestrator`].
     pub fn transient_buffer(&mut self, size: u64) -> TransientId {
         self.transient_buffer_with_stride(size, 4)
     }
@@ -281,8 +281,8 @@ impl TaskGraph {
     /// Register a transient texture (same dimensions and format) for this graph.
     ///
     /// Non-overlapping wave lifetimes may alias onto one backing texture; see
-    /// [`Self::transient_buffer`] for scheduling behavior. [`crate::Device::submit`]
-    /// waits until completion when transients are used; use [`crate::Device::submit_pipelined`]
+    /// [`Self::transient_buffer`] for scheduling behavior. [`crate::Context::submit`]
+    /// waits until completion when transients are used; use [`crate::Context::submit_pipelined`]
     /// for overlapping submissions in a managed frame loop.
     ///
     /// ## Stable slot identity contract
@@ -344,7 +344,7 @@ impl TaskGraph {
 
     pub(crate) fn submit_with_backend(
         &mut self,
-        device: &Device,
+        context: &crate::Context,
         backend: &mut dyn GpuBackend,
         _transient_buffer_ranges: Option<&HashMap<u32, (BufferHandle, u64, u64)>>,
         _transient_texture_handles: &HashMap<u32, TextureHandle>,
@@ -355,16 +355,16 @@ impl TaskGraph {
             "submit_with_backend: transient resources must go through submit_ir_with_resolver"
         );
 
-        let tv = Self::submit_resolved_ir(&mut self.schedule_cache, device, backend, &self.ir)?;
+        let tv = Self::submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir)?;
         if wait_for_transient_completion && self.needs_transient_gpu_wait() {
-            backend.wait_until(device.inner.handle, tv)?;
+            backend.wait_until(context.backend_handle(), tv)?;
         }
         Ok(tv)
     }
 
     fn submit_resolved_ir(
         cache: &mut Option<CompiledCacheEntry>,
-        device: &Device,
+        context: &crate::Context,
         backend: &mut dyn GpuBackend,
         ir: &GraphIR,
     ) -> Result<TimelineValue> {
@@ -376,7 +376,7 @@ impl TaskGraph {
         if has_render {
             // Render-pass graphs: single submission (mixed compute+render CBs).
             let g = Self::compile_graph_commands_for_ir(ir);
-            return backend.submit_graph(device.inner.handle, &g);
+            return backend.submit_graph(context.backend_handle(), &g);
         }
 
         // Compute-only: partition the wave schedule and submit each group.
@@ -385,10 +385,10 @@ impl TaskGraph {
         // The last partition's timeline value is returned to the caller.
         let fp = Self::binding_fingerprint(ir);
         let partitions = Self::get_or_build_partitioned_commands(cache, ir, fp);
-        let mut last_tv = backend.gpu_progress(device.inner.handle);
+        let mut last_tv = backend.gpu_progress(context.backend_handle());
         for partition in partitions {
             let _tz = crate::tracy_zone!("goldy.submit_partition");
-            last_tv = backend.submit_standalone(device.inner.handle, partition)?;
+            last_tv = backend.submit_standalone(context.backend_handle(), partition)?;
         }
         Ok(last_tv)
     }
@@ -400,7 +400,7 @@ impl TaskGraph {
     /// and graphs containing upload nodes fall back to a plain submit (no retention).
     fn submit_resolved_ir_and_retain(
         cache: &mut Option<CompiledCacheEntry>,
-        device: &Device,
+        context: &crate::Context,
         backend: &mut dyn GpuBackend,
         ir: &GraphIR,
     ) -> Result<TimelineValue> {
@@ -412,7 +412,7 @@ impl TaskGraph {
         if has_render {
             // Render-pass graphs cannot be retained (mixed command lists); fall back.
             let g = Self::compile_graph_commands_for_ir(ir);
-            return backend.submit_graph(device.inner.handle, &g);
+            return backend.submit_graph(context.backend_handle(), &g);
         }
 
         let has_upload = ir.nodes.iter().any(|n| {
@@ -428,7 +428,7 @@ impl TaskGraph {
         if has_upload {
             // Upload commands use staging memory that is not re-encodable; fall back.
             let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
-            return backend.submit_standalone(device.inner.handle, cmds);
+            return backend.submit_standalone(context.backend_handle(), cmds);
         }
 
         // Derive the retention key from full CB content so it is always correct.
@@ -436,7 +436,7 @@ impl TaskGraph {
         let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
         let graph_cmds: Vec<GraphCommand> =
             cmds.iter().cloned().map(GraphCommand::Compute).collect();
-        backend.submit_graph_and_retain(device.inner.handle, &graph_cmds, key)
+        backend.submit_graph_and_retain(context.backend_handle(), &graph_cmds, key)
     }
 
     /// Like [`Self::submit_with_backend`] but retains the closed command list keyed by
@@ -444,17 +444,17 @@ impl TaskGraph {
     ///
     /// Graphs with transient resources, render passes, or upload nodes are not eligible for
     /// retention and silently fall back to a normal submit.
-    /// Called from [`Device::submit_pipelined_and_retain`].
+    /// Called from [`Context::submit_pipelined_and_retain`].
     pub(crate) fn submit_with_backend_and_retain(
         &mut self,
-        device: &Device,
+        context: &crate::Context,
         backend: &mut dyn GpuBackend,
     ) -> Result<TimelineValue> {
         // Only retain pure compute graphs (no transients, no render passes, no uploads).
         if self.has_transient_resources() {
-            return Self::submit_resolved_ir(&mut self.schedule_cache, device, backend, &self.ir);
+            return Self::submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir);
         }
-        Self::submit_resolved_ir_and_retain(&mut self.schedule_cache, device, backend, &self.ir)
+        Self::submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir)
     }
 
     /// Pack transient buffers into a heap using wave live ranges: transients whose
@@ -566,7 +566,7 @@ impl TaskGraph {
     /// fresh each frame through the resolver.
     pub(crate) fn submit_ir_with_resolver(
         &mut self,
-        device: &Device,
+        context: &crate::Context,
         backend: &mut dyn GpuBackend,
         resolver: &super::SlotResolver,
         wait_for_transient_completion: bool,
@@ -583,21 +583,21 @@ impl TaskGraph {
 
         if has_render {
             let g = analysis::emit_graph_commands(&self.ir, schedule, Some(resolver));
-            let tv = backend.submit_graph(device.inner.handle, &g)?;
+            let tv = backend.submit_graph(context.backend_handle(), &g)?;
             if wait_for_transient_completion && self.needs_transient_gpu_wait() {
-                backend.wait_until(device.inner.handle, tv)?;
+                backend.wait_until(context.backend_handle(), tv)?;
             }
             return Ok(tv);
         }
 
         let partitions = analysis::emit_partitioned_commands(&self.ir, schedule, Some(resolver));
-        let mut last_tv = backend.gpu_progress(device.inner.handle);
+        let mut last_tv = backend.gpu_progress(context.backend_handle());
         for partition in &partitions {
             let _tz = crate::tracy_zone!("goldy.submit_partition");
-            last_tv = backend.submit_standalone(device.inner.handle, partition)?;
+            last_tv = backend.submit_standalone(context.backend_handle(), partition)?;
         }
         if wait_for_transient_completion && self.needs_transient_gpu_wait() {
-            backend.wait_until(device.inner.handle, last_tv)?;
+            backend.wait_until(context.backend_handle(), last_tv)?;
         }
         Ok(last_tv)
     }
@@ -998,14 +998,14 @@ impl TaskGraph {
     }
 
     /// Analyze the graph and submit all tasks with optimal barriers.
-    /// Returns the device [`TimelineValue`] to pass to [`Device::wait_until`].
-    pub fn submit(&mut self, device: &Device) -> Result<TimelineValue, GoldyError> {
-        device.submit(self)
+    /// Returns the device [`TimelineValue`] to pass to [`Context::wait_until`](crate::Context::wait_until).
+    pub fn submit(&mut self, context: &crate::Context) -> Result<TimelineValue, GoldyError> {
+        context.submit(self)
     }
 
     /// Analyze the graph, submit, and block until complete.
-    pub fn dispatch(&mut self, device: &Device) -> Result<(), GoldyError> {
-        device.dispatch(self)
+    pub fn dispatch(&mut self, context: &crate::Context) -> Result<(), GoldyError> {
+        context.dispatch(self)
     }
 
     /// Number of task nodes in the graph.
@@ -1133,8 +1133,8 @@ impl TaskGraph {
     /// a CB that contains upload commands is currently unsupported (those graphs fall back
     /// to a normal submit).
     ///
-    /// Pass this value to [`crate::Device::try_resubmit_retained`] to attempt zero-cost
-    /// resubmission; [`crate::Device::submit_pipelined_and_retain`] derives and stores the
+    /// Pass this value to [`crate::Context::try_resubmit_retained`] to attempt zero-cost
+    /// resubmission; [`crate::Context::submit_pipelined_and_retain`] derives and stores the
     /// same key internally.
     pub fn compute_retention_fingerprint(&self) -> u64 {
         Self::retention_fingerprint(&self.ir)
@@ -1368,7 +1368,7 @@ impl TaskGraph {
     /// # Panics
     ///
     /// If the graph contains render-pass nodes or transient buffers, use
-    /// [`Self::compile_graph_commands`] or [`Device::submit`](crate::Device::submit) instead.
+    /// [`Self::compile_graph_commands`] or [`Context::submit`](crate::Context::submit) instead.
     pub fn compile_commands(&mut self) -> Vec<crate::backend::GpuCommand> {
         assert!(
             self.transient_specs.is_empty(),
@@ -1699,6 +1699,7 @@ mod tests {
     #[test]
     fn compile_mixed_compute_render_inserts_barrier_and_submits_graph() {
         let device = mock_device();
+        let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
         let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
@@ -1728,12 +1729,13 @@ mod tests {
             "expected ResourceBarrier between compute write and render read"
         );
 
-        graph.submit(&device).unwrap();
+        graph.submit(&ctx).unwrap();
     }
 
     #[test]
     fn transient_buffer_submit_succeeds_on_mock() {
         let device = mock_device();
+        let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
         let mut graph = TaskGraph::new();
@@ -1743,12 +1745,13 @@ mod tests {
             .bind_transient_buffer(t, NodeAccess::Write)
             .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
-        graph.submit(&device).unwrap();
+        graph.submit(&ctx).unwrap();
     }
 
     #[test]
     fn transient_texture_submit_succeeds_on_mock() {
         let device = mock_device();
+        let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
         let mut graph = TaskGraph::new();
@@ -1758,12 +1761,13 @@ mod tests {
             .bind_transient_texture(tt, NodeAccess::Write)
             .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
-        graph.submit(&device).unwrap();
+        graph.submit(&ctx).unwrap();
     }
 
     #[test]
     fn transient_texture_heap_aliases_non_overlapping_waves() {
         let device = mock_device();
+        let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
         let buf = Buffer::new(&device, 4, crate::DataAccess::Scattered).unwrap();
@@ -1782,12 +1786,13 @@ mod tests {
             .bind_transient_texture(t1, NodeAccess::Write)
             .bind_resources_raw_slice(&[0])
             .dispatch(1, 1, 1);
-        graph.submit(&device).unwrap();
+        graph.submit(&ctx).unwrap();
     }
 
     #[test]
     fn transient_heap_aliases_non_overlapping_waves() {
         let device = mock_device();
+        let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
         let buf = Buffer::new(&device, 4, crate::DataAccess::Scattered).unwrap();
@@ -1817,12 +1822,13 @@ mod tests {
             "sequential transients should pack into one 256-byte slot"
         );
         assert_eq!(layout[&t0.0], layout[&t1.0]);
-        graph.submit(&device).unwrap();
+        graph.submit(&ctx).unwrap();
     }
 
     #[test]
     fn transient_heap_separates_concurrent_waves() {
         let device = mock_device();
+        let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -1850,7 +1856,7 @@ mod tests {
             total
         );
         assert_ne!(layout[&t0.0], layout[&t1.0]);
-        graph.submit(&device).unwrap();
+        graph.submit(&ctx).unwrap();
     }
 
     #[test]
@@ -1939,6 +1945,7 @@ mod tests {
     #[test]
     fn submit_via_mock() {
         let device = mock_device();
+        let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
         let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
@@ -1949,9 +1956,9 @@ mod tests {
             .bind_buffer(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
-        let tv = graph.submit(&device).unwrap();
-        assert!(device.gpu_progress() >= tv);
-        device.wait_until(tv).unwrap();
+        let tv = graph.submit(&ctx).unwrap();
+        assert!(ctx.gpu_progress() >= tv);
+        ctx.wait_until(tv).unwrap();
     }
 
     #[test]

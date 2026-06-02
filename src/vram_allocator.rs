@@ -234,7 +234,7 @@ pub trait VramAllocator: Send + Sync {
     /// Reclaim all deferred payloads whose epoch is `<= gpu_progress`, dropping them.
     ///
     /// Returns the number of entries reclaimed. Typically called from
-    /// [`Device::flush_deferred_deletions`](crate::device::Device::flush_deferred_deletions)
+    /// [`Context::flush_deferred_deletions`](crate::Context::flush_deferred_deletions)
     /// at frame boundaries.
     ///
     /// The default implementation is a no-op and returns 0.
@@ -282,6 +282,13 @@ pub trait VramAllocator: Send + Sync {
 /// Installed automatically when a [`Device`] is created. Implements the full
 /// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::boundary_crossed`],
 /// and [`VramAllocator::drain`].
+///
+/// **Device-owned ring:** the ring is device-installed and keyed by device-global timeline
+/// epochs from [`crate::context::Context::defer_release`].
+/// [`crate::context::Context::boundary_crossed`] drains entries
+/// when `epoch <= device_retired` (max completed over all live contexts). Any context may
+/// poll boundaries; multi-context deferral is sound under this conservative collapse.
+/// Per-handle last-touch reclamation (tighter than `device_retired`) is a future optimization.
 pub struct DefaultVramAllocator {
     deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
 }

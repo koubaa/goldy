@@ -10,8 +10,9 @@ fn orchestrator_double_begin_fails() {
         .expect("adapter")
         .request_device(&DeviceDescriptor::default())
         .expect("device");
+    let ctx = device.create_context().expect("context");
 
-    let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&device, 3);
+    let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&ctx, 3);
     let h = orch
         .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
         .expect("begin");
@@ -32,8 +33,9 @@ fn orchestrator_reclaim_empty_is_ok() {
         .expect("adapter")
         .request_device(&DeviceDescriptor::default())
         .expect("device");
+    let ctx = device.create_context().expect("context");
 
-    let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&device, 2);
+    let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&ctx, 2);
     orch.reclaim(|_d, _r| Ok::<_, std::convert::Infallible>(()))
         .unwrap();
 }

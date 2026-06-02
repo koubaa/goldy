@@ -86,7 +86,7 @@ static class GameOfLife
         _instance = new Instance();
         Console.WriteLine($"Backend: {_instance.BackendType}");
 
-        _device = _instance.CreateDevice(DeviceType.DiscreteGpu);
+        _device = _instance.RequestAdapter().RequestDevice();
         Console.WriteLine($"Using adapter {_device.AdapterId}");
         Console.WriteLine($"Grid: {GRID_WIDTH}x{GRID_HEIGHT} = {CELL_COUNT} cells");
 

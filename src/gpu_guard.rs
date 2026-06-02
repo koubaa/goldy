@@ -2,7 +2,7 @@
 //!
 //! [`GpuGuard`] pairs a set of GPU resources with a [`TimelineValue`] epoch. When the
 //! guard is dropped, the resources are handed to the device's [`VramAllocator`] for
-//! deferred release — they remain alive until [`Device::flush_deferred_deletions`]
+//! deferred release — they remain alive until [`crate::Context::flush_deferred_deletions`]
 //! observes `gpu_progress >= epoch`, at which point they are dropped.
 //!
 //! This is the correct, non-blocking pattern for ensuring owned resources outlive the
@@ -11,17 +11,17 @@
 //! # Example
 //!
 //! ```no_run
-//! # use goldy::{Device, GpuGuard};
+//! # use goldy::{Context, GpuGuard};
 //! # use goldy::buffer::Buffer;
 //! # use goldy::task_graph::TaskGraph;
-//! # fn example(device: &Device, buf: Buffer) -> anyhow::Result<()> {
+//! # fn example(context: &Context, buf: Buffer) -> anyhow::Result<()> {
 //! let mut graph = TaskGraph::new(); // ... build your graph using buf ...
-//! let tv = device.submit(&mut graph)?;
+//! let tv = context.submit(&mut graph)?;
 //!
-//! let mut guard = GpuGuard::new(device, tv);
+//! let mut guard = GpuGuard::new(context, tv);
 //! guard.hold(buf); // buf is now safe: dropped only after tv retires
 //!
-//! // Drop order in a struct: guard before device → correct.
+//! // Drop order in a struct: guard before context → correct.
 //! // Or let the guard go out of scope; flush_deferred_deletions will reclaim it.
 //! # Ok(())
 //! # }
@@ -29,15 +29,15 @@
 //!
 //! # Comparison with blocking
 //!
-//! Without `GpuGuard`, safe resource cleanup requires `device.wait_until(tv)` before
+//! Without `GpuGuard`, safe resource cleanup requires `context.wait_until(tv)` before
 //! dropping — which stalls the CPU. `GpuGuard` defers the drop to the next
-//! [`flush_deferred_deletions`](crate::device::Device::flush_deferred_deletions) call
+//! [`flush_deferred_deletions`](crate::context::Context::flush_deferred_deletions) call
 //! once the timeline has naturally advanced, keeping the CPU–GPU pipeline full.
 //!
 //! [`TimelineValue`]: crate::timeline::TimelineValue
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 
-use crate::device::Device;
+use crate::context::Context;
 use crate::timeline::TimelineValue;
 use crate::vram_allocator::DeferredPayload;
 use std::any::Any;
@@ -52,19 +52,19 @@ use std::any::Any;
 ///
 /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
 pub struct GpuGuard {
-    device: Device,
+    context: Context,
     epoch: TimelineValue,
     held: Vec<Box<dyn Any + Send>>,
 }
 
 impl GpuGuard {
-    /// Create a new guard tied to `device` and `epoch`.
+    /// Create a new guard tied to `context` and `epoch`.
     ///
     /// Resources added via [`hold`](Self::hold) will not be dropped until
-    /// `device.gpu_progress() >= epoch`.
-    pub fn new(device: &Device, epoch: TimelineValue) -> Self {
+    /// `context.gpu_progress() >= epoch`.
+    pub fn new(context: &Context, epoch: TimelineValue) -> Self {
         Self {
-            device: device.clone(),
+            context: context.clone(),
             epoch,
             held: Vec::new(),
         }
@@ -103,7 +103,7 @@ impl Drop for GpuGuard {
         for resource in self.held.drain(..) {
             payload.0.push(resource);
         }
-        self.device.defer_release(self.epoch, payload);
+        self.context.defer_release(self.epoch, payload);
     }
 }
 
@@ -111,16 +111,22 @@ impl Drop for GpuGuard {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
+    use crate::context::Context;
+    use crate::device::Device;
     use crate::task_graph::TaskGraph;
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
+    fn test_ctx() -> Context {
+        test_device().create_context().unwrap()
+    }
+
     #[test]
     fn gpu_guard_new_is_empty() {
-        let device = test_device();
-        let guard = GpuGuard::new(&device, 5);
+        let ctx = test_ctx();
+        let guard = GpuGuard::new(&ctx, 5);
         assert!(guard.is_empty());
         assert_eq!(guard.resource_count(), 0);
         assert_eq!(guard.epoch(), 5);
@@ -128,8 +134,8 @@ mod tests {
 
     #[test]
     fn gpu_guard_hold_tracks_count() {
-        let device = test_device();
-        let mut guard = GpuGuard::new(&device, 1);
+        let ctx = test_ctx();
+        let mut guard = GpuGuard::new(&ctx, 1);
         guard.hold(42u32).hold("hello").hold(vec![1u8, 2, 3]);
         assert!(!guard.is_empty());
         assert_eq!(guard.resource_count(), 3);
@@ -137,32 +143,32 @@ mod tests {
 
     #[test]
     fn gpu_guard_empty_drop_is_noop() {
-        let device = test_device();
+        let ctx = test_ctx();
         // An empty guard should not add anything to the deferred ring.
-        let guard = GpuGuard::new(&device, 1);
+        let guard = GpuGuard::new(&ctx, 1);
         drop(guard);
         // After drop, flush: nothing to reclaim because nothing was deferred.
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
         // No panic, no assertion failure — just confirming no crash.
     }
 
     #[test]
     fn gpu_guard_resources_not_dropped_before_epoch() {
-        let device = test_device();
+        let ctx = test_ctx();
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
+        let tv = ctx.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(99u32);
         let weak = std::sync::Arc::downgrade(&alive);
 
-        let mut guard = GpuGuard::new(&device, tv + 100);
+        let mut guard = GpuGuard::new(&ctx, tv + 100);
         guard.hold(alive);
 
         // Dropping the guard enqueues the Arc into the ring at epoch tv+100.
         drop(guard);
 
         // flush_deferred_deletions at current gpu_progress (tv) must NOT drop it.
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
         assert!(
             weak.upgrade().is_some(),
             "resource must not be dropped before its epoch"
@@ -171,20 +177,20 @@ mod tests {
 
     #[test]
     fn gpu_guard_resources_dropped_after_epoch_and_flush() {
-        let device = test_device();
+        let ctx = test_ctx();
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
+        let tv = ctx.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(42u32);
         let weak = std::sync::Arc::downgrade(&alive);
 
-        let mut guard = GpuGuard::new(&device, tv);
+        let mut guard = GpuGuard::new(&ctx, tv);
         guard.hold(alive);
         drop(guard);
 
         // Advance GPU to tv and flush — resource must be dropped.
-        device.wait_until(tv).unwrap();
-        device.flush_deferred_deletions();
+        ctx.wait_until(tv).unwrap();
+        ctx.flush_deferred_deletions();
         assert!(
             weak.upgrade().is_none(),
             "resource must be dropped after epoch retires and flush_deferred_deletions is called"
@@ -196,9 +202,9 @@ mod tests {
         // The mock backend marks every submission as completed immediately, so we use
         // one real submitted epoch (tv) and one far-future epoch (tv + 100) that hasn't
         // been submitted and therefore remains unretired after wait_until(tv).
-        let device = test_device();
+        let ctx = test_ctx();
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
+        let tv = ctx.submit(&mut graph).unwrap();
         let tv_future = tv + 100;
 
         let alive_past = std::sync::Arc::new(1u32);
@@ -206,17 +212,17 @@ mod tests {
         let alive_future = std::sync::Arc::new(2u32);
         let weak_future = std::sync::Arc::downgrade(&alive_future);
 
-        let mut guard_past = GpuGuard::new(&device, tv);
+        let mut guard_past = GpuGuard::new(&ctx, tv);
         guard_past.hold(alive_past);
         drop(guard_past);
 
-        let mut guard_future = GpuGuard::new(&device, tv_future);
+        let mut guard_future = GpuGuard::new(&ctx, tv_future);
         guard_future.hold(alive_future);
         drop(guard_future);
 
         // Advance to tv — past guard's resource should be reclaimed, future's should not.
-        device.wait_until(tv).unwrap();
-        device.flush_deferred_deletions();
+        ctx.wait_until(tv).unwrap();
+        ctx.flush_deferred_deletions();
         assert!(
             weak_past.upgrade().is_none(),
             "epoch=tv resource should be dropped after wait_until(tv)"
@@ -227,8 +233,8 @@ mod tests {
         );
 
         // Advance to tv_future — future guard's resource should now be reclaimed.
-        device.wait_until(tv_future).unwrap();
-        device.flush_deferred_deletions();
+        ctx.wait_until(tv_future).unwrap();
+        ctx.flush_deferred_deletions();
         assert!(
             weak_future.upgrade().is_none(),
             "epoch=tv+100 resource should be dropped after wait_until(tv+100)"
@@ -238,18 +244,20 @@ mod tests {
     #[test]
     fn gpu_guard_resources_cleaned_up_on_device_drop() {
         let device = test_device();
+        let ctx = device.create_context().unwrap();
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
+        let tv = ctx.submit(&mut graph).unwrap();
 
         let alive = std::sync::Arc::new(7u32);
         let weak = std::sync::Arc::downgrade(&alive);
 
         // Guard with a far-future epoch — normal flush won't reclaim.
-        let mut guard = GpuGuard::new(&device, tv + 9999);
+        let mut guard = GpuGuard::new(&ctx, tv + 9999);
         guard.hold(alive);
         drop(guard);
 
         // Device drop should drain everything.
+        drop(ctx);
         drop(device);
         assert!(
             weak.upgrade().is_none(),
@@ -260,8 +268,9 @@ mod tests {
     #[test]
     fn gpu_guard_hold_multiple_resource_types() {
         let device = test_device();
+        let ctx = device.create_context().unwrap();
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
+        let tv = ctx.submit(&mut graph).unwrap();
 
         // Allocate a real buffer and hold it in a guard.
         let buf = device
@@ -275,13 +284,13 @@ mod tests {
         let alive = std::sync::Arc::new(0u32);
         let weak = std::sync::Arc::downgrade(&alive);
 
-        let mut guard = GpuGuard::new(&device, tv);
+        let mut guard = GpuGuard::new(&ctx, tv);
         guard.hold(buf).hold(alive);
         assert_eq!(guard.resource_count(), 2);
         drop(guard);
 
-        device.wait_until(tv).unwrap();
-        device.flush_deferred_deletions();
+        ctx.wait_until(tv).unwrap();
+        ctx.flush_deferred_deletions();
         assert!(weak.upgrade().is_none());
     }
 }

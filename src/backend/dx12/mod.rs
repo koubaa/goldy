@@ -31,6 +31,7 @@
 mod barriers;
 mod buffer;
 mod compute;
+mod context;
 mod diagnostic;
 mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
@@ -318,6 +319,8 @@ impl Dx12Backend {
             adapters,
             devices: HashMap::new(),
             next_device_handle: 1,
+            contexts: HashMap::new(),
+            next_context_id: 1,
             buffers: HashMap::new(),
             next_buffer_handle: 1,
             shaders: HashMap::new(),
@@ -347,9 +350,9 @@ impl Dx12Backend {
         Ok(Self { state })
     }
 
-    /// Wait for the GPU to finish all work on a device.
+    /// Wait for the GPU to finish all work on a device (sync fence path).
     fn wait_for_gpu(&self, device: &LogicalDevice) -> Result<()> {
-        let fence_value = device.fence_value;
+        let fence_value = device.timeline_next;
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         utils::wait_for_fence(&device.fence, fence_value)
@@ -359,17 +362,13 @@ impl Dx12Backend {
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
         if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
-            crate::backend::signal_fence::join_fence_poller(
-                &logical_device.fence_shutdown,
-                logical_device.fence_thread.take(),
-            );
             let _ = self.wait_for_gpu(&logical_device);
-            // Advance fence_value past the value consumed by wait_for_gpu so that
+            // Advance timeline_next past the value consumed by wait_for_gpu so that
             // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing
             // fence values. Without this, PendingDeletion::Buffer re-signals the same value
             // that wait_for_gpu already used, violating D3D12's monotonic fence requirement
             // and causing an abnormal process exit (exit code 2173) on teardown.
-            logical_device.fence_value += 1;
+            logical_device.timeline_next += 1;
             logical_device.flush_deletion_queue();
 
             if logical_device.pso_disk_cache_dirty {
@@ -514,7 +513,38 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
+        let ctxs: Vec<ContextHandle> = self
+            .state
+            .contexts
+            .iter()
+            .filter(|(_, sc)| sc.device == device_handle)
+            .map(|(k, _)| *k)
+            .collect();
+        for ctx in ctxs {
+            context::destroy(&mut self.state, ctx);
+        }
         self.destroy_device_inner(device_handle);
+    }
+
+    fn device_wait_idle(&mut self, device_handle: DeviceHandle) -> Result<()> {
+        let logical_device = self
+            .state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        self.wait_for_gpu(logical_device)
+    }
+
+    fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
+        context::create(&mut self.state, device)
+    }
+
+    fn destroy_context(&mut self, ctx: ContextHandle) {
+        context::destroy(&mut self.state, ctx);
+    }
+
+    fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
+        context::context_device(&self.state, ctx)
     }
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {
@@ -775,14 +805,16 @@ impl GpuBackend for Dx12Backend {
     fn begin_frame(
         &mut self,
         surface_handle: SurfaceHandle,
+        ctx: ContextHandle,
     ) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface_handle)?;
+        let image = surface::acquire(&mut self.state, surface_handle, ctx)?;
         let tex = surface::frame_texture(&self.state, surface_handle)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
             FrameToken {
                 surface: surface_handle,
                 image,
+                context: ctx,
             },
             tex,
         ))
@@ -820,21 +852,50 @@ impl GpuBackend for Dx12Backend {
         surface::get_present_mode(&self.state, surface_handle)
     }
 
-    fn gpu_progress(&self, device_handle: DeviceHandle) -> crate::timeline::TimelineValue {
-        self.state
-            .devices
-            .get(&device_handle)
-            .map(|d| unsafe { d.fence.GetCompletedValue() })
-            .unwrap_or(0)
+    fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
+        let Some(sc) = self.state.contexts.get(&ctx) else {
+            return 0;
+        };
+        unsafe { sc.fence.GetCompletedValue() }
     }
 
-    fn poll_signals(&mut self, device_handle: DeviceHandle) -> Vec<crate::signal::Signal> {
-        let progress = self.gpu_progress(device_handle);
+    fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+        context::device_retired(&self.state, device)
+    }
+
+    fn device_wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> anyhow::Result<()> {
+        if context::device_retired(&self.state, device) >= value {
+            return Ok(());
+        }
+        // Find the context that submitted value (or past it) and wait on its fence.
+        let fence = self
+            .state
+            .contexts
+            .values()
+            .find(|c| c.device == device && c.last_submitted_seq >= value)
+            .map(|c| c.fence.clone());
+        if let Some(fence) = fence {
+            utils::wait_for_fence(&fence, value)?;
+        }
+        // If no context has submitted past value yet, device_wait_idle is the safe fallback.
+        if context::device_retired(&self.state, device) < value {
+            self.device_wait_idle(device)?;
+        }
+        Ok(())
+    }
+
+    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+        let device_handle = self.context_device(ctx);
+        let progress = self.gpu_progress(ctx);
         let signal_queue = self
             .state
-            .devices
-            .get(&device_handle)
-            .map(|ld| std::sync::Arc::clone(&ld.signal_queue));
+            .contexts
+            .get(&ctx)
+            .map(|sc| std::sync::Arc::clone(&sc.signal_queue));
         let Some(signal_queue) = signal_queue else {
             return Vec::new();
         };
@@ -856,14 +917,10 @@ impl GpuBackend for Dx12Backend {
         crate::signal::drain_all_signals(&signal_queue)
     }
 
-    fn peek_oldest_in_flight(
-        &self,
-        device_handle: DeviceHandle,
-    ) -> Option<crate::timeline::TimelineValue> {
-        let ld = self.state.devices.get(&device_handle)?;
-        let progress = self.gpu_progress(device_handle);
-        let scheduled = ld.fence_value.saturating_sub(1);
-        if progress < scheduled {
+    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
+        let sc = self.state.contexts.get(&ctx)?;
+        let progress = self.gpu_progress(ctx);
+        if progress < sc.last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {
             None
@@ -880,14 +937,15 @@ impl GpuBackend for Dx12Backend {
 
     fn wait_until(
         &mut self,
-        device_handle: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
+        let device_handle = self.context_device(ctx);
         let fence = self
             .state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
             .fence
             .clone();
         utils::wait_for_fence(&fence, value)?;
@@ -903,23 +961,25 @@ impl GpuBackend for Dx12Backend {
             }
             anyhow::bail!("GPU device removed (TDR)");
         }
-        if let Some(dev) = self.state.devices.get_mut(&device_handle) {
-            dev.process_deletion_queue();
+        let retired = context::device_retired(&self.state, device_handle);
+        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to(value.min(retired));
         }
         Ok(())
     }
 
     fn wait_until_timeout(
         &mut self,
-        device_handle: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
         timeout_ms: u32,
     ) -> Result<bool> {
+        let device_handle = self.context_device(ctx);
         let fence = self
             .state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
             .fence
             .clone();
         let ok = utils::wait_for_fence_timeout(&fence, value, timeout_ms)?;
@@ -936,8 +996,9 @@ impl GpuBackend for Dx12Backend {
                 }
                 anyhow::bail!("GPU device removed (TDR)");
             }
+            let retired = context::device_retired(&self.state, device_handle);
             if let Some(dev) = self.state.devices.get_mut(&device_handle) {
-                dev.process_deletion_queue();
+                dev.process_deletion_queue_up_to(value.min(retired));
             }
         }
         Ok(ok)
@@ -945,39 +1006,39 @@ impl GpuBackend for Dx12Backend {
 
     fn submit_standalone(
         &mut self,
-        device_handle: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&mut self.state, device_handle, commands)
+        compute::submit(&mut self.state, ctx, commands)
     }
 
     fn submit_graph(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, device, commands, None)
+        compute::submit_graph(&mut self.state, ctx, commands, None)
     }
 
     fn submit_graph_and_retain(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, device, commands, Some(key))
+        compute::submit_graph(&mut self.state, ctx, commands, Some(key))
     }
 
     fn try_resubmit_retained(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         key: u64,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        compute::try_resubmit_retained(&mut self.state, device, key)
+        compute::try_resubmit_retained(&mut self.state, ctx, key)
     }
 
-    fn evict_retained(&mut self, device: DeviceHandle, _key: u64) {
-        compute::evict_retained(&mut self.state, device);
+    fn evict_retained(&mut self, ctx: ContextHandle, _key: u64) {
+        compute::evict_retained(&mut self.state, ctx);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
@@ -1170,13 +1231,16 @@ impl GpuBackend for Dx12Backend {
         types::ResourceRegistry::max_slots(category)
     }
 
-    fn flush_deferred_deletions(&mut self, device_handle: DeviceHandle) {
+    fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
+        let device_handle = self.context_device(ctx);
+        let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue();
+            ld.process_deletion_queue_up_to(retired);
         }
     }
 
-    fn deferred_deletion_pending_count(&self, device_handle: DeviceHandle) -> usize {
+    fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
+        let device_handle = self.context_device(ctx);
         self.state
             .devices
             .get(&device_handle)

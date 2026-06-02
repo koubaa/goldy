@@ -16,6 +16,7 @@ pub mod backend;
 pub mod buffer;
 pub mod common_types;
 pub mod compute;
+pub mod context;
 pub mod device;
 pub mod encoder;
 pub mod error;
@@ -65,6 +66,7 @@ pub use timeline::TimelineValue;
 
 pub use backend::GraphCommand;
 pub use backend::{BufferHeapStats, TextureHeapStats};
+pub use context::Context;
 pub use device::{
     Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
     RequestAdapterOptions,

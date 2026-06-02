@@ -34,8 +34,9 @@ graph.node("read_data", &pipeline_b)
     .bind_resources_raw(&[buf_idx])
     .dispatch(64, 1, 1);
 
+let ctx = device.create_context();
 let tv = graph.submit(&device)?;
-device.wait_until(tv)?;
+ctx.wait_until(tv)?;
 ```
 
 The analyzer sees that `read_data` depends on `write_data` (RAW hazard on `buf`) and inserts a barrier between them. If two nodes touch completely different resources, they execute in the same wave with no barrier.
@@ -203,9 +204,10 @@ All nodes in a `TaskGraph` are submitted in a single command buffer (or compute 
 **Non-blocking** — returns a `TimelineValue` for CPU-side synchronization:
 
 ```rust
+let ctx = device.create_context();
 let tv = graph.submit(&device)?;
 // CPU work while GPU executes...
-device.wait_until(tv)?;
+ctx.wait_until(tv)?;
 ```
 
 **Blocking** — submits and waits for completion:

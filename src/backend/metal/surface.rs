@@ -33,7 +33,8 @@
 //! slot `(N-1) % 3` — the slots never alias across concurrent frames.
 
 use super::super::{
-    DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle,
+    ContextHandle, DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle,
+    TextureHandle,
 };
 use super::compute;
 use super::render_commands::{create_render_pass, record};
@@ -189,6 +190,7 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
 pub(super) fn acquire(
     state: &mut MetalState,
     surface: SurfaceHandle,
+    ctx: super::ContextHandle,
 ) -> Result<SwapchainImageHandle> {
     let _tz = crate::tracy_zone!("mtl.surface.acquire");
     // Clean up any previously acquired drawable that wasn't presented
@@ -204,8 +206,13 @@ pub(super) fn acquire(
     let gpu_signal_arc = state
         .surfaces
         .get(&surface)
-        .and_then(|ss| state.devices.get(&ss.device_handle))
-        .map(|ld| ld.timeline_waiter.last_signal_ns_arc());
+        .and_then(|ss| {
+            state
+                .contexts
+                .values()
+                .find(|c| c.device == ss.device_handle)
+        })
+        .map(|sc| sc.timeline_waiter.last_signal_ns_arc());
 
     let surface_state = state
         .surfaces
@@ -311,7 +318,7 @@ pub(super) fn acquire(
         bindless_slot,
     )?;
 
-    let (image_index, signal_queue) = {
+    let image_index = {
         let surface_state = state
             .surfaces
             .get_mut(&surface)
@@ -320,19 +327,19 @@ pub(super) fn acquire(
         surface_state.current_texture_handle = Some(tex_handle);
         surface_state.last_acquired_image_index = Some(image_index);
         surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_add(1);
-        let signal_queue = state
-            .devices
-            .get(&device_handle)
-            .map(|ld| std::sync::Arc::clone(&ld.signal_queue));
-        (image_index, signal_queue)
+        image_index
     };
 
-    if let Some(queue) = signal_queue {
-        queue.push(crate::signal::Signal::SwapchainAcquired { image_index });
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.signal_queue
+            .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.process_deletion_queue_up_to_signaled();
+    {
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to(retired);
+        }
     }
 
     Ok(image_index as u64)
@@ -444,6 +451,7 @@ pub(super) fn present(
     state: &mut MetalState,
     surface: SurfaceHandle,
     _image: SwapchainImageHandle,
+    ctx: ContextHandle,
 ) -> Result<crate::timeline::TimelineValue> {
     let surface_state = state
         .surfaces
@@ -455,12 +463,17 @@ pub(super) fn present(
     let drawable_ptr = match surface_state.current_drawable {
         Some(d) => d,
         None => {
+            let retired = super::context::device_retired(state, device_handle);
             let ld = state
                 .devices
                 .get_mut(&device_handle)
                 .context("Device no longer valid")?;
-            ld.process_deletion_queue_up_to_signaled();
-            return Ok(ld.timeline_event.as_ref().signaled_value());
+            ld.process_deletion_queue_up_to(retired);
+            return Ok(state
+                .contexts
+                .get(&ctx)
+                .map(|sc| sc.timeline_event.as_ref().signaled_value())
+                .unwrap_or(retired));
         }
     };
     let tex_handle = surface_state.current_texture_handle;
@@ -483,11 +496,18 @@ pub(super) fn present(
 
     let owned_command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
     let command_buffer = owned_command_buffer.as_ref();
-    command_buffer.encode_signal_event(logical_device.timeline_event.as_ref(), signal_value);
 
-    let waiter = logical_device.timeline_waiter.clone();
-    let signal_queue_present = std::sync::Arc::clone(&logical_device.signal_queue);
-    let return_pending = logical_device.pending_swapchain_returns.clone();
+    let (timeline_event, waiter, signal_queue_present, return_pending) = {
+        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        (
+            sc.timeline_event.clone(),
+            sc.timeline_waiter.clone(),
+            std::sync::Arc::clone(&sc.signal_queue),
+            sc.pending_swapchain_returns.clone(),
+        )
+    };
+    command_buffer.encode_signal_event(timeline_event.as_ref(), signal_value);
+
     let return_image = state
         .surfaces
         .get(&surface)
@@ -532,10 +552,16 @@ pub(super) fn present(
     surface_state.current_texture_handle = None;
     surface_state.last_acquired_image_index = None;
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.in_flight_command_buffers
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
-        ld.process_deletion_queue_up_to_signaled();
+        sc.last_submitted_seq = signal_value;
+    }
+    {
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to(retired);
+        }
     }
 
     Ok(signal_value)
@@ -544,12 +570,6 @@ pub(super) fn submit_frame(
     state: &mut MetalState,
     frame: &FrameToken,
 ) -> Result<crate::timeline::TimelineValue> {
-    let dh = state
-        .surfaces
-        .get(&frame.surface)
-        .context("Invalid surface handle")?
-        .device_handle;
-
     let pending = {
         let surf = state
             .surfaces
@@ -559,15 +579,18 @@ pub(super) fn submit_frame(
     };
 
     if !pending.is_empty() {
-        return compute::submit(state, dh, &pending);
+        return compute::submit(state, frame.context, &pending);
     }
 
-    let ld = state.devices.get(&dh).context("Device no longer valid")?;
-    Ok(ld
+    let sc = state
+        .contexts
+        .get(&frame.context)
+        .context("Invalid context handle")?;
+    Ok(sc
         .timeline_event
         .as_ref()
         .signaled_value()
-        .max(ld.last_committed_timeline.unwrap_or(0)))
+        .max(sc.last_committed_timeline.unwrap_or(0)))
 }
 
 pub(super) fn present_frame(
@@ -575,7 +598,7 @@ pub(super) fn present_frame(
     frame: FrameToken,
     _submit_tv: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
-    present(state, frame.surface, frame.image)
+    present(state, frame.surface, frame.image, frame.context)
 }
 
 /// Set the present mode on the CAMetalLayer.
@@ -656,8 +679,12 @@ pub(super) fn resize(
     }
 
     surface_state.pending_acquire_count = 0;
-    if let Some(ld) = state.devices.get(&surface_state.device_handle) {
-        ld.pending_swapchain_returns.lock().unwrap().clear();
+    if let Some(device_handle) = state.surfaces.get(&surface).map(|s| s.device_handle) {
+        for sc in state.contexts.values_mut() {
+            if sc.device == device_handle {
+                sc.pending_swapchain_returns.lock().unwrap().clear();
+            }
+        }
     }
 
     tracing::debug!("Resized surface {} to {}x{}", surface, width, height);

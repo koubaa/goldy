@@ -45,9 +45,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_instance_get_adapter")]
     internal static partial GoldyResult InstanceGetAdapter(nint instance, uint index, out AdapterInfoNative info);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_instance_create_device")]
-    internal static partial nint InstanceCreateDevice(nint instance, DeviceType preferredType);
-
     [LibraryImport(LibName, EntryPoint = "goldy_instance_create_device_for_adapter")]
     internal static partial nint InstanceCreateDeviceForAdapter(nint instance, uint adapterId);
 

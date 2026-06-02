@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 ///     >>> window = glfw.create_window(800, 600, "Goldy", None, None)
 ///     >>>
 ///     >>> instance = goldy.Instance()
-///     >>> device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+///     >>> device = instance.request_adapter().request_device()
 ///     >>> surface = goldy.Surface.from_glfw(device, window)
 ///     >>>
 ///     >>> while not glfw.window_should_close(window):
@@ -48,6 +48,8 @@ impl PySurface {
     /// Note: The window must be created with glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
     #[staticmethod]
     fn from_glfw(device: &PyDevice, glfw_window: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let context = device.inner.create_context().into_py_result()?;
+
         // GLFW windows in Python expose the native handle via ctypes
         // We need to get the raw window handle
 
@@ -67,7 +69,7 @@ impl PySurface {
             let window_wrapper = Win32WindowWrapper {
                 hwnd: hwnd as *mut std::ffi::c_void,
             };
-            goldy::Surface::new(&device.inner, &window_wrapper).into_py_result()?
+            goldy::Surface::new(&context, &window_wrapper).into_py_result()?
         };
 
         #[cfg(target_os = "linux")]
@@ -83,7 +85,7 @@ impl PySurface {
                 window: x11_window as u32,
                 display: x11_display as *mut std::ffi::c_void,
             };
-            goldy::Surface::new(&device.inner, &window_wrapper).into_py_result()?
+            goldy::Surface::new(&context, &window_wrapper).into_py_result()?
         };
 
         #[cfg(target_os = "macos")]
@@ -104,7 +106,7 @@ impl PySurface {
             };
 
             let window_wrapper = CocoaWindowWrapper { ns_view };
-            goldy::Surface::new(&device.inner, &window_wrapper).into_py_result()?
+            goldy::Surface::new(&context, &window_wrapper).into_py_result()?
         };
 
         Ok(PySurface { inner: surface })

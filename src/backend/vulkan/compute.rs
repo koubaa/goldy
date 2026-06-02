@@ -63,12 +63,15 @@ fn slot_usage_to_vk_access(usage: &SlotUsageSet) -> vk::AccessFlags2 {
 }
 
 /// Acquire a command buffer: recycle from the free-list or allocate a fresh one.
-fn acquire_cmd_buffer(ld: &mut LogicalDevice) -> Result<vk::CommandBuffer> {
-    if let Some(cb) = ld.free_cmd_buffers.pop() {
+fn acquire_cmd_buffer(
+    ld: &LogicalDevice,
+    sc: &mut super::types::SubmissionContext,
+) -> Result<vk::CommandBuffer> {
+    if let Some(cb) = sc.free_cmd_buffers.pop() {
         return Ok(cb);
     }
     let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(ld.command_pool)
+        .command_pool(sc.command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     let cbs = unsafe { ld.device.allocate_command_buffers(&alloc_info) }
@@ -167,7 +170,7 @@ fn vulkan_decode_duration_ns(start: u64, end: u64, valid_bits: u32, period_ns: f
 
 unsafe fn vulkan_finish_gpu_profile(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     device: &ash::Device,
     timeline_sem: vk::Semaphore,
     signal_value: TimelineValue,
@@ -221,7 +224,7 @@ unsafe fn vulkan_finish_gpu_profile(
     }
 
     device.destroy_query_pool(profile.pool, None);
-    reap_timeline_cmd_buffers_up_to(state, device_handle, signal_value);
+    reap_timeline_cmd_buffers_up_to(state, ctx, signal_value);
     let _ = cmd;
     Ok(())
 }
@@ -365,9 +368,14 @@ pub(super) fn destroy(
 /// Submit a batch of GPU commands as a single compute submission.
 pub(super) fn submit(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
+    let device_handle = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .device;
     let _tz = tracy_zone!("vk.submit");
     // Detect WriteBuffer up-front so we can skip all the staging-belt /
     // fence-pool maintenance when this submit has no host→GPU uploads.
@@ -392,15 +400,7 @@ pub(super) fn submit(
 
     if has_write_buffer || has_write_texture {
         let _rz = tracy_zone!("vk.submit.belt_reclaim");
-        let completed_timeline = state
-            .devices
-            .get(&device_handle)
-            .map(|ld| unsafe {
-                ld.device
-                    .get_semaphore_counter_value(ld.timeline_semaphore)
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
+        let completed_timeline = super::context::device_retired(state, device_handle);
 
         if has_write_buffer {
             for belt in state.staging_belts.values_mut() {
@@ -476,34 +476,44 @@ pub(super) fn submit(
     }
 
     if commands.is_empty() {
-        let signal_value = {
-            let ld = state
-                .devices
-                .get(&device_handle)
-                .context("Invalid device handle")?;
-            ld.timeline_next
-        };
+        let signal_value = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?
+            .timeline_next;
+        let timeline_sem = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .timeline_semaphore;
         let ld = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
+        let queue = ld.queue;
         let signal_info = vk::SemaphoreSubmitInfo::default()
-            .semaphore(ld.timeline_semaphore)
+            .semaphore(timeline_sem)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
         let submit_info2 =
             vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
         let r = unsafe {
             ld.device.queue_submit2(
-                ld.queue,
+                queue,
                 std::slice::from_ref(&submit_info2),
                 vk::Fence::null(),
             )
         };
         r.context("Failed queue_submit2 for empty compute submit")?;
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.timeline_next = signal_value.saturating_add(1);
-            ld.process_deletion_queue_up_to_gpu_progress();
+        {
+            let retired = super::context::device_retired(state, device_handle);
+            if let Some(ld) = state.devices.get_mut(&device_handle) {
+                ld.timeline_next = signal_value.saturating_add(1);
+                ld.process_deletion_queue_up_to(retired);
+            }
+        }
+        if let Some(sc) = state.contexts.get_mut(&ctx) {
+            sc.last_submitted_seq = signal_value;
         }
         return Ok(signal_value);
     }
@@ -582,13 +592,17 @@ pub(super) fn submit(
     let cmd = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
-        let cb = acquire_cmd_buffer(ld)?;
+        let sc = state
+            .contexts
+            .get_mut(&ctx)
+            .context("Invalid context handle")?;
+        let cb = acquire_cmd_buffer(ld, sc)?;
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
-            ld.free_cmd_buffers.push(cb);
+            sc.free_cmd_buffers.push(cb);
             return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
         }
         cb
@@ -1157,13 +1171,18 @@ pub(super) fn submit(
         ld.timeline_next
     };
 
+    let timeline_sem = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .timeline_semaphore;
     let submit_device_core = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
-        .semaphore(submit_device_core.timeline_semaphore)
+        .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
     let submit_info2 = vk::SubmitInfo2::default()
@@ -1181,10 +1200,15 @@ pub(super) fn submit(
         }
     };
     if let Err(e) = queue_submit_result {
+        let ctx_pool = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .command_pool;
         unsafe {
             submit_device_core
                 .device
-                .free_command_buffers(submit_device_core.command_pool, &[cmd]);
+                .free_command_buffers(ctx_pool, &[cmd]);
             if let Some(prof) = vk_gpu_profile.take() {
                 submit_device_core
                     .device
@@ -1200,12 +1224,13 @@ pub(super) fn submit(
     if let Some(ld) = state.devices.get_mut(&device_handle) {
         ld.timeline_next = signal_value.saturating_add(1);
     }
-
-    state
-        .timeline_cmd_buffers
-        .entry(signal_value)
-        .or_default()
-        .push((device_handle, cmd));
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.last_submitted_seq = signal_value;
+        sc.timeline_cmd_buffers
+            .entry(signal_value)
+            .or_default()
+            .push(cmd);
+    }
 
     if !texture_upload_scratch.is_empty() {
         let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
@@ -1237,12 +1262,17 @@ pub(super) fn submit(
                 .devices
                 .get(&device_handle)
                 .context("Invalid device handle")?;
-            (ld.device.clone(), ld.timeline_semaphore)
+            let sem = state
+                .contexts
+                .get(&ctx)
+                .context("Invalid context handle")?
+                .timeline_semaphore;
+            (ld.device.clone(), sem)
         };
         unsafe {
             vulkan_finish_gpu_profile(
                 state,
-                device_handle,
+                ctx,
                 &device_clone,
                 timeline_sem,
                 signal_value,
@@ -1252,8 +1282,11 @@ pub(super) fn submit(
         }
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.process_deletion_queue_up_to_gpu_progress();
+    {
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to(retired);
+        }
     }
 
     Ok(signal_value)
@@ -1266,10 +1299,10 @@ pub(super) fn submit(
 /// `queue_submit2` with a timeline semaphore signal at the end.
 pub(super) fn submit_graph(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     commands: &[GraphCommand],
 ) -> Result<TimelineValue> {
-    submit_graph_impl(state, device_handle, commands, None)
+    submit_graph_impl(state, ctx, commands, None)
 }
 
 /// Inner implementation shared by `submit_graph` and `submit_graph_and_retain`.
@@ -1285,10 +1318,15 @@ pub(super) fn submit_graph(
 /// - after submit it is stored in `timeline_cmd_buffers` and freed once the GPU retires it
 fn submit_graph_impl(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
 ) -> Result<TimelineValue> {
+    let device_handle = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .device;
     let _tz = tracy_zone!("vk.submit_graph");
     // --- Same housekeeping as `submit` ---
     // Skip belt reclaim + fence reap when there's no host upload in this submit;
@@ -1314,15 +1352,7 @@ fn submit_graph_impl(
 
     if has_upload {
         let _rz = tracy_zone!("vk.submit_graph.belt_reclaim");
-        let completed_timeline = state
-            .devices
-            .get(&device_handle)
-            .map(|ld| unsafe {
-                ld.device
-                    .get_semaphore_counter_value(ld.timeline_semaphore)
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
+        let completed_timeline = super::context::device_retired(state, device_handle);
 
         for belt in state.staging_belts.values_mut() {
             belt.reclaim(
@@ -1461,9 +1491,13 @@ fn submit_graph_impl(
     let cmd = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
-        let cb = acquire_cmd_buffer(ld)?;
+        let sc = state
+            .contexts
+            .get_mut(&ctx)
+            .context("Invalid context handle")?;
+        let cb = acquire_cmd_buffer(ld, sc)?;
         // Use ONE_TIME_SUBMIT for normal submits (driver hint for optimization).
         // When retaining, omit the flag so the CB stays executable after GPU completion
         // and can be resubmitted on the next frame.
@@ -1474,7 +1508,7 @@ fn submit_graph_impl(
         };
         let begin_info = vk::CommandBufferBeginInfo::default().flags(flags);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
-            ld.free_cmd_buffers.push(cb);
+            sc.free_cmd_buffers.push(cb);
             return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
         }
         cb
@@ -2102,13 +2136,18 @@ fn submit_graph_impl(
         ld.timeline_next
     };
 
+    let timeline_sem = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .timeline_semaphore;
     let submit_device = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
-        .semaphore(submit_device.timeline_semaphore)
+        .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
     let submit_info2 = vk::SubmitInfo2::default()
@@ -2126,10 +2165,13 @@ fn submit_graph_impl(
         }
     };
     if let Err(e) = queue_submit_result {
+        let ctx_pool = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .command_pool;
         unsafe {
-            submit_device
-                .device
-                .free_command_buffers(submit_device.command_pool, &[cmd]);
+            submit_device.device.free_command_buffers(ctx_pool, &[cmd]);
             if let Some(prof) = vk_gpu_profile.take() {
                 submit_device.device.destroy_query_pool(prof.pool, None);
             }
@@ -2145,22 +2187,19 @@ fn submit_graph_impl(
     }
 
     // Post-submit: store the CB for lifecycle management.
-    if let Some(key) = retain_key {
-        // Retained path: store in `retained_compute_cb` (not timeline_cmd_buffers)
-        // so the reap cycle doesn't free it. The CB will be resubmitted next frame.
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.retained_compute_cb = Some(super::types::RetainedVkCb {
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.last_submitted_seq = signal_value;
+        if let Some(key) = retain_key {
+            sc.retained_compute_cb = Some(super::types::RetainedVkCb {
                 fingerprint: key,
                 command_buffer: cmd,
             });
+        } else {
+            sc.timeline_cmd_buffers
+                .entry(signal_value)
+                .or_default()
+                .push(cmd);
         }
-    } else {
-        // Normal path: track for GPU-retirement-based cleanup.
-        state
-            .timeline_cmd_buffers
-            .entry(signal_value)
-            .or_default()
-            .push((device_handle, cmd));
     }
 
     if !texture_upload_scratch.is_empty() {
@@ -2187,12 +2226,17 @@ fn submit_graph_impl(
                 .devices
                 .get(&device_handle)
                 .context("Invalid device handle")?;
-            (ld.device.clone(), ld.timeline_semaphore)
+            let sem = state
+                .contexts
+                .get(&ctx)
+                .context("Invalid context handle")?
+                .timeline_semaphore;
+            (ld.device.clone(), sem)
         };
         unsafe {
             vulkan_finish_gpu_profile(
                 state,
-                device_handle,
+                ctx,
                 &device_clone,
                 timeline_sem,
                 signal_value,
@@ -2209,8 +2253,11 @@ fn submit_graph_impl(
         }
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.process_deletion_queue_up_to_gpu_progress();
+    {
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to(retired);
+        }
     }
 
     Ok(signal_value)
@@ -2226,14 +2273,14 @@ fn submit_graph_impl(
 /// (non-retained) submit via [`submit_graph`].
 pub(super) fn submit_graph_and_retain(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     commands: &[GraphCommand],
     key: u64,
 ) -> Result<TimelineValue> {
     // Evict any previously retained CB so we start fresh.
-    evict_retained(state, device_handle, key);
+    evict_retained(state, ctx, key);
     // Delegate to the shared inner path with retention enabled.
-    submit_graph_impl(state, device_handle, commands, Some(key))
+    submit_graph_impl(state, ctx, commands, Some(key))
 }
 
 /// Re-execute the retained dispatch CB without re-recording.
@@ -2244,15 +2291,17 @@ pub(super) fn submit_graph_and_retain(
 /// submission of this CB (e.g. by `wait_until`) so it is in executable state.
 pub(super) fn try_resubmit_retained(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     key: u64,
 ) -> Result<Option<TimelineValue>> {
+    let device_handle = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .device;
     let retained_cb = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-        match ld.retained_compute_cb.as_ref() {
+        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        match sc.retained_compute_cb.as_ref() {
             Some(r) if r.fingerprint == key => Some(r.command_buffer),
             _ => None,
         }
@@ -2270,13 +2319,18 @@ pub(super) fn try_resubmit_retained(
         ld.timeline_next
     };
 
+    let timeline_sem = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .timeline_semaphore;
     let submit_device = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
-        .semaphore(submit_device.timeline_semaphore)
+        .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
     let submit_info2 = vk::SubmitInfo2::default()
@@ -2295,9 +2349,15 @@ pub(super) fn try_resubmit_retained(
         .context("Failed to queue_submit2 retained dispatch CB")?;
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.timeline_next = signal_value.saturating_add(1);
-        ld.process_deletion_queue_up_to_gpu_progress();
+    {
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.timeline_next = signal_value.saturating_add(1);
+            ld.process_deletion_queue_up_to(retired);
+        }
+    }
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.last_submitted_seq = signal_value;
     }
 
     Ok(Some(signal_value))
@@ -2307,81 +2367,52 @@ pub(super) fn try_resubmit_retained(
 /// returning the `VkCommandBuffer` to `free_cmd_buffers` for pool reuse.
 pub(super) fn evict_retained(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     _key: u64,
 ) {
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        if let Some(old) = ld.retained_compute_cb.take() {
-            ld.free_cmd_buffers.push(old.command_buffer);
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        if let Some(old) = sc.retained_compute_cb.take() {
+            sc.free_cmd_buffers.push(old.command_buffer);
         }
     }
 }
 
 pub(super) fn reap_timeline_cmd_buffers_up_to(
     state: &mut super::types::VulkanState,
-    device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     max_completed_value: u64,
 ) {
-    if state.timeline_cmd_buffers.is_empty() {
-        return;
-    }
-    // Stack buffer for eligible keys; typical steady-state has 1-2 entries.
-    let mut keys_buf = [0u64; 8];
-    let mut n = 0usize;
-    {
-        let _tz = crate::tracy_zone!("vk.reap_timeline.key_scan");
-        for &k in state.timeline_cmd_buffers.keys() {
-            if k <= max_completed_value {
-                if n < keys_buf.len() {
-                    keys_buf[n] = k;
-                }
-                n += 1;
-            }
+    let (device, pool, keys): (DeviceHandle, vk::CommandPool, Vec<u64>) = {
+        let sc = match state.contexts.get(&ctx) {
+            Some(s) => s,
+            None => return,
+        };
+        if sc.timeline_cmd_buffers.is_empty() {
+            return;
         }
-    }
-    if n == 0 {
-        return;
-    }
-
-    fn process_key(state: &mut super::types::VulkanState, device_handle: DeviceHandle, k: u64) {
-        {
-            let _tz = crate::tracy_zone!("vk.reap_timeline.recycle_cbs");
-            if let Some(mut entries) = state.timeline_cmd_buffers.remove(&k) {
-                entries.retain(|(dh, cb)| {
-                    if *dh == device_handle {
-                        if let Some(ld) = state.devices.get_mut(dh) {
-                            ld.free_cmd_buffers.push(*cb);
-                        }
-                        false
-                    } else {
-                        true
-                    }
-                });
-                if !entries.is_empty() {
-                    state.timeline_cmd_buffers.insert(k, entries);
-                }
-            }
-        }
-        // Texture staging is now pooled; reclaim happens at the next submit
-        // when `completed_timeline` is read from the semaphore. No per-key
-        // destroy needed here.
-    }
-
-    if n <= keys_buf.len() {
-        let _tz = crate::tracy_zone!("vk.reap_timeline.process_keys.stack");
-        for &k in &keys_buf[..n] {
-            process_key(state, device_handle, k);
-        }
-    } else {
-        let _tz = crate::tracy_zone!("vk.reap_timeline.process_keys.heap");
-        let keys: Vec<u64> = state
+        let keys: Vec<u64> = sc
             .timeline_cmd_buffers
             .keys()
             .copied()
             .filter(|k| *k <= max_completed_value)
             .collect();
-        for k in keys {
-            process_key(state, device_handle, k);
+        (sc.device, sc.command_pool, keys)
+    };
+    if keys.is_empty() {
+        return;
+    }
+    let cbs_to_free: Vec<vk::CommandBuffer> = {
+        let sc = state.contexts.get_mut(&ctx).expect("context");
+        keys.iter()
+            .filter_map(|k| sc.timeline_cmd_buffers.remove(k))
+            .flatten()
+            .collect()
+    };
+    if let Some(ld) = state.devices.get(&device) {
+        for cb in cbs_to_free {
+            unsafe {
+                ld.device.free_command_buffers(pool, &[cb]);
+            }
         }
     }
 }

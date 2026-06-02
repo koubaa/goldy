@@ -28,7 +28,6 @@ use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
 use crate::error::GoldyError;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
-use crate::task_graph::TaskGraph;
 use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::{Context, Result};
@@ -316,7 +315,7 @@ impl Adapter {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 placement_heap: Mutex::new(None),
-                high_water_timeline: AtomicU64::new(0),
+                owns_backend_device: true,
             }),
         })
     }
@@ -445,9 +444,9 @@ pub(crate) struct DeviceInner {
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
     pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
-    /// Largest TimelineValue ever returned from submit(). Used in Drop to ensure
-    /// all submitted GPU work has completed before destroying the device.
-    high_water_timeline: AtomicU64,
+    /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
+    /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
+    pub(crate) owns_backend_device: bool,
 }
 
 impl Clone for Device {
@@ -567,6 +566,14 @@ impl Device {
     // VramAllocator
     // =======================================================================
 
+    pub(crate) fn defer_release(
+        &self,
+        epoch: TimelineValue,
+        payload: crate::vram_allocator::DeferredPayload,
+    ) {
+        self.inner.vram_allocator.defer_release(epoch, payload);
+    }
+
     /// Returns the currently installed [`VramAllocator`].
     ///
     /// The default is [`DefaultVramAllocator`] which delegates directly to the
@@ -605,7 +612,7 @@ impl Device {
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
                 placement_heap: Mutex::new(None),
-                high_water_timeline: AtomicU64::new(0),
+                owns_backend_device: false,
             }),
         }
     }
@@ -713,61 +720,48 @@ impl Device {
             .is_device_valid(self.inner.handle)
     }
 
-    /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
+    /// Create a submission/timeline context bound to this device.
     ///
-    /// Call from the render thread before reclaiming resources; driver callbacks only enqueue
-    /// async signals — client policy runs here without locks on ekrano state.
-    pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
+    /// The context holds an `Arc` clone of the device substrate, so the device
+    /// outlives the context. Submit, wait, signal, and reclamation APIs live on [`Context`].
+    pub fn create_context(&self) -> Result<crate::context::Context, GoldyError> {
+        crate::context::Context::new(self.clone())
+    }
+
+    /// Latest device-global submission sequence retired on the GPU.
+    ///
+    /// Epochs from any [`crate::context::Context::submit`] on this device share one value space; use this
+    /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
+    pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .device_timeline_retired(self.inner.handle)
+    }
+
+    /// Block until the device-global timeline has retired at least `value`.
+    ///
+    /// Unlike [`Context::wait_until`], this does not require the caller to hold the same
+    /// [`Context`] that submitted `value`. The backend searches across all live contexts
+    /// on this device for the one that produced `value` and waits on its native primitive
+    /// (Metal `MTLSharedEvent`, Vulkan timeline semaphore, DX12 fence).
+    ///
+    /// Use this from allocators and other device-scoped objects that receive epoch values
+    /// from external contexts they do not own.
+    ///
+    /// [`Context::wait_until`]: crate::Context::wait_until
+    pub fn wait_until_retired(
+        &self,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<(), GoldyError> {
         let mut backend = self.inner.backend.lock().unwrap();
-        backend.poll_signals(self.inner.handle)
-    }
-
-    /// Drain pending signals and service [`crate::signal::Signal::BoundaryCrossed`] by calling
-    /// [`boundary_crossed`](Self::boundary_crossed) at the highest drained epoch.
-    ///
-    /// Returns the full signal batch so callers can still handle swapchain events,
-    /// oversubscription, and frame bookkeeping. Non-boundary signals are not acted on
-    /// here.
-    pub fn poll_signals_and_service(&self) -> Vec<crate::signal::Signal> {
-        let _tz = crate::tracy_zone!("device.poll_signals_and_service");
-        let signals = self.poll_signals();
-        let latest_boundary = signals.iter().fold(None, |latest, signal| match signal {
-            crate::signal::Signal::BoundaryCrossed { epoch } => {
-                Some(latest.unwrap_or(0).max(*epoch))
-            }
-            _ => latest,
-        });
-        if let Some(epoch) = latest_boundary {
-            self.boundary_crossed(epoch);
-        }
-        signals
-    }
-
-    /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
-    pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
-        let backend = self.inner.backend.lock().unwrap();
-        backend.peek_oldest_in_flight(self.inner.handle)
-    }
-
-    /// Latest GPU completion counter on this device's timeline (`wait_until(value)` is valid once
-    /// `gpu_progress() >= value`).
-    pub fn gpu_progress(&self) -> TimelineValue {
-        let _tz = crate::tracy_zone!("device.gpu_progress");
-        let backend = {
-            let _lock = crate::tracy_zone!("device.gpu_progress.lock");
-            self.inner.backend.lock().unwrap()
-        };
-        let _query = crate::tracy_zone!("device.gpu_progress.query");
-        backend.gpu_progress(self.inner.handle)
-    }
-
-    /// The largest [`TimelineValue`] ever returned by [`submit`](Self::submit) on this device.
-    ///
-    /// Waiting on this value guarantees that all GPU work submitted through this device handle
-    /// has completed. Primarily useful for diagnostics; `Drop for DeviceInner` uses this
-    /// automatically before tearing down the backend device.
-    pub fn high_water_timeline(&self) -> TimelineValue {
-        self.inner.high_water_timeline.load(Ordering::Relaxed)
+        backend
+            .device_wait_until(self.inner.handle, value)
+            .map_err(|e| {
+                drop(backend);
+                GoldyError::Backend(e)
+            })
     }
 
     /// Returns `true` if the device has been permanently lost.
@@ -782,50 +776,11 @@ impl Device {
             .is_device_lost(self.inner.handle)
     }
 
-    /// Map a backend [`anyhow::Error`] to the appropriate [`GoldyError`] variant.
-    fn classify(&self, e: anyhow::Error) -> GoldyError {
-        if self.is_device_lost() {
-            return GoldyError::DeviceLost;
-        }
-        GoldyError::Backend(e)
-    }
-
-    /// Block until the device timeline reaches at least `value`.
-    pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
-        let _tz = crate::tracy_zone!("device.wait_until");
-        let mut backend = {
-            let _lock = crate::tracy_zone!("device.wait_until.lock");
-            self.inner.backend.lock().unwrap()
-        };
-        let _backend = crate::tracy_zone!("device.wait_until.backend");
-        backend.wait_until(self.inner.handle, value).map_err(|e| {
-            drop(backend);
-            self.classify(e)
-        })
-    }
-
-    /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
-    pub fn wait_until_timeout(
-        &self,
-        value: TimelineValue,
-        timeout_ms: u32,
-    ) -> Result<(), GoldyError> {
-        let mut backend = self.inner.backend.lock().unwrap();
-        match backend.wait_until_timeout(self.inner.handle, value, timeout_ms) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(GoldyError::SubmitTimeout),
-            Err(e) => {
-                drop(backend);
-                Err(self.classify(e))
-            }
-        }
-    }
-
     /// Number of bindless descriptor slots still available for allocation in
     /// the given `category`.
     ///
     /// Use this to check remaining capacity and make adaptive cleanup
-    /// decisions (e.g. calling [`flush_deferred_deletions`](Self::flush_deferred_deletions)
+    /// decisions (e.g. calling [`Context::flush_deferred_deletions`](crate::Context::flush_deferred_deletions)
     /// when slots are low) rather than relying on fixed heuristics.
     ///
     /// Returns `u32::MAX` on backends that don't enforce a per-category cap
@@ -843,147 +798,6 @@ impl Device {
         backend.max_bindless_slots_per_category(self.inner.handle, category)
     }
 
-    /// Process deferred GPU deletions and reclaim VRAM-ring payloads whose epoch
-    /// has retired.
-    ///
-    /// This is the single reclamation entry point for epoch-keyed resource retirement.
-    /// Both explicit pull (`flush_deferred_deletions`) and signal-driven paths route here
-    /// with an epoch value.
-    ///
-    /// `epoch` is the retirement horizon: the VRAM deferred ring drops payloads whose
-    /// registered epoch is `<= epoch`. Callers typically pass either
-    /// [`gpu_progress`](Self::gpu_progress) (pull) or a `Signal::BoundaryCrossed { epoch }`
-    /// value (push notification). Calling this twice for the same epoch is safe: already-
-    /// reclaimed payloads are not dropped again.
-    ///
-    /// # Double-flush ordering (load-bearing on Metal)
-    ///
-    /// 1. **Pass 1 — pre-reclaim flush:** drain backend deletions that are already eligible
-    ///    (timeline barriers already signaled) before any new drops occur.
-    /// 2. **Reclamation-context bracket:** set the backend reclamation context to `epoch`.
-    ///    During this bracket, [`boundary_crossed`](crate::vram_allocator::VramAllocator::boundary_crossed)
-    ///    drops [`DeferredPayload`]s and the placement-heap ring reclaims retired regions.
-    ///    On Metal, `Buffer::drop` inside those drops queues heap frees at the already-
-    ///    retired epoch rather than `timeline_scheduled_max`, making them immediately
-    ///    eligible for the next flush.
-    /// 3. **Pass 2 — post-reclaim flush:** clear the reclamation context and drain heap
-    ///    frees queued during step 2 before any subsequent allocation attempt.
-    ///
-    /// On non-Metal backends [`set_reclamation_context`](crate::backend::GpuBackend::set_reclamation_context)
-    /// is a no-op, so pass 2 is redundant-but-cheap.
-    ///
-    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
-    /// [`defer_release`]: Self::defer_release
-    pub fn boundary_crossed(&self, epoch: TimelineValue) {
-        let _tz = crate::tracy_zone!("device.boundary_crossed");
-        {
-            let _tz = crate::tracy_zone!("device.boundary_crossed.flush_pre");
-            let mut backend = self.inner.backend.lock().unwrap();
-            backend.flush_deferred_deletions(self.inner.handle);
-        }
-        {
-            let _tz = crate::tracy_zone!("device.boundary_crossed.reclaim");
-            let mut backend = self.inner.backend.lock().unwrap();
-            backend.set_reclamation_context(self.inner.handle, Some(epoch));
-            drop(backend);
-            self.inner.vram_allocator.boundary_crossed(epoch);
-            if let Ok(mut heap_guard) = self.inner.placement_heap.lock() {
-                if let Some(heap) = heap_guard.as_mut() {
-                    heap.reclaim(epoch);
-                }
-            }
-        }
-        {
-            let _tz = crate::tracy_zone!("device.boundary_crossed.flush_post");
-            let mut backend = self.inner.backend.lock().unwrap();
-            backend.set_reclamation_context(self.inner.handle, None);
-            backend.flush_deferred_deletions(self.inner.handle);
-        }
-    }
-
-    /// Reclaim bindless descriptor slots and process deferred GPU deletions
-    /// whose timeline barrier has been signaled.
-    ///
-    /// This is normally called internally at acquire / present / submit, but
-    /// consumers that drop buffers between those points (e.g. during a
-    /// non-blocking frame drain) can call this to reclaim slots immediately
-    /// rather than waiting for the next internal call.
-    ///
-    /// Pull-side wrapper around [`boundary_crossed`](Self::boundary_crossed) using the
-    /// authoritative latest retired epoch from [`gpu_progress`](Self::gpu_progress).
-    ///
-    /// Drives device-owned epoch-based reclamation via [`boundary_crossed`](Self::boundary_crossed):
-    /// the VRAM deferred ring drops [`DeferredPayload`]s registered via [`defer_release`]
-    /// (including evicted placement-heap views/textures), and the placement-heap ring
-    /// reclaims retired regions. Transient allocators (`BumpResetAllocator`,
-    /// `HeapTransientAllocator`) self-service by comparing stored epochs to
-    /// [`gpu_progress`](Self::gpu_progress) at `begin_frame`.
-    ///
-    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
-    /// [`defer_release`]: Self::defer_release
-    pub fn flush_deferred_deletions(&self) {
-        let _tz = crate::tracy_zone!("device.flush_deferred_deletions");
-        self.boundary_crossed(self.gpu_progress());
-    }
-
-    /// Returns `true` if the device's [`VramAllocator`] holds deferred payloads that
-    /// have not yet been reclaimed (i.e. their GPU epoch has not been reached).
-    ///
-    /// Useful as a precondition before calling [`wait_until`](Self::wait_until) to avoid
-    /// blocking indefinitely when there is nothing to wait for.
-    ///
-    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn has_deferred_payloads(&self) -> bool {
-        self.inner.vram_allocator.has_deferred_payloads()
-    }
-
-    /// The oldest GPU epoch currently in the deferred payload ring, if any.
-    ///
-    /// Calling `wait_until(oldest_deferred_epoch())` followed by
-    /// `flush_deferred_deletions()` will reclaim the oldest batch of deferred resources.
-    pub fn oldest_deferred_epoch(&self) -> Option<crate::timeline::TimelineValue> {
-        self.inner.vram_allocator.oldest_deferred_epoch()
-    }
-
-    /// Register a [`DeferredPayload`] for deferred dropping after GPU timeline `epoch` retires.
-    ///
-    /// The device's [`VramAllocator`] holds the payload alive until a subsequent call to
-    /// [`flush_deferred_deletions`] or device [`Drop`] observes `gpu_progress >= epoch`, at
-    /// which point all resources in the payload are dropped.
-    ///
-    /// This is a lower-level primitive. Prefer [`GpuGuard`](crate::gpu_guard::GpuGuard) for
-    /// ergonomic RAII-based resource lifetime management.
-    ///
-    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
-    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    /// [`flush_deferred_deletions`]: Self::flush_deferred_deletions
-    pub fn defer_release(
-        &self,
-        epoch: TimelineValue,
-        payload: crate::vram_allocator::DeferredPayload,
-    ) {
-        self.inner.vram_allocator.defer_release(epoch, payload);
-    }
-
-    /// Convenience wrapper around [`defer_release`]: defer a single resource until `epoch` retires.
-    ///
-    /// Wraps `resource` in a [`DeferredPayload`] and forwards to the device's [`VramAllocator`].
-    ///
-    /// [`defer_release`]: Self::defer_release
-    /// [`DeferredPayload`]: crate::vram_allocator::DeferredPayload
-    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
-        let mut payload = crate::vram_allocator::DeferredPayload::new();
-        payload.push(resource);
-        self.inner.vram_allocator.defer_release(epoch, payload);
-    }
-
-    #[doc(hidden)]
-    pub fn deferred_deletion_pending_count(&self) -> usize {
-        let backend = self.inner.backend.lock().unwrap();
-        backend.deferred_deletion_pending_count(self.inner.handle)
-    }
-
     /// Snapshot of the Metal buffer heap allocator state.
     /// Returns `None` on non-Metal backends.
     #[doc(hidden)]
@@ -998,248 +812,6 @@ impl Device {
     pub fn texture_heap_stats(&self) -> Option<crate::backend::TextureHeapStats> {
         let backend = self.inner.backend.lock().unwrap();
         backend.texture_heap_stats(self.inner.handle)
-    }
-
-    /// Number of in-flight command buffers tracked for wait-reclaim.
-    /// Returns 0 on non-Metal backends.
-    #[doc(hidden)]
-    pub fn in_flight_command_buffer_count(&self) -> usize {
-        let backend = self.inner.backend.lock().unwrap();
-        backend.in_flight_command_buffer_count(self.inner.handle)
-    }
-
-    /// Submit a compiled [`TaskGraph`] on the device timeline (standalone / non-surface compute).
-    ///
-    /// Graphs containing transient buffers are resolved automatically using a
-    /// persistent [`PlacementHeap`](crate::placement_heap::PlacementHeap) owned
-    /// by the device. The heap is lazily created on first use and reused across
-    /// submissions — callers never need to manage transient buffer backing
-    /// storage, view creation, or bindless index patching.
-    pub fn submit(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
-        if !graph.has_transient_resources() {
-            let mut backend = self.inner.backend.lock().unwrap();
-            let tv = graph
-                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), true)
-                .map_err(|e| {
-                    drop(backend);
-                    self.classify(e)
-                })?;
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
-            return Ok(tv);
-        }
-
-        // All transient resource cases go through the heap (cached views/textures).
-        let tv = self
-            .submit_with_placement_heap(graph, true)
-            .map_err(|e| self.classify(e))?;
-        self.inner
-            .high_water_timeline
-            .fetch_max(tv, Ordering::Relaxed);
-        Ok(tv)
-    }
-
-    /// Like [`Self::submit`] but does **not** block the CPU until transient-buffer or
-    /// transient-texture GPU work completes after the submission.
-    ///
-    /// Use this only when building a pipelined frame loop that records multiple
-    /// consecutive graphs (for example [`FrameOrchestrator::flush`](crate::FrameOrchestrator::flush)) or when the
-    /// caller tracks completion via [`TimelineValue`] / [`Self::gpu_progress`].
-    ///
-    /// [`Self::submit`] still waits on transient resources — that path remains the
-    /// safe default for one-shot submission.
-    pub fn submit_pipelined(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
-        let _tz = crate::tracy_zone!("device.submit_pipelined");
-        if !graph.has_transient_resources() {
-            let mut backend = self.inner.backend.lock().unwrap();
-            let tv = graph
-                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), false)
-                .map_err(|e| {
-                    drop(backend);
-                    self.classify(e)
-                })?;
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
-            return Ok(tv);
-        }
-
-        // All transient resource cases go through the heap (cached views/textures).
-        let tv = self
-            .submit_with_placement_heap(graph, false)
-            .map_err(|e| self.classify(e))?;
-        self.inner
-            .high_water_timeline
-            .fetch_max(tv, Ordering::Relaxed);
-        Ok(tv)
-    }
-
-    /// Submit a task graph and retain the closed command list for potential reuse.
-    ///
-    /// Works like [`Self::submit_pipelined`] but also stores the compiled command list keyed
-    /// by the graph's [`TaskGraph::compute_retention_fingerprint`].  Call
-    /// [`Self::try_resubmit_retained`] on the next frame — passing the same fingerprint — to
-    /// re-execute the same list without re-recording when the graph is unchanged.
-    ///
-    /// Graphs with transient resources, render passes, or upload nodes are not eligible for
-    /// retention and fall back gracefully to a plain submit.
-    pub fn submit_pipelined_and_retain(
-        &self,
-        graph: &mut TaskGraph,
-    ) -> Result<TimelineValue, GoldyError> {
-        if graph.has_transient_resources() {
-            // Transient-buffer graphs cannot be safely retained; fall back.
-            return self.submit_pipelined(graph);
-        }
-        let mut backend = self.inner.backend.lock().unwrap();
-        let tv = graph
-            .submit_with_backend_and_retain(self, backend.as_mut())
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
-        self.inner
-            .high_water_timeline
-            .fetch_max(tv, Ordering::Relaxed);
-        Ok(tv)
-    }
-
-    /// Re-execute a previously retained command list without re-recording.
-    ///
-    /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no matching retained list exists
-    /// (caller should fall back to a full submit-and-retain cycle).
-    pub fn try_resubmit_retained(&self, key: u64) -> Result<Option<TimelineValue>, GoldyError> {
-        let mut backend = self.inner.backend.lock().unwrap();
-        let result = backend
-            .try_resubmit_retained(self.inner.handle, key)
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
-        if let Some(tv) = result {
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
-        }
-        Ok(result)
-    }
-
-    /// Default pipeline depth for initial placement heap sizing.
-    pub(crate) const DEFAULT_PIPELINE_DEPTH: u64 = 4;
-
-    /// Resolve transient buffers via the device-owned placement heap and submit.
-    ///
-    /// 1. Compute wave-interval coloring layout
-    /// 2. Lazily create / reclaim / acquire from the persistent placement heap
-    /// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
-    /// 4. Patch dispatch `resource_slots` with real bindless indices
-    /// 5. Submit the resolved IR (views kept alive in the heap ring until GPU retires)
-    ///
-    /// Handles both transient-buffer and transient-texture cases, routing through
-    /// the device's [`PlacementHeap`](crate::placement_heap::PlacementHeap) for
-    /// stable-slot caching. Views and textures are owned by the heap across frames;
-    /// only evicted entries go through `defer_release`.
-    fn submit_with_placement_heap(
-        &self,
-        graph: &mut TaskGraph,
-        wait_for_transient_completion: bool,
-    ) -> Result<TimelineValue> {
-        use crate::task_graph::{ResolvedTransientBuffer, ResolvedTransientTexture, SlotResolver};
-
-        // Compute the schedule once; derive node_waves from it so the
-        // transient layout and texture resolution paths don't re-run
-        // build_edges + schedule_waves.
-        let (schedule, _) = graph.schedule_and_split_wave();
-        let node_waves =
-            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
-
-        let has_buffers = graph.has_transient_buffers();
-
-        let (alloc_size, base_align, layout_opt) = if has_buffers {
-            let (ts, ba, lay) = graph.transient_heap_size_and_layout(&node_waves)?;
-            let sz = (ts + ba - 1).max(256);
-            (sz, ba, Some(lay))
-        } else {
-            (0u64, 1u64, None)
-        };
-
-        let mut heap_guard = self.inner.placement_heap.lock().unwrap();
-
-        if heap_guard.is_none() {
-            let cap = (256 * 1024 * 1024u64).max(alloc_size * Self::DEFAULT_PIPELINE_DEPTH);
-            *heap_guard = Some(
-                crate::placement_heap::PlacementHeap::with_capacity(self, cap)
-                    .context("failed to create device placement heap")?,
-            );
-        }
-        let heap = heap_guard.as_mut().unwrap();
-
-        if has_buffers {
-            let depth = Self::DEFAULT_PIPELINE_DEPTH as usize;
-            heap.configure_pages(alloc_size, depth, self)?;
-        }
-
-        // ── Build the SlotResolver ───────────────────────────────────────────
-        let mut resolver = SlotResolver::new();
-
-        let tex_handles = graph.resolve_transient_textures_with_heap(self, heap, &node_waves)?;
-        for (id, handle) in &tex_handles {
-            resolver
-                .textures
-                .insert(*id, ResolvedTransientTexture { handle: *handle });
-        }
-
-        if has_buffers {
-            let layout = layout_opt.unwrap();
-            let raw_offset = heap.advance_page();
-            let base_offset = raw_offset.div_ceil(base_align) * base_align;
-
-            let buf_handle = heap.buffer().handle;
-            for spec in graph.transient_specs() {
-                let offset = base_offset + layout[&spec.id];
-                let view_stride = spec.stride.max(1);
-                let (uav, srv, _hit) =
-                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, self)?;
-
-                resolver.buffers.insert(
-                    spec.id,
-                    ResolvedTransientBuffer {
-                        parent: buf_handle,
-                        offset,
-                        len: spec.size,
-                        uav_index: uav,
-                        srv_index: srv,
-                    },
-                );
-            }
-        }
-
-        drop(heap_guard);
-
-        let mut backend = self.inner.backend.lock().unwrap();
-        let tv = graph.submit_ir_with_resolver(
-            self,
-            backend.as_mut(),
-            &resolver,
-            wait_for_transient_completion,
-        )?;
-        drop(backend);
-
-        // Stamp paged-mode timeline. Ring-mode region reclaim is driven by
-        // [`Device::boundary_crossed`] on the next flush/signal boundary.
-        let mut heap_guard = self.inner.placement_heap.lock().unwrap();
-        if let Some(heap) = heap_guard.as_mut() {
-            heap.stamp_pending(tv);
-        }
-
-        Ok(tv)
-    }
-
-    /// Submit a task graph and block until it completes.
-    pub fn dispatch(&self, graph: &mut TaskGraph) -> Result<(), GoldyError> {
-        let v = self.submit(graph)?;
-        self.wait_until(v)
     }
 
     /// Snapshot of the device-owned placement heap's state for diagnostics.
@@ -1534,7 +1106,7 @@ impl Device {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 placement_heap: Mutex::new(None),
-                high_water_timeline: AtomicU64::new(0),
+                owns_backend_device: true,
             }),
         })
     }
@@ -1546,28 +1118,27 @@ impl Drop for DeviceInner {
             %self.handle,
             adapter_id = self.adapter.id(),
             device_type = ?self.adapter.device_type(),
-            "Destroying GPU device"
+            owns_backend = self.owns_backend_device,
+            "Dropping GPU device handle"
         );
-        // Wait for all submitted GPU work to complete. This covers any in-flight work not
-        // covered by the placement-heap wait (e.g. non-transient submits held by callers).
-        // Skip the wait if the device is already lost: the hardware cannot make progress
-        // and backends handle per-object teardown ordering inside destroy_device.
-        let high_water = self.high_water_timeline.load(Ordering::Relaxed);
+        // Wait for all GPU work on this device to complete before tearing down resources.
+        // Contexts must be dropped before DeviceInner; device_wait_idle is the device-wide fence.
+        // Skip if already lost: the hardware cannot make progress and destroy_device orders teardown.
         let already_lost = self.backend.lock().unwrap().is_device_lost(self.handle);
-        if high_water > 0 && !already_lost {
+        if !already_lost {
             let mut backend = self.backend.lock().unwrap();
-            let _ = backend.wait_until(self.handle, high_water);
+            let _ = backend.device_wait_idle(self.handle);
         }
-        // Drop all deferred payloads. The GPU has completed all submitted work (high-water
-        // wait above), so it is safe to release any resources that were deferred.
+        // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
         // Drop the placement heap (and its views/buffer) while the device is still alive.
-        // The heap's in-flight work is already covered by the high-water wait above.
         if let Ok(mut heap_guard) = self.placement_heap.lock() {
             *heap_guard = None;
         }
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_device(self.handle);
+        if self.owns_backend_device {
+            let mut backend = self.backend.lock().unwrap();
+            backend.destroy_device(self.handle);
+        }
     }
 }
 
@@ -1581,86 +1152,17 @@ mod tests {
     }
 
     #[test]
-    fn high_water_timeline_starts_at_zero() {
+    fn with_vram_allocator_alias_does_not_destroy_backend_device() {
+        use std::sync::Arc;
+
         let device = test_device();
-        assert_eq!(device.high_water_timeline(), 0);
-    }
-
-    #[test]
-    fn high_water_timeline_advances_after_submit() {
-        use crate::task_graph::TaskGraph;
-        let device = test_device();
-        assert_eq!(device.high_water_timeline(), 0);
-        let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
-        assert!(tv > 0);
-        assert_eq!(device.high_water_timeline(), tv);
-        // Second submit advances it further.
-        let tv2 = device.submit(&mut graph).unwrap();
-        assert!(tv2 > tv);
-        assert_eq!(device.high_water_timeline(), tv2);
-    }
-
-    #[test]
-    fn defer_until_resources_are_not_dropped_before_epoch() {
-        use crate::task_graph::TaskGraph;
-        let device = test_device();
-        let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
-
-        let alive = std::sync::Arc::new(99u32);
-        let weak = std::sync::Arc::downgrade(&alive);
-
-        // Defer with a far-future epoch — resource must not drop yet.
-        device.defer_until(tv + 100, alive);
-
-        // flush_deferred_deletions with current gpu_progress (tv) should not reclaim tv+100.
-        device.flush_deferred_deletions();
+        let alias = device
+            .with_vram_allocator(Arc::new(crate::vram_allocator::DefaultVramAllocator::new()));
+        assert!(device.is_valid());
+        drop(alias);
         assert!(
-            weak.upgrade().is_some(),
-            "resource should still be alive after flush at tv"
-        );
-    }
-
-    #[test]
-    fn defer_until_resources_dropped_after_flush_at_epoch() {
-        use crate::task_graph::TaskGraph;
-        let device = test_device();
-        let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
-
-        let alive = std::sync::Arc::new(42u32);
-        let weak = std::sync::Arc::downgrade(&alive);
-
-        device.defer_until(tv, alive);
-
-        // After advancing GPU to tv and flushing, resource should be dropped.
-        device.wait_until(tv).unwrap();
-        device.flush_deferred_deletions();
-        assert!(
-            weak.upgrade().is_none(),
-            "resource should be dropped after flush at epoch"
-        );
-    }
-
-    #[test]
-    fn defer_release_drops_all_on_device_drop() {
-        use crate::task_graph::TaskGraph;
-        let device = test_device();
-        let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).unwrap();
-
-        let alive = std::sync::Arc::new(7u32);
-        let weak = std::sync::Arc::downgrade(&alive);
-
-        // Defer with a far-future epoch so normal flush won't reclaim it.
-        device.defer_until(tv + 9999, alive);
-
-        // Dropping the device should drain all deferred resources.
-        drop(device);
-        assert!(
-            weak.upgrade().is_none(),
-            "device drop should drain deferred resources"
+            device.is_valid(),
+            "dropping a with_vram_allocator alias must not destroy the backend device"
         );
     }
 

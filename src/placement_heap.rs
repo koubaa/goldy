@@ -94,7 +94,7 @@ struct CachedTexture {
 ///
 /// [`Self::get_or_create_view`] and `get_or_create_textures` implement a
 /// stable-slot cache. In steady state (same spec, same placement) all backend
-/// descriptor work is skipped. Eviction via [`Device::defer_release`] ensures
+/// descriptor work is skipped. Eviction via `Device::defer_release` ensures
 /// GPU safety when shapes or placements change.
 pub struct PlacementHeap {
     buffer: Buffer,
@@ -581,7 +581,7 @@ impl PlacementHeap {
     /// Stamp the most recently acquired region with a timeline value and immediately
     /// defer `views` to the device's VramAllocator ring.
     ///
-    /// The views will be dropped when `device.flush_deferred_deletions()` observes
+    /// The views will be dropped when `ctx.flush_deferred_deletions()` observes
     /// `gpu_progress >= timeline`, freeing their bindless slots at the right time.
     /// This is the standalone-submit path; the surface path defers views via
     /// `Frame::keepalive` instead.

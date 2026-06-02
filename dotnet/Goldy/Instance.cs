@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Runtime.InteropServices;
 using Goldy.Native;
 
@@ -50,17 +51,21 @@ public sealed class Instance : IDisposable
     }
 
     /// <summary>
-    /// Create a device on the first adapter matching the given type.
+    /// Request the best available GPU adapter (highest performance by default).
     /// </summary>
-    public Device CreateDevice(DeviceType preferredType = DeviceType.DiscreteGpu)
+    public Adapter RequestAdapter()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        
-        var handle = NativeMethods.InstanceCreateDevice(_handle, preferredType);
-        if (handle == nint.Zero)
-            throw GoldyException.FromLastError("Device creation");
-        
-        return new Device(handle);
+
+        var adapters = EnumerateAdapters();
+        if (adapters.Length == 0)
+            throw GoldyException.FromLastError("Request adapter");
+
+        var adapter = adapters.FirstOrDefault(a => a.DeviceType == DeviceType.DiscreteGpu);
+        if (string.IsNullOrEmpty(adapter.Name))
+            adapter = adapters[0];
+
+        return new Adapter(this, adapter);
     }
 
     /// <summary>
@@ -91,4 +96,26 @@ public sealed class Instance : IDisposable
 /// Information about a GPU adapter.
 /// </summary>
 public readonly record struct AdapterInfo(uint Id, DeviceType DeviceType, string Name, string Vendor);
+
+/// <summary>
+/// A selected GPU adapter used to create devices.
+/// </summary>
+public sealed class Adapter
+{
+    private readonly Instance _instance;
+    private readonly AdapterInfo _info;
+
+    internal Adapter(Instance instance, AdapterInfo info)
+    {
+        _instance = instance;
+        _info = info;
+    }
+
+    public uint Id => _info.Id;
+    public DeviceType DeviceType => _info.DeviceType;
+    public string Name => _info.Name;
+    public string Vendor => _info.Vendor;
+
+    public Device RequestDevice() => _instance.CreateDeviceForAdapter(_info.Id);
+}
 

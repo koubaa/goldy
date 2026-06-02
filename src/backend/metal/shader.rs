@@ -138,7 +138,7 @@ fn patch_msl_threadgroup_copies(msl: &str) -> String {
         // Pattern 2 — explicit `thread array<` copying a known threadgroup-ref variable.
         let is_p2 = trimmed.starts_with("thread array<")
             && !line.contains("= *kernelContext")
-            && line.find(" = ").map_or(false, |eq| {
+            && line.find(" = ").is_some_and(|eq| {
                 let rhs = line[eq + 3..].trim_end_matches(';').trim();
                 tg_ref_vars.contains(rhs)
             });

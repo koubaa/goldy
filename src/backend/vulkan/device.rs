@@ -54,7 +54,7 @@ pub(super) fn adapter_capabilities(
         .is_some_and(|d| d.supports_sparse_buffer)
     {
         caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
-        caps.buffer_page_size = 64 * 1024;
+        caps.buffer_page_size = 64 * 1024; // 64 KiB — universal sparse granularity; asserted in device::create
         caps.buffer_decommit_supported = true;
     }
     caps
@@ -287,6 +287,13 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     } else {
         (0u64, 0u32, None)
     };
+    if supports_sparse {
+        debug_assert_eq!(
+            sparse_buffer_block_size,
+            64 * 1024,
+            "sparse_buffer_block_size deviates from the 64 KiB assumed by DeviceCapabilities::buffer_page_size"
+        );
+    }
 
     // Load Vulkan 1.4 core APIs via KHR extension loaders (ash 0.38 predates 1.4 headers).
     // On a 1.4 device these functions are core — the KHR entry points are aliases.
@@ -442,13 +449,6 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         )
     };
 
-    let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
-        .semaphore_type(vk::SemaphoreType::TIMELINE)
-        .initial_value(0);
-    let timeline_sem_ci = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_sem_type);
-    let timeline_semaphore = unsafe { device.create_semaphore(&timeline_sem_ci, None) }
-        .context("Failed to create Vulkan timeline semaphore")?;
-
     let initial_pipeline_cache_bytes = dirs::cache_dir()
         .map(|d| {
             d.join("goldy")
@@ -463,25 +463,6 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
-
-    let signal_queue = std::sync::Arc::new(crate::signal::SignalQueue::new());
-    let fence_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let timeline_semaphore_for_poll = timeline_semaphore;
-    let device_for_poll = device.clone();
-    let signal_queue_poll = std::sync::Arc::clone(&signal_queue);
-    let shutdown_poll = std::sync::Arc::clone(&fence_shutdown);
-    let fence_thread = Some(crate::backend::signal_fence::spawn_fence_poller(
-        crate::backend::signal_fence::FencePollerState {
-            shutdown: shutdown_poll,
-            signal_queue: signal_queue_poll,
-            last_emitted_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            gpu_completed: std::sync::Arc::new(move || unsafe {
-                device_for_poll
-                    .get_semaphore_counter_value(timeline_semaphore_for_poll)
-                    .unwrap_or(0)
-            }),
-        },
-    ));
 
     state.devices.insert(
         handle,
@@ -504,16 +485,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_pipeline_layout,
             resource_registry: types::ResourceRegistry::new(),
             deletion_queue: types::DeletionQueue::new(),
-            timeline_semaphore,
             timeline_next: 1,
-            signal_queue,
-            fence_shutdown,
-            fence_thread,
+            retired_floor: 0,
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
             vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,
-            free_cmd_buffers: Vec::new(),
-            retained_compute_cb: None,
         },
     );
 
@@ -541,10 +517,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         "destroying Vulkan device"
     );
     if let Some(mut logical_device) = state.devices.remove(&device_handle) {
-        crate::backend::signal_fence::join_fence_poller(
-            &logical_device.fence_shutdown,
-            logical_device.fence_thread.take(),
-        );
         unsafe {
             let wait_result = logical_device.device.device_wait_idle();
 
@@ -833,26 +805,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 pool.destroy_all(&logical_device);
             }
 
-            // Free command buffers still registered on the timeline for this device.
-            let timeline_keys: Vec<u64> = state.timeline_cmd_buffers.keys().copied().collect();
-            for tk in timeline_keys {
-                if let Some(entries) = state.timeline_cmd_buffers.remove(&tk) {
-                    let mut reinsert = Vec::new();
-                    for (dh, cb) in entries {
-                        if dh == device_handle {
-                            logical_device
-                                .device
-                                .free_command_buffers(logical_device.command_pool, &[cb]);
-                        } else {
-                            reinsert.push((dh, cb));
-                        }
-                    }
-                    if !reinsert.is_empty() {
-                        state.timeline_cmd_buffers.insert(tk, reinsert);
-                    }
-                }
-            }
-
             if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {
                 logical_device
                     .device
@@ -866,10 +818,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     .device
                     .destroy_descriptor_set_layout(layout, None);
             }
-
-            logical_device
-                .device
-                .destroy_semaphore(logical_device.timeline_semaphore, None);
 
             logical_device
                 .device

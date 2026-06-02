@@ -4,6 +4,7 @@
 //! [`TimelineValue`], including swapchain paths where the epoch arrives only after
 //! [`crate::surface::Frame::present`].
 
+use crate::context::Context;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::surface::{Frame, Surface};
@@ -42,7 +43,7 @@ struct FrameSlot<T> {
 /// 3. [`Self::end_frame_standalone`] or [`Self::end_frame_for_surface`].  
 /// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
 pub struct FrameOrchestrator<T> {
-    device: Device,
+    context: Context,
     max_depth: usize,
     ring: VecDeque<FrameSlot<T>>,
     /// Monotonic id for the next [`FrameHandle`].
@@ -58,9 +59,9 @@ pub struct FrameOrchestrator<T> {
 impl<T> FrameOrchestrator<T> {
     /// Create an orchestrator. `max_depth` bounds how many frames may be in flight before the
     /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire.
-    pub fn new(device: &Device, max_depth: usize) -> Self {
+    pub fn new(context: &Context, max_depth: usize) -> Self {
         Self {
-            device: device.clone(),
+            context: context.clone(),
             max_depth: max_depth.max(1),
             ring: VecDeque::new(),
             next_id: 1,
@@ -141,9 +142,9 @@ impl<T> FrameOrchestrator<T> {
     /// Mid-frame submit: dispatches the current graph and starts a fresh one.
     ///
     /// When [`Self::retains_command_buffers`] is true the graph is submitted via
-    /// [`Device::submit_pipelined_and_retain`] and on subsequent frames zero-cost
-    /// resubmission is attempted first via [`Device::try_resubmit_retained`].
-    /// All other strategies use [`Device::submit_pipelined`] unconditionally.
+    /// [`crate::Context::submit_pipelined_and_retain`] and on subsequent frames zero-cost
+    /// resubmission is attempted first via [`crate::Context::try_resubmit_retained`].
+    /// All other strategies use [`crate::Context::submit_pipelined`] unconditionally.
     ///
     /// This creates a real command-buffer boundary on all backends, including windowed/
     /// surface frames where the fine pass and present are submitted later via
@@ -174,7 +175,7 @@ impl<T> FrameOrchestrator<T> {
     /// zero-cost resubmission is attempted first, falling back to a retain-and-record submit.
     ///
     /// If `graph` is empty, `fallback_timeline` is used (e.g. the value from previous
-    /// [`Self::flush`] calls). If that is `None`, [`Device::gpu_progress`] is used.
+    /// [`Self::flush`] calls). If that is `None`, [`Context::gpu_progress`](crate::Context::gpu_progress) is used.
     pub fn end_frame_standalone(
         &mut self,
         handle: FrameHandle,
@@ -185,7 +186,7 @@ impl<T> FrameOrchestrator<T> {
         let _tz = tracy_zone!("orchestrator.end_frame_standalone");
         self.expect_open(handle)?;
         let tv = if graph.is_empty() {
-            fallback_timeline.unwrap_or_else(|| self.device.gpu_progress())
+            fallback_timeline.unwrap_or_else(|| self.context.gpu_progress())
         } else {
             self.submit_with_retention(graph)?
         };
@@ -200,11 +201,11 @@ impl<T> FrameOrchestrator<T> {
 
     /// Submit `graph`, using command-buffer retention when [`Self::retains_command_buffers`].
     ///
-    /// - **depth == 1**: tries [`Device::try_resubmit_retained`] first
+    /// - **depth == 1**: tries [`crate::Context::try_resubmit_retained`] first
     ///   (zero CPU recording cost on a hit); on a miss (first frame or fingerprint change)
-    ///   falls back to [`Device::submit_pipelined_and_retain`] so the next frame can hit.
+    ///   falls back to [`crate::Context::submit_pipelined_and_retain`] so the next frame can hit.
     ///   The last successful retention key is stored in `self.last_retention_key`.
-    /// - **All other strategies**: always [`Device::submit_pipelined`].  Retention would be
+    /// - **All other strategies**: always [`crate::Context::submit_pipelined`].  Retention would be
     ///   unsafe at pipeline depth > 1 because the same CB can still be in-flight from the
     ///   previous frame when a new submission begins.
     fn submit_with_retention(
@@ -212,7 +213,7 @@ impl<T> FrameOrchestrator<T> {
         graph: &mut TaskGraph,
     ) -> Result<TimelineValue, GoldyError> {
         if !self.retains_command_buffers() {
-            return self.device.submit_pipelined(graph);
+            return self.context.submit_pipelined(graph);
         }
 
         // Compute the full content fingerprint — covers pipeline, dispatch dims, push constants.
@@ -220,7 +221,7 @@ impl<T> FrameOrchestrator<T> {
 
         // Attempt zero-cost resubmission when the fingerprint matches the stored CB.
         if self.last_retention_key == Some(fp) {
-            match self.device.try_resubmit_retained(fp)? {
+            match self.context.try_resubmit_retained(fp)? {
                 Some(tv) => {
                     tracing::trace!(
                         target: "goldy::retention",
@@ -249,7 +250,7 @@ impl<T> FrameOrchestrator<T> {
         }
 
         // Record the command buffer and store it for the next frame.
-        let tv = self.device.submit_pipelined_and_retain(graph)?;
+        let tv = self.context.submit_pipelined_and_retain(graph)?;
         self.last_retention_key = Some(fp);
         Ok(tv)
     }
@@ -324,7 +325,7 @@ impl<T> FrameOrchestrator<T> {
     /// Block until every pending slot has retired and invoke `retire` for each.
     ///
     /// Slots whose timeline is still unknown (`None`, i.e. surface path before
-    /// [`Self::note_presented`]) use [`Device::high_water_timeline`] as a completion fence —
+    /// [`Self::note_presented`]) use [`crate::Context::high_water_timeline`] as a completion fence —
     /// callers draining mid-presentation should prefer [`Self::reclaim`] / presenting first.
     pub fn drain_all<E, F>(&mut self, mut retire: F) -> Result<(), GoldyError>
     where
@@ -335,15 +336,15 @@ impl<T> FrameOrchestrator<T> {
             let timeline = match slot.timeline {
                 Some(t) => t,
                 None => self
-                    .device
+                    .context
                     .high_water_timeline()
-                    .max(self.device.gpu_progress()),
+                    .max(self.context.gpu_progress()),
             };
-            if self.device.gpu_progress() < timeline {
-                self.device.wait_until(timeline)?;
+            if self.context.gpu_progress() < timeline {
+                self.context.wait_until(timeline)?;
             }
             retire(
-                &self.device,
+                self.context.device(),
                 RetiredFrame {
                     timeline,
                     data: slot.data,
@@ -374,7 +375,7 @@ impl<T> FrameOrchestrator<T> {
         let _tz = tracy_zone!("orchestrator.drain_ring");
         let mut progress = {
             let _pg = tracy_zone!("orchestrator.drain_ring.gpu_progress");
-            self.device.gpu_progress()
+            self.context.gpu_progress()
         };
         while let Some(front) = self.ring.front() {
             let done = match front.timeline {
@@ -387,7 +388,7 @@ impl<T> FrameOrchestrator<T> {
                 if let Some(tv) = slot.timeline {
                     if progress < tv && must_wait {
                         let _wz = tracy_zone!("orchestrator.wait_gpu");
-                        self.device.wait_until(tv)?;
+                        self.context.wait_until(tv)?;
                         progress = tv;
                     }
                 }
@@ -395,7 +396,7 @@ impl<T> FrameOrchestrator<T> {
                 {
                     let _rz = tracy_zone!("orchestrator.retire_cb");
                     retire(
-                        &self.device,
+                        self.context.device(),
                         RetiredFrame {
                             timeline,
                             data: slot.data,

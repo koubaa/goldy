@@ -170,6 +170,7 @@ pub fn create_gol_initial_state() -> Vec<u32> {
 }
 
 pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
+    let ctx = device.create_context().expect("context");
     let render_width = 512u32;
     let render_height = 512u32;
 
@@ -222,7 +223,7 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             pass.dispatch(workgroups_x, workgroups_y, 1);
         }
         compute_encoder
-            .dispatch(device)
+            .dispatch(&ctx)
             .expect("Compute dispatch failed");
         use_buffer_a = !use_buffer_a;
     }

@@ -30,7 +30,7 @@ import numpy as np
 
 # Create device
 instance = goldy.Instance()
-device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
+device = instance.request_adapter().request_device()
 
 # Create vertex buffer with a triangle
 vertices = np.array([

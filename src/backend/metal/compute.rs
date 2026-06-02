@@ -1,7 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
-use super::super::{ComputePipelineHandle, DeviceHandle, GpuCommand, ShaderHandle};
+use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle};
 use super::staging::{StagingBelt, TextureStagingEntry, TextureStagingPool};
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
@@ -209,6 +209,7 @@ impl Drop for EncoderGuard<'_> {
 ///
 /// `gpu_idle` must equal `last_committed_timeline.map(|l| signaled >= l).unwrap_or(true)`
 /// as computed by the caller before the pre-pass.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_commands_to_buffer(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
@@ -754,6 +755,9 @@ pub(super) fn record_commands_to_buffer(
 
 // ── Staging pre-pass ─────────────────────────────────────────────────────────
 
+type StagedBufferUpload = (mtl::Buffer, u64);
+type StagedUploads = (Vec<StagedBufferUpload>, Vec<TextureStagingEntry>, bool);
+
 /// Reclaim completed staging resources and pre-stage all upload commands.
 ///
 /// Returns `(belt_slices, texture_scratches, gpu_idle)`.
@@ -768,9 +772,10 @@ pub(super) fn record_commands_to_buffer(
 /// same value computed here — keeping the pre-pass and command loop in sync.
 fn stage_uploads(
     state: &mut MetalState,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
+    device_handle: super::super::DeviceHandle,
     commands: &[GpuCommand],
-) -> Result<(Vec<(mtl::Buffer, u64)>, Vec<TextureStagingEntry>, bool)> {
+) -> Result<StagedUploads> {
     let has_upload = commands.iter().any(|c| {
         matches!(
             c,
@@ -781,11 +786,11 @@ fn stage_uploads(
     });
 
     let gpu_idle = state
-        .devices
-        .get(&device_handle)
-        .map(|ld| {
-            ld.last_committed_timeline
-                .map(|last| ld.timeline_event.as_ref().signaled_value() >= last)
+        .contexts
+        .get(&ctx)
+        .map(|sc| {
+            sc.last_committed_timeline
+                .map(|last| sc.timeline_event.as_ref().signaled_value() >= last)
                 .unwrap_or(true)
         })
         .unwrap_or(true);
@@ -796,11 +801,7 @@ fn stage_uploads(
 
     // Reclaim: return completed in-flight resources to the free lists.
     {
-        let completed = state
-            .devices
-            .get(&device_handle)
-            .map(|ld| ld.timeline_event.as_ref().signaled_value())
-            .unwrap_or(0);
+        let completed = super::context::device_retired(state, device_handle);
         let ld = state
             .devices
             .get_mut(&device_handle)
@@ -906,13 +907,15 @@ fn stage_uploads(
 /// Submit compute commands without blocking. Returns the timeline value signaled when the work completes.
 pub(super) fn submit(
     state: &mut MetalState,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit");
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
     }
+
+    let device_handle = super::context::context_device(state, ctx);
 
     let owned_command_buffer = {
         let ld = state
@@ -924,7 +927,8 @@ pub(super) fn submit(
     let command_buffer_ref = owned_command_buffer.as_ref();
 
     // Reclaim and pre-stage all uploads before recording.
-    let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, device_handle, commands)?;
+    let (belt_slices, texture_scratches, gpu_idle) =
+        stage_uploads(state, ctx, device_handle, commands)?;
 
     {
         let ld = state
@@ -959,9 +963,9 @@ pub(super) fn submit(
     };
 
     let waiter = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
         .timeline_waiter
         .clone();
 
@@ -996,11 +1000,13 @@ pub(super) fn submit(
     .copy();
     command_buffer_ref.add_completed_handler(&handler);
 
-    let ld = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
-    command_buffer_ref.encode_signal_event(ld.timeline_event.as_ref(), signal_value);
+    let timeline_event = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .timeline_event
+        .clone();
+    command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
 
     tracing::debug!(
         "[mtl.cb_commit] kind=compute signal_value={signal_value} queue=command_queue commands={n}",
@@ -1013,16 +1019,24 @@ pub(super) fn submit(
         ld.staging_belt.finish(signal_value);
         ld.texture_staging_pool
             .release(signal_value, texture_scratches);
-        ld.last_committed_timeline = Some(signal_value);
-        ld.in_flight_command_buffers
+    }
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.last_committed_timeline = Some(signal_value);
+        sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
-        ld.process_deletion_queue_up_to_signaled();
+        sc.last_submitted_seq = signal_value;
+    }
+    {
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to(retired);
 
-        if metal_memory_log_enabled() {
-            let n = METAL_MEMORY_LOG_FRAME.fetch_add(1, Ordering::Relaxed);
-            if n % 60 == 0 {
-                let mib = ld.device.current_allocated_size() / (1024 * 1024);
-                tracing::info!(metal_current_allocated_mib = mib, "metal-alloc");
+            if metal_memory_log_enabled() {
+                let n = METAL_MEMORY_LOG_FRAME.fetch_add(1, Ordering::Relaxed);
+                if n.is_multiple_of(60) {
+                    let mib = ld.device.current_allocated_size() / (1024 * 1024);
+                    tracing::info!(metal_current_allocated_mib = mib, "metal-alloc");
+                }
             }
         }
     }
@@ -1039,7 +1053,7 @@ pub(super) fn submit(
 /// is preserved without any CPU-side synchronization.
 pub(super) fn submit_graph(
     state: &mut MetalState,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
     commands: &[super::super::GraphCommand],
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit_graph");
@@ -1048,6 +1062,8 @@ pub(super) fn submit_graph(
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
     }
+
+    let device_handle = super::context::context_device(state, ctx);
 
     let owned_command_buffer = {
         let ld = state
@@ -1073,7 +1089,7 @@ pub(super) fn submit_graph(
         .collect();
 
     let (belt_slices, texture_scratches, gpu_idle) =
-        stage_uploads(state, device_handle, &all_compute_cmds)?;
+        stage_uploads(state, ctx, device_handle, &all_compute_cmds)?;
 
     // Walk GraphCommands, collecting contiguous compute batches and recording
     // render passes inline. Encoder transitions within a single command buffer
@@ -1160,9 +1176,9 @@ pub(super) fn submit_graph(
     };
 
     let waiter = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
         .timeline_waiter
         .clone();
 
@@ -1190,11 +1206,13 @@ pub(super) fn submit_graph(
     .copy();
     command_buffer_ref.add_completed_handler(&handler);
 
-    let ld = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
-    command_buffer_ref.encode_signal_event(ld.timeline_event.as_ref(), signal_value);
+    let timeline_event = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .timeline_event
+        .clone();
+    command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
 
     command_buffer_ref.commit();
 
@@ -1203,10 +1221,18 @@ pub(super) fn submit_graph(
         ld.staging_belt.finish(signal_value);
         ld.texture_staging_pool
             .release(signal_value, texture_scratches);
-        ld.last_committed_timeline = Some(signal_value);
-        ld.in_flight_command_buffers
+    }
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.last_committed_timeline = Some(signal_value);
+        sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
-        ld.process_deletion_queue_up_to_signaled();
+        sc.last_submitted_seq = signal_value;
+    }
+    {
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get_mut(&device_handle) {
+            ld.process_deletion_queue_up_to(retired);
+        }
     }
 
     // Mark render targets as rendered.
