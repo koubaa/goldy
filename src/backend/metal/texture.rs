@@ -19,24 +19,36 @@ fn allocate_mtl_texture(
     device_handle: DeviceHandle,
     descriptor: &mtl::TextureDescriptorRef,
 ) -> Result<mtl::Texture> {
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
-    // Attempt 1: fast path.
-    if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
-        return Ok(tex);
+    {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        // Attempt 1: fast path.
+        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+            return Ok(tex);
+        }
     }
 
     // Attempt 2 (non-blocking): drain signaled work, compact empty overflow heaps.
     {
         let _tz = crate::tracy_zone!("mtl.texture_heap_allocator.drain_reclaim");
         let retired = super::context::device_retired(state, device_handle);
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
         logical_device.texture_heap.compact_overflow();
     }
-    if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
-        return Ok(tex);
+    {
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
+        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+            return Ok(tex);
+        }
     }
 
     // Attempt 3 (blocking): wait on the oldest in-flight CB to reclaim one frame's
@@ -51,6 +63,10 @@ fn allocate_mtl_texture(
         );
         cb.wait_until_completed();
         let retired = super::context::device_retired(state, device_handle);
+        let logical_device = state
+            .devices
+            .get_mut(&device_handle)
+            .context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
         logical_device.texture_heap.compact_overflow();
         if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {

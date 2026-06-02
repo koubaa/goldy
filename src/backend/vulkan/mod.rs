@@ -1116,6 +1116,15 @@ impl GpuBackend for VulkanBackend {
         context::device_retired(&self.state, device)
     }
 
+    fn device_wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> anyhow::Result<()> {
+        context::wait_until_device_seq_at_least(&self.state, device, value);
+        Ok(())
+    }
+
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
         let progress = self.gpu_progress(ctx);

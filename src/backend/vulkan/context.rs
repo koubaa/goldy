@@ -112,15 +112,14 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         let _ = ld.device.device_wait_idle();
         for (_, cbs) in sc.timeline_cmd_buffers.drain() {
             for cb in cbs {
-                let _ = ld.device.free_command_buffers(sc.command_pool, &[cb]);
+                ld.device.free_command_buffers(sc.command_pool, &[cb]);
             }
         }
         for cb in sc.free_cmd_buffers.drain(..) {
-            let _ = ld.device.free_command_buffers(sc.command_pool, &[cb]);
+            ld.device.free_command_buffers(sc.command_pool, &[cb]);
         }
         if let Some(retained) = sc.retained_compute_cb.take() {
-            let _ = ld
-                .device
+            ld.device
                 .free_command_buffers(sc.command_pool, &[retained.command_buffer]);
         }
         ld.device.destroy_command_pool(sc.command_pool, None);

@@ -636,6 +636,21 @@ impl GpuBackend for MetalBackend {
         context::device_retired(&self.state, device)
     }
 
+    fn device_wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> anyhow::Result<()> {
+        let timeout = std::time::Duration::from_secs(60);
+        if context::wait_until_device_seq_at_least(&self.state, device, value, timeout) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "device_wait_until: timed out after 60 s waiting for timeline value {value}"
+            )
+        }
+    }
+
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
         let device = self.context_device(ctx);
         let sc = match self.state.contexts.get(&ctx) {

@@ -1,7 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
-use super::super::{ComputePipelineHandle, ContextHandle, GpuCommand, ShaderHandle};
+use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle};
 use super::staging::{StagingBelt, TextureStagingEntry, TextureStagingPool};
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
@@ -209,6 +209,7 @@ impl Drop for EncoderGuard<'_> {
 ///
 /// `gpu_idle` must equal `last_committed_timeline.map(|l| signaled >= l).unwrap_or(true)`
 /// as computed by the caller before the pre-pass.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_commands_to_buffer(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
@@ -754,6 +755,9 @@ pub(super) fn record_commands_to_buffer(
 
 // ── Staging pre-pass ─────────────────────────────────────────────────────────
 
+type StagedBufferUpload = (mtl::Buffer, u64);
+type StagedUploads = (Vec<StagedBufferUpload>, Vec<TextureStagingEntry>, bool);
+
 /// Reclaim completed staging resources and pre-stage all upload commands.
 ///
 /// Returns `(belt_slices, texture_scratches, gpu_idle)`.
@@ -771,7 +775,7 @@ fn stage_uploads(
     ctx: ContextHandle,
     device_handle: super::super::DeviceHandle,
     commands: &[GpuCommand],
-) -> Result<(Vec<(mtl::Buffer, u64)>, Vec<TextureStagingEntry>, bool)> {
+) -> Result<StagedUploads> {
     let has_upload = commands.iter().any(|c| {
         matches!(
             c,
@@ -1029,7 +1033,7 @@ pub(super) fn submit(
 
             if metal_memory_log_enabled() {
                 let n = METAL_MEMORY_LOG_FRAME.fetch_add(1, Ordering::Relaxed);
-                if n % 60 == 0 {
+                if n.is_multiple_of(60) {
                     let mib = ld.device.current_allocated_size() / (1024 * 1024);
                     tracing::info!(metal_current_allocated_mib = mib, "metal-alloc");
                 }

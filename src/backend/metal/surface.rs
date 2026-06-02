@@ -464,13 +464,11 @@ pub(super) fn present(
         Some(d) => d,
         None => {
             let retired = super::context::device_retired(state, device_handle);
-            if let Some(ld) = state
+            let ld = state
                 .devices
                 .get_mut(&device_handle)
-                .context("Device no longer valid")?
-            {
-                ld.process_deletion_queue_up_to(retired);
-            }
+                .context("Device no longer valid")?;
+            ld.process_deletion_queue_up_to(retired);
             return Ok(state
                 .contexts
                 .get(&ctx)

@@ -233,7 +233,6 @@ impl TransientAllocatorStrategy {
 pub struct BumpResetAllocator {
     pool: BufferPool,
     last_epoch: Option<TimelineValue>,
-    context: crate::Context,
 }
 
 impl BumpResetAllocator {
@@ -250,24 +249,24 @@ impl BumpResetAllocator {
         Ok(Self {
             pool,
             last_epoch: None,
-            context: device
-                .create_context()
-                .map_err(|e| anyhow::anyhow!("{e}"))?,
         })
     }
 }
 
 impl TransientAllocator for BumpResetAllocator {
-    fn begin_frame(&mut self, _device: &Device, hint_size: u64) -> Result<()> {
+    fn begin_frame(&mut self, device: &Device, hint_size: u64) -> Result<()> {
         if let Some(tv) = self.last_epoch {
-            // gpu_progress() and wait_until() are two separate lock acquisitions.
-            // The GPU may retire tv between the check and the wait — that's harmless
-            // (wait_until returns immediately when the semaphore/fence has already
-            // fired). The opposite direction (progress reads stale-low on a poller
-            // backend) causes an unnecessary but correct wait of at most ~1 ms.
-            if self.context.device().timeline_retired() < tv {
-                self.context
-                    .wait_until(tv)
+            // timeline_retired() and wait_until_retired() are two separate lock
+            // acquisitions. The GPU may retire tv between the check and the wait —
+            // that's harmless (wait_until_retired returns immediately when the
+            // primitive has already fired). The opposite direction (stale-low read
+            // on a poller backend) causes an unnecessary but correct wait of ≤1 ms.
+            //
+            // We use device-level primitives here because `tv` may have been
+            // produced by any context on this device, not necessarily one we own.
+            if device.timeline_retired() < tv {
+                device
+                    .wait_until_retired(tv)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         }
@@ -364,7 +363,6 @@ pub struct HeapTransientAllocator {
     peak_live_bytes: u64,
     /// Frame counter — used to defer `shrink_to_fit` until the pipeline has warmed up.
     frame_count: u64,
-    context: crate::Context,
 }
 
 impl HeapTransientAllocator {
@@ -386,15 +384,12 @@ impl HeapTransientAllocator {
             live_bytes: 0,
             peak_live_bytes: 0,
             frame_count: 0,
-            context: device
-                .create_context()
-                .map_err(|e| anyhow::anyhow!("{e}"))?,
         })
     }
 
     /// Return deferred frees whose epoch has retired to the coalescing free list.
-    fn reclaim_retired_frees(&mut self) {
-        let progress = self.context.device().timeline_retired();
+    fn reclaim_retired_frees(&mut self, device: &Device) {
+        let progress = device.timeline_retired();
         let mut i = 0;
         while i < self.deferred.len() {
             if self.deferred[i]
@@ -515,9 +510,9 @@ impl HeapTransientAllocator {
 const HEAP_WARMUP_FRAMES: u64 = 8;
 
 impl TransientAllocator for HeapTransientAllocator {
-    fn begin_frame(&mut self, _device: &Device, _hint_size: u64) -> Result<()> {
+    fn begin_frame(&mut self, device: &Device, _hint_size: u64) -> Result<()> {
         self.frame_count += 1;
-        self.reclaim_retired_frees();
+        self.reclaim_retired_frees(device);
         self.compact_watermark();
         // After warmup, auto-shrink if we over-grew during the first few frames.
         if self.frame_count == HEAP_WARMUP_FRAMES {

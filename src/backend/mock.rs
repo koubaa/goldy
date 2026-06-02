@@ -1141,6 +1141,28 @@ impl GpuBackend for MockBackend {
         self.device_retired(device)
     }
 
+    fn device_wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> anyhow::Result<()> {
+        // On the mock, advance every context on this device to at least `value`
+        // so that device_retired() >= value after the call.
+        let ctx_ids: Vec<_> = self
+            .contexts
+            .iter()
+            .filter(|(_, c)| c.device == device)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ctx_ids {
+            let ctx = self.contexts.get_mut(&id).unwrap();
+            if ctx.completed < value {
+                ctx.completed = value;
+            }
+        }
+        Ok(())
+    }
+
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
         crate::signal::drain_all_signals(&self.context_state(ctx).signal_queue)
     }

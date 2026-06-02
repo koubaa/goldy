@@ -719,6 +719,18 @@ pub trait GpuBackend: Send + Sync {
     /// context completion primitives, the device sync fence (DX12), and the post-destroy floor.
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
 
+    /// Block until the device-global timeline has retired at least `value`.
+    ///
+    /// Unlike [`wait_until`] (which is per-context), this searches across all live contexts on
+    /// `device` for the one that signaled `value` and waits on its native primitive. Use this
+    /// when the `TimelineValue` was produced by an arbitrary context — e.g. from outside the
+    /// allocator — so you don't need a matching `ContextHandle`.
+    fn device_wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()>;
+
     /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal>;
 

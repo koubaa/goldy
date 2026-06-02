@@ -2413,7 +2413,7 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
     if let Some(ld) = state.devices.get(&device) {
         for cb in cbs_to_free {
             unsafe {
-                let _ = ld.device.free_command_buffers(pool, &[cb]);
+                ld.device.free_command_buffers(pool, &[cb]);
             }
         }
     }

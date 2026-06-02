@@ -9,7 +9,6 @@ use super::types::{
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use std::sync::Arc;
 
 /// Initial heap size for both the buffer and texture heaps.
 ///

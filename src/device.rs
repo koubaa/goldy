@@ -735,6 +735,27 @@ impl Device {
             .device_timeline_retired(self.inner.handle)
     }
 
+    /// Block until the device-global timeline has retired at least `value`.
+    ///
+    /// Unlike [`Context::wait_until`], this does not require the caller to hold the same
+    /// [`Context`] that submitted `value`. The backend searches across all live contexts
+    /// on this device for the one that produced `value` and waits on its native primitive
+    /// (Metal `MTLSharedEvent`, Vulkan timeline semaphore, DX12 fence).
+    ///
+    /// Use this from allocators and other device-scoped objects that receive epoch values
+    /// from external contexts they do not own.
+    ///
+    /// [`Context::wait_until`]: crate::Context::wait_until
+    pub fn wait_until_retired(&self, value: crate::timeline::TimelineValue) -> Result<(), GoldyError> {
+        let mut backend = self.inner.backend.lock().unwrap();
+        backend
+            .device_wait_until(self.inner.handle, value)
+            .map_err(|e| {
+                drop(backend);
+                GoldyError::Backend(e)
+            })
+    }
+
     /// Returns `true` if the device has been permanently lost.
     ///
     /// After this returns `true`, all further submit / wait calls will fail with

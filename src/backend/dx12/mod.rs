@@ -863,6 +863,31 @@ impl GpuBackend for Dx12Backend {
         context::device_retired(&self.state, device)
     }
 
+    fn device_wait_until(
+        &mut self,
+        device: DeviceHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> anyhow::Result<()> {
+        if context::device_retired(&self.state, device) >= value {
+            return Ok(());
+        }
+        // Find the context that submitted value (or past it) and wait on its fence.
+        let fence = self
+            .state
+            .contexts
+            .values()
+            .find(|c| c.device == device && c.last_submitted_seq >= value)
+            .map(|c| c.fence.clone());
+        if let Some(fence) = fence {
+            utils::wait_for_fence(&fence, value)?;
+        }
+        // If no context has submitted past value yet, device_wait_idle is the safe fallback.
+        if context::device_retired(&self.state, device) < value {
+            self.device_wait_idle(device)?;
+        }
+        Ok(())
+    }
+
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
         let progress = self.gpu_progress(ctx);
