@@ -282,6 +282,11 @@ pub trait VramAllocator: Send + Sync {
 /// Installed automatically when a [`Device`] is created. Implements the full
 /// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::boundary_crossed`],
 /// and [`VramAllocator::drain`].
+///
+/// **Single-writer invariant:** the ring is device-installed and keyed by timeline epochs
+/// from [`Context::boundary_crossed`]. Reclamation is sound when one context's submission
+/// stream drives `boundary_crossed` for that device; concurrent deferral from multiple
+/// contexts sharing one ring is not yet supported (goldy #179 memory-ownership follow-up).
 pub struct DefaultVramAllocator {
     deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
 }

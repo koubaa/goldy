@@ -6,7 +6,7 @@ use super::pso_cache;
 use super::shader;
 use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
-use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
+use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
 use crate::backend::{GpuCommand, GraphCommand};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
@@ -279,14 +279,15 @@ fn dx12_decode_duration_ns(start: u64, end: u64, freq: u64) -> u64 {
 }
 
 fn dx12_finish_gpu_profile(
-    logical_device: &types::LogicalDevice,
+    ctx_fence: &ID3D12Fence,
+    command_queue: &ID3D12CommandQueue,
     fence_value: u64,
     profile: Dx12GpuProfileResources,
 ) -> Result<()> {
     use crate::gpu_profiler::{self, DispatchGpuNs};
-    super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
+    super::utils::wait_for_fence(ctx_fence, fence_value)?;
 
-    let freq = unsafe { logical_device.command_queue.GetTimestampFrequency() }
+    let freq = unsafe { command_queue.GetTimestampFrequency() }
         .context("GetTimestampFrequency")?;
 
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -505,16 +506,30 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 /// pool when its fence has already signalled; otherwise a fresh one is created.
 fn acquire_allocator_slot(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
 ) -> Result<(ID3D12GraphicsCommandList, u64, usize)> {
+    let device_handle = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .device;
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
-    let fence = &logical_device.fence;
-    let completed = unsafe { fence.GetCompletedValue() };
-    let pool = &mut logical_device.compute_allocator_pool;
+    let ctx_fence = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .fence
+        .clone();
+    let completed = unsafe { ctx_fence.GetCompletedValue() };
+    let pool = &mut state
+        .contexts
+        .get_mut(&ctx)
+        .context("Invalid context handle")?
+        .compute_allocator_pool;
     // Skip retained slots — their allocator must not be reset until evict_retained is called.
     let slot_idx = pool
         .iter()
@@ -564,8 +579,16 @@ fn acquire_allocator_slot(
         });
         (new_list, pool.len() - 1)
     };
-    let token = logical_device.fence_value;
-    logical_device.fence_value += 1;
+    let token = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .timeline_next;
+    state
+        .devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?
+        .timeline_next += 1;
     Ok((cmd_list, token, slot_idx))
 }
 
@@ -866,7 +889,7 @@ fn record_gpu_command(
                     cl.ExecuteIndirect(&batch_sig, *count, &arg_resource, 0, None, 0);
                 }
 
-                let fence_val = logical_device.fence_value.saturating_sub(1);
+                let fence_val = logical_device.timeline_next.saturating_sub(1);
                 let dev = state
                     .devices
                     .get_mut(&device_handle)
@@ -1259,6 +1282,7 @@ fn record_gpu_command(
 }
 
 struct SubmitFinish {
+    ctx: ContextHandle,
     device_handle: DeviceHandle,
     fence_value: u64,
     slot_idx: usize,
@@ -1274,7 +1298,7 @@ struct StagingFinish {
 /// Close the command list, execute, signal, update the pool slot, and finish staging.
 ///
 /// `retain_key`: when `Some(k)`, stores the closed command list in
-/// `LogicalDevice::retained_graph` for zero-cost re-execution via
+/// `Dx12SubmissionContext::retained_graph` for zero-cost re-execution via
 /// [`try_resubmit_retained`].
 ///
 /// # Abandoned optimizations
@@ -1302,6 +1326,7 @@ fn execute_signal_and_finish(
     staging_finish: StagingFinish,
 ) -> Result<TimelineValue> {
     let SubmitFinish {
+        ctx,
         device_handle,
         fence_value,
         slot_idx,
@@ -1334,6 +1359,12 @@ fn execute_signal_and_finish(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = state.devices.get(&device_handle).unwrap();
+    let ctx_fence = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .fence
+        .clone();
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
         unsafe {
@@ -1344,41 +1375,51 @@ fn execute_signal_and_finish(
         unsafe {
             logical_device
                 .command_queue
-                .Signal(&logical_device.fence, fence_value)
+                .Signal(&ctx_fence, fence_value)
         }
-        .context("Failed to signal fence")?;
+        .context("Failed to signal context fence")?;
     }
 
     if let Some(prof) = gpu_profile {
-        if let Err(e) = dx12_finish_gpu_profile(logical_device, fence_value, prof) {
+        if let Err(e) = dx12_finish_gpu_profile(
+            &ctx_fence,
+            &logical_device.command_queue,
+            fence_value,
+            prof,
+        ) {
             tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
         }
     }
 
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
         if let Some(key) = retain_key {
-            if let Some(old) = dev.retained_graph.take() {
-                if let Some(old_slot) = dev.compute_allocator_pool.get_mut(old.slot_idx) {
+            if let Some(old) = sc.retained_graph.take() {
+                if let Some(old_slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                     old_slot.retained = false;
                 }
             }
-            if let Some(cl) = dev
+            if let Some(cl) = sc
                 .compute_allocator_pool
                 .get(slot_idx)
                 .and_then(|s| s.command_list.clone())
             {
-                dev.compute_allocator_pool[slot_idx].retained = true;
-                dev.retained_graph = Some(types::RetainedGraph {
+                sc.compute_allocator_pool[slot_idx].retained = true;
+                sc.retained_graph = Some(types::RetainedGraph {
                     fingerprint: key,
                     command_list: cl,
                     slot_idx,
                 });
             }
         }
-        dev.process_deletion_queue();
+        sc.last_submitted_seq = fence_value;
+    }
+
+    let retired = super::context::device_retired(state, device_handle);
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        dev.process_deletion_queue_up_to(retired);
     }
 
     state
@@ -1409,21 +1450,32 @@ fn execute_signal_and_finish(
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
 pub(super) fn submit(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
+    let device_handle = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .device;
     let _tz = tracy_zone!("dx12.submit");
     let (command_list, fence_value, slot_idx) = {
         let _tz_acq = tracy_zone!("dx12.submit.acquire_allocator");
-        acquire_allocator_slot(state, device_handle)?
+        acquire_allocator_slot(state, ctx)?
     };
 
-    let (fence_clone, use_global_buffer_barriers) = {
+    let (ctx_fence_clone, use_global_buffer_barriers) = {
         let dev = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        (dev.fence.clone(), dev.adapter_id == super::WARP_ADAPTER_ID)
+        let ctx_fence = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .fence
+            .clone();
+        (ctx_fence, dev.adapter_id == super::WARP_ADAPTER_ID)
     };
 
     let has_upload = commands.iter().any(|c| {
@@ -1440,9 +1492,9 @@ pub(super) fn submit(
             .staging_belts
             .entry(device_handle)
             .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-            .reclaim(&fence_clone)?;
+            .reclaim(&ctx_fence_clone)?;
+        let completed = super::context::device_retired(state, device_handle);
         if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-            let completed = unsafe { fence_clone.GetCompletedValue() };
             pool.reclaim(completed);
         }
     }
@@ -1616,6 +1668,7 @@ pub(super) fn submit(
         &command_list,
         dx_gpu_profile.take(),
         SubmitFinish {
+            ctx,
             device_handle,
             fence_value,
             slot_idx,
@@ -1636,23 +1689,34 @@ pub(super) fn submit(
 /// `ExecuteCommandLists` + `Signal(fence)` at the end.
 ///
 /// When `retain_key` is `Some(k)`, the closed command list is stored in
-/// `LogicalDevice::retained_graph` keyed by `k` for future zero-cost re-execution
+/// `Dx12SubmissionContext::retained_graph` keyed by `k` for future zero-cost re-execution
 /// via [`try_resubmit_retained`].  Any previously retained graph is evicted first.
 pub(super) fn submit_graph(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
 ) -> Result<TimelineValue> {
+    let device_handle = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .device;
     let _tz = tracy_zone!("dx12.submit_graph");
-    let (command_list, fence_value, slot_idx) = acquire_allocator_slot(state, device_handle)?;
+    let (command_list, fence_value, slot_idx) = acquire_allocator_slot(state, ctx)?;
 
-    let (fence_clone, use_global_buffer_barriers) = {
+    let (ctx_fence_clone, use_global_buffer_barriers) = {
         let dev = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        (dev.fence.clone(), dev.adapter_id == super::WARP_ADAPTER_ID)
+        let ctx_fence = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .fence
+            .clone();
+        (ctx_fence, dev.adapter_id == super::WARP_ADAPTER_ID)
     };
 
     let has_upload = commands.iter().any(|c| {
@@ -1670,9 +1734,9 @@ pub(super) fn submit_graph(
             .staging_belts
             .entry(device_handle)
             .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-            .reclaim(&fence_clone)?;
+            .reclaim(&ctx_fence_clone)?;
+        let completed = super::context::device_retired(state, device_handle);
         if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-            let completed = unsafe { fence_clone.GetCompletedValue() };
             pool.reclaim(completed);
         }
     }
@@ -1910,6 +1974,7 @@ pub(super) fn submit_graph(
         &command_list,
         dx_gpu_profile.take(),
         SubmitFinish {
+            ctx,
             device_handle,
             fence_value,
             slot_idx,
@@ -1938,15 +2003,20 @@ pub(super) fn submit_graph(
 /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no retained list matches `key`.
 pub(super) fn try_resubmit_retained(
     state: &mut Dx12State,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
     key: u64,
 ) -> Result<Option<TimelineValue>> {
+    let device_handle = state
+        .contexts
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .device;
     let retained = {
-        let dev = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-        match dev.retained_graph.as_ref() {
+        let sc = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?;
+        match sc.retained_graph.as_ref() {
             Some(r) if r.fingerprint == key => Some((r.command_list.clone(), r.slot_idx)),
             _ => None,
         }
@@ -1961,8 +2031,8 @@ pub(super) fn try_resubmit_retained(
             .devices
             .get_mut(&device_handle)
             .context("Invalid device handle")?;
-        let token = dev.fence_value;
-        dev.fence_value += 1;
+        let token = dev.timeline_next;
+        dev.timeline_next += 1;
         token
     };
 
@@ -1970,35 +2040,46 @@ pub(super) fn try_resubmit_retained(
         .cast()
         .context("Failed to cast retained command list")?;
 
-    let dev = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let (ctx_fence, command_queue) = {
+        let sc = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?;
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        (sc.fence.clone(), ld.command_queue.clone())
+    };
     {
         let _tz = tracy_zone!("dx12.resubmit_retained");
         unsafe {
-            dev.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
+            command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
         }
-        unsafe { dev.command_queue.Signal(&dev.fence, fence_value) }
-            .context("Failed to signal fence after retained resubmit")?;
+        unsafe { command_queue.Signal(&ctx_fence, fence_value) }
+            .context("Failed to signal context fence after retained resubmit")?;
     }
 
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        // Update the retained slot's fence_value so the GPU timeline stays accurate.
-        if let Some(slot) = dev.compute_allocator_pool.get_mut(slot_idx) {
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
-        dev.process_deletion_queue();
+        sc.last_submitted_seq = fence_value;
+    }
+
+    let retired = super::context::device_retired(state, device_handle);
+    if let Some(dev) = state.devices.get_mut(&device_handle) {
+        dev.process_deletion_queue_up_to(retired);
     }
 
     Ok(Some(fence_value))
 }
 
 /// Drop the retained command list for `key`, marking its pool slot as reusable.
-pub(super) fn evict_retained(state: &mut Dx12State, device_handle: DeviceHandle) {
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        if let Some(old) = dev.retained_graph.take() {
-            if let Some(slot) = dev.compute_allocator_pool.get_mut(old.slot_idx) {
+pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle) {
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        if let Some(old) = sc.retained_graph.take() {
+            if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                 slot.retained = false;
             }
         }

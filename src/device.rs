@@ -723,6 +723,18 @@ impl Device {
         crate::context::Context::new(self.clone())
     }
 
+    /// Latest device-global submission sequence retired on the GPU.
+    ///
+    /// Epochs from any [`Context::submit`] on this device share one value space; use this
+    /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
+    pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .device_timeline_retired(self.inner.handle)
+    }
+
     /// Returns `true` if the device has been permanently lost.
     ///
     /// After this returns `true`, all further submit / wait calls will fail with

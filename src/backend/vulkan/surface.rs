@@ -685,10 +685,6 @@ pub(super) fn acquire(
     // max(copy, next_compute) is monotonic; no WSI dependency on this wait.
     {
         let _wz = crate::tracy_zone!("vk.surface.wait_compute");
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
         let surface_state = state
             .surfaces
             .get(&surface_handle)
@@ -700,21 +696,10 @@ pub(super) fn acquire(
         let next_compute = surface_state.frame_sync[next_slot].last_compute_timeline_value;
         let slot_timeline = slot_copy.max(next_compute);
         if slot_timeline > 0 {
-            let sems = [logical_device.timeline_semaphore];
-            let vals = [slot_timeline];
-            let wait = vk::SemaphoreWaitInfo::default()
-                .semaphores(&sems)
-                .values(&vals);
-            unsafe { logical_device.device.wait_semaphores(&wait, u64::MAX) }
-                .context("Failed to wait on frame slot timeline value")?;
+            super::context::wait_until_device_seq_at_least(state, device_handle, slot_timeline);
 
             if crate::validation_env::timeline_validation_enabled() {
-                let completed = unsafe {
-                    logical_device
-                        .device
-                        .get_semaphore_counter_value(logical_device.timeline_semaphore)
-                }
-                .unwrap_or(0);
+                let completed = super::context::device_retired(state, device_handle);
                 assert!(
                     completed >= slot_timeline,
                     "vk.acquire: post-wait semaphore counter {completed} < \
@@ -787,18 +772,18 @@ pub(super) fn acquire(
     }
 
     // CPU cleanup: drain the GPU timeline and reset the frame slot.
-    let completed = {
-        let _tz = crate::tracy_zone!("vk.surface.acquire.timeline_query");
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
-        unsafe { ld.device.get_semaphore_counter_value(ld.timeline_semaphore) }.unwrap_or(0)
-    };
+    let completed = super::context::device_retired(state, device_handle);
 
     {
         let _tz = crate::tracy_zone!("vk.surface.acquire.reap_timeline");
-        super::compute::reap_timeline_cmd_buffers_up_to(state, device_handle, completed);
+        for ctx in state
+            .contexts
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            super::compute::reap_timeline_cmd_buffers_up_to(state, ctx, completed);
+        }
     }
 
     {
@@ -868,9 +853,11 @@ pub(super) fn acquire(
                     surface_state.pending_acquire_count.saturating_add(1);
             }
 
-            if let Some(ld) = state.devices.get(&device_handle) {
-                ld.signal_queue
-                    .push(crate::signal::Signal::SwapchainAcquired { image_index });
+            for sc in state.contexts.values() {
+                if sc.device == device_handle {
+                    sc.signal_queue
+                        .push(crate::signal::Signal::SwapchainAcquired { image_index });
+                }
             }
 
             Ok(image_index as SwapchainImageHandle)
@@ -913,6 +900,7 @@ pub(super) fn render<F>(
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
+    timeline_sem: vk::Semaphore,
     commands: &[RenderCommand],
     record_commands_fn: F,
 ) -> Result<()>
@@ -1215,11 +1203,6 @@ where
             .context("Surface's device is invalid")?;
         ld.timeline_next
     };
-    let timeline_sem = devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?
-        .timeline_semaphore;
-
     let wait_acq = vk::SemaphoreSubmitInfo::default()
         .semaphore(image_available_semaphore)
         .value(0)
@@ -1286,7 +1269,7 @@ pub(super) fn submit_frame(
     };
 
     if !pending.is_empty() {
-        return super::compute::submit(state, dh, &pending);
+        return super::compute::submit(state, frame.context, &pending);
     }
 
     let ld = state
@@ -1301,7 +1284,7 @@ pub(super) fn present_frame(
     frame: crate::backend::FrameToken,
     submit_tv: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
-    present(state, frame.surface, frame.image, submit_tv)
+    present(state, frame.surface, frame.image, frame.context, submit_tv)
 }
 
 /// Present the rendered image to the screen.
@@ -1312,6 +1295,7 @@ pub(super) fn present(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
+    ctx: super::ContextHandle,
     frame_compute_timeline_value: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
     let _tz = crate::tracy_zone!("vk.surface.present");
@@ -1530,9 +1514,9 @@ pub(super) fn present(
         };
 
         let timeline_sem = state
-            .devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
             .timeline_semaphore;
 
         // WSI submit: [copy_cb]
@@ -1596,6 +1580,9 @@ pub(super) fn present(
             let _bk = crate::tracy_zone!("vk.present.post_submit");
             let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
             ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
+            if let Some(sc) = state.contexts.get_mut(&ctx) {
+                sc.last_submitted_seq = signal_timeline_value;
+            }
 
             // Expose the *compute* timeline value to callers (not the copy's).
             // Render targets and other resources are safe to reuse once compute
@@ -1685,8 +1672,8 @@ pub(super) fn present(
         }
     } else if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
         surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_sub(1);
-        if let Some(ld) = state.devices.get(&device_handle) {
-            ld.signal_queue
+        if let Some(sc) = state.contexts.get(&ctx) {
+            sc.signal_queue
                 .push(crate::signal::Signal::SwapchainReturned {
                     image_index: image_idx_for_return,
                 });

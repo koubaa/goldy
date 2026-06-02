@@ -356,10 +356,10 @@ mod tests {
             original_offset,
             "bump should reset to 0 after wait + begin_frame"
         );
-        // gpu_progress should now be >= far_epoch (mock wait_until advanced it).
+        // Device-global retirement must reach far_epoch (begin_frame wait_until on allocator ctx).
         assert!(
-            ctx.gpu_progress() >= far_epoch,
-            "begin_frame must have called wait_until to advance progress"
+            device.timeline_retired() >= far_epoch,
+            "begin_frame must have called wait_until to advance device retirement"
         );
     }
 }

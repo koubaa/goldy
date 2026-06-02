@@ -4,12 +4,12 @@ use super::super::DeviceHandle;
 use super::staging::{StagingBelt, TextureStagingPool, DEFAULT_STAGING_CHUNK_SIZE};
 use super::types::{
     DeletionQueue, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState, ResourceRegistry,
-    TextureHeapAllocator, TimelineWaiter, ARGUMENT_BUFFER_SIZE,
+    TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Initial heap size for both the buffer and texture heaps.
 ///
@@ -106,10 +106,6 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         device.name(),
     );
 
-    let timeline_event = device.new_shared_event();
-    let signal_queue = std::sync::Arc::new(crate::signal::SignalQueue::new());
-    let timeline_waiter = TimelineWaiter::new_with_signals(std::sync::Arc::clone(&signal_queue));
-
     state.devices.insert(
         handle,
         LogicalDevice {
@@ -122,18 +118,12 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             texture_encoder,
             storage_image_encoder,
             resource_registry: ResourceRegistry::new(),
-            timeline_event,
-            timeline_waiter,
-            signal_queue,
-            pending_swapchain_returns: Arc::new(Mutex::new(Vec::new())),
             timeline_next: 1,
             timeline_scheduled_max: 0,
+            retired_floor: 0,
             deletion_queue: DeletionQueue::new(),
-            reclamation_context: None,
-            last_committed_timeline: None,
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),
-            in_flight_command_buffers: std::collections::VecDeque::new(),
         },
     );
 

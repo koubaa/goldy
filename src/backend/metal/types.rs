@@ -456,7 +456,7 @@ impl TextureHeapAllocator {
     }
 }
 
-/// GPU resource retained until [`TimelineValue`] completion on [`LogicalDevice::timeline_event`].
+/// GPU resource retained until [`TimelineValue`] completion on a context [`SharedEvent`].
 ///
 /// Variant payloads are held **only for their `Drop` impl** — once the GPU signals the
 /// timeline value, `DeletionQueue::drain` removes the variant so the MTL object is released.
@@ -589,6 +589,23 @@ impl TimelineWaiter {
     }
 }
 
+/// Per-context async submission stream (timeline shared event, in-flight CBs, signals).
+pub(crate) struct MetalSubmissionContext {
+    pub device: super::DeviceHandle,
+    pub timeline_event: SharedEvent,
+    pub timeline_waiter: TimelineWaiter,
+    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    /// Last device-global seq value submitted on this context.
+    pub last_submitted_seq: u64,
+    pub in_flight_command_buffers: VecDeque<(crate::timeline::TimelineValue, mtl::CommandBuffer)>,
+    /// Thread-scoped reclamation epoch from [`GpuBackend::set_reclamation_context`].
+    pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
+    /// Swapchain returns posted from completion handlers; drained on `poll_signals`.
+    pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,
+    /// Most recently committed timeline on this context (WriteBuffer fast-path gate).
+    pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
+}
+
 /// A logical Metal device with associated resources.
 ///
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
@@ -611,73 +628,25 @@ pub(crate) struct LogicalDevice {
     pub storage_image_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
-    /// GPU timeline shared between standalone submits and surface presents.
-    pub timeline_event: SharedEvent,
-    /// Event-driven waiter for GPU timeline completion (replaces poll loop).
-    pub timeline_waiter: TimelineWaiter,
-    /// Async + sync signal delivery for [`crate::Context::poll_signals`].
-    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
-    /// Swapchain returns posted from completion handlers; drained on `poll_signals`.
-    pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,
-    /// Next [`TimelineValue`] assigned on submission (`timeline_next` follows successful commits).
+    /// Device-global submission sequence (contexts signal their own shared events).
     pub timeline_next: u64,
-    /// Highest timeline value scheduled on the GPU queue for this device (used for idle / flush).
+    /// Highest device-global seq scheduled on the GPU queue (used for idle / flush).
     pub timeline_scheduled_max: u64,
-    /// Deferred GPU resource teardown until [`SharedEvent`] reaches the queued barrier.
+    /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
+    pub retired_floor: u64,
+    /// Deferred GPU resource teardown until device timeline reaches the queued barrier.
     pub deletion_queue: DeletionQueue,
-    /// Thread-scoped reclamation epoch installed by [`Device::boundary_crossed`](crate::device::Device::boundary_crossed)
-    /// before VRAM deferred payloads drop. Only the installing thread reads this when choosing
-    /// a Metal deletion-queue barrier; other threads fall back to `timeline_scheduled_max`.
-    pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
-    /// Timeline value of the most recently committed command buffer, or `None` if nothing has
-    /// been submitted yet. Used to decide whether a direct CPU `memcpy` into a shared-mode
-    /// buffer is safe: it is safe only when `gpu_progress() >= last_committed_timeline`,
-    /// meaning all previously submitted GPU work has completed and no in-flight reads remain.
-    pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
     /// Pooled staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).
     pub staging_belt: super::staging::StagingBelt,
     /// Pooled staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
     pub texture_staging_pool: super::staging::TextureStagingPool,
-    /// In-flight command buffers indexed by timeline value, ordered by submission.
-    ///
-    /// Used in `wait_until` to call `waitUntilCompleted()` — the Metal-native Mach-semaphore
-    /// wait — instead of routing through the `completedHandler` → condvar chain.  Since the
-    /// command queue is serial, waiting on the CB at value N guarantees all CBs at values < N
-    /// are also complete.  Entries are drained lazily from the front as timeline values are
-    /// confirmed signaled.
-    pub in_flight_command_buffers: VecDeque<(crate::timeline::TimelineValue, mtl::CommandBuffer)>,
 }
 
 impl LogicalDevice {
-    /// Process pending GPU deletions and recycle bindless registry slots.
-    ///
-    /// Called on every `acquire_frame` and `present` to reclaim both Metal
-    /// objects (via [`DeletionQueue`]) and argument-buffer slot indices (via
-    /// [`ResourceRegistry::drain_pending_slots_up_to`]) whose GPU timeline
-    /// barrier has been signaled. Both advance together so slots are recycled
-    /// as soon as the GPU catches up, without requiring a full blocking
-    /// `wait_all_in_flight`. This is what prevents the `pending_free` list
-    /// from filling up in long-running or multi-window scenarios.
-    pub(crate) fn process_deletion_queue_up_to_signaled(&mut self) {
-        let signaled = self.timeline_event.as_ref().signaled_value();
-        self.deletion_queue.process_up_to(signaled);
-        self.resource_registry.drain_pending_slots_up_to(signaled);
-    }
-
-    /// Deletion-queue barrier for buffer teardown. During VRAM reclamation on the installing
-    /// thread, uses the explicit retired epoch so heap memory returns on the next flush.
-    pub(crate) fn buffer_deletion_barrier(&self, gpu_idle: bool) -> u64 {
-        if gpu_idle {
-            0
-        } else if let Some((thread, epoch)) = self.reclamation_context {
-            if thread == std::thread::current().id() {
-                epoch
-            } else {
-                self.timeline_scheduled_max
-            }
-        } else {
-            self.timeline_scheduled_max
-        }
+    /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
+    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
+        self.deletion_queue.process_up_to(completed);
+        self.resource_registry.drain_pending_slots_up_to(completed);
     }
 }
 
@@ -1217,7 +1186,7 @@ pub(super) struct MetalState {
     pub device_lost: std::sync::atomic::AtomicBool,
     pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: std::collections::HashMap<super::ContextHandle, DeviceHandle>,
+    pub contexts: std::collections::HashMap<super::ContextHandle, MetalSubmissionContext>,
     pub next_context_id: super::ContextHandle,
     pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,

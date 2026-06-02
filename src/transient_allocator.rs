@@ -265,7 +265,7 @@ impl TransientAllocator for BumpResetAllocator {
             // (wait_until returns immediately when the semaphore/fence has already
             // fired). The opposite direction (progress reads stale-low on a poller
             // backend) causes an unnecessary but correct wait of at most ~1 ms.
-            if self.context.gpu_progress() < tv {
+            if self.context.device().timeline_retired() < tv {
                 self.context
                     .wait_until(tv)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -394,7 +394,7 @@ impl HeapTransientAllocator {
 
     /// Return deferred frees whose epoch has retired to the coalescing free list.
     fn reclaim_retired_frees(&mut self) {
-        let progress = self.context.gpu_progress();
+        let progress = self.context.device().timeline_retired();
         let mut i = 0;
         while i < self.deferred.len() {
             if self.deferred[i]

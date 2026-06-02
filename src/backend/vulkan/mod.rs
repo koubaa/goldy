@@ -13,6 +13,7 @@
 
 mod buffer;
 mod compute;
+mod context;
 mod device;
 mod pipeline;
 mod render_commands;
@@ -283,7 +284,6 @@ impl VulkanBackend {
             compute_fence_pool: HashMap::new(),
             texture_staging_pools: HashMap::new(),
             staging_belts: HashMap::new(),
-            timeline_cmd_buffers: HashMap::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
         };
 
@@ -326,7 +326,16 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
-        self.state.contexts.retain(|_, d| *d != device_handle);
+        let ctxs: Vec<ContextHandle> = self
+            .state
+            .contexts
+            .iter()
+            .filter(|(_, sc)| sc.device == device_handle)
+            .map(|(k, _)| *k)
+            .collect();
+        for ctx in ctxs {
+            context::destroy(&mut self.state, ctx);
+        }
         device::destroy(&mut self.state, device_handle);
     }
 
@@ -342,25 +351,15 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
-        if !self.state.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-        let id = self.state.next_context_id;
-        self.state.next_context_id = self.state.next_context_id.saturating_add(1);
-        self.state.contexts.insert(id, device);
-        Ok(id)
+        context::create(&mut self.state, device)
     }
 
     fn destroy_context(&mut self, ctx: ContextHandle) {
-        self.state.contexts.remove(&ctx);
+        context::destroy(&mut self.state, ctx);
     }
 
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
-        *self
-            .state
-            .contexts
-            .get(&ctx)
-            .expect("invalid context handle")
+        context::context_device(&self.state, ctx)
     }
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {
@@ -783,17 +782,25 @@ impl GpuBackend for VulkanBackend {
             FrameToken {
                 surface: surface_handle,
                 image,
+                context: 0,
             },
             tex,
         ))
     }
 
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
+        let timeline_sem = self
+            .state
+            .contexts
+            .get(&frame.context)
+            .context("Invalid context handle")?
+            .timeline_semaphore;
         surface::render(
             &mut self.state.devices,
             &mut self.state.surfaces,
             frame.surface,
             frame.image,
+            timeline_sem,
             commands,
             |cmd, cmds, logical_device, current_pipeline| {
                 render_commands::record(
@@ -805,7 +812,19 @@ impl GpuBackend for VulkanBackend {
                     current_pipeline,
                 )
             },
-        )
+        )?;
+        if let Some(tv) = self
+            .state
+            .surfaces
+            .get(&frame.surface)
+            .and_then(|s| s.frame_sync.get(s.current_frame))
+            .and_then(|fs| fs.frame_timeline_value)
+        {
+            if let Some(sc) = self.state.contexts.get_mut(&frame.context) {
+                sc.last_submitted_seq = tv;
+            }
+        }
+        Ok(())
     }
 
     fn surface_resize(
@@ -1078,12 +1097,22 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
-        let device_handle = self.context_device(ctx);
         let _tz = crate::tracy_zone!("vk.gpu_progress");
-        let Some(ld) = self.state.devices.get(&device_handle) else {
+        let Some(sc) = self.state.contexts.get(&ctx) else {
             return 0;
         };
-        unsafe { ld.device.get_semaphore_counter_value(ld.timeline_semaphore) }.unwrap_or(0)
+        let Some(ld) = self.state.devices.get(&sc.device) else {
+            return 0;
+        };
+        unsafe {
+            ld.device
+                .get_semaphore_counter_value(sc.timeline_semaphore)
+        }
+        .unwrap_or(0)
+    }
+
+    fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+        context::device_retired(&self.state, device)
     }
 
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
@@ -1091,9 +1120,9 @@ impl GpuBackend for VulkanBackend {
         let progress = self.gpu_progress(ctx);
         let signal_queue = self
             .state
-            .devices
-            .get(&device_handle)
-            .map(|ld| std::sync::Arc::clone(&ld.signal_queue));
+            .contexts
+            .get(&ctx)
+            .map(|sc| std::sync::Arc::clone(&sc.signal_queue));
         let Some(signal_queue) = signal_queue else {
             return Vec::new();
         };
@@ -1116,11 +1145,9 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let device_handle = self.context_device(ctx);
-        let ld = self.state.devices.get(&device_handle)?;
+        let sc = self.state.contexts.get(&ctx)?;
         let progress = self.gpu_progress(ctx);
-        let scheduled = ld.timeline_next.saturating_sub(1);
-        if progress < scheduled {
+        if progress < sc.last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {
             None
@@ -1146,9 +1173,9 @@ impl GpuBackend for VulkanBackend {
             let _lookup = crate::tracy_zone!("vk.wait_until.lookup");
             let sem = self
                 .state
-                .devices
-                .get(&device_handle)
-                .context("Invalid device handle")?
+                .contexts
+                .get(&ctx)
+                .context("Invalid context handle")?
                 .timeline_semaphore;
             let dev = &self.state.devices.get(&device_handle).unwrap().device;
             let wait = vk::SemaphoreWaitInfo::default()
@@ -1164,14 +1191,16 @@ impl GpuBackend for VulkanBackend {
                 return Err(anyhow::anyhow!("wait_semaphores: {:?}", e));
             }
         }
+        let retired = context::device_retired(&self.state, device_handle);
         {
             let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
-            compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+            compute::reap_timeline_cmd_buffers_up_to(&mut self.state, ctx, value);
         }
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+            let drain_to = value.min(retired);
             let drained = {
                 let _drain = crate::tracy_zone!("vk.wait_until.deletion_queue.drain");
-                ld.deletion_queue.drain_up_to(value)
+                ld.deletion_queue.drain_up_to(drain_to)
             };
             {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
@@ -1192,9 +1221,9 @@ impl GpuBackend for VulkanBackend {
         let device_handle = self.context_device(ctx);
         let sem = self
             .state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
             .timeline_semaphore;
         let dev = &self.state.devices.get(&device_handle).unwrap().device;
         let wait = vk::SemaphoreWaitInfo::default()
@@ -1203,9 +1232,10 @@ impl GpuBackend for VulkanBackend {
         let timeout_ns = (timeout_ms as u64).saturating_mul(1_000_000);
         match unsafe { dev.wait_semaphores(&wait, timeout_ns) } {
             Ok(()) => {
-                compute::reap_timeline_cmd_buffers_up_to(&mut self.state, device_handle, value);
+                let retired = context::device_retired(&self.state, device_handle);
+                compute::reap_timeline_cmd_buffers_up_to(&mut self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-                    let drained = ld.deletion_queue.drain_up_to(value);
+                    let drained = ld.deletion_queue.drain_up_to(value.min(retired));
                     for r in drained {
                         types::destroy_pending_deletion(ld, r);
                     }
@@ -1229,8 +1259,7 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        let device_handle = self.context_device(ctx);
-        compute::submit(&mut self.state, device_handle, commands)
+        compute::submit(&mut self.state, ctx, commands)
     }
 
     fn submit_graph(
@@ -1238,8 +1267,7 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        compute::submit_graph(&mut self.state, device, commands)
+        compute::submit_graph(&mut self.state, ctx, commands)
     }
 
     fn submit_graph_and_retain(
@@ -1248,8 +1276,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[GraphCommand],
         key: u64,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        compute::submit_graph_and_retain(&mut self.state, device, commands, key)
+        compute::submit_graph_and_retain(&mut self.state, ctx, commands, key)
     }
 
     fn try_resubmit_retained(
@@ -1257,13 +1284,11 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         key: u64,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let device = self.context_device(ctx);
-        compute::try_resubmit_retained(&mut self.state, device, key)
+        compute::try_resubmit_retained(&mut self.state, ctx, key)
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
-        let device = self.context_device(ctx);
-        compute::evict_retained(&mut self.state, device, key);
+        compute::evict_retained(&mut self.state, ctx, key);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
@@ -1319,8 +1344,9 @@ impl GpuBackend for VulkanBackend {
 
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device_handle = self.context_device(ctx);
+        let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to_gpu_progress();
+            ld.process_deletion_queue_up_to(retired);
         }
     }
 

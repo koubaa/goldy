@@ -14,8 +14,10 @@ use std::sync::Arc;
 
 /// GPU submission/timeline context for a single device.
 ///
-/// Clone is cheap (`Arc` bump). Multiple contexts may be created per device;
-/// in the current backend they alias the device's single submission stream.
+/// Clone is cheap (`Arc` bump). Multiple contexts may be created per device; each
+/// owns its own submission timeline (semaphore/fence/event, signal queue, and on
+/// Vulkan/DX12 a fence poller). [`Device`] substrate (deletion queue, VRAM ring,
+/// placement heap) stays device-scoped.
 pub struct Context {
     pub(crate) inner: Arc<ContextInner>,
 }
@@ -42,6 +44,8 @@ impl std::fmt::Debug for Context {
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
+        // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
+        // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         let mut backend = self.device.inner.backend.lock().unwrap();
         backend.destroy_context(self.handle);
     }
@@ -156,6 +160,12 @@ impl Context {
     }
 
     /// Process deferred GPU deletions and reclaim VRAM-ring payloads whose epoch has retired.
+    ///
+    /// The device-installed deferred VRAM ring ([`Device::vram_allocator`]) assumes a
+    /// **single submission timeline drives reclamation** for defer/release pairing on that
+    /// device. Concurrent multi-context deferral against one ring is not yet sound (pending
+    /// the memory-ownership decision in goldy #179). Multiple contexts remain legal; callers
+    /// should defer/reclaim from one primary context per device until ring ownership moves.
     pub fn boundary_crossed(&self, epoch: TimelineValue) {
         let _tz = crate::tracy_zone!("context.boundary_crossed");
         {
@@ -539,5 +549,33 @@ mod tests {
             weak.upgrade().is_none(),
             "device drop should drain deferred resources"
         );
+    }
+
+    #[test]
+    fn independent_context_timelines() {
+        let device = test_device();
+        let ctx_a = device.create_context().unwrap();
+        let ctx_b = device.create_context().unwrap();
+        assert_eq!(ctx_a.gpu_progress(), 0);
+        assert_eq!(ctx_b.gpu_progress(), 0);
+
+        let mut graph = TaskGraph::new();
+        let tv_a = ctx_a.submit(&mut graph).unwrap();
+        assert!(tv_a > 0);
+        assert_eq!(ctx_a.gpu_progress(), tv_a);
+        assert_eq!(ctx_b.gpu_progress(), 0, "context B must not observe A's submit");
+    }
+
+    #[test]
+    fn drop_one_context_leaves_other_usable() {
+        let device = test_device();
+        let ctx_a = device.create_context().unwrap();
+        let ctx_b = device.create_context().unwrap();
+        drop(ctx_a);
+
+        let mut graph = TaskGraph::new();
+        let tv = ctx_b.submit(&mut graph).unwrap();
+        assert!(tv > 0);
+        assert_eq!(ctx_b.gpu_progress(), tv);
     }
 }

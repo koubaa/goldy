@@ -132,6 +132,12 @@ impl Surface {
             format,
         ));
 
+        let token = crate::backend::FrameToken {
+            surface: token.surface,
+            image: token.image,
+            context: self.ctx_handle,
+        };
+
         Ok(Frame {
             context: self.context.clone(),
             backend: Arc::clone(&self.backend),

@@ -203,6 +203,8 @@ pub type SamplerHandle = u64;
 pub struct FrameToken {
     pub surface: SurfaceHandle,
     pub image: SwapchainImageHandle,
+    /// Submission context that owns this frame's timeline (set by [`crate::surface::Frame`]).
+    pub context: ContextHandle,
 }
 
 /// Render command for command buffer recording.
@@ -710,6 +712,12 @@ pub trait GpuBackend: Send + Sync {
     /// Latest GPU completion point on this context's timeline (`value` is done when
     /// `gpu_progress() >= value`).
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue;
+
+    /// Latest device-global submission sequence retired on the GPU (shared queue / seq space).
+    ///
+    /// `value` is done when `device_timeline_retired() >= value`. This is the max over live
+    /// context completion primitives, the device sync fence (DX12), and the post-destroy floor.
+    fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
 
     /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal>;

@@ -15,9 +15,14 @@ use mtl::{MTLOrigin, MTLRegion, MTLSize, MTLStorageMode, MTLTextureUsage, Textur
 /// buffer to complete, drains again, and retries. Mirrors the buffer heap self-regulation
 /// in `allocate_mtl_storage_buffer`.
 fn allocate_mtl_texture(
-    logical_device: &mut super::types::LogicalDevice,
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
     descriptor: &mtl::TextureDescriptorRef,
 ) -> Result<mtl::Texture> {
+    let logical_device = state
+        .devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
     // Attempt 1: fast path.
     if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
         return Ok(tex);
@@ -26,7 +31,8 @@ fn allocate_mtl_texture(
     // Attempt 2 (non-blocking): drain signaled work, compact empty overflow heaps.
     {
         let _tz = crate::tracy_zone!("mtl.texture_heap_allocator.drain_reclaim");
-        logical_device.process_deletion_queue_up_to_signaled();
+        let retired = super::context::device_retired(state, device_handle);
+        logical_device.process_deletion_queue_up_to(retired);
         logical_device.texture_heap.compact_overflow();
     }
     if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
@@ -35,10 +41,7 @@ fn allocate_mtl_texture(
 
     // Attempt 3 (blocking): wait on the oldest in-flight CB to reclaim one frame's
     // worth of archive — a runtime boundary action, invisible to the caller.
-    let oldest_cb = logical_device
-        .in_flight_command_buffers
-        .front()
-        .map(|(_, cb)| cb.to_owned());
+    let oldest_cb = super::context::oldest_in_flight_cb(state, device_handle);
 
     if let Some(cb) = oldest_cb {
         let _tz = crate::tracy_zone!("mtl.texture_heap_allocator.wait_reclaim");
@@ -47,7 +50,8 @@ fn allocate_mtl_texture(
              to reclaim archive",
         );
         cb.wait_until_completed();
-        logical_device.process_deletion_queue_up_to_signaled();
+        let retired = super::context::device_retired(state, device_handle);
+        logical_device.process_deletion_queue_up_to(retired);
         logical_device.texture_heap.compact_overflow();
         if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
             return Ok(tex);
@@ -71,11 +75,6 @@ pub(super) fn create(
     access: SpatialAccess,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
-
     let handle = state.next_texture_handle;
     state.next_texture_handle += 1;
 
@@ -112,7 +111,12 @@ pub(super) fn create(
     descriptor.set_usage(mtl_usage);
     descriptor.set_storage_mode(MTLStorageMode::Shared);
 
-    let texture = allocate_mtl_texture(logical_device, &descriptor)?;
+    let texture = allocate_mtl_texture(state, device_handle, &descriptor)?;
+
+    let logical_device = state
+        .devices
+        .get_mut(&device_handle)
+        .context("Invalid device handle")?;
 
     let is_storage_image = matches!(
         access,

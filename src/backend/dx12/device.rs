@@ -393,22 +393,12 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let zero_buffer =
         zero_buffer_opt.context("CreateCommittedResource returned null for zero buffer")?;
 
-    // Create fence
+    // Create device sync fence (Signal+wait paths only; per-context fences track submissions)
     let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create fence")?;
 
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
-
-    let compute_initial_allocator: ID3D12CommandAllocator =
-        unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
-            .context("Failed to create compute command allocator")?;
-    let compute_allocator_pool = vec![types::ComputeAllocatorSlot {
-        allocator: compute_initial_allocator,
-        fence_value: 0,
-        command_list: None,
-        retained: false,
-    }];
 
     let resource_registry = types::ResourceRegistry::new();
 
@@ -423,22 +413,6 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         },
     );
 
-    let signal_queue = std::sync::Arc::new(crate::signal::SignalQueue::new());
-    let fence_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let fence_for_poll = fence.clone();
-    let signal_queue_poll = std::sync::Arc::clone(&signal_queue);
-    let shutdown_poll = std::sync::Arc::clone(&fence_shutdown);
-    let fence_thread = Some(crate::backend::signal_fence::spawn_fence_poller(
-        crate::backend::signal_fence::FencePollerState {
-            shutdown: shutdown_poll,
-            signal_queue: signal_queue_poll,
-            last_emitted_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            gpu_completed: std::sync::Arc::new(move || unsafe {
-                fence_for_poll.GetCompletedValue()
-            }),
-        },
-    ));
-
     state.devices.insert(
         handle,
         LogicalDevice {
@@ -446,7 +420,6 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             adapter_id,
             command_queue,
             command_allocator,
-            compute_allocator_pool,
             rtv_heap,
             rtv_descriptor_size,
             dsv_heap,
@@ -456,10 +429,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             sampler_heap,
             sampler_descriptor_size,
             fence,
-            fence_value: 1,
-            signal_queue,
-            fence_shutdown,
-            fence_thread,
+            timeline_next: 1,
+            retired_floor: 0,
             supports_reserved_buffers,
             tile_heap_pool: if supports_reserved_buffers {
                 Some(super::tiles::TileHeapPool::new())
@@ -471,7 +442,6 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             compute_batch_dispatch_signature,
             resource_registry,
             zero_buffer,
-            retained_graph: None,
             deletion_queue: super::types::DeletionQueue::new(),
             graphics_pso_blobs,
             compute_pso_blobs,

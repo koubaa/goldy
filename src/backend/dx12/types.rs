@@ -328,6 +328,21 @@ pub(crate) struct ComputeAllocatorSlot {
     pub retained: bool,
 }
 
+/// Per-context async submission stream (fence, poller, compute allocator pool).
+pub(crate) struct Dx12SubmissionContext {
+    pub device: super::DeviceHandle,
+    pub fence: Direct3D12::ID3D12Fence,
+    /// Last device-global seq value submitted on this context.
+    pub last_submitted_seq: u64,
+    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fence_thread: Option<std::thread::JoinHandle<()>>,
+    /// Pool of command allocators for non-blocking compute submission on this context.
+    pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
+    /// A single retained command list for zero-recording-cost re-submission.
+    pub retained_graph: Option<RetainedGraph>,
+}
+
 /// A retained (closed but not reset) command list available for re-execution.
 ///
 /// DX12 allows re-executing a closed command list via `ExecuteCommandLists`
@@ -339,7 +354,7 @@ pub(crate) struct RetainedGraph {
     /// The closed (but not reset) command list.  Cloned from the pool slot so both
     /// the pool and this struct hold a reference-counted pointer to the same COM object.
     pub command_list: Direct3D12::ID3D12GraphicsCommandList,
-    /// Index into `LogicalDevice::compute_allocator_pool` for the backing allocator slot.
+    /// Index into [`Dx12SubmissionContext::compute_allocator_pool`] for the backing allocator slot.
     pub slot_idx: usize,
 }
 
@@ -426,12 +441,12 @@ pub(crate) struct LogicalDevice {
     pub cbv_srv_uav_descriptor_size: u32,
     pub sampler_heap: Direct3D12::ID3D12DescriptorHeap,
     pub sampler_descriptor_size: u32,
+    /// Device fence for synchronous Signal+wait paths only (not per-submit timeline).
     pub fence: Direct3D12::ID3D12Fence,
-    pub fence_value: u64,
-
-    pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
-    pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub fence_thread: Option<std::thread::JoinHandle<()>>,
+    /// Device-global submission sequence (shared value space; contexts signal their own fences).
+    pub timeline_next: u64,
+    /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
+    pub retired_floor: u64,
 
     // Bindless infrastructure
     /// `true` when adapter reports tiled resources tier >= 1 (buffer reserved resources).
@@ -447,12 +462,6 @@ pub(crate) struct LogicalDevice {
     pub compute_batch_dispatch_signature: Option<Direct3D12::ID3D12CommandSignature>,
     /// Registry tracking resource offsets in descriptor heaps
     pub resource_registry: ResourceRegistry,
-    /// Pool of command allocators for non-blocking compute submission.
-    /// Slots can be reused when fence signals completion.
-    pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
-    /// A single retained command list for zero-recording-cost re-submission.
-    /// `None` until a `submit_graph_and_retain` call stores a closed CL here.
-    pub retained_graph: Option<RetainedGraph>,
     /// Device-lifetime zero-filled UPLOAD-heap buffer used as the source for
     /// `CopyBufferRegion` clears. One buffer per device; clears of any size are
     /// handled by chunking `CopyBufferRegion` calls. Using a copy instead of
@@ -472,8 +481,7 @@ pub(crate) struct LogicalDevice {
 }
 
 impl LogicalDevice {
-    pub(crate) fn process_deletion_queue(&mut self) {
-        let completed = unsafe { self.fence.GetCompletedValue() };
+    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
         let batch = self.deletion_queue.drain_up_to_completed(completed);
         for resource in batch {
             destroy_pending_deletion(self, resource);
@@ -508,8 +516,8 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.fence_value;
-            ld.fence_value += 1;
+            let fv = ld.timeline_next;
+            ld.timeline_next += 1;
             if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
@@ -543,8 +551,8 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             );
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.fence_value;
-            ld.fence_value += 1;
+            let fv = ld.timeline_next;
+            ld.timeline_next += 1;
             if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
@@ -785,7 +793,7 @@ pub(super) struct Dx12State {
     pub adapters: Vec<DxgiAdapterInfo>,
     pub devices: HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: HashMap<super::ContextHandle, DeviceHandle>,
+    pub contexts: HashMap<super::ContextHandle, Dx12SubmissionContext>,
     pub next_context_id: super::ContextHandle,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,

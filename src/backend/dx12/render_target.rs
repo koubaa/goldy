@@ -421,7 +421,7 @@ pub(super) fn render(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.fence_value;
+    let fence_value = logical_device.timeline_next;
     unsafe {
         logical_device
             .command_queue
@@ -431,7 +431,7 @@ pub(super) fn render(
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
+        dev.timeline_next += 1;
     }
 
     if let Some(rt) = state.render_targets.get_mut(&target) {
@@ -579,7 +579,7 @@ pub(super) fn read_to_cpu(
     }
 
     // Wait for copy to complete
-    let fence_value = logical_device.fence_value;
+    let fence_value = logical_device.timeline_next;
     unsafe {
         logical_device
             .command_queue
@@ -590,7 +590,7 @@ pub(super) fn read_to_cpu(
 
     // Increment fence value
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.fence_value += 1;
+        dev.timeline_next += 1;
     }
 
     // Map and copy data
