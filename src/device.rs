@@ -730,7 +730,7 @@ impl Device {
 
     /// Latest device-global submission sequence retired on the GPU.
     ///
-    /// Epochs from any [`Context::submit`] on this device share one value space; use this
+    /// Epochs from any [`crate::context::Context::submit`] on this device share one value space; use this
     /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
     pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
         self.inner
@@ -751,7 +751,10 @@ impl Device {
     /// from external contexts they do not own.
     ///
     /// [`Context::wait_until`]: crate::Context::wait_until
-    pub fn wait_until_retired(&self, value: crate::timeline::TimelineValue) -> Result<(), GoldyError> {
+    pub fn wait_until_retired(
+        &self,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<(), GoldyError> {
         let mut backend = self.inner.backend.lock().unwrap();
         backend
             .device_wait_until(self.inner.handle, value)
@@ -1153,9 +1156,8 @@ mod tests {
         use std::sync::Arc;
 
         let device = test_device();
-        let alias = device.with_vram_allocator(Arc::new(
-            crate::vram_allocator::DefaultVramAllocator::new(),
-        ));
+        let alias = device
+            .with_vram_allocator(Arc::new(crate::vram_allocator::DefaultVramAllocator::new()));
         assert!(device.is_valid());
         drop(alias);
         assert!(

@@ -284,7 +284,8 @@ pub trait VramAllocator: Send + Sync {
 /// and [`VramAllocator::drain`].
 ///
 /// **Device-owned ring:** the ring is device-installed and keyed by device-global timeline
-/// epochs from [`Context::defer_release`]. [`Context::boundary_crossed`] drains entries
+/// epochs from [`crate::context::Context::defer_release`].
+/// [`crate::context::Context::boundary_crossed`] drains entries
 /// when `epoch <= device_retired` (max completed over all live contexts). Any context may
 /// poll boundaries; multi-context deferral is sound under this conservative collapse.
 /// Per-handle last-touch reclamation (tighter than `device_retired`) is a future optimization.

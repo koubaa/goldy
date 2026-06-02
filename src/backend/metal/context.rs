@@ -2,8 +2,8 @@
 
 use super::types::{MetalState, MetalSubmissionContext, TimelineWaiter};
 use super::{ContextHandle, DeviceHandle};
-use anyhow::{Context as _, Result};
 use ::metal as mtl;
+use anyhow::{Context as _, Result};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -32,8 +32,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
 
     let timeline_event = ld.device.new_shared_event();
     let signal_queue = Arc::new(crate::signal::SignalQueue::new());
-    let timeline_waiter =
-        TimelineWaiter::new_with_signals(std::sync::Arc::clone(&signal_queue));
+    let timeline_waiter = TimelineWaiter::new_with_signals(std::sync::Arc::clone(&signal_queue));
 
     let id = state.next_context_id;
     state.next_context_id = state.next_context_id.saturating_add(1);

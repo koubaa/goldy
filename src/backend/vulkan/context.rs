@@ -96,7 +96,11 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         state
             .devices
             .get(&device)
-            .and_then(|ld| ld.device.get_semaphore_counter_value(sc.timeline_semaphore).ok())
+            .and_then(|ld| {
+                ld.device
+                    .get_semaphore_counter_value(sc.timeline_semaphore)
+                    .ok()
+            })
             .unwrap_or(0)
     };
     if let Some(ld) = state.devices.get_mut(&device) {
@@ -132,11 +136,7 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
 /// Finds the context on `device` that last submitted at or beyond `seq` and issues a
 /// `vkWaitSemaphores` on its timeline semaphore. This replaces the previous 1ms
 /// sleep-poll loop, eliminating the latency floor that capped Vulkan FPS at ~1260.
-pub(super) fn wait_until_device_seq_at_least(
-    state: &VulkanState,
-    device: DeviceHandle,
-    seq: u64,
-) {
+pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: DeviceHandle, seq: u64) {
     if seq == 0 {
         return;
     }

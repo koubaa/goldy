@@ -287,8 +287,7 @@ fn dx12_finish_gpu_profile(
     use crate::gpu_profiler::{self, DispatchGpuNs};
     super::utils::wait_for_fence(ctx_fence, fence_value)?;
 
-    let freq = unsafe { command_queue.GetTimestampFrequency() }
-        .context("GetTimestampFrequency")?;
+    let freq = unsafe { command_queue.GetTimestampFrequency() }.context("GetTimestampFrequency")?;
 
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
     let no_read = D3D12_RANGE { Begin: 0, End: 0 };
@@ -1372,21 +1371,14 @@ fn execute_signal_and_finish(
                 .command_queue
                 .ExecuteCommandLists(&[Some(cmd_list)])
         };
-        unsafe {
-            logical_device
-                .command_queue
-                .Signal(&ctx_fence, fence_value)
-        }
-        .context("Failed to signal context fence")?;
+        unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
+            .context("Failed to signal context fence")?;
     }
 
     if let Some(prof) = gpu_profile {
-        if let Err(e) = dx12_finish_gpu_profile(
-            &ctx_fence,
-            &logical_device.command_queue,
-            fence_value,
-            prof,
-        ) {
+        if let Err(e) =
+            dx12_finish_gpu_profile(&ctx_fence, &logical_device.command_queue, fence_value, prof)
+        {
             tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
         }
     }
@@ -2012,10 +2004,7 @@ pub(super) fn try_resubmit_retained(
         .context("Invalid context handle")?
         .device;
     let retained = {
-        let sc = state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?;
+        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
         match sc.retained_graph.as_ref() {
             Some(r) if r.fingerprint == key => Some((r.command_list.clone(), r.slot_idx)),
             _ => None,
@@ -2041,10 +2030,7 @@ pub(super) fn try_resubmit_retained(
         .context("Failed to cast retained command list")?;
 
     let (ctx_fence, command_queue) = {
-        let sc = state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?;
+        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
         let ld = state
             .devices
             .get(&device_handle)

@@ -498,10 +498,7 @@ pub(super) fn present(
     let command_buffer = owned_command_buffer.as_ref();
 
     let (timeline_event, waiter, signal_queue_present, return_pending) = {
-        let sc = state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?;
+        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
         (
             sc.timeline_event.clone(),
             sc.timeline_waiter.clone(),

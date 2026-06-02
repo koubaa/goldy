@@ -721,7 +721,7 @@ pub trait GpuBackend: Send + Sync {
 
     /// Block until the device-global timeline has retired at least `value`.
     ///
-    /// Unlike [`wait_until`] (which is per-context), this searches across all live contexts on
+    /// Unlike [`Self::wait_until`] (which is per-context), this searches across all live contexts on
     /// `device` for the one that signaled `value` and waits on its native primitive. Use this
     /// when the `TimelineValue` was produced by an arbitrary context — e.g. from outside the
     /// allocator — so you don't need a matching `ContextHandle`.

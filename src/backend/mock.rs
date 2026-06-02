@@ -212,11 +212,7 @@ impl MockBackend {
 
     /// Max completed over live contexts on `device`, floored by `retired_floor`.
     fn device_retired(&self, device: DeviceHandle) -> u64 {
-        let floor = self
-            .device_retired_floor
-            .get(&device)
-            .copied()
-            .unwrap_or(0);
+        let floor = self.device_retired_floor.get(&device).copied().unwrap_or(0);
         let max_ctx = self
             .contexts
             .values()
@@ -356,10 +352,7 @@ impl GpuBackend for MockBackend {
 
     fn destroy_context(&mut self, ctx: ContextHandle) {
         if let Some(state) = self.contexts.remove(&ctx) {
-            let floor = self
-                .device_retired_floor
-                .entry(state.device)
-                .or_insert(0);
+            let floor = self.device_retired_floor.entry(state.device).or_insert(0);
             *floor = (*floor).max(state.completed);
         }
     }

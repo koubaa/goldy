@@ -486,7 +486,10 @@ pub(super) fn submit(
             .get(&ctx)
             .context("Invalid context handle")?
             .timeline_semaphore;
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
         let queue = ld.queue;
         let signal_info = vk::SemaphoreSubmitInfo::default()
             .semaphore(timeline_sem)
@@ -2168,9 +2171,7 @@ fn submit_graph_impl(
             .context("Invalid context handle")?
             .command_pool;
         unsafe {
-            submit_device
-                .device
-                .free_command_buffers(ctx_pool, &[cmd]);
+            submit_device.device.free_command_buffers(ctx_pool, &[cmd]);
             if let Some(prof) = vk_gpu_profile.take() {
                 submit_device.device.destroy_query_pool(prof.pool, None);
             }
@@ -2299,10 +2300,7 @@ pub(super) fn try_resubmit_retained(
         .context("Invalid context handle")?
         .device;
     let retained_cb = {
-        let sc = state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?;
+        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
         match sc.retained_compute_cb.as_ref() {
             Some(r) if r.fingerprint == key => Some(r.command_buffer),
             _ => None,

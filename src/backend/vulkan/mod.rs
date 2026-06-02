@@ -1105,11 +1105,7 @@ impl GpuBackend for VulkanBackend {
         let Some(ld) = self.state.devices.get(&sc.device) else {
             return 0;
         };
-        unsafe {
-            ld.device
-                .get_semaphore_counter_value(sc.timeline_semaphore)
-        }
-        .unwrap_or(0)
+        unsafe { ld.device.get_semaphore_counter_value(sc.timeline_semaphore) }.unwrap_or(0)
     }
 
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {

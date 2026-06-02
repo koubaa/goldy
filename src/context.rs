@@ -573,7 +573,11 @@ mod tests {
         let tv_a = ctx_a.submit(&mut graph).unwrap();
         assert!(tv_a > 0);
         assert_eq!(ctx_a.gpu_progress(), tv_a);
-        assert_eq!(ctx_b.gpu_progress(), 0, "context B must not observe A's submit");
+        assert_eq!(
+            ctx_b.gpu_progress(),
+            0,
+            "context B must not observe A's submit"
+        );
     }
 
     #[test]

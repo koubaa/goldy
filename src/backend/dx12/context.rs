@@ -36,9 +36,11 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
     let fence: ID3D12Fence = unsafe { ld.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create per-context DX12 fence")?;
 
-    let compute_initial_allocator: ID3D12CommandAllocator =
-        unsafe { ld.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
-            .context("Failed to create per-context compute command allocator")?;
+    let compute_initial_allocator: ID3D12CommandAllocator = unsafe {
+        ld.device
+            .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+    }
+    .context("Failed to create per-context compute command allocator")?;
     let compute_allocator_pool = vec![super::types::ComputeAllocatorSlot {
         allocator: compute_initial_allocator,
         fence_value: 0,
