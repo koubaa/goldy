@@ -43,7 +43,6 @@ struct FrameSlot<T> {
 /// 3. [`Self::end_frame_standalone`] or [`Self::end_frame_for_surface`].  
 /// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
 pub struct FrameOrchestrator<T> {
-    device: Device,
     context: Context,
     max_depth: usize,
     ring: VecDeque<FrameSlot<T>>,
@@ -62,7 +61,6 @@ impl<T> FrameOrchestrator<T> {
     /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire.
     pub fn new(context: &Context, max_depth: usize) -> Self {
         Self {
-            device: context.device().clone(),
             context: context.clone(),
             max_depth: max_depth.max(1),
             ring: VecDeque::new(),
@@ -346,7 +344,7 @@ impl<T> FrameOrchestrator<T> {
                 self.context.wait_until(timeline)?;
             }
             retire(
-                &self.device,
+                self.context.device(),
                 RetiredFrame {
                     timeline,
                     data: slot.data,
@@ -398,7 +396,7 @@ impl<T> FrameOrchestrator<T> {
                 {
                     let _rz = tracy_zone!("orchestrator.retire_cb");
                     retire(
-                        &self.device,
+                        self.context.device(),
                         RetiredFrame {
                             timeline,
                             data: slot.data,

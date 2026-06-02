@@ -61,25 +61,42 @@ pub(in crate::backend::metal) fn drain_completed_cbs(ld: &mut types::LogicalDevi
     }
 }
 
+/// Block until scheduled timeline values have been signaled on one device, or timeout.
+pub(in crate::backend::metal) fn wait_device_idle(
+    state: &MetalState,
+    device: DeviceHandle,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    if state.device_lost.load(Ordering::Relaxed) {
+        anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
+    }
+    let ld = state
+        .devices
+        .get(&device)
+        .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
+    let target = ld.timeline_scheduled_max;
+    if target == 0 {
+        return Ok(());
+    }
+    let timeout = std::time::Duration::from_millis(5000);
+    if !ld.timeline_waiter.wait_until(target, timeout) {
+        state.device_lost.store(true, Ordering::Relaxed);
+        anyhow::bail!(
+            "GPU wait_device_idle timed out after {}ms",
+            timeout.as_millis()
+        );
+    }
+    Ok(())
+}
+
 /// Block until scheduled timeline values have been signaled on every device, or timeout.
 pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Result<()> {
     use std::sync::atomic::Ordering;
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
     }
-    let timeout = std::time::Duration::from_millis(5000);
-    for ld in state.devices.values() {
-        let target = ld.timeline_scheduled_max;
-        if target == 0 {
-            continue;
-        }
-        if !ld.timeline_waiter.wait_until(target, timeout) {
-            state.device_lost.store(true, Ordering::Relaxed);
-            anyhow::bail!(
-                "GPU wait_all_in_flight timed out after {}ms",
-                timeout.as_millis()
-            );
-        }
+    for device in state.devices.keys().copied().collect::<Vec<_>>() {
+        wait_device_idle(state, device)?;
     }
     Ok(())
 }
@@ -180,8 +197,8 @@ impl GpuBackend for MetalBackend {
         device::destroy(&mut self.state, device);
     }
 
-    fn device_wait_idle(&mut self, _device: DeviceHandle) -> Result<()> {
-        wait_all_in_flight(&self.state)
+    fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
+        wait_device_idle(&self.state, device)
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {

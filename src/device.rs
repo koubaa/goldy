@@ -1078,20 +1078,17 @@ impl Drop for DeviceInner {
             device_type = ?self.adapter.device_type(),
             "Destroying GPU device"
         );
-        // Wait for all submitted GPU work to complete. This covers any in-flight work not
-        // covered by the placement-heap wait (e.g. non-transient submits held by callers).
-        // Skip the wait if the device is already lost: the hardware cannot make progress
-        // and backends handle per-object teardown ordering inside destroy_device.
+        // Wait for all GPU work on this device to complete before tearing down resources.
+        // Contexts must be dropped before DeviceInner; device_wait_idle is the device-wide fence.
+        // Skip if already lost: the hardware cannot make progress and destroy_device orders teardown.
         let already_lost = self.backend.lock().unwrap().is_device_lost(self.handle);
         if !already_lost {
             let mut backend = self.backend.lock().unwrap();
             let _ = backend.device_wait_idle(self.handle);
         }
-        // Drop all deferred payloads. The GPU has completed all submitted work (high-water
-        // wait above), so it is safe to release any resources that were deferred.
+        // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
         // Drop the placement heap (and its views/buffer) while the device is still alive.
-        // The heap's in-flight work is already covered by the high-water wait above.
         if let Ok(mut heap_guard) = self.placement_heap.lock() {
             *heap_guard = None;
         }
