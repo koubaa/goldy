@@ -180,7 +180,7 @@ impl GpuBackend for MetalBackend {
         device::destroy(&mut self.state, device);
     }
 
-    fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
+    fn device_wait_idle(&mut self, _device: DeviceHandle) -> Result<()> {
         wait_all_in_flight(&self.state)
     }
 

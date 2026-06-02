@@ -484,7 +484,7 @@ fn device_capabilities_metal_reports_constant_resize() {
     use goldy::{types::BufferResizeCost, BackendType, Instance};
     let inst = Instance::new().expect("i");
     let device = request_device_preferring(&inst, goldy::DeviceType::IntegratedGpu);
-    let ctx = device.create_context().expect("context");
+    let _ctx = device.create_context().expect("context");
     assert_eq!(device.backend_type(), BackendType::Metal);
     let caps = device.capabilities();
     assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);

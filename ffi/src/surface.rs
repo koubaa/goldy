@@ -6,7 +6,9 @@
 #[cfg(windows)]
 use crate::device::GoldyDevice;
 use crate::encoder::GoldyCommandEncoder;
-use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
+#[cfg(windows)]
+use crate::error::set_last_error;
+use crate::error::{set_last_error_from_anyhow, GoldyResult};
 use crate::types::GoldyTextureFormat;
 use std::ptr;
 

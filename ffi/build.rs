@@ -39,8 +39,6 @@ fn generate_c_header(crate_dir: &Path) {
         .generate()
         .expect("Failed to generate C header")
         .write_to_file(&output_file);
-
-    println!("cargo:warning=Generated C header at {:?}", output_file);
 }
 
 fn copy_slang_libraries(crate_dir: &Path, out_dir: &Path) {
@@ -88,28 +86,16 @@ fn copy_slang_libraries(crate_dir: &Path, out_dir: &Path) {
     // We want to copy to target/release/ alongside the .dll
     let target_dir = find_target_output_dir(out_dir);
 
-    let mut copied = 0;
     for file_name in &files {
         let src = slang_bin_dir.join(file_name);
         if src.exists() {
             let dest = target_dir.join(file_name);
             if let Err(e) = fs::copy(&src, &dest) {
                 println!("cargo:warning=Failed to copy {}: {}", file_name, e);
-            } else {
-                copied += 1;
             }
         } else {
             println!("cargo:warning=Slang file not found: {}", src.display());
         }
-    }
-
-    if copied > 0 {
-        println!(
-            "cargo:warning=Copied {}/{} Slang libraries to {}",
-            copied,
-            files.len(),
-            target_dir.display()
-        );
     }
 
     // Also emit a path that binding build scripts can use

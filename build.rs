@@ -180,10 +180,6 @@ fn generate_embedded_module(version: &str, vendored_dir: &Path, platform_info: &
     content.push_str("];\n");
 
     fs::write(&embedded_path, content).expect("Failed to write slang_embedded.rs");
-    println!(
-        "cargo:warning=Generated slang_embedded.rs with {} files",
-        platform_info.files.len()
-    );
 }
 
 fn load_manifest(path: &Path) -> io::Result<SlangManifest> {
