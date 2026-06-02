@@ -283,10 +283,11 @@ pub trait VramAllocator: Send + Sync {
 /// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::boundary_crossed`],
 /// and [`VramAllocator::drain`].
 ///
-/// **Single-writer invariant:** the ring is device-installed and keyed by timeline epochs
-/// from [`Context::boundary_crossed`]. Reclamation is sound when one context's submission
-/// stream drives `boundary_crossed` for that device; concurrent deferral from multiple
-/// contexts sharing one ring is not yet supported (goldy #179 memory-ownership follow-up).
+/// **Device-owned ring:** the ring is device-installed and keyed by device-global timeline
+/// epochs from [`Context::defer_release`]. [`Context::boundary_crossed`] drains entries
+/// when `epoch <= device_retired` (max completed over all live contexts). Any context may
+/// poll boundaries; multi-context deferral is sound under this conservative collapse.
+/// Per-handle last-touch reclamation (tighter than `device_retired`) is a future optimization.
 pub struct DefaultVramAllocator {
     deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
 }

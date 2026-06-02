@@ -315,6 +315,7 @@ impl Adapter {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 placement_heap: Mutex::new(None),
+                owns_backend_device: true,
             }),
         })
     }
@@ -443,6 +444,9 @@ pub(crate) struct DeviceInner {
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
     pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
+    /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
+    /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
+    pub(crate) owns_backend_device: bool,
 }
 
 impl Clone for Device {
@@ -608,6 +612,7 @@ impl Device {
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
                 placement_heap: Mutex::new(None),
+                owns_backend_device: false,
             }),
         }
     }
@@ -1098,6 +1103,7 @@ impl Device {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 placement_heap: Mutex::new(None),
+                owns_backend_device: true,
             }),
         })
     }
@@ -1109,7 +1115,8 @@ impl Drop for DeviceInner {
             %self.handle,
             adapter_id = self.adapter.id(),
             device_type = ?self.adapter.device_type(),
-            "Destroying GPU device"
+            owns_backend = self.owns_backend_device,
+            "Dropping GPU device handle"
         );
         // Wait for all GPU work on this device to complete before tearing down resources.
         // Contexts must be dropped before DeviceInner; device_wait_idle is the device-wide fence.
@@ -1125,8 +1132,10 @@ impl Drop for DeviceInner {
         if let Ok(mut heap_guard) = self.placement_heap.lock() {
             *heap_guard = None;
         }
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_device(self.handle);
+        if self.owns_backend_device {
+            let mut backend = self.backend.lock().unwrap();
+            backend.destroy_device(self.handle);
+        }
     }
 }
 
@@ -1137,6 +1146,22 @@ mod tests {
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    #[test]
+    fn with_vram_allocator_alias_does_not_destroy_backend_device() {
+        use std::sync::Arc;
+
+        let device = test_device();
+        let alias = device.with_vram_allocator(Arc::new(
+            crate::vram_allocator::DefaultVramAllocator::new(),
+        ));
+        assert!(device.is_valid());
+        drop(alias);
+        assert!(
+            device.is_valid(),
+            "dropping a with_vram_allocator alias must not destroy the backend device"
+        );
     }
 
     #[test]
