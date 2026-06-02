@@ -67,7 +67,7 @@ impl PySurface {
             let window_wrapper = Win32WindowWrapper {
                 hwnd: hwnd as *mut std::ffi::c_void,
             };
-            goldy::Surface::new(&device.inner, &window_wrapper).into_py_result()?
+            goldy::Surface::new(&ctx.inner, &window_wrapper).into_py_result()?
         };
 
         #[cfg(target_os = "linux")]
@@ -83,7 +83,7 @@ impl PySurface {
                 window: x11_window as u32,
                 display: x11_display as *mut std::ffi::c_void,
             };
-            goldy::Surface::new(&device.inner, &window_wrapper).into_py_result()?
+            goldy::Surface::new(&ctx.inner, &window_wrapper).into_py_result()?
         };
 
         #[cfg(target_os = "macos")]
@@ -104,7 +104,7 @@ impl PySurface {
             };
 
             let window_wrapper = CocoaWindowWrapper { ns_view };
-            goldy::Surface::new(&device.inner, &window_wrapper).into_py_result()?
+            goldy::Surface::new(&ctx.inner, &window_wrapper).into_py_result()?
         };
 
         Ok(PySurface { inner: surface })

@@ -124,6 +124,8 @@ impl MetalBackend {
                 device_lost: std::sync::atomic::AtomicBool::new(false),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
+                contexts: std::collections::HashMap::new(),
+                next_context_id: 1,
                 buffers: std::collections::HashMap::new(),
                 next_buffer_handle: 1,
                 shaders: std::collections::HashMap::new(),
@@ -174,7 +176,36 @@ impl GpuBackend for MetalBackend {
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
+        self.state
+            .contexts
+            .retain(|_, d| *d != device);
         device::destroy(&mut self.state, device);
+    }
+
+    fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
+        wait_all_in_flight(&self.state)
+    }
+
+    fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
+        if !self.state.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+        let id = self.state.next_context_id;
+        self.state.next_context_id = self.state.next_context_id.saturating_add(1);
+        self.state.contexts.insert(id, device);
+        Ok(id)
+    }
+
+    fn destroy_context(&mut self, ctx: ContextHandle) {
+        self.state.contexts.remove(&ctx);
+    }
+
+    fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
+        *self
+            .state
+            .contexts
+            .get(&ctx)
+            .expect("invalid context handle")
     }
 
     fn is_device_valid(&self, device: DeviceHandle) -> bool {
@@ -567,7 +598,8 @@ impl GpuBackend for MetalBackend {
         compute::create(&mut self.state, device, compute_shader)
     }
 
-    fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
+    fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
+        let device = self.context_device(ctx);
         self.state
             .devices
             .get(&device)
@@ -575,7 +607,8 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
-    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal> {
+    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+        let device = self.context_device(ctx);
         if let Some(ld) = self.state.devices.get(&device) {
             let returns: Vec<(SurfaceHandle, u32)> =
                 std::mem::take(&mut *ld.pending_swapchain_returns.lock().unwrap());
@@ -593,8 +626,9 @@ impl GpuBackend for MetalBackend {
 
     fn peek_oldest_in_flight(
         &self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
     ) -> Option<crate::timeline::TimelineValue> {
+        let device = self.context_device(ctx);
         let ld = self.state.devices.get(&device)?;
         let progress = ld.timeline_event.as_ref().signaled_value();
         let scheduled = ld.timeline_next.saturating_sub(1);
@@ -615,10 +649,11 @@ impl GpuBackend for MetalBackend {
 
     fn wait_until(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
+        let device = self.context_device(ctx);
         let _tz = crate::tracy_zone!("mtl.wait_until");
 
         if self.state.device_lost.load(Ordering::Relaxed) {
@@ -626,7 +661,7 @@ impl GpuBackend for MetalBackend {
         }
 
         // Fast path: GPU has already passed this timeline value.
-        if self.gpu_progress(device) >= value {
+        if self.gpu_progress(ctx) >= value {
             let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
             if let Some(ld) = self.state.devices.get_mut(&device) {
                 drain_completed_cbs(ld);
@@ -690,11 +725,12 @@ impl GpuBackend for MetalBackend {
 
     fn wait_until_timeout(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
         timeout_ms: u32,
     ) -> Result<bool> {
         use std::sync::atomic::Ordering;
+        let device = self.context_device(ctx);
 
         if self.state.device_lost.load(Ordering::Relaxed) {
             anyhow::bail!("Metal device lost");
@@ -725,17 +761,19 @@ impl GpuBackend for MetalBackend {
 
     fn submit_standalone(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue> {
+        let device = self.context_device(ctx);
         compute::submit(&mut self.state, device, commands)
     }
 
     fn submit_graph(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
+        let device = self.context_device(ctx);
         compute::submit_graph(&mut self.state, device, commands)
     }
 
@@ -785,7 +823,8 @@ impl GpuBackend for MetalBackend {
         types::MAX_RESOURCES_PER_CATEGORY
     }
 
-    fn flush_deferred_deletions(&mut self, device: DeviceHandle) {
+    fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
+        let device = self.context_device(ctx);
         if let Some(ld) = self.state.devices.get_mut(&device) {
             ld.process_deletion_queue_up_to_signaled();
         }
@@ -793,9 +832,10 @@ impl GpuBackend for MetalBackend {
 
     fn set_reclamation_context(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         epoch: Option<crate::timeline::TimelineValue>,
     ) {
+        let device = self.context_device(ctx);
         if let Some(ld) = self.state.devices.get_mut(&device) {
             ld.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
         }
@@ -839,7 +879,8 @@ impl GpuBackend for MetalBackend {
         tracing::info!("Released Metal Slang compiler session (freed host-side compiler memory)");
     }
 
-    fn deferred_deletion_pending_count(&self, device: DeviceHandle) -> usize {
+    fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
+        let device = self.context_device(ctx);
         self.state
             .devices
             .get(&device)
@@ -869,7 +910,8 @@ impl GpuBackend for MetalBackend {
             })
     }
 
-    fn in_flight_command_buffer_count(&self, device: DeviceHandle) -> usize {
+    fn in_flight_command_buffer_count(&self, ctx: ContextHandle) -> usize {
+        let device = self.context_device(ctx);
         self.state
             .devices
             .get(&device)

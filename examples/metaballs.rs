@@ -56,9 +56,10 @@ impl App {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
+        let ctx = device.create_context()?;
 
         // Create surface first to get the correct format
-        let surface = Surface::new(&device, window.as_ref())?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::METABALLS)?;

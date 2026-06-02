@@ -60,10 +60,10 @@ pub struct FrameOrchestrator<T> {
 impl<T> FrameOrchestrator<T> {
     /// Create an orchestrator. `max_depth` bounds how many frames may be in flight before the
     /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire.
-    pub fn new(device: &Device, max_depth: usize) -> Self {
+    pub fn new(context: &Context, max_depth: usize) -> Self {
         Self {
-            device: device.clone(),
-            context: device.create_context(),
+            device: context.device().clone(),
+            context: context.clone(),
             max_depth: max_depth.max(1),
             ring: VecDeque::new(),
             next_id: 1,
@@ -215,7 +215,7 @@ impl<T> FrameOrchestrator<T> {
         graph: &mut TaskGraph,
     ) -> Result<TimelineValue, GoldyError> {
         if !self.retains_command_buffers() {
-            return self.device.submit_pipelined(graph);
+            return self.context.submit_pipelined(graph);
         }
 
         // Compute the full content fingerprint — covers pipeline, dispatch dims, push constants.
@@ -223,7 +223,7 @@ impl<T> FrameOrchestrator<T> {
 
         // Attempt zero-cost resubmission when the fingerprint matches the stored CB.
         if self.last_retention_key == Some(fp) {
-            match self.device.try_resubmit_retained(fp)? {
+            match self.context.try_resubmit_retained(fp)? {
                 Some(tv) => {
                     tracing::trace!(
                         target: "goldy::retention",
@@ -252,7 +252,7 @@ impl<T> FrameOrchestrator<T> {
         }
 
         // Record the command buffer and store it for the next frame.
-        let tv = self.device.submit_pipelined_and_retain(graph)?;
+        let tv = self.context.submit_pipelined_and_retain(graph)?;
         self.last_retention_key = Some(fp);
         Ok(tv)
     }
@@ -338,7 +338,7 @@ impl<T> FrameOrchestrator<T> {
             let timeline = match slot.timeline {
                 Some(t) => t,
                 None => self
-                    .device
+                    .context
                     .high_water_timeline()
                     .max(self.context.gpu_progress()),
             };

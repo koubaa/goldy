@@ -6,7 +6,7 @@
 #[cfg(windows)]
 use crate::device::GoldyDevice;
 use crate::encoder::GoldyCommandEncoder;
-use crate::error::{set_last_error_from_anyhow, GoldyResult};
+use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::types::GoldyTextureFormat;
 use std::ptr;
 
@@ -278,7 +278,15 @@ mod windows_surface {
 
         let window = Win32Window { hwnd: hwnd_nonzero };
 
-        match goldy::Surface::new(&(*device).inner, &window) {
+        let device = &(*device).inner;
+        let ctx = match device.create_context() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                set_last_error(format!("{e}"));
+                return ptr::null_mut();
+            }
+        };
+        match goldy::Surface::new(&ctx, &window) {
             Ok(surface) => Box::into_raw(Box::new(GoldySurface { inner: surface })),
             Err(e) => {
                 set_last_error_from_anyhow(&e);

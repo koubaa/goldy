@@ -19,7 +19,9 @@ use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{Buffer, DataAccess, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 mod common;
-use common::submission_context;
+#[path = "common/submission.rs"]
+mod submission;
+use submission::submission_context;
 
 fn make_device() -> Device {
     let instance = Instance::new().expect("Instance::new");
@@ -107,7 +109,7 @@ fn buffer_drop_frees_heap_space_after_flush() {
     let mut graph = TaskGraph::new();
     let setup_buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&setup_buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
     ctx.wait_until(tv).unwrap();
 
     // Allocate a large buffer to create overflow.
@@ -136,9 +138,9 @@ fn buffer_drop_frees_heap_space_after_flush() {
     // Submit + wait so the deletion queue processes the drops.
     let mut graph2 = TaskGraph::new();
     graph2.clear_buffer(&setup_buf, 0, 256);
-    let tv2 = device.submit_pipelined(&mut graph2).unwrap();
+    let tv2 = ctx.submit_pipelined(&mut graph2).unwrap();
     ctx.wait_until(tv2).unwrap();
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
     device.compact_overflow_heaps();
 
     let overflow_after = device.buffer_heap_stats().unwrap().overflow_count;
@@ -189,6 +191,7 @@ fn many_buffers_create_overflow_heaps() {
 #[test]
 fn compact_overflow_removes_empty_heaps() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let alloc_size = 8 * 1024 * 1024u64;
 
     // Fill primary + create overflow
@@ -210,7 +213,7 @@ fn compact_overflow_removes_empty_heaps() {
 
     // Drop all buffers and flush
     drop(buffers);
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
     device.compact_overflow_heaps();
 
     let overflow_after = device.buffer_heap_stats().unwrap().overflow_count;
@@ -236,7 +239,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
     assert!(tv > 0, "submission should advance timeline");
 
     // Now defer some buffers at that timeline value.
@@ -256,13 +259,13 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
     for b in held_buffers {
         payload.push(b);
     }
-    device.defer_release(tv, payload);
+    ctx.defer_release(tv, payload);
 
     // Now allocate more buffers. The heap may be under pressure, but the
     // self-regulation logic should wait for tv to retire, flush, and succeed.
     // First, make sure the GPU has completed (wait).
     ctx.wait_until(tv).unwrap();
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
 
     // Now allocating should succeed because we reclaimed the deferred buffers.
     let _fresh = Buffer::new_with_stride_and_flags(
@@ -279,6 +282,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
 #[test]
 fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let alloc_size = 2 * 1024 * 1024u64;
     let frames = 30;
 
@@ -301,7 +305,7 @@ fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
         for b in &buffers {
             graph.clear_buffer(b, 0, alloc_size);
         }
-        let tv = device
+        let tv = ctx
             .submit_pipelined(&mut graph)
             .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
 
@@ -310,10 +314,10 @@ fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
         for b in buffers {
             payload.push(b);
         }
-        device.defer_release(tv, payload);
+        ctx.defer_release(tv, payload);
 
         // Flush any completed work from previous frames.
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
     }
 
     // If we got here without panicking, the heap self-regulated successfully.
@@ -352,15 +356,15 @@ fn steady_state_overflow_stays_bounded() {
         for b in &buffers {
             graph.clear_buffer(b, 0, alloc_size);
         }
-        let tv = device.submit_pipelined(&mut graph).unwrap();
+        let tv = ctx.submit_pipelined(&mut graph).unwrap();
         let mut payload = goldy::DeferredPayload::new();
         for b in buffers {
             payload.push(b);
         }
-        device.defer_release(tv, payload);
+        ctx.defer_release(tv, payload);
         ctx.wait_until(tv).unwrap();
-        device.flush_deferred_deletions();
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
     }
     device.compact_overflow_heaps();
 
@@ -387,15 +391,15 @@ fn steady_state_overflow_stays_bounded() {
         for b in &buffers {
             graph.clear_buffer(b, 0, alloc_size);
         }
-        let tv = device.submit_pipelined(&mut graph).unwrap();
+        let tv = ctx.submit_pipelined(&mut graph).unwrap();
         let mut payload = goldy::DeferredPayload::new();
         for b in buffers {
             payload.push(b);
         }
-        device.defer_release(tv, payload);
+        ctx.defer_release(tv, payload);
         ctx.wait_until(tv).unwrap();
-        device.flush_deferred_deletions();
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
         device.compact_overflow_heaps();
 
         max_overflow = max_overflow.max(device.buffer_heap_stats().unwrap().overflow_count);
@@ -436,6 +440,7 @@ fn texture_allocation_increments_count() {
 #[test]
 fn many_textures_create_overflow_then_compact() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let mut textures = Vec::new();
     for _ in 0..20 {
@@ -455,7 +460,7 @@ fn many_textures_create_overflow_then_compact() {
     // Textures are 512x512 RGBA = 1MB each, primary heap varies but likely overflows.
     if overflow > 0 {
         drop(textures);
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
         device.compact_overflow_heaps();
         let after = device.texture_heap_stats().unwrap().overflow_count;
         assert!(
@@ -474,7 +479,7 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
     // Allocate textures and defer them.
     let mut payload = goldy::DeferredPayload::new();
@@ -490,11 +495,11 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
             .unwrap();
         payload.push(tex);
     }
-    device.defer_release(tv, payload);
+    ctx.defer_release(tv, payload);
 
     // Wait and flush.
     ctx.wait_until(tv).unwrap();
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
 
     // Should succeed now.
     let _tex = device
@@ -523,19 +528,19 @@ fn flush_deferred_deletions_advances_with_gpu_progress() {
         let mut graph = TaskGraph::new();
         let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
         graph.clear_buffer(&buf, 0, 256);
-        let tv = device.submit_pipelined(&mut graph).unwrap();
-        device.defer_until(tv, buf);
+        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        ctx.defer_until(tv, buf);
         timelines.push(tv);
     }
 
-    assert!(device.has_deferred_payloads());
-    let oldest_before = device.oldest_deferred_epoch().unwrap();
+    assert!(ctx.has_deferred_payloads());
+    let oldest_before = ctx.oldest_deferred_epoch().unwrap();
 
     // Wait for the first frame and flush.
     ctx.wait_until(timelines[0]).unwrap();
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
 
-    let oldest_after = device.oldest_deferred_epoch();
+    let oldest_after = ctx.oldest_deferred_epoch();
     if let Some(after) = oldest_after {
         assert!(
             after > oldest_before,
@@ -547,8 +552,9 @@ fn flush_deferred_deletions_advances_with_gpu_progress() {
 #[test]
 fn oldest_deferred_epoch_is_none_when_empty() {
     let device = make_device();
-    assert_eq!(device.oldest_deferred_epoch(), None);
-    assert!(!device.has_deferred_payloads());
+    let ctx = submission_context(&device);
+    assert_eq!(ctx.oldest_deferred_epoch(), None);
+    assert!(!ctx.has_deferred_payloads());
 }
 
 #[test]
@@ -559,15 +565,15 @@ fn wait_and_flush_reclaims_all_deferred() {
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
-    device.defer_until(tv, buf);
-    assert!(device.has_deferred_payloads());
+    ctx.defer_until(tv, buf);
+    assert!(ctx.has_deferred_payloads());
 
     ctx.wait_until(tv).unwrap();
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
 
-    assert!(!device.has_deferred_payloads());
+    assert!(!ctx.has_deferred_payloads());
 }
 
 // ===========================================================================
@@ -578,15 +584,16 @@ fn wait_and_flush_reclaims_all_deferred() {
 #[test]
 fn in_flight_cb_count_increases_after_submit() {
     let device = make_device();
-    assert_eq!(device.in_flight_command_buffer_count(), 0);
+    let ctx = submission_context(&device);
+    assert_eq!(ctx.in_flight_command_buffer_count(), 0);
 
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let _tv = device.submit_pipelined(&mut graph).unwrap();
+    let _tv = ctx.submit_pipelined(&mut graph).unwrap();
 
     assert!(
-        device.in_flight_command_buffer_count() > 0,
+        ctx.in_flight_command_buffer_count() > 0,
         "should track at least one in-flight CB after submit"
     );
 }
@@ -600,14 +607,14 @@ fn in_flight_cbs_drain_after_wait() {
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
-    let before = device.in_flight_command_buffer_count();
+    let before = ctx.in_flight_command_buffer_count();
     assert!(before > 0);
 
     ctx.wait_until(tv).unwrap();
 
-    let after = device.in_flight_command_buffer_count();
+    let after = ctx.in_flight_command_buffer_count();
     assert!(
         after < before,
         "in-flight CBs should drain after wait: before={before} after={after}"
@@ -627,7 +634,7 @@ fn gpu_progress_advances_after_wait() {
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
     ctx.wait_until(tv).unwrap();
     let after = ctx.gpu_progress();
@@ -640,13 +647,14 @@ fn gpu_progress_advances_after_wait() {
 #[test]
 fn multiple_submits_advance_timeline_monotonically() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let mut prev_tv = 0;
 
     for _ in 0..5 {
         let mut graph = TaskGraph::new();
         let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
         graph.clear_buffer(&buf, 0, 256);
-        let tv = device.submit_pipelined(&mut graph).unwrap();
+        let tv = ctx.submit_pipelined(&mut graph).unwrap();
         assert!(tv > prev_tv, "timeline must be monotonically increasing");
         prev_tv = tv;
     }
@@ -659,17 +667,18 @@ fn multiple_submits_advance_timeline_monotonically() {
 #[test]
 fn deletion_queue_populated_after_buffer_drop() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Submit so we have a non-zero timeline barrier.
     let mut graph = TaskGraph::new();
     let trigger = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&trigger, 0, 256);
-    let _tv = device.submit_pipelined(&mut graph).unwrap();
+    let _tv = ctx.submit_pipelined(&mut graph).unwrap();
 
-    let before = device.deferred_deletion_pending_count();
+    let before = ctx.deferred_deletion_pending_count();
     let buf = Buffer::new(&device, 4096, DataAccess::Scattered).unwrap();
     drop(buf);
-    let after = device.deferred_deletion_pending_count();
+    let after = ctx.deferred_deletion_pending_count();
     assert!(
         after >= before,
         "deletion queue should grow after buffer drop: before={before} after={after}"
@@ -684,15 +693,15 @@ fn deletion_queue_drains_after_flush() {
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
     let extra = Buffer::new(&device, 4096, DataAccess::Scattered).unwrap();
     drop(extra);
 
-    let pending = device.deferred_deletion_pending_count();
+    let pending = ctx.deferred_deletion_pending_count();
     ctx.wait_until(tv).unwrap();
-    device.flush_deferred_deletions();
-    let after = device.deferred_deletion_pending_count();
+    ctx.flush_deferred_deletions();
+    let after = ctx.deferred_deletion_pending_count();
 
     // Should have processed at least the one we dropped.
     assert!(
@@ -708,6 +717,7 @@ fn deletion_queue_drains_after_flush() {
 #[test]
 fn rapid_submit_without_explicit_wait_survives_50_frames() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let alloc_size = 1024 * 1024u64;
 
     // Submit 50 frames as fast as possible, with NO explicit wait between frames.
@@ -730,7 +740,7 @@ fn rapid_submit_without_explicit_wait_survives_50_frames() {
         for b in &buffers {
             graph.clear_buffer(b, 0, alloc_size);
         }
-        let tv = device
+        let tv = ctx
             .submit_pipelined(&mut graph)
             .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
 
@@ -738,10 +748,10 @@ fn rapid_submit_without_explicit_wait_survives_50_frames() {
         for b in buffers {
             payload.push(b);
         }
-        device.defer_release(tv, payload);
+        ctx.defer_release(tv, payload);
 
         // Only non-blocking flush (no wait) — the allocator must self-regulate.
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
     }
 }
 
@@ -749,6 +759,7 @@ fn rapid_submit_without_explicit_wait_survives_50_frames() {
 #[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn rapid_submit_large_buffers_50_frames() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let alloc_size = 4 * 1024 * 1024u64;
 
     for frame in 0..50 {
@@ -769,7 +780,7 @@ fn rapid_submit_large_buffers_50_frames() {
         for b in &buffers {
             graph.clear_buffer(b, 0, alloc_size);
         }
-        let tv = device
+        let tv = ctx
             .submit_pipelined(&mut graph)
             .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
 
@@ -777,8 +788,8 @@ fn rapid_submit_large_buffers_50_frames() {
         for b in buffers {
             payload.push(b);
         }
-        device.defer_release(tv, payload);
-        device.flush_deferred_deletions();
+        ctx.defer_release(tv, payload);
+        ctx.flush_deferred_deletions();
     }
 }
 
@@ -822,6 +833,7 @@ fn overflow_count_never_exceeds_16() {
 #[test]
 fn mixed_buffer_and_texture_allocation_survives_30_frames() {
     let device = make_device();
+    let ctx = submission_context(&device);
     let buf_size = 2 * 1024 * 1024u64;
 
     for frame in 0..30 {
@@ -852,7 +864,7 @@ fn mixed_buffer_and_texture_allocation_survives_30_frames() {
         for b in &bufs {
             graph.clear_buffer(b, 0, buf_size);
         }
-        let tv = device
+        let tv = ctx
             .submit_pipelined(&mut graph)
             .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
 
@@ -861,8 +873,8 @@ fn mixed_buffer_and_texture_allocation_survives_30_frames() {
             payload.push(b);
         }
         payload.push(tex);
-        device.defer_release(tv, payload);
-        device.flush_deferred_deletions();
+        ctx.defer_release(tv, payload);
+        ctx.flush_deferred_deletions();
     }
 }
 
@@ -880,7 +892,7 @@ fn buffer_resize_works_under_heap_pressure() {
 
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&buf, 0, 1024);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
     ctx.wait_until(tv).unwrap();
 
     // Resize multiple times (triggers realloc + blit-copy on Metal).
@@ -907,7 +919,7 @@ fn buffer_resize_preserves_contents() {
     // Submit a fence to ensure the internal blit-copy has completed.
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&buf, 256, 256); // Touch bytes past the original data
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
     ctx.wait_until(tv).unwrap();
 
     // Read back — first 256 bytes should be preserved.
@@ -950,20 +962,20 @@ fn deferred_buffers_returned_to_caller_after_flush() {
     for b in &bufs {
         graph.clear_buffer(b, 0, 4096);
     }
-    let tv = device.submit_pipelined(&mut graph).unwrap();
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
     let token = Token {
         pending: Arc::clone(&pending),
         buffers: bufs,
     };
-    device.defer_until(tv, token);
+    ctx.defer_until(tv, token);
 
     // Before GPU completes: pending should be empty.
     assert_eq!(pending.lock().unwrap().len(), 0);
 
     // Wait and flush: token drops, buffers move to pending.
     ctx.wait_until(tv).unwrap();
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
 
     let returned = pending.lock().unwrap().len();
     assert_eq!(
@@ -979,9 +991,10 @@ fn deferred_buffers_returned_to_caller_after_flush() {
 #[test]
 fn zero_byte_flush_is_no_op() {
     let device = make_device();
+    let ctx = submission_context(&device);
     // Calling flush with no deferred work should not panic or error.
-    device.flush_deferred_deletions();
-    assert!(!device.has_deferred_payloads());
+    ctx.flush_deferred_deletions();
+    assert!(!ctx.has_deferred_payloads());
 }
 
 #[test]
@@ -991,14 +1004,14 @@ fn double_flush_is_idempotent() {
     let mut graph = TaskGraph::new();
     let buf = Buffer::new(&device, 256, DataAccess::Scattered).unwrap();
     graph.clear_buffer(&buf, 0, 256);
-    let tv = device.submit_pipelined(&mut graph).unwrap();
-    device.defer_until(tv, buf);
+    let tv = ctx.submit_pipelined(&mut graph).unwrap();
+    ctx.defer_until(tv, buf);
 
     ctx.wait_until(tv).unwrap();
-    device.flush_deferred_deletions();
+    ctx.flush_deferred_deletions();
     // Second flush should be safe and not crash.
-    device.flush_deferred_deletions();
-    assert!(!device.has_deferred_payloads());
+    ctx.flush_deferred_deletions();
+    assert!(!ctx.has_deferred_payloads());
 }
 
 #[test]

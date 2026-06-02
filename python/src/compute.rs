@@ -88,7 +88,7 @@ impl PyComputeEncoder {
     /// This submits the compute work to the GPU and waits for completion.
     fn dispatch(&self, device: &PyDevice) -> PyResult<()> {
         let encoder = self.inner.lock().unwrap();
-        encoder.dispatch(&device.inner).into_py_result()
+        encoder.dispatch(&ctx.inner).into_py_result()
     }
 
     fn __repr__(&self) -> String {

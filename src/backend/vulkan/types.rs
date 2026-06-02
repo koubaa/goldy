@@ -925,6 +925,9 @@ pub(super) struct VulkanState {
     pub physical_devices: Vec<PhysicalDeviceInfo>,
     pub devices: HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
+    /// Submission contexts (1:1 alias onto device timeline until per-context streams land).
+    pub contexts: HashMap<super::ContextHandle, DeviceHandle>,
+    pub next_context_id: super::ContextHandle,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: HashMap<ShaderHandle, ShaderState>,

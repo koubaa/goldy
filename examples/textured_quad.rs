@@ -149,7 +149,8 @@ impl App {
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = Arc::new(self.instance.request_adapter(&RequestAdapterOptions::default())?.request_device(&DeviceDescriptor::default())?);
-        let surface = Surface::new(&device, window.as_ref())?;
+        let ctx = device.create_context()?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Create shader
         let shader = ShaderModule::from_slang(&device, TEXTURED_SHADER)?;

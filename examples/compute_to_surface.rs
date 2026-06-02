@@ -113,9 +113,10 @@ impl App {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
+        let ctx = device.create_context()?;
 
         let surface = Surface::new_with_config(
-            &device,
+            &ctx,
             window.as_ref(),
             SurfaceConfig {
                 present_mode: PresentMode::Fifo,

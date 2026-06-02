@@ -17,6 +17,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::backend::mock::MockBackend;
+    use crate::context::Context;
     use crate::device::Device;
     use crate::placement_heap::PlacementHeap;
     use crate::signal::Signal;
@@ -28,6 +29,10 @@ mod tests {
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    fn test_ctx(device: &Device) -> Context {
+        device.create_context().unwrap()
     }
 
     fn small_config() -> TransientAllocatorConfig {
@@ -53,15 +58,16 @@ mod tests {
     #[test]
     fn u0_vram_ring_empties_after_submit_wait_flush() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = ctx.submit(&mut graph).expect("submit");
 
         let alive = Arc::new(99u32);
         let weak = Arc::downgrade(&alive);
-        device.defer_until(tv, alive);
+        ctx.defer_until(tv, alive);
 
         assert!(
-            device.has_deferred_payloads(),
+            ctx.has_deferred_payloads(),
             "VRAM ring must hold payload before flush"
         );
         assert!(
@@ -69,11 +75,11 @@ mod tests {
             "payload must stay alive before flush"
         );
 
-        device.wait_until_impl(tv).expect("wait");
+        ctx.wait_until(tv).expect("wait");
 
         // GPU has retired the epoch, but reclaim has not run yet.
         assert!(
-            device.has_deferred_payloads(),
+            ctx.has_deferred_payloads(),
             "VRAM ring must still hold payload after wait, before flush"
         );
         assert!(
@@ -81,10 +87,10 @@ mod tests {
             "payload must stay alive after wait, before flush"
         );
 
-        device.flush_deferred_deletions();
+        ctx.flush_deferred_deletions();
 
         assert!(
-            !device.has_deferred_payloads(),
+            !ctx.has_deferred_payloads(),
             "VRAM ring must be empty after submit + wait + flush"
         );
         assert!(
@@ -97,13 +103,14 @@ mod tests {
     #[test]
     fn u0_heap_free_range_recycles_after_epoch() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
 
         alloc.begin_frame(&device, 0).unwrap();
         let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         let offset = v1.offset();
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = ctx.submit(&mut graph).expect("submit");
         let far_epoch = tv + 100;
 
         alloc.free(offset, 1024, Some(far_epoch));
@@ -117,7 +124,7 @@ mod tests {
             "freed range must not be reused before epoch retires"
         );
 
-        device.wait_until_impl(far_epoch).expect("wait");
+        ctx.wait_until(far_epoch).expect("wait");
         alloc.begin_frame(&device, 0).unwrap();
         let reused = alloc
             .alloc(&device, 1024, Some(4))
@@ -162,10 +169,11 @@ mod tests {
         assert_eq!(heap.in_flight_count(), 3, "two old + one new in flight");
     }
 
-    /// `Device::boundary_crossed` drives placement-heap ring reclaim for device-owned heaps.
+    /// `Context::boundary_crossed` drives placement-heap ring reclaim for device-owned heaps.
     #[test]
     fn u7_boundary_crossed_reclaims_placement_heap_ring() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut heap = PlacementHeap::new(&device, 3 * 1024, 1024).unwrap();
 
         let _o1 = heap.acquire(1024).unwrap();
@@ -178,7 +186,7 @@ mod tests {
 
         *device.inner.placement_heap.lock().unwrap() = Some(heap);
 
-        device.boundary_crossed(1);
+        ctx.boundary_crossed(1);
 
         let stats = device
             .placement_heap_stats()
@@ -193,15 +201,16 @@ mod tests {
     #[test]
     fn u3_signal_boundary_crossed_services_vram_ring() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = ctx.submit(&mut graph).expect("submit");
 
         let alive = Arc::new(42u32);
         let weak = Arc::downgrade(&alive);
-        device.defer_until(tv, alive);
-        assert!(device.has_deferred_payloads());
+        ctx.defer_until(tv, alive);
+        assert!(ctx.has_deferred_payloads());
 
-        let signals = device.poll_signals_and_service();
+        let signals = ctx.poll_signals_and_service();
         assert!(
             signals
                 .iter()
@@ -209,7 +218,7 @@ mod tests {
             "submit should post BoundaryCrossed for epoch {tv}"
         );
         assert!(
-            !device.has_deferred_payloads(),
+            !ctx.has_deferred_payloads(),
             "VRAM ring must empty after poll_signals_and_service"
         );
         assert!(weak.upgrade().is_none(), "payload must drop after service");
@@ -223,19 +232,20 @@ mod tests {
     #[test]
     fn pull_path_reclaims_without_signal_drain() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = ctx.submit(&mut graph).expect("submit");
 
         let alive = Arc::new(77u32);
         let weak = Arc::downgrade(&alive);
-        device.defer_until(tv, alive);
-        assert!(device.has_deferred_payloads());
+        ctx.defer_until(tv, alive);
+        assert!(ctx.has_deferred_payloads());
 
-        device.wait_until_impl(tv).expect("wait");
-        device.flush_deferred_deletions();
+        ctx.wait_until(tv).expect("wait");
+        ctx.flush_deferred_deletions();
 
         assert!(
-            !device.has_deferred_payloads(),
+            !ctx.has_deferred_payloads(),
             "VRAM ring must empty via pull path without polling signals"
         );
         assert!(
@@ -248,19 +258,20 @@ mod tests {
     #[test]
     fn boundary_crossed_is_idempotent_for_same_epoch() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = ctx.submit(&mut graph).expect("submit");
 
         let alive = Arc::new(11u32);
         let weak = Arc::downgrade(&alive);
-        device.defer_until(tv, alive);
-        assert!(device.has_deferred_payloads());
+        ctx.defer_until(tv, alive);
+        assert!(ctx.has_deferred_payloads());
 
-        device.wait_until_impl(tv).expect("wait");
+        ctx.wait_until(tv).expect("wait");
 
-        device.boundary_crossed(tv);
+        ctx.boundary_crossed(tv);
         assert!(
-            !device.has_deferred_payloads(),
+            !ctx.has_deferred_payloads(),
             "first boundary_crossed must drain the VRAM ring"
         );
         assert!(
@@ -269,9 +280,9 @@ mod tests {
         );
 
         // Second call for the same epoch must be a no-op (no double-free panic).
-        device.boundary_crossed(tv);
+        ctx.boundary_crossed(tv);
         assert!(
-            !device.has_deferred_payloads(),
+            !ctx.has_deferred_payloads(),
             "second boundary_crossed must remain a no-op"
         );
     }
@@ -280,31 +291,32 @@ mod tests {
     #[test]
     fn boundary_crossed_stale_epoch_is_no_op_after_high_water() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut graph1 = TaskGraph::new();
-        let tv1 = device.submit(&mut graph1).expect("submit 1");
+        let tv1 = ctx.submit(&mut graph1).expect("submit 1");
         let mut graph2 = TaskGraph::new();
-        let tv2 = device.submit(&mut graph2).expect("submit 2");
+        let tv2 = ctx.submit(&mut graph2).expect("submit 2");
         assert!(tv2 > tv1, "mock timeline must advance");
 
         let alive1 = Arc::new(1u32);
         let alive2 = Arc::new(2u32);
         let weak1 = Arc::downgrade(&alive1);
         let weak2 = Arc::downgrade(&alive2);
-        device.defer_until(tv1, alive1);
-        device.defer_until(tv2, alive2);
-        assert!(device.has_deferred_payloads());
+        ctx.defer_until(tv1, alive1);
+        ctx.defer_until(tv2, alive2);
+        assert!(ctx.has_deferred_payloads());
 
-        device.wait_until_impl(tv2).expect("wait");
+        ctx.wait_until(tv2).expect("wait");
 
         // High-water reclaim retires both payloads (epoch <= tv2).
-        device.boundary_crossed(tv2);
-        assert!(!device.has_deferred_payloads());
+        ctx.boundary_crossed(tv2);
+        assert!(!ctx.has_deferred_payloads());
         assert!(weak1.upgrade().is_none());
         assert!(weak2.upgrade().is_none());
 
         // Stale lower epoch must not panic or resurrect payloads.
-        device.boundary_crossed(tv1);
-        assert!(!device.has_deferred_payloads());
+        ctx.boundary_crossed(tv1);
+        assert!(!ctx.has_deferred_payloads());
     }
 
     /// BumpReset must NOT reset the pool before the prior frame's epoch retires.
@@ -316,13 +328,14 @@ mod tests {
     #[test]
     fn u6_bump_reset_waits_before_reset() {
         let device = test_device();
+        let ctx = test_ctx(&device);
         let mut alloc = BumpResetAllocator::new(&device, small_config()).expect("create");
 
         alloc.begin_frame(&device, 0).expect("begin 1");
         let v1 = alloc.alloc(&device, 512, Some(4)).expect("alloc");
         let original_offset = v1.offset();
         let mut graph = TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = ctx.submit(&mut graph).expect("submit");
 
         // Retire to a far epoch the GPU has NOT reached.
         let far_epoch = tv + 100;
@@ -345,7 +358,7 @@ mod tests {
         );
         // gpu_progress should now be >= far_epoch (mock wait_until advanced it).
         assert!(
-            device.gpu_progress_impl() >= far_epoch,
+            ctx.gpu_progress() >= far_epoch,
             "begin_frame must have called wait_until to advance progress"
         );
     }

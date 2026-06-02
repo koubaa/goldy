@@ -62,7 +62,8 @@ impl App {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
-        let surface = Surface::new(&device, window.as_ref())?;
+        let ctx = device.create_context()?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
         let shader = ShaderModule::from_slang_with_options(
             &device,
             shaders::CHECKERBOARD,

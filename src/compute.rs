@@ -121,21 +121,21 @@ impl ComputeEncoder {
     /// Execute the recorded compute commands on the device.
     ///
     /// This submits the compute work to the GPU and waits for completion.
-    pub fn dispatch(&self, device: &Device) -> Result<()> {
+    pub fn dispatch(&self, context: &crate::Context) -> Result<()> {
         tracing::debug!(
             command_count = self.commands.len(),
             "Dispatching compute commands"
         );
-        let mut backend = device.inner.backend.lock().unwrap();
-        backend.dispatch_compute(device.inner.handle, &self.commands)
+        let mut backend = context.device().inner.backend.lock().unwrap();
+        backend.dispatch_compute(context.backend_handle(), &self.commands)
     }
 
     /// Submit the recorded compute commands without blocking.
     ///
     /// Returns the device timeline value for use with [`Context::gpu_progress`] / [`Context::wait_until`].
-    pub fn submit(&self, device: &Device) -> Result<crate::timeline::TimelineValue> {
-        let mut backend = device.inner.backend.lock().unwrap();
-        backend.submit_standalone(device.inner.handle, &self.commands)
+    pub fn submit(&self, context: &crate::Context) -> Result<crate::timeline::TimelineValue> {
+        let mut backend = context.device().inner.backend.lock().unwrap();
+        backend.submit_standalone(context.backend_handle(), &self.commands)
     }
 }
 

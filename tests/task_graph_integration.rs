@@ -11,7 +11,9 @@ use goldy::{
 };
 
 mod common;
-use common::submission_context;
+#[path = "common/submission.rs"]
+mod submission;
+use submission::submission_context;
 
 /// Doubles each element: out[i] = in[i] * 2
 const DOUBLE_SHADER: &str = r#"
@@ -122,6 +124,7 @@ fn readback_u32(device: &goldy::Device, buffer: &Buffer, count: usize) -> Vec<u3
 #[test]
 fn graph_linear_chain() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let double_shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap();
     let add_shader = ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap();
@@ -149,7 +152,7 @@ fn graph_linear_chain() {
         .bind_resources_raw_slice(&[dst_idx])
         .dispatch(1, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result = readback_u32(&device, &dst, 64);
     for (i, &val) in result.iter().enumerate() {
@@ -163,6 +166,7 @@ fn graph_linear_chain() {
 #[test]
 fn graph_independent_dispatches() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let fill42_shader = ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap();
     let fill99_shader = ShaderModule::from_slang(&device, FILL_99_SHADER).unwrap();
@@ -187,7 +191,7 @@ fn graph_independent_dispatches() {
         .bind_resources_raw_slice(&[idx_b])
         .dispatch(1, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result_a = readback_u32(&device, &buf_a, 64);
     let result_b = readback_u32(&device, &buf_b, 64);
@@ -212,6 +216,7 @@ fn graph_independent_dispatches() {
 #[test]
 fn graph_diamond_dependency() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let fill_shader_src = r#"
 import goldy_exp;
@@ -274,7 +279,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .bind_resources_raw_slice(&[y_idx, z_idx, out_idx])
         .dispatch(1, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result = readback_u32(&device, &out, 64);
     for (i, &val) in result.iter().enumerate() {
@@ -287,6 +292,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 #[test]
 fn graph_matches_encoder() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let double_shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap();
     let add_shader = ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap();
@@ -310,7 +316,7 @@ fn graph_matches_encoder() {
             pass.bind_resources_raw(&[src_enc_idx, dst_enc_idx]);
             pass.dispatch(1, 1, 1);
         }
-        encoder.dispatch(&device).unwrap();
+        encoder.dispatch(&ctx).unwrap();
     }
     {
         let mut encoder = ComputeEncoder::new();
@@ -320,7 +326,7 @@ fn graph_matches_encoder() {
             pass.bind_resources_raw(&[dst_enc_idx]);
             pass.dispatch(1, 1, 1);
         }
-        encoder.dispatch(&device).unwrap();
+        encoder.dispatch(&ctx).unwrap();
     }
 
     let result_enc = readback_u32(&device, &dst_enc, 64);
@@ -344,7 +350,7 @@ fn graph_matches_encoder() {
         .bind_buffer(&dst_graph, NodeAccess::ReadWrite)
         .bind_resources_raw_slice(&[dst_graph_idx])
         .dispatch(1, 1, 1);
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result_graph = readback_u32(&device, &dst_graph, 64);
 
@@ -374,7 +380,7 @@ fn graph_nonblocking_submit() {
         .bind_resources_raw_slice(&[idx])
         .dispatch(1, 1, 1);
 
-    let tv = graph.submit(&device).unwrap();
+    let tv = graph.submit(&ctx).unwrap();
     ctx.wait_until(tv).unwrap();
 
     let result = readback_u32(&device, &buf, 64);
@@ -403,6 +409,7 @@ fn graph_nonblocking_submit() {
 #[test]
 fn clear_then_dispatch_reads_zeros() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
@@ -426,7 +433,7 @@ fn clear_then_dispatch_reads_zeros() {
         .bind_resources_raw_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     // The copy reads from buf *after* the clear, so output must be all zeros.
     let result = readback_u32(&device, &out, 64);
@@ -446,6 +453,7 @@ fn clear_then_dispatch_reads_zeros() {
 #[test]
 fn write_then_dispatch_reads_uploaded_data() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
@@ -471,7 +479,7 @@ fn write_then_dispatch_reads_uploaded_data() {
         .bind_resources_raw_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result = readback_u32(&device, &out, 64);
     for (i, &val) in result.iter().enumerate() {
@@ -504,6 +512,7 @@ fn write_then_dispatch_reads_uploaded_data() {
 #[test]
 fn stress_clear_then_dispatch_large() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
@@ -525,7 +534,7 @@ fn stress_clear_then_dispatch_large() {
         .bind_resources_raw_slice(&[buf_idx, out_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result = readback_u32(&device, &out, N);
     let nonzero_count = result.iter().filter(|&&v| v != 0).count();
@@ -543,6 +552,7 @@ fn stress_clear_then_dispatch_large() {
 #[test]
 fn stress_many_clears_many_dispatches() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
@@ -573,7 +583,7 @@ fn stress_many_clears_many_dispatches() {
             .dispatch((N / 64) as u32, 1, 1);
     }
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     for (i, out) in outs.iter().enumerate() {
         let result = readback_u32(&device, out, N);
@@ -593,6 +603,7 @@ fn stress_many_clears_many_dispatches() {
 #[test]
 fn stress_clear_write_dispatch_chain() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
@@ -618,7 +629,7 @@ fn stress_clear_write_dispatch_chain() {
         .bind_resources_raw_slice(&[buf_idx, out_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result = readback_u32(&device, &out, N);
     for (i, &val) in result.iter().enumerate() {
@@ -661,7 +672,7 @@ fn stress_two_phase_submission() {
             .bind_buffer(&tmp, NodeAccess::Write)
             .bind_resources_raw_slice(&[buf_idx, tmp_idx])
             .dispatch((N / 64) as u32, 1, 1);
-        let tv = graph.submit(&device).unwrap();
+        let tv = graph.submit(&ctx).unwrap();
         ctx.wait_until(tv).unwrap();
     }
 
@@ -673,7 +684,7 @@ fn stress_two_phase_submission() {
             .bind_buffer(&tmp, NodeAccess::ReadWrite)
             .bind_resources_raw_slice(&[tmp_idx])
             .dispatch((N / 64) as u32, 1, 1);
-        graph.dispatch(&device).unwrap();
+        graph.dispatch(&ctx).unwrap();
     }
 
     let result = readback_u32(&device, &tmp, N);
@@ -710,7 +721,7 @@ fn stress_rapid_submissions() {
             .bind_buffer(&buf, NodeAccess::ReadWrite)
             .bind_resources_raw_slice(&[idx])
             .dispatch((N / 64) as u32, 1, 1);
-        last_tv = Some(graph.submit(&device).unwrap());
+        last_tv = Some(graph.submit(&ctx).unwrap());
     }
 
     ctx.wait_until(last_tv.unwrap()).unwrap();
@@ -731,6 +742,7 @@ fn stress_rapid_submissions() {
 #[test]
 fn stress_clear_then_indirect_dispatch() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     // Shader that writes dispatch args: (N/64, 1, 1) at offset 0
     let write_args_shader_src = r#"
@@ -775,7 +787,7 @@ void cs_main(Scattered<uint> args, ThreadId id) {
         .bind_resources_raw_slice(&[buf_idx, out_idx])
         .dispatch_indirect(&args, 0);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result = readback_u32(&device, &out, N);
     let nonzero_count = result.iter().filter(|&&v| v != 0).count();
@@ -793,6 +805,7 @@ void cs_main(Scattered<uint> args, ThreadId id) {
 #[test]
 fn stress_alternating_write_dispatch() {
     let device = make_device();
+    let ctx = submission_context(&device);
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
@@ -830,7 +843,7 @@ fn stress_alternating_write_dispatch() {
         .bind_resources_raw_slice(&[buf_idx, out2_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
-    graph.dispatch(&device).unwrap();
+    graph.dispatch(&ctx).unwrap();
 
     let result1 = readback_u32(&device, &out1, N);
     for (i, &val) in result1.iter().enumerate() {

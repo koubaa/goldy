@@ -1217,6 +1217,8 @@ pub(super) struct MetalState {
     pub device_lost: std::sync::atomic::AtomicBool,
     pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
+    pub contexts: std::collections::HashMap<super::ContextHandle, DeviceHandle>,
+    pub next_context_id: super::ContextHandle,
     pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: std::collections::HashMap<ShaderHandle, ShaderState>,

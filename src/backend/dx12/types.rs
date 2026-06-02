@@ -785,6 +785,8 @@ pub(super) struct Dx12State {
     pub adapters: Vec<DxgiAdapterInfo>,
     pub devices: HashMap<DeviceHandle, LogicalDevice>,
     pub next_device_handle: DeviceHandle,
+    pub contexts: HashMap<super::ContextHandle, DeviceHandle>,
+    pub next_context_id: super::ContextHandle,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: HashMap<ShaderHandle, ShaderState>,

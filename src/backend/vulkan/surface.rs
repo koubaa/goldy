@@ -279,8 +279,11 @@ pub(super) fn create(
         }
         .context("Failed to create work-done semaphore")?;
 
-        // Create per-slot in-flight fence (starts signaled so first-frame wait is a no-op)
-        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        // Create per-slot in-flight fence unsignaled. The wait in acquire() is guarded
+        // by `fence_pending`, so we never wait on an unsignaled fence. Submitting a
+        // SIGNALED fence to vkQueueSubmit2 without resetting it first violates
+        // VUID-vkQueueSubmit2-fence-04894.
+        let fence_info = vk::FenceCreateInfo::default();
         let in_flight_fence = unsafe { logical_device.device.create_fence(&fence_info, None) }
             .context("Failed to create in-flight fence")?;
 

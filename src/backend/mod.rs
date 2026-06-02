@@ -187,6 +187,7 @@ pub struct AdapterInfo {
 
 /// Opaque handle types.
 pub type DeviceHandle = u64;
+pub type ContextHandle = u64;
 pub type BufferHandle = u64;
 pub type ShaderHandle = u64;
 pub type PipelineHandle = u64;
@@ -407,6 +408,13 @@ pub trait GpuBackend: Send + Sync {
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle>;
     fn destroy_device(&mut self, device: DeviceHandle);
     fn is_device_valid(&self, device: DeviceHandle) -> bool;
+
+    /// Block until all GPU work on this device has completed (teardown primitive).
+    fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()>;
+
+    // Submission context (timeline / submit / reclaim API is keyed by context)
+    fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle>;
+    fn destroy_context(&mut self, ctx: ContextHandle);
 
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///
@@ -699,15 +707,15 @@ pub trait GpuBackend: Send + Sync {
 
     // --- Timeline + explicit frame bracket ---
 
-    /// Latest GPU completion point on this device's timeline (`value` is done when
+    /// Latest GPU completion point on this context's timeline (`value` is done when
     /// `gpu_progress() >= value`).
-    fn gpu_progress(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
+    fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue;
 
-    /// Drain pending backend signals for this device (async queue + synchronous oversubscribed).
-    fn poll_signals(&mut self, device: DeviceHandle) -> Vec<crate::signal::Signal>;
+    /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).
+    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal>;
 
     /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
-    fn peek_oldest_in_flight(&self, device: DeviceHandle)
+    fn peek_oldest_in_flight(&self, ctx: ContextHandle)
         -> Option<crate::timeline::TimelineValue>;
 
     /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
@@ -715,21 +723,21 @@ pub trait GpuBackend: Send + Sync {
 
     fn wait_until(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
     ) -> Result<()>;
 
     fn wait_until_timeout(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         value: crate::timeline::TimelineValue,
         timeout_ms: u32,
     ) -> Result<bool>;
 
-    /// Submit compute (and transfer) commands on the device timeline, not tied to a surface frame.
+    /// Submit compute (and transfer) commands on the context timeline, not tied to a surface frame.
     fn submit_standalone(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue>;
 
@@ -742,11 +750,11 @@ pub trait GpuBackend: Send + Sync {
     /// Metal, Vulkan, and DX12 all provide such overrides.
     fn submit_graph(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
         let mut batch: Vec<GpuCommand> = Vec::new();
-        let mut last_tv = self.gpu_progress(device);
+        let mut last_tv = self.gpu_progress(ctx);
         for cmd in commands {
             match cmd {
                 GraphCommand::Compute(c) => batch.push(c.clone()),
@@ -755,20 +763,24 @@ pub trait GpuBackend: Send + Sync {
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
-                        last_tv = self.submit_standalone(device, &batch)?;
-                        self.wait_until(device, last_tv)?;
+                        last_tv = self.submit_standalone(ctx, &batch)?;
+                        self.wait_until(ctx, last_tv)?;
                         batch.clear();
                     }
+                    let device = self.context_device(ctx);
                     self.render_to_target(device, *target, render_cmds)?;
-                    last_tv = self.submit_standalone(device, &[])?;
+                    last_tv = self.submit_standalone(ctx, &[])?;
                 }
             }
         }
         if !batch.is_empty() {
-            last_tv = self.submit_standalone(device, &batch)?;
+            last_tv = self.submit_standalone(ctx, &batch)?;
         }
         Ok(last_tv)
     }
+
+    /// Resolve the logical device for a submission context.
+    fn context_device(&self, ctx: ContextHandle) -> DeviceHandle;
 
     /// Submit commands and retain the closed command list for potential reuse on the next
     /// cache-hit frame.
@@ -782,12 +794,12 @@ pub trait GpuBackend: Send + Sync {
     /// backends default to a normal [`Self::submit_graph`] (safe fallback, no caching).
     fn submit_graph_and_retain(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
     ) -> Result<crate::timeline::TimelineValue> {
         let _ = key;
-        self.submit_graph(device, commands)
+        self.submit_graph(ctx, commands)
     }
 
     /// Re-execute a previously retained command list without re-recording.
@@ -797,16 +809,16 @@ pub trait GpuBackend: Send + Sync {
     /// a full [`Self::submit_graph_and_retain`]).  Returns `Err` on a backend error.
     fn try_resubmit_retained(
         &mut self,
-        device: DeviceHandle,
+        ctx: ContextHandle,
         key: u64,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let _ = (device, key);
+        let _ = (ctx, key);
         Ok(None)
     }
 
     /// Drop the retained command list associated with `key`, marking its allocator slot
     /// as available for re-use.  No-op if no retained list exists.
-    fn evict_retained(&mut self, _device: DeviceHandle, _key: u64) {}
+    fn evict_retained(&mut self, _ctx: ContextHandle, _key: u64) {}
 
     /// Acquire the next swapchain image and begin a frame bracket.
     fn begin_frame(&mut self, surface: SurfaceHandle) -> Result<(FrameToken, TextureHandle)>;
@@ -856,9 +868,9 @@ pub trait GpuBackend: Send + Sync {
 
     /// Execute compute commands.
     /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(&mut self, device: DeviceHandle, commands: &[GpuCommand]) -> Result<()> {
-        let v = self.submit_standalone(device, commands)?;
-        self.wait_until(device, v)
+    fn dispatch_compute(&mut self, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<()> {
+        let v = self.submit_standalone(ctx, commands)?;
+        self.wait_until(ctx, v)
     }
 
     /// Notify the backend that a frame has completed and all transient buffers
@@ -913,23 +925,23 @@ pub trait GpuBackend: Send + Sync {
     /// Normally called internally at acquire/present/submit, but consumers
     /// that drop buffers between those points (e.g. during a non-blocking
     /// frame drain) can call this explicitly to reclaim slots immediately.
-    fn flush_deferred_deletions(&mut self, _device: DeviceHandle) {}
+    fn flush_deferred_deletions(&mut self, _ctx: ContextHandle) {}
 
     /// Install a per-thread reclamation epoch for the next deferred-payload drop window.
     ///
-    /// Metal uses this so `Buffer::drop` during [`crate::device::Device::boundary_crossed`] queues heap
+    /// Metal uses this so `Buffer::drop` during [`crate::Context::boundary_crossed`] queues heap
     /// frees with the already-retired epoch instead of `timeline_scheduled_max`. Only the
     /// installing thread observes the override; other threads keep conservative barriers.
     fn set_reclamation_context(
         &mut self,
-        _device: DeviceHandle,
+        _ctx: ContextHandle,
         _epoch: Option<crate::timeline::TimelineValue>,
     ) {
     }
 
     /// Resources queued for destruction after the GPU timeline advances (for tests).
     #[doc(hidden)]
-    fn deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {
+    fn deferred_deletion_pending_count(&self, _ctx: ContextHandle) -> usize {
         0
     }
 
@@ -950,7 +962,7 @@ pub trait GpuBackend: Send + Sync {
     /// Number of in-flight command buffers tracked by the backend for wait-reclaim.
     /// Only meaningful on Metal; other backends return 0.
     #[doc(hidden)]
-    fn in_flight_command_buffer_count(&self, _device: DeviceHandle) -> usize {
+    fn in_flight_command_buffer_count(&self, _ctx: ContextHandle) -> usize {
         0
     }
 }

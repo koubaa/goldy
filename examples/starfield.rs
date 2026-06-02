@@ -86,7 +86,7 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    device: Arc<goldy::Device>,
+    context: goldy::Context,
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
@@ -109,7 +109,8 @@ impl RenderState {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
-        let surface = Surface::new(&device, window.as_ref())?;
+        let ctx = device.create_context()?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Compute shader for star movement
         let compute_shader =
@@ -175,7 +176,7 @@ impl RenderState {
 
         Ok(Self {
             window,
-            device,
+            context: ctx,
             surface,
             compute_pipeline,
             star_buffer,
@@ -209,7 +210,7 @@ impl RenderState {
             let workgroups = NUM_STARS.div_ceil(64);
             pass.dispatch(workgroups, 1, 1);
         }
-        compute_encoder.dispatch(&self.device)?;
+        compute_encoder.dispatch(&self.context)?;
 
         // Render stars
         let frame = self.surface.begin()?;

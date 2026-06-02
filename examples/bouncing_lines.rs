@@ -63,7 +63,7 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    device: Arc<goldy::Device>,
+    context: goldy::Context,
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
@@ -84,7 +84,8 @@ impl RenderState {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
-        let surface = Surface::new(&device, window.as_ref())?;
+        let ctx = device.create_context()?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Compute shader for line physics
         let compute_shader = ShaderModule::from_slang(
@@ -142,7 +143,7 @@ impl RenderState {
 
         Ok(Self {
             window,
-            device,
+            context: ctx,
             surface,
             compute_pipeline,
             line_buffer,
@@ -166,7 +167,7 @@ impl RenderState {
             let workgroups = NUM_LINES.div_ceil(64);
             pass.dispatch(workgroups.max(1), 1, 1);
         }
-        compute_encoder.dispatch(&self.device)?;
+        compute_encoder.dispatch(&self.context)?;
 
         // Render lines
         let frame = self.surface.begin()?;

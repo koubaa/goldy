@@ -581,7 +581,7 @@ impl PlacementHeap {
     /// Stamp the most recently acquired region with a timeline value and immediately
     /// defer `views` to the device's VramAllocator ring.
     ///
-    /// The views will be dropped when `device.flush_deferred_deletions()` observes
+    /// The views will be dropped when `ctx.flush_deferred_deletions()` observes
     /// `gpu_progress >= timeline`, freeing their bindless slots at the right time.
     /// This is the standalone-submit path; the surface path defers views via
     /// `Frame::keepalive` instead.

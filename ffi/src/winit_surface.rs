@@ -20,7 +20,15 @@ pub fn goldy_surface_from_winit_window<W: HasWindowHandle + HasDisplayHandle>(
         set_last_error_from_anyhow(&anyhow::anyhow!("Device pointer is null"));
         return ptr::null_mut();
     }
-    match goldy::Surface::new(unsafe { &(*device).inner }, window) {
+    let device = unsafe { &(*device).inner };
+    let ctx = match device.create_context() {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            crate::error::set_last_error(format!("{e}"));
+            return ptr::null_mut();
+        }
+    };
+    match goldy::Surface::new(&ctx, window) {
         Ok(surface) => Box::into_raw(Box::new(GoldySurface { inner: surface })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

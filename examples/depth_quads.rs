@@ -116,10 +116,11 @@ impl App {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
+        let ctx = device.create_context()?;
 
         // Surface with a depth buffer for 3D depth testing
         let surface =
-            Surface::new_with_depth(&device, window.as_ref(), Some(DepthFormat::Depth32Float))?;
+            Surface::new_with_depth(&ctx, window.as_ref(), Some(DepthFormat::Depth32Float))?;
 
         let shader =
             ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;

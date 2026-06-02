@@ -4,7 +4,7 @@
 //! Use `Surface` to render directly to a window without CPU readback.
 
 use crate::backend::{FrameToken, GpuBackend, SurfaceHandle};
-use crate::device::Device;
+use crate::context::Context as GpuContext;
 use crate::encoder::CommandEncoder;
 use crate::task_graph::TaskGraph;
 use crate::texture::Texture;
@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 
 /// A GPU surface for zero-copy presentation to a window.
 pub struct Surface {
-    _device: Device,
+    context: GpuContext,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
-    device_handle: crate::backend::DeviceHandle,
+    ctx_handle: crate::backend::ContextHandle,
     handle: SurfaceHandle,
     width: u32,
     height: u32,
@@ -29,9 +29,9 @@ pub struct Surface {
 
 /// A frame acquired from a surface — explicit bracket for render/compute + present.
 pub struct Frame {
-    _device: Device,
+    context: GpuContext,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
-    device_handle: crate::backend::DeviceHandle,
+    ctx_handle: crate::backend::ContextHandle,
     token: FrameToken,
     texture: Option<Texture>,
     width: u32,
@@ -46,15 +46,15 @@ pub struct Frame {
 }
 
 impl Surface {
-    pub fn new<W>(device: &Device, window: &W) -> Result<Self>
+    pub fn new<W>(context: &GpuContext, window: &W) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
-        Self::new_with_config(device, window, SurfaceConfig::default())
+        Self::new_with_config(context, window, SurfaceConfig::default())
     }
 
     pub fn new_with_depth<W>(
-        device: &Device,
+        context: &GpuContext,
         window: &W,
         depth_format: Option<crate::types::DepthFormat>,
     ) -> Result<Self>
@@ -62,7 +62,7 @@ impl Surface {
         W: HasWindowHandle + HasDisplayHandle,
     {
         Self::new_with_config(
-            device,
+            context,
             window,
             SurfaceConfig {
                 depth_format,
@@ -71,10 +71,11 @@ impl Surface {
         )
     }
 
-    pub fn new_with_config<W>(device: &Device, window: &W, config: SurfaceConfig) -> Result<Self>
+    pub fn new_with_config<W>(context: &GpuContext, window: &W, config: SurfaceConfig) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
+        let device = context.device();
         let handle = {
             let mut backend = device.inner.backend.lock().unwrap();
             backend.create_surface(device.inner.handle, window, window, config.depth_format)?
@@ -99,9 +100,9 @@ impl Surface {
         );
 
         Ok(Self {
-            _device: device.clone(),
+            context: context.clone(),
             backend: Arc::clone(&device.inner.backend),
-            device_handle: device.inner.handle,
+            ctx_handle: context.backend_handle(),
             handle,
             width,
             height,
@@ -128,9 +129,9 @@ impl Surface {
         ));
 
         Ok(Frame {
-            _device: self._device.clone(),
+            context: self.context.clone(),
             backend: Arc::clone(&self.backend),
-            device_handle: self.device_handle,
+            ctx_handle: self.ctx_handle,
             token,
             texture,
             width: w,
@@ -263,7 +264,7 @@ impl Surface {
         if !early_cmds.is_empty() {
             let mut backend = self.backend.lock().unwrap();
             let _tz = tracy_zone!("surface.submit_partition_early");
-            backend.submit_standalone(self.device_handle, &early_cmds)?;
+            backend.submit_standalone(self.ctx_handle, &early_cmds)?;
         }
 
         // ── Step 5: deferred surface acquire ─────────────────────────────────
@@ -347,7 +348,7 @@ impl Surface {
         if !early_cmds.is_empty() {
             let mut backend = self.backend.lock().unwrap();
             let _tz = tracy_zone!("surface.submit_graph_to_frame.partition_early");
-            backend.submit_standalone(self.device_handle, &early_cmds)?;
+            backend.submit_standalone(self.ctx_handle, &early_cmds)?;
         }
 
         let swapchain_tex = frame.texture();
@@ -387,7 +388,7 @@ impl Surface {
         graph: &mut TaskGraph,
         node_waves: &[u32],
     ) -> Result<Option<crate::task_graph::SlotResolver>> {
-        use crate::device::Device;
+        use crate::context::Context as GpuContext;
         use crate::placement_heap::PlacementHeap;
         use crate::task_graph::{ResolvedTransientBuffer, ResolvedTransientTexture, SlotResolver};
 
@@ -407,11 +408,12 @@ impl Surface {
         };
 
         // ── Initialise the placement heap ────────────────────────────────────────
-        let mut heap_guard = self._device.inner.placement_heap.lock().unwrap();
+        let device = self.context.device();
+        let mut heap_guard = device.inner.placement_heap.lock().unwrap();
         if heap_guard.is_none() {
-            let cap = (256 * 1024 * 1024u64).max(alloc_size * Device::DEFAULT_PIPELINE_DEPTH);
+            let cap = (256 * 1024 * 1024u64).max(alloc_size * GpuContext::DEFAULT_PIPELINE_DEPTH);
             *heap_guard = Some(
-                PlacementHeap::with_capacity(&self._device, cap)
+                PlacementHeap::with_capacity(device, cap)
                     .context("failed to create device placement heap")?,
             );
         }
@@ -419,16 +421,16 @@ impl Surface {
 
         // ── Switch to paged mode FIRST (may invalidate_all; must happen before ──
         // ── texture resolution so caches are clean when textures are created)  ──
-        let depth = Device::DEFAULT_PIPELINE_DEPTH as usize;
+        let depth = GpuContext::DEFAULT_PIPELINE_DEPTH as usize;
         if layout_opt.is_some() {
             let _tz = tracy_zone!("surface.build_resolver.configure_pages");
-            heap.configure_pages(alloc_size, depth, &self._device)?;
+            heap.configure_pages(alloc_size, depth, device)?;
         }
 
         // ── Resolve transient textures ───────────────────────────────────────────
         let tex_handles = {
             let _tz = tracy_zone!("surface.build_resolver.resolve_textures");
-            graph.resolve_transient_textures_with_heap(&self._device, heap, node_waves)?
+            graph.resolve_transient_textures_with_heap(device, heap, node_waves)?
         };
         for (id, handle) in &tex_handles {
             resolver
@@ -460,7 +462,7 @@ impl Surface {
                     offset,
                     spec.size,
                     view_stride,
-                    &self._device,
+                    device,
                 )?;
                 resolver.buffers.insert(
                     spec.id,
@@ -543,7 +545,7 @@ impl Frame {
         if self.presented {
             return Ok(self.submit_tv.unwrap_or_else(|| {
                 let backend = self.backend.lock().unwrap();
-                backend.gpu_progress(self.device_handle)
+                backend.gpu_progress(self.ctx_handle)
             }));
         }
         self.presented = true;
@@ -559,14 +561,14 @@ impl Frame {
 
     fn apply_frame_bookkeeping(&self, submit_tv: TimelineValue) -> Result<()> {
         tracy_frame_mark!();
-        if let Ok(mut heap_guard) = self._device.inner.placement_heap.lock() {
+        if let Ok(mut heap_guard) = self.context.device().inner.placement_heap.lock() {
             if let Some(ref mut heap) = *heap_guard {
                 heap.stamp_all_pending(submit_tv);
             }
         }
         let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
         if !keepalive.is_empty() {
-            self._device.defer_release(submit_tv, keepalive);
+            self.context.defer_release(submit_tv, keepalive);
         }
         Ok(())
     }
@@ -655,9 +657,10 @@ mod tests {
     #[test]
     fn test_surface_size() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
         assert_eq!(window.size(), (800, 600));
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -667,8 +670,9 @@ mod tests {
     #[test]
     fn test_surface_format_default() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         assert_eq!(surface.format(), TextureFormat::Bgra8UnormSrgb);
     }
@@ -678,9 +682,10 @@ mod tests {
         use crate::types::DepthFormat;
 
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
         let surface =
-            Surface::new_with_depth(&device, &window, Some(DepthFormat::Depth24Plus)).unwrap();
+            Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth24Plus)).unwrap();
 
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -689,8 +694,9 @@ mod tests {
     #[test]
     fn test_surface_format_custom() {
         let device = create_test_device_with_format(TextureFormat::Rgba8Unorm);
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         assert_eq!(surface.format(), TextureFormat::Rgba8Unorm);
     }
@@ -698,8 +704,9 @@ mod tests {
     #[test]
     fn test_surface_resize() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let mut surface = Surface::new(&device, &window).unwrap();
+        let mut surface = Surface::new(&ctx, &window).unwrap();
 
         surface.resize(1920, 1080).unwrap();
 
@@ -711,8 +718,9 @@ mod tests {
     #[test]
     fn test_surface_resize_ignores_zero_dimensions() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let mut surface = Surface::new(&device, &window).unwrap();
+        let mut surface = Surface::new(&ctx, &window).unwrap();
 
         surface.resize(0, 0).unwrap();
 
@@ -723,8 +731,9 @@ mod tests {
     #[test]
     fn test_surface_begin_and_present() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         let frame = surface.begin().unwrap();
 
@@ -739,8 +748,9 @@ mod tests {
     #[test]
     fn test_surface_present_legacy() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         let frame = surface.begin().unwrap();
         surface.present(frame).unwrap();
@@ -749,8 +759,9 @@ mod tests {
     #[test]
     fn test_surface_frame_render_and_present() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         let frame = surface.begin().unwrap();
 
@@ -769,9 +780,10 @@ mod tests {
         use crate::types::DepthFormat;
 
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
         let surface =
-            Surface::new_with_depth(&device, &window, Some(DepthFormat::Depth32Float)).unwrap();
+            Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth32Float)).unwrap();
 
         let frame = surface.begin().unwrap();
 
@@ -789,8 +801,9 @@ mod tests {
     #[test]
     fn test_surface_multiple_begin_present() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(640, 480);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         for _ in 0..5 {
             let frame = surface.begin().unwrap();
@@ -801,8 +814,9 @@ mod tests {
     #[test]
     fn test_validate_pipeline_format_matching() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         let result = surface.validate_pipeline_format(TextureFormat::Bgra8UnormSrgb);
         assert!(result.is_ok());
@@ -811,8 +825,9 @@ mod tests {
     #[test]
     fn test_validate_pipeline_format_mismatch() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         let result = surface.validate_pipeline_format(TextureFormat::Rgba8Unorm);
         assert!(result.is_err());
@@ -821,8 +836,9 @@ mod tests {
     #[test]
     fn test_surface_validate_custom_format() {
         let device = create_test_device_with_format(TextureFormat::Rgba8Unorm);
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         assert!(surface
             .validate_pipeline_format(TextureFormat::Rgba8Unorm)
@@ -836,9 +852,10 @@ mod tests {
     #[test]
     fn test_surface_with_config() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new_with_config(
-            &device,
+            &ctx,
             &window,
             SurfaceConfig {
                 present_mode: PresentMode::Immediate,
@@ -854,8 +871,9 @@ mod tests {
     #[test]
     fn test_surface_frame_drop_without_present() {
         let device = create_test_device();
+        let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&device, &window).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
 
         let _frame = surface.begin().unwrap();
     }

@@ -50,7 +50,7 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    device: Arc<goldy::Device>,
+    context: goldy::Context,
     surface: Surface,
     // Compute resources
     compute_pipeline: ComputePipeline,
@@ -148,7 +148,8 @@ impl RenderState {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
-        let surface = Surface::new(&device, window.as_ref())?;
+        let ctx = device.create_context()?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Load shaders
         let compute_shader =
@@ -197,7 +198,7 @@ impl RenderState {
 
         Ok(Self {
             window,
-            device,
+            context: ctx,
             surface,
             compute_pipeline,
             render_pipeline,
@@ -238,7 +239,7 @@ impl RenderState {
                     write_view.bindless_handle().unwrap().index(),
                 ])
                 .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
-            graph.dispatch(&self.device)?;
+            graph.dispatch(&self.context)?;
 
             // Toggle buffer for next frame
             self.use_buffer_a = !self.use_buffer_a;

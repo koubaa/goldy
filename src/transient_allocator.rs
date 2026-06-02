@@ -233,6 +233,7 @@ impl TransientAllocatorStrategy {
 pub struct BumpResetAllocator {
     pool: BufferPool,
     last_epoch: Option<TimelineValue>,
+    context: crate::Context,
 }
 
 impl BumpResetAllocator {
@@ -249,20 +250,23 @@ impl BumpResetAllocator {
         Ok(Self {
             pool,
             last_epoch: None,
+            context: device
+                .create_context()
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
         })
     }
 }
 
 impl TransientAllocator for BumpResetAllocator {
-    fn begin_frame(&mut self, device: &Device, hint_size: u64) -> Result<()> {
+    fn begin_frame(&mut self, _device: &Device, hint_size: u64) -> Result<()> {
         if let Some(tv) = self.last_epoch {
             // gpu_progress() and wait_until() are two separate lock acquisitions.
             // The GPU may retire tv between the check and the wait — that's harmless
             // (wait_until returns immediately when the semaphore/fence has already
             // fired). The opposite direction (progress reads stale-low on a poller
             // backend) causes an unnecessary but correct wait of at most ~1 ms.
-            if device.gpu_progress_impl() < tv {
-                device.wait_until_impl(tv)?;
+            if self.context.gpu_progress() < tv {
+                self.context.wait_until(tv).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         }
 
@@ -358,6 +362,7 @@ pub struct HeapTransientAllocator {
     peak_live_bytes: u64,
     /// Frame counter — used to defer `shrink_to_fit` until the pipeline has warmed up.
     frame_count: u64,
+    context: crate::Context,
 }
 
 impl HeapTransientAllocator {
@@ -379,12 +384,15 @@ impl HeapTransientAllocator {
             live_bytes: 0,
             peak_live_bytes: 0,
             frame_count: 0,
+            context: device
+                .create_context()
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
         })
     }
 
     /// Return deferred frees whose epoch has retired to the coalescing free list.
-    fn reclaim_retired_frees(&mut self, device: &Device) {
-        let progress = device.gpu_progress_impl();
+    fn reclaim_retired_frees(&mut self) {
+        let progress = self.context.gpu_progress();
         let mut i = 0;
         while i < self.deferred.len() {
             if self.deferred[i]
@@ -505,9 +513,9 @@ impl HeapTransientAllocator {
 const HEAP_WARMUP_FRAMES: u64 = 8;
 
 impl TransientAllocator for HeapTransientAllocator {
-    fn begin_frame(&mut self, device: &Device, _hint_size: u64) -> Result<()> {
+    fn begin_frame(&mut self, _device: &Device, _hint_size: u64) -> Result<()> {
         self.frame_count += 1;
-        self.reclaim_retired_frees(device);
+        self.reclaim_retired_frees();
         self.compact_watermark();
         // After warmup, auto-shrink if we over-grew during the first few frames.
         if self.frame_count == HEAP_WARMUP_FRAMES {
@@ -730,9 +738,10 @@ mod tests {
             alloc.begin_frame(&device, 0).expect("begin");
             let _v = alloc.alloc(&device, 2048, Some(4)).expect("alloc");
             let mut graph = crate::task_graph::TaskGraph::new();
-            let tv = device.submit(&mut graph).expect("submit");
+            let ctx = device.create_context().expect("context");
+            let tv = ctx.submit(&mut graph).expect("submit");
             alloc.end_frame(&device, tv);
-            device.wait_until_impl(tv).expect("wait");
+            ctx.wait_until(tv).expect("wait");
 
             let cap = alloc.capacity();
             assert!(
@@ -785,7 +794,7 @@ mod tests {
         assert_ne!(v2.offset(), v1_off, "epoch not retired — should not reuse");
 
         // Now advance GPU timeline past epoch=5.
-        device.wait_until_impl(5).unwrap();
+        device.create_context().unwrap().wait_until(5).unwrap();
 
         alloc.begin_frame(&device, 0).unwrap();
 
@@ -865,7 +874,7 @@ mod tests {
         );
 
         // Advance past epoch=1.
-        device.wait_until_impl(1).unwrap();
+        device.create_context().unwrap().wait_until(1).unwrap();
         alloc.begin_frame(&device, 0).unwrap();
         let v4 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         assert_eq!(
@@ -945,12 +954,12 @@ mod tests {
         let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         let offset = v1.offset();
         let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
 
         alloc.free(offset, 1024, Some(tv));
         alloc.end_frame(&device, tv);
 
-        device.wait_until_impl(tv).expect("wait");
+        device.create_context().unwrap().wait_until(tv).expect("wait");
         alloc.begin_frame(&device, 0).unwrap();
         let v2 = alloc
             .alloc(&device, 1024, Some(4))
@@ -971,10 +980,10 @@ mod tests {
         a.begin_frame(&device, 0).expect("begin 1");
         let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
         let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device.submit(&mut graph).expect("submit");
+        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
-        device.wait_until_impl(tv).expect("wait");
+        device.create_context().unwrap().wait_until(tv).expect("wait");
         a.begin_frame(&device, 0).expect("begin 2 should not block");
     }
 }
