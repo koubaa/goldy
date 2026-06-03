@@ -2,6 +2,21 @@
 
 ## Metal Backend Issues
 
+### VRAM / heap diagnostics (`RUST_LOG` + `goldy::diag::*`)
+
+Heap allocation events, submit summaries, and periodic residency snapshots use dedicated `tracing` targets (Metal backend only for now). Enable with `RUST_LOG`, for example:
+
+```bash
+RUST_LOG=goldy::diag::alloc=info,goldy::diag::submit=info,goldy::diag::mem=info \
+  cargo run --example triangle
+```
+
+- `goldy::diag::alloc` — primary full, overflow heap creation, compact, reset
+- `goldy::diag::submit` — dispatch count and pipeline labels per submit (pre-scans commands; only runs when this target is enabled)
+- `goldy::diag::mem` — `metal-alloc` snapshot every N submits (`GOLDY_MEM_CADENCE`, default 60)
+
+Ekrano frame boundaries use `ekrano::lifecycle=info` when running through the velato `with_winit` harness.
+
 ### Runtime shader validation (`MTL_SHADER_VALIDATION`)
 
 When **GPU API validation** is on, Goldy sets **`MTL_SHADER_VALIDATION=1`** before the first Metal device is created, **only if** `MTL_SHADER_VALIDATION` is not already set. That opts into Apple’s runtime shader validation (see Apple’s Metal debugging documentation for other allowed values). GPU API validation includes **`GOLDY_VALIDATION=1`/`true`/`yes`**, the **`api`** token, or **`all`** (see [Unified validation](#unified-validation-goldy_validation)). Like Vulkan, this is applied at backend initialization; avoid touching Metal before `Instance::new()` if you rely on Goldy to set the variable.
