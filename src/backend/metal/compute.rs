@@ -37,7 +37,7 @@ fn mem_diag_cadence() -> u64 {
 fn maybe_log_mem_diag(ld: &super::types::LogicalDevice) {
     if tracing::enabled!(target: "goldy::diag::mem", tracing::Level::INFO) {
         let n = MEM_DIAG_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if n % mem_diag_cadence() == 0 {
+        if n.is_multiple_of(mem_diag_cadence()) {
             let mib = ld.device.current_allocated_size() / (1024 * 1024);
             let heap_primary_mib = ld.heap_allocator.primary_size() / (1024 * 1024);
             let heap_overflow = ld.heap_allocator.overflow_count();
@@ -59,7 +59,9 @@ fn maybe_log_mem_diag(ld: &super::types::LogicalDevice) {
 /// Collects the unique sequence of pipeline names (in order of first appearance)
 /// and counts total dispatch calls. Used by `submit` / `submit_graph` when
 /// `goldy::diag::submit` is enabled in `RUST_LOG`.
-fn summarise_commands<'a>(commands: impl Iterator<Item = &'a super::super::GpuCommand>) -> (usize, Vec<&'static str>) {
+fn summarise_commands<'a>(
+    commands: impl Iterator<Item = &'a super::super::GpuCommand>,
+) -> (usize, Vec<&'static str>) {
     let mut dispatch_count = 0usize;
     let mut pipeline_names: Vec<&'static str> = Vec::new();
     let mut pending_label: Option<&'static str> = None;
