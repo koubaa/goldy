@@ -1089,11 +1089,13 @@ mod tests {
             }],
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
-        let mut resolver = SlotResolver::default();
-        resolver.swapchain = Some(crate::task_graph::ResolvedSwapchain {
-            handle: 99,
-            uav_index: 7,
-        });
+        let resolver = SlotResolver {
+            swapchain: Some(crate::task_graph::ResolvedSwapchain {
+                handle: 99,
+                uav_index: 7,
+            }),
+            ..Default::default()
+        };
 
         let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
         assert!(matches!(

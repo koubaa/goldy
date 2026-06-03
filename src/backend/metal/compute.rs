@@ -20,14 +20,76 @@ use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-/// Whether `GOLDY_METAL_MEMORY_LOG` is set (cached on first access).
-fn metal_memory_log_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("GOLDY_METAL_MEMORY_LOG").is_ok())
+/// Submit counter for `goldy::diag::mem` throttling.
+static MEM_DIAG_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Cadence for `goldy::diag::mem` snapshots. Reads `GOLDY_MEM_CADENCE` once, defaults to 60.
+fn mem_diag_cadence() -> u64 {
+    static CADENCE: OnceLock<u64> = OnceLock::new();
+    *CADENCE.get_or_init(|| {
+        std::env::var("GOLDY_MEM_CADENCE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60)
+    })
 }
 
-/// Monotonic submit counter used to throttle `GOLDY_METAL_MEMORY_LOG` output.
-static METAL_MEMORY_LOG_FRAME: AtomicU64 = AtomicU64::new(0);
+fn maybe_log_mem_diag(ld: &super::types::LogicalDevice) {
+    if tracing::enabled!(target: "goldy::diag::mem", tracing::Level::INFO) {
+        let n = MEM_DIAG_COUNTER.fetch_add(1, Ordering::Relaxed);
+        if n.is_multiple_of(mem_diag_cadence()) {
+            let mib = ld.device.current_allocated_size() / (1024 * 1024);
+            let heap_primary_mib = ld.heap_allocator.primary_size() / (1024 * 1024);
+            let heap_overflow = ld.heap_allocator.overflow_count();
+            let heap_hwm_mib = ld.heap_allocator.high_water_mark() / (1024 * 1024);
+            tracing::info!(
+                target: "goldy::diag::mem",
+                metal_current_allocated_mib = mib,
+                heap_primary_mib,
+                heap_overflow,
+                heap_hwm_mib,
+                "metal-alloc"
+            );
+        }
+    }
+}
+
+/// Pre-scan a `GpuCommand` slice and return a compact submit summary for logging.
+///
+/// Collects the unique sequence of pipeline names (in order of first appearance)
+/// and counts total dispatch calls. Used by `submit` / `submit_graph` when
+/// `goldy::diag::submit` is enabled in `RUST_LOG`.
+fn summarise_commands<'a>(
+    commands: impl Iterator<Item = &'a super::super::GpuCommand>,
+) -> (usize, Vec<&'static str>) {
+    let mut dispatch_count = 0usize;
+    let mut pipeline_names: Vec<&'static str> = Vec::new();
+    let mut pending_label: Option<&'static str> = None;
+    for cmd in commands {
+        match cmd {
+            super::super::GpuCommand::SetPipeline(_) => {
+                // label is attached to the following Dispatch; reset pending
+                pending_label = None;
+            }
+            super::super::GpuCommand::Dispatch { label, .. }
+            | super::super::GpuCommand::DispatchIndirect { label, .. }
+            | super::super::GpuCommand::DispatchBatch { label, .. } => {
+                dispatch_count += match cmd {
+                    super::super::GpuCommand::DispatchBatch { count, .. } => *count as usize,
+                    _ => 1,
+                };
+                if let Some(name) = label.or(pending_label) {
+                    if !pipeline_names.contains(&name) {
+                        pipeline_names.push(name);
+                    }
+                }
+                pending_label = None;
+            }
+            _ => {}
+        }
+    }
+    (dispatch_count, pipeline_names)
+}
 
 /// Create a compute pipeline.
 pub(super) fn create(
@@ -915,6 +977,16 @@ pub(super) fn submit(
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
     }
 
+    if tracing::enabled!(target: "goldy::diag::submit", tracing::Level::INFO) {
+        let (dispatch_count, pipeline_names) = summarise_commands(commands.iter());
+        tracing::info!(
+            target: "goldy::diag::submit",
+            dispatch_count,
+            ?pipeline_names,
+            "gpu.submit kind=compute"
+        );
+    }
+
     let device_handle = super::context::context_device(state, ctx);
 
     let owned_command_buffer = {
@@ -1030,14 +1102,7 @@ pub(super) fn submit(
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
-
-            if metal_memory_log_enabled() {
-                let n = METAL_MEMORY_LOG_FRAME.fetch_add(1, Ordering::Relaxed);
-                if n.is_multiple_of(60) {
-                    let mib = ld.device.current_allocated_size() / (1024 * 1024);
-                    tracing::info!(metal_current_allocated_mib = mib, "metal-alloc");
-                }
-            }
+            maybe_log_mem_diag(ld);
         }
     }
 
@@ -1061,6 +1126,28 @@ pub(super) fn submit_graph(
 
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
+    }
+
+    if tracing::enabled!(target: "goldy::diag::submit", tracing::Level::INFO) {
+        let gpu_cmds = commands.iter().filter_map(|c| {
+            if let GraphCommand::Compute(gc) = c {
+                Some(gc)
+            } else {
+                None
+            }
+        });
+        let (dispatch_count, pipeline_names) = summarise_commands(gpu_cmds);
+        let render_passes = commands
+            .iter()
+            .filter(|c| matches!(c, GraphCommand::Render { .. }))
+            .count();
+        tracing::info!(
+            target: "goldy::diag::submit",
+            dispatch_count,
+            render_passes,
+            ?pipeline_names,
+            "gpu.submit kind=graph"
+        );
     }
 
     let device_handle = super::context::context_device(state, ctx);
@@ -1232,6 +1319,7 @@ pub(super) fn submit_graph(
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
+            maybe_log_mem_diag(ld);
         }
     }
 

@@ -142,10 +142,31 @@ impl HeapAllocator {
             return Some(buf);
         }
 
+        // Primary is full — log the spill point so heap growth is visible.
+        if tracing::enabled!(target: "goldy::diag::alloc", tracing::Level::INFO) {
+            tracing::info!(
+                target: "goldy::diag::alloc",
+                size_mb = size / (1024 * 1024),
+                primary_used_mb = self.primary.used_size() / (1024 * 1024),
+                primary_total_mb = self.primary_size / (1024 * 1024),
+                overflow_count = self.overflow.len(),
+                "heap.primary_full"
+            );
+        }
+
         // Try all overflow heaps (newest first). The cap at MAX_OVERFLOW_HEAPS
         // keeps the search bounded. Older heaps may have space from freed buffers.
-        for heap in self.overflow.iter().rev() {
+        for (idx, heap) in self.overflow.iter().rev().enumerate() {
             if let Some(buf) = heap.new_buffer(size, options) {
+                if tracing::enabled!(target: "goldy::diag::alloc", tracing::Level::INFO) {
+                    tracing::info!(
+                        target: "goldy::diag::alloc",
+                        size_mb = size / (1024 * 1024),
+                        heap_idx = self.overflow.len() - 1 - idx,
+                        overflow_count = self.overflow.len(),
+                        "heap.alloc_from_overflow"
+                    );
+                }
                 self.buffer_count += 1;
                 self.update_high_water_mark();
                 return Some(buf);
@@ -164,9 +185,14 @@ impl HeapAllocator {
         let overflow_size = (size * 2).clamp(MIN_OVERFLOW_HEAP_SIZE, MAX_HEAP_SIZE);
         let new_heap = self.create_heap(overflow_size);
         tracing::info!(
-            "Created overflow buffer heap (size={}MB, overflow_count={})",
+            target: "goldy::diag::alloc",
+            "Created overflow buffer heap (size={}MB, overflow_count={}, request_mb={}, primary_used_mb={}/{}MB, hwm_mb={})",
             overflow_size / 1024 / 1024,
-            self.overflow.len() + 1
+            self.overflow.len() + 1,
+            size / (1024 * 1024),
+            self.primary.used_size() / (1024 * 1024),
+            self.primary_size / (1024 * 1024),
+            self.high_water_mark / (1024 * 1024),
         );
         let buf = new_heap.new_buffer(size, options);
         self.overflow.push(new_heap);
@@ -244,6 +270,7 @@ impl HeapAllocator {
             if new_size > self.primary_size {
                 let new_primary = self.create_heap(new_size);
                 tracing::info!(
+                    target: "goldy::diag::alloc",
                     "Resized primary buffer heap: {}MB -> {}MB (high_water_mark={}MB)",
                     self.primary_size / 1024 / 1024,
                     new_size / 1024 / 1024,
@@ -255,7 +282,16 @@ impl HeapAllocator {
 
             let overflow_count = self.overflow.len();
             self.overflow.clear();
-            tracing::debug!("Cleared {} overflow buffer heaps", overflow_count);
+            if tracing::enabled!(target: "goldy::diag::alloc", tracing::Level::INFO) {
+                tracing::info!(
+                    target: "goldy::diag::alloc",
+                    overflow_cleared = overflow_count,
+                    primary_size_mb = self.primary_size / (1024 * 1024),
+                    "heap.reset_for_frame"
+                );
+            } else {
+                tracing::debug!("Cleared {} overflow buffer heaps", overflow_count);
+            }
         }
         self.high_water_mark = 0;
     }
@@ -268,11 +304,20 @@ impl HeapAllocator {
         self.overflow.retain(|heap| heap.used_size() > 0);
         let dropped = before - self.overflow.len();
         if dropped > 0 {
-            tracing::debug!(
-                "Compacted {} empty overflow buffer heaps ({} remaining)",
-                dropped,
-                self.overflow.len()
-            );
+            if tracing::enabled!(target: "goldy::diag::alloc", tracing::Level::INFO) {
+                tracing::info!(
+                    target: "goldy::diag::alloc",
+                    freed = dropped,
+                    overflow_remaining = self.overflow.len(),
+                    "heap.compact"
+                );
+            } else {
+                tracing::debug!(
+                    "Compacted {} empty overflow buffer heaps ({} remaining)",
+                    dropped,
+                    self.overflow.len()
+                );
+            }
         }
     }
 
@@ -295,6 +340,7 @@ impl HeapAllocator {
         if too_small || too_large {
             let new_primary = self.create_heap(target);
             tracing::info!(
+                target: "goldy::diag::alloc",
                 "{} primary buffer heap: {}MB -> {}MB (requested={}MB)",
                 if too_small { "Grew" } else { "Shrank" },
                 self.primary_size / 1024 / 1024,
@@ -377,6 +423,7 @@ impl TextureHeapAllocator {
         let overflow_size = (alloc_size * 2).max(MIN_OVERFLOW_HEAP_SIZE);
         let new_heap = self.create_heap(overflow_size);
         tracing::info!(
+            target: "goldy::diag::alloc",
             "Created overflow texture heap (size={}MB, overflow_count={})",
             overflow_size / 1024 / 1024,
             self.overflow.len() + 1

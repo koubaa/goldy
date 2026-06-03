@@ -86,10 +86,10 @@ fn allocate_mtl_storage_buffer(
 
     if let Some(cb) = oldest_cb {
         let _tz = crate::tracy_zone!("mtl.heap_allocator.wait_reclaim");
-        tracing::debug!(
-            "Metal buffer heap saturated — waiting for oldest in-flight command buffer \
-             to reclaim archive ({}MB requested)",
-            allocation_size / 1024 / 1024,
+        tracing::info!(
+            target: "goldy::diag::alloc",
+            allocation_size_mb = allocation_size / (1024 * 1024),
+            "heap.wait_reclaim: heap saturated, blocking on oldest in-flight CB"
         );
         cb.wait_until_completed();
         let retired = super::context::device_retired(state, device_handle);
