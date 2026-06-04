@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputePipeline, DataAccess, DeviceDescriptor, Instance,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    Buffer, BufferFlags, Color, CommandEncoder, ComputePipeline, DataAccess, DeviceDescriptor,
+    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
