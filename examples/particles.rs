@@ -118,7 +118,7 @@ impl RenderState {
 
         // Create particle buffer with initial rain particles
         let particles = Self::create_particles(false);
-        let particle_buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
+        let particle_buffer = device.alloc_buffer_with_data(&particles, DataAccess::Scattered)?;
 
         // Create params buffer
         let initial_params = ParticleParams {
@@ -127,7 +127,8 @@ impl RenderState {
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer = Buffer::with_data(&device, &[initial_params], DataAccess::Broadcast)?;
+        let params_buffer =
+            device.alloc_buffer_with_data(&[initial_params], DataAccess::Broadcast)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

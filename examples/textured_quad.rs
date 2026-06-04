@@ -200,7 +200,7 @@ impl App {
         )?;
 
         // Create vertex buffer
-        let vertex_buffer = Buffer::with_data(&device, &QUAD_VERTICES, DataAccess::Scattered)?;
+        let vertex_buffer = device.alloc_buffer_with_data(&QUAD_VERTICES, DataAccess::Scattered)?;
 
         self.device = Some(device);
         self.shader = Some(shader);

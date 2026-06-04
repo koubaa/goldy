@@ -7,14 +7,14 @@ use crate::vram_allocator::{ParcelKind, VramAllocator};
 use anyhow::Result;
 use std::sync::{Arc, Mutex, Weak};
 
-/// Types allowed as elements in [`Buffer::with_data`] and [`BufferPool::alloc_with_data`].
+/// Types allowed as elements in [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data) and [`BufferPool::alloc_with_data`].
 ///
 /// This is implemented for common multi-byte primitives, arrays of those types, and
 /// `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
 ///
 /// **Not** implemented for `u8` / `i8`: passing `&[u8]` (e.g. from `bytemuck::bytes_of`) would
 /// set element stride to 1 while shaders usually expect a larger struct stride. Use
-/// [`Buffer::with_bytes_stride`] or a typed slice instead.
+/// [`Device::alloc_buffer_with_bytes_stride`](crate::Device::alloc_buffer_with_bytes_stride) or a typed slice instead.
 ///
 /// Unit type `()` is included so empty slices type-check.
 pub trait StructuredBufferElement: bytemuck::Pod {}
@@ -66,6 +66,7 @@ pub struct Buffer {
     deed: Option<Weak<dyn VramAllocator>>,
 }
 
+#[allow(dead_code)]
 impl Buffer {
     #[inline]
     pub(crate) fn gpu_buffer_handle(&self) -> BufferHandle {
@@ -86,14 +87,14 @@ impl Buffer {
     ///
     /// - `DataAccess::Broadcast`: All threads read the same address.
     ///   Hardware optimizes for wave-wide broadcast (ConstantBuffer).
-    pub fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self> {
+    pub(crate) fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self> {
         Self::new_with_stride_and_flags(device, size, access, None, BufferFlags::empty())
     }
 
     /// Like [`Self::new`], with a peak-capacity hint for backends that support oversize virtual
     /// reservations (e.g. Metal). `expected_max` is clamped with `initial_size`; allocation is at
     /// least `max(initial_size, expected_max)` on supporting backends.
-    pub fn new_with_capacity_hint(
+    pub(crate) fn new_with_capacity_hint(
         device: &Device,
         initial_size: u64,
         expected_max: u64,
@@ -111,7 +112,7 @@ impl Buffer {
     /// Like [`Self::new_with_capacity_hint`], with explicit [`BufferFlags`].
     ///
     /// Use [`BufferFlags::GPU_ONLY`] for device-local frame scratch pools on Metal.
-    pub fn new_with_capacity_hint_and_flags(
+    pub(crate) fn new_with_capacity_hint_and_flags(
         device: &Device,
         initial_size: u64,
         expected_max: u64,
@@ -154,7 +155,7 @@ impl Buffer {
             deed: None,
         })
     }
-    pub fn new_with_stride(
+    pub(crate) fn new_with_stride(
         device: &Device,
         size: u64,
         access: DataAccess,
@@ -164,7 +165,7 @@ impl Buffer {
     }
 
     /// Create a buffer with optional element stride and [`BufferFlags`].
-    pub fn new_with_stride_and_flags(
+    pub(crate) fn new_with_stride_and_flags(
         device: &Device,
         size: u64,
         access: DataAccess,
@@ -208,7 +209,7 @@ impl Buffer {
     /// See [`StructuredBufferElement`] for which `T` are allowed (`u8` / `i8` are not).
     ///
     /// See [`Buffer::new`] and [`DataAccess::Scattered`] for access-pattern details.
-    pub fn with_data<T: StructuredBufferElement>(
+    pub(crate) fn with_data<T: StructuredBufferElement>(
         device: &Device,
         data: &[T],
         access: DataAccess,
@@ -217,7 +218,7 @@ impl Buffer {
     }
 
     /// Like [`Self::with_data`], with explicit [`BufferFlags`].
-    pub fn with_data_and_flags<T: StructuredBufferElement>(
+    pub(crate) fn with_data_and_flags<T: StructuredBufferElement>(
         device: &Device,
         data: &[T],
         access: DataAccess,
@@ -258,7 +259,7 @@ impl Buffer {
     /// structs, prefer [`Buffer::with_data`] with `&[T]` so stride matches the shader type.
     ///
     /// See [`Buffer::new`] for access pattern documentation.
-    pub fn with_bytes(device: &Device, data: &[u8], access: DataAccess) -> Result<Self> {
+    pub(crate) fn with_bytes(device: &Device, data: &[u8], access: DataAccess) -> Result<Self> {
         // For raw bytes, use stride of 1 (byte-addressable)
         Self::with_bytes_stride_and_flags(device, data, access, 1, BufferFlags::empty())
     }
@@ -270,7 +271,7 @@ impl Buffer {
     /// interpret the buffer as `StructuredBuffer<uint>`.
     ///
     /// See [`Buffer::new`] for access pattern documentation.
-    pub fn with_bytes_stride(
+    pub(crate) fn with_bytes_stride(
         device: &Device,
         data: &[u8],
         access: DataAccess,
@@ -286,7 +287,7 @@ impl Buffer {
     }
 
     /// Like [`Self::with_bytes_stride`], with explicit [`BufferFlags`].
-    pub fn with_bytes_stride_and_flags(
+    pub(crate) fn with_bytes_stride_and_flags(
         device: &Device,
         data: &[u8],
         access: DataAccess,
@@ -895,7 +896,7 @@ impl BufferPool {
     /// Allocate and fill a typed region in one call.
     ///
     /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
-    /// Same element-stride rules as [`Buffer::with_data`].
+    /// Same element-stride rules as [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data).
     pub fn alloc_with_data<T: StructuredBufferElement>(
         &mut self,
         data: &[T],

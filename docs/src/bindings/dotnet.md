@@ -120,7 +120,7 @@ using (var target = new RenderTarget(device, 512, 512, TextureFormat.Rgba8Unorm)
 | Instance creation | `Instance::new()?` | `new Instance()` |
 | Error handling | `Result<T, GoldyError>` | Exceptions |
 | Device lifetime | `Arc<Device>` | `IDisposable` / `using` |
-| Buffer creation | `Buffer::with_data(&device, &[T], access)` | `Buffer.WithData<T>(device, data, access)` |
+| Buffer creation | `device.alloc_buffer_with_data( &[T], access)` | `Buffer.WithData<T>(device, data, access)` |
 | Pixel readback | `Vec<u8>` | `byte[]` |
 | Enums | `DeviceType::DiscreteGpu` | `DeviceType.DiscreteGpu` |
 

@@ -193,7 +193,7 @@ target.render(render_encoder)
 |--------|------|--------|
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
-| Buffer data | `Buffer::with_data(&device, &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
+| Buffer data | `device.alloc_buffer_with_data( &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
 | Render pass | `encoder.begin_render_pass()` returns struct | Context manager (`with ... as rp`) |
 | Pixel readback | `target.read_to_cpu()` → `Vec<u8>` | `target.read_to_cpu()` → NumPy array `(H, W, 4)` |
 | Resource lifetime | Explicit `Arc<Device>` ownership | Managed by Python GC via PyO3 |

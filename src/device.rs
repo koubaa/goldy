@@ -619,13 +619,12 @@ impl Device {
 
     /// Allocate a GPU buffer through the device's [`VramAllocator`].
     ///
-    /// Equivalent to calling [`VramAllocator::alloc_buffer`] on the installed
-    /// allocator. Prefer this over [`Buffer::new`] when you want allocations to
-    /// go through the unified allocator for tracking and budgeting.
+    /// All public buffer creation goes through this method (or the `alloc_buffer_with_*`
+    /// helpers below). Allocations receive an accounting deed and honor the installed
+    /// allocator's budget and telemetry.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`VramAllocator::alloc_buffer`]: crate::vram_allocator::VramAllocator::alloc_buffer
-    /// [`Buffer::new`]: crate::buffer::Buffer::new
     pub fn alloc_buffer(
         &self,
         size: u64,
@@ -662,15 +661,61 @@ impl Device {
         Ok(buf)
     }
 
+    /// Allocate a buffer initialized with typed data (element stride from `T`).
+    pub fn alloc_buffer_with_data<T: crate::buffer::StructuredBufferElement>(
+        &self,
+        data: &[T],
+        access: DataAccess,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        let bytes = bytemuck::cast_slice(data);
+        let stride = std::mem::size_of::<T>() as u32;
+        self.alloc_buffer_with_bytes_stride(bytes, access, stride)
+    }
+
+    /// Allocate a buffer initialized with raw bytes (element stride 1).
+    pub fn alloc_buffer_with_bytes(
+        &self,
+        data: &[u8],
+        access: DataAccess,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        self.alloc_buffer_with_bytes_stride(data, access, 1)
+    }
+
+    /// Allocate a buffer initialized with raw bytes and a custom element stride.
+    pub fn alloc_buffer_with_bytes_stride(
+        &self,
+        data: &[u8],
+        access: DataAccess,
+        element_stride: u32,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        self.alloc_buffer_with_bytes_stride_and_flags(
+            data,
+            access,
+            element_stride,
+            BufferFlags::empty(),
+        )
+    }
+
+    /// Like [`Self::alloc_buffer_with_bytes_stride`], with explicit [`BufferFlags`].
+    pub fn alloc_buffer_with_bytes_stride_and_flags(
+        &self,
+        data: &[u8],
+        access: DataAccess,
+        element_stride: u32,
+        flags: BufferFlags,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        let buf = self.alloc_buffer(data.len() as u64, access, Some(element_stride), flags)?;
+        buf.write(0, data)?;
+        Ok(buf)
+    }
+
     /// Allocate a GPU texture through the device's [`VramAllocator`].
     ///
-    /// Equivalent to calling [`VramAllocator::alloc_texture`] on the installed
-    /// allocator. Prefer this over [`Texture::new`] when you want allocations to
-    /// go through the unified allocator for tracking and budgeting.
+    /// All public texture creation goes through this method. Allocations receive an
+    /// accounting deed and honor the installed allocator's budget and telemetry.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`VramAllocator::alloc_texture`]: crate::vram_allocator::VramAllocator::alloc_texture
-    /// [`Texture::new`]: crate::texture::Texture::new
     pub fn alloc_texture(
         &self,
         width: u32,

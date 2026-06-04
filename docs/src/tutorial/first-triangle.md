@@ -46,7 +46,7 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
+        let vertex_buffer = device.alloc_buffer_with_data( &vertices, DataAccess::Scattered)?;
 
         let surface = Surface::new(&device, window.as_ref())?;
 
@@ -160,10 +160,10 @@ let vertices = [
     Vertex2D::new(-0.5, 0.5, Color::GREEN),
     Vertex2D::new(0.5, 0.5, Color::BLUE),
 ];
-let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
+let vertex_buffer = device.alloc_buffer_with_data( &vertices, DataAccess::Scattered)?;
 ```
 
-`Vertex2D` is a built-in vertex type with position and color. `Buffer::with_data` allocates a GPU buffer and uploads the data. `DataAccess::Scattered` marks it as a bindless storage buffer.
+`Vertex2D` is a built-in vertex type with position and color. `device.alloc_buffer_with_data` allocates a GPU buffer and uploads the data. `DataAccess::Scattered` marks it as a bindless storage buffer.
 
 ### Shader and Pipeline
 

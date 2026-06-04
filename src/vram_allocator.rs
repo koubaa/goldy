@@ -1,61 +1,72 @@
 //! Unified GPU memory allocation interface.
 //!
-//! Goldy has three independent GPU memory allocation paths:
+//! [`VramAllocator`] is the single customization point for *where* GPU memory comes from.
+//! It sits below Goldy's pooling layers; every allocation that goes through a
+//! [`Device::alloc_buffer`] / [`Device::alloc_buffer_with_capacity`] / [`Device::alloc_texture`]
+//! method passes through the installed allocator:
 //!
-//! 1. **Transient sub-allocations** — [`TransientAllocator`] → [`BufferPool`] → [`Buffer::new`].
-//!    Pluggable recycling policy via the [`TransientAllocator`] trait, but no control over
-//!    *where* memory comes from.
-//! 2. **Standalone named buffers** — consumers call [`Buffer::new`] directly for bump readback,
-//!    staging, indirect dispatch, etc.
-//! 3. **Textures** — [`TexturePool`] → [`Texture::new`]. No interception point.
+//! - **Transient backing** — [`TransientAllocator`] → [`BufferPool`] → [`Device::alloc_buffer`] ✓
+//! - **Standalone named buffers** — [`Device::alloc_buffer`] / [`Device::alloc_buffer_with_capacity`] ✓
+//! - **Textures** — [`TexturePool`] → [`Device::alloc_texture`] ✓
 //!
-//! [`VramAllocator`] sits **below** all three pooling systems, providing a single customization
-//! point for *where* GPU memory comes from. This enables:
+//! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
+//! a `Weak` back-reference to the allocator. When the [`Buffer`] or [`Texture`] is dropped,
+//! [`VramAllocator::notify_freed`] is called automatically so the allocator can update its
+//! byte counters. Sub-parcels ([`crate::buffer::BufferView`]) carry no deed and are never
+//! accounted.
 //!
-//! - **Unified memory control** — alias transient, standalone, and texture allocations into one
-//!   address space or placement heap.
-//! - **Backend-native strategies** — Metal `makeAliasable` placement heaps, Vulkan sparse
-//!   binding, DX12 tiled resources as first-class allocator implementations.
-//! - **Budgeting / telemetry** — VRAM caps, fragmentation monitoring, eviction policies.
-//! - **Defragmentation** — move allocations and update bindless descriptors atomically.
+//! External callers use [`Device::alloc_buffer`] / [`Device::alloc_texture`] (and the
+//! `alloc_buffer_with_*` helpers). Raw `Buffer::new_with_stride_and_flags` is
+//! `pub(crate)` for allocator backends and in-crate tests only.
+//!
+//! **Deferred-reclamation ring.** The allocator also owns the timeline-gated reclamation ring.
+//! Resources with in-flight GPU work are registered via [`VramAllocator::defer_release`] and
+//! dropped by [`VramAllocator::boundary_crossed`] once the timeline retires past their epoch.
+//! [`DefaultVramAllocator`] implements the ring; [`TrackingVramAllocator`] delegates through it.
 //!
 //! # Architecture
 //!
 //! ```text
-//! ┌────────────────────────────────────────────────┐
-//! │  Consumers (ekrano, user code)                 │
-//! │  ┌─────────────┐  ┌──────────┐  ┌───────────┐ │
-//! │  │ TransientAlloc│ │ Buffer:: │  │ Texture:: │ │
-//! │  │ (recycling)  │  │ new()    │  │ new()     │ │
-//! │  └──────┬───────┘  └────┬─────┘  └─────┬─────┘ │
-//! │         │               │              │       │
-//! │  ┌──────▼───────────────▼──────────────▼──────┐│
-//! │  │           VramAllocator trait               ││
-//! │  │  alloc_buffer / alloc_texture / free / ...  ││
-//! │  └──────────────────┬──────────────────────────┘│
-//! │                     │                           │
-//! │  ┌──────────────────▼──────────────────────────┐│
-//! │  │           GpuBackend (Metal/Vulkan/DX12)    ││
-//! │  └─────────────────────────────────────────────┘│
-//! └────────────────────────────────────────────────┘
+//! ┌───────────────────────────────────────────────────┐
+//! │  Consumers (ekrano, user code)                    │
+//! │  ┌──────────────┐  ┌──────────────┐  ┌─────────┐ │
+//! │  │TransientAlloc│  │Device::alloc_│  │Texture  │ │
+//! │  │ (recycling)  │  │buffer()      │  │Pool     │ │
+//! │  └──────┬───────┘  └──────┬───────┘  └────┬────┘ │
+//! │         │ via BufferPool  │               │      │
+//! │  ┌──────▼─────────────────▼───────────────▼─────┐│
+//! │  │              VramAllocator trait              ││
+//! │  │  alloc_buffer / alloc_texture / notify_freed  ││
+//! │  │  defer_release / boundary_crossed / drain     ││
+//! │  └──────────────────┬────────────────────────────┘│
+//! │                     │                             │
+//! │  ┌──────────────────▼────────────────────────────┐│
+//! │  │          GpuBackend (Metal/Vulkan/DX12)       ││
+//! │  └───────────────────────────────────────────────┘│
+//! └───────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Usage
 //!
-//! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. Call
-//! [`Device::with_vram_allocator`] before creating any GPU resources to install
-//! a custom allocator. The default ([`DefaultVramAllocator`]) delegates directly
-//! to the backend with zero overhead.
+//! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. Call [`Device::with_vram_allocator`]
+//! before creating any GPU resources to install a custom allocator. The default
+//! ([`DefaultVramAllocator`]) delegates directly to the backend and implements the deferred
+//! ring at zero overhead when no budget enforcement is needed. Wrap it with
+//! [`TrackingVramAllocator`] to add byte-level tracking and an optional VRAM budget.
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`BufferPool`]: crate::buffer::BufferPool
-//! [`Buffer::new`]: crate::buffer::Buffer::new
-//! [`Texture::new`]: crate::texture::Texture::new
+//! [`Buffer`]: crate::buffer::Buffer
+//! [`Texture`]: crate::texture::Texture
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
+//! [`Device::alloc_buffer`]: crate::device::Device::alloc_buffer
+//! [`Device::alloc_buffer_with_capacity`]: crate::device::Device::alloc_buffer_with_capacity
+//! [`Device::alloc_texture`]: crate::device::Device::alloc_texture
 //! [`Device::with_vram_allocator`]: crate::device::Device::with_vram_allocator
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
+//! [`TrackingVramAllocator`]: crate::vram_allocator::TrackingVramAllocator
 
 use crate::buffer::Buffer;
 use crate::device::Device;
@@ -147,7 +158,7 @@ pub enum ParcelKind {
 pub trait VramAllocator: Send + Sync {
     /// Allocate a GPU buffer.
     ///
-    /// The default implementation calls [`Buffer::new_with_stride_and_flags`] directly.
+    /// The default implementation calls the raw `Buffer::new_with_stride_and_flags` constructor directly.
     /// Custom implementations may allocate from a placement heap, enforce a budget, or
     /// track the allocation for telemetry.
     fn alloc_buffer(
@@ -163,7 +174,7 @@ pub trait VramAllocator: Send + Sync {
 
     /// Allocate a GPU buffer with a pre-reserved capacity hint.
     ///
-    /// The default implementation calls [`Buffer::new_with_capacity_hint_and_flags`].
+    /// The default implementation calls the raw `Buffer::new_with_capacity_hint_and_flags` constructor.
     fn alloc_buffer_with_capacity(
         &self,
         device: &Device,
@@ -177,7 +188,7 @@ pub trait VramAllocator: Send + Sync {
 
     /// Allocate a GPU texture.
     ///
-    /// The default implementation calls [`Texture::new`] directly.
+    /// The default implementation calls the raw `Texture::new` constructor directly.
     fn alloc_texture(
         &self,
         device: &Device,
@@ -276,7 +287,7 @@ pub trait VramAllocator: Send + Sync {
 // Default implementation
 // -----------------------------------------------------------------------
 
-/// The default allocator: delegates directly to [`Buffer::new`] / [`Texture::new`]
+/// The default allocator: delegates directly to raw buffer / texture constructors
 /// with no tracking, budgeting, or overhead.
 ///
 /// Installed automatically when a [`Device`] is created. Implements the full

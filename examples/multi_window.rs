@@ -355,7 +355,7 @@ impl WindowState {
 
         let time = self.current_time();
         let vertices = create_quad(time);
-        let vertex_buffer = Buffer::with_data(device, &vertices, DataAccess::Scattered)?;
+        let vertex_buffer = device.alloc_buffer_with_data(&vertices, DataAccess::Scattered)?;
 
         // Acquire frame - this waits for oldest in-flight frame
         let frame = self.surface.begin()?;

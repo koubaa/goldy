@@ -37,9 +37,10 @@ impl PyBuffer {
     fn new(device: &PyDevice, data: &Bound<'_, PyAny>, access: PyDataAccess) -> PyResult<Self> {
         let (bytes, element_stride) = extract_bytes_with_stride(data)?;
         // Use the correct element stride for StructuredBuffer views on DX12
-        let buffer =
-            goldy::Buffer::with_bytes_stride(&device.inner, &bytes, access.into(), element_stride)
-                .into_py_result()?;
+        let buffer = device
+            .inner
+            .alloc_buffer_with_bytes_stride(&bytes, access.into(), element_stride)
+            .into_py_result()?;
 
         Ok(PyBuffer {
             inner: Arc::new(buffer),
@@ -57,7 +58,10 @@ impl PyBuffer {
     ///     A new empty Buffer instance.
     #[staticmethod]
     fn empty(device: &PyDevice, size: u64, access: PyDataAccess) -> PyResult<Self> {
-        let buffer = goldy::Buffer::new(&device.inner, size, access.into()).into_py_result()?;
+        let buffer = device
+            .inner
+            .alloc_buffer(size, access.into(), None, goldy::BufferFlags::empty())
+            .into_py_result()?;
         Ok(PyBuffer {
             inner: Arc::new(buffer),
         })

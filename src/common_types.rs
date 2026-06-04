@@ -15,7 +15,7 @@
 //! ];
 //!
 //! // Upload directly to GPU - layout matches shader struct exactly
-//! let buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
+//! let buffer = device.alloc_buffer_with_data(&particles, DataAccess::Scattered)?;
 //! ```
 
 use crate::buffer::StructuredBufferElement;

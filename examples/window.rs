@@ -59,7 +59,7 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)?;
+        let vertex_buffer = device.alloc_buffer_with_data(&vertices, DataAccess::Scattered)?;
 
         // Create Surface for zero-copy presentation
         let surface = Surface::new(&ctx, window.as_ref())?;

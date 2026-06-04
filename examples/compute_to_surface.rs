@@ -134,8 +134,7 @@ impl App {
         // for a stride-1 structured buffer) — turning `u.height` into 0 and
         // triggering the `if (tid.y >= u.height) return;` guard for every
         // thread on the `compute_to_surface` path.
-        let uniform_buffer = Buffer::with_data(
-            &device,
+        let uniform_buffer = device.alloc_buffer_with_data(
             &[Uniforms {
                 width: surface.width(),
                 height: surface.height(),

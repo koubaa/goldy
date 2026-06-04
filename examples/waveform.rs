@@ -167,11 +167,11 @@ impl App {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
             vertex_counts.push(vertices.len() as u32);
-            channel_buffers.push(Buffer::with_data(
-                device.as_ref(),
-                &vertices,
-                DataAccess::Scattered,
-            )?);
+            channel_buffers.push(
+                device
+                    .as_ref()
+                    .alloc_buffer_with_data(&vertices, DataAccess::Scattered)?,
+            );
         }
 
         let frame = surface.begin()?;

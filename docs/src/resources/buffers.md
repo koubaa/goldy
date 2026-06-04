@@ -6,47 +6,46 @@
 
 ### With Typed Data
 
-`Buffer::with_data` creates a buffer and uploads an initial slice. The element stride is inferred from `T`, which is critical for correct `StructuredBuffer` views on DX12.
+`Device::alloc_buffer_with_data` allocates through the installed [`VramAllocator`](vram-allocator.md) and uploads an initial slice. The element stride is inferred from `T`, which is critical for correct `StructuredBuffer` views on DX12.
 
 ```rust
-use goldy::{Buffer, DataAccess};
+use goldy::DataAccess;
 
 let positions = vec![[0.0f32, 1.0, 0.0], [1.0, 0.0, 0.0]];
-let buffer = Buffer::with_data(&device, &positions, DataAccess::Scattered)?;
+let buffer = device.alloc_buffer_with_data(&positions, DataAccess::Scattered)?;
 ```
 
-**Type matters.** Passing `&[u8]` (e.g. from `bytemuck::bytes_of`) sets the element stride to 1 byte, while shaders usually expect a larger struct stride. Use a typed slice or `with_bytes_stride` instead.
-
-### With Typed Data and Flags
-
-```rust
-let buffer = Buffer::with_data_and_flags(
-    &device,
-    &data,
-    DataAccess::Scattered,
-    BufferFlags::CPU_READABLE,
-)?;
-```
+**Type matters.** Passing `&[u8]` (e.g. from `bytemuck::bytes_of`) sets the element stride to 1 byte, while shaders usually expect a larger struct stride. Use a typed slice or `alloc_buffer_with_bytes_stride` instead.
 
 ### With Raw Bytes
 
-When the data is naturally `&[u8]`, use one of the byte-oriented constructors:
+When the data is naturally `&[u8]`:
 
 ```rust
 // Stride defaults to 1 (byte-addressable)
-let buffer = Buffer::with_bytes(&device, &raw_bytes, DataAccess::Scattered)?;
+let buffer = device.alloc_buffer_with_bytes(&raw_bytes, DataAccess::Scattered)?;
 
 // Explicit stride for structured buffer views
-let buffer = Buffer::with_bytes_stride(&device, &raw_bytes, DataAccess::Scattered, 16)?;
+let buffer = device.alloc_buffer_with_bytes_stride(&raw_bytes, DataAccess::Scattered, 16)?;
+
+// With flags (e.g. CPU_READABLE)
+let buffer = device.alloc_buffer_with_bytes_stride_and_flags(
+    &raw_bytes,
+    DataAccess::Scattered,
+    16,
+    BufferFlags::CPU_READABLE,
+)?;
 ```
 
 ### Empty Buffer
 
 ```rust
-let buffer = Buffer::new(&device, 4096, DataAccess::Scattered)?;
+use goldy::{BufferFlags, DataAccess};
+
+let buffer = device.alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())?;
 
 // With a specific element stride
-let buffer = Buffer::new_with_stride(&device, 4096, DataAccess::Scattered, Some(64))?;
+let buffer = device.alloc_buffer(4096, DataAccess::Scattered, Some(64), BufferFlags::empty())?;
 ```
 
 ## Data Access Patterns
@@ -164,9 +163,9 @@ Dropping a `BufferView` unregisters its descriptor but does not free the parent 
 
 ## StructuredBufferElement
 
-The `StructuredBufferElement` trait marks types safe for `Buffer::with_data` and `BufferPool::alloc_with_data`. It is implemented for common multi-byte primitives (`u16`, `u32`, `f32`, `f64`, etc.), fixed-size arrays of those types, and `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
+The `StructuredBufferElement` trait marks types safe for `Device::alloc_buffer_with_data` and `BufferPool::alloc_with_data`. It is implemented for common multi-byte primitives (`u16`, `u32`, `f32`, `f64`, etc.), fixed-size arrays of those types, and `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
 
-**Not implemented for `u8`/`i8`** — passing `&[u8]` would set stride to 1, which almost never matches the shader's expected struct stride. Use `Buffer::with_bytes_stride` for raw bytes.
+**Not implemented for `u8`/`i8`** — passing `&[u8]` would set stride to 1, which almost never matches the shader's expected struct stride. Use `device.alloc_buffer_with_bytes_stride` for raw bytes.
 
 ## Matrix Convention
 

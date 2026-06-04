@@ -32,7 +32,10 @@ pub unsafe extern "C" fn goldy_buffer_create(
         return ptr::null_mut();
     }
 
-    match goldy::Buffer::new(&(*device).inner, size, access.into()) {
+    match (*device)
+        .inner
+        .alloc_buffer(size, access.into(), None, goldy::BufferFlags::empty())
+    {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
@@ -72,7 +75,10 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data(
         &[]
     };
 
-    match goldy::Buffer::with_bytes(&(*device).inner, data_slice, access.into()) {
+    match (*device)
+        .inner
+        .alloc_buffer_with_bytes(data_slice, access.into())
+    {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

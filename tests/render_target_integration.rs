@@ -91,7 +91,8 @@ fn test_vulkan_render_and_readback() {
         Vertex2D::new(-0.5, 0.5, Color::GREEN),
         Vertex2D::new(0.5, 0.5, Color::BLUE),
     ];
-    let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)
+    let vertex_buffer = device
+        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
         .expect("Failed to create vertex buffer");
 
     // Render
@@ -255,7 +256,8 @@ fn test_indexed_drawing() {
         Vertex2D::new(0.5, 0.5, Color::BLUE),   // 2: top-right
         Vertex2D::new(-0.5, 0.5, Color::WHITE), // 3: top-left
     ];
-    let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)
+    let vertex_buffer = device
+        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
         .expect("Failed to create vertex buffer");
 
     // Indices for two triangles forming a quad
@@ -263,7 +265,8 @@ fn test_indexed_drawing() {
         0, 1, 2, // First triangle
         0, 2, 3, // Second triangle
     ];
-    let index_buffer = Buffer::with_data(&device, &indices, DataAccess::Scattered)
+    let index_buffer = device
+        .alloc_buffer_with_data(&indices, DataAccess::Scattered)
         .expect("Failed to create index buffer");
 
     // Render using indexed drawing
@@ -352,12 +355,14 @@ fn test_indexed_drawing_uint32() {
         Vertex2D::new(-0.8, 0.8, Color::RED),
         Vertex2D::new(0.8, 0.8, Color::RED),
     ];
-    let vertex_buffer = Buffer::with_data(&device, &vertices, DataAccess::Scattered)
+    let vertex_buffer = device
+        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
         .expect("Failed to create vertex buffer");
 
     // Use u32 indices
     let indices: [u32; 3] = [0, 1, 2];
-    let index_buffer = Buffer::with_data(&device, &indices, DataAccess::Scattered)
+    let index_buffer = device
+        .alloc_buffer_with_data(&indices, DataAccess::Scattered)
         .expect("Failed to create index buffer");
 
     let mut encoder = CommandEncoder::new();
@@ -490,9 +495,11 @@ fn test_depth_occlusion_red_beats_green() {
     let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
     let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
 
-    let red_vb = Buffer::with_data(&device, &red_verts, DataAccess::Scattered)
+    let red_vb = device
+        .alloc_buffer_with_data(&red_verts, DataAccess::Scattered)
         .expect("Failed to create red VB");
-    let green_vb = Buffer::with_data(&device, &green_verts, DataAccess::Scattered)
+    let green_vb = device
+        .alloc_buffer_with_data(&green_verts, DataAccess::Scattered)
         .expect("Failed to create green VB");
 
     let mut encoder = CommandEncoder::new();
@@ -596,9 +603,11 @@ fn test_depth_occlusion_green_beats_red() {
     let red_verts = make_tri(0.8, [1.0, 0.0, 0.0, 1.0]);
     let green_verts = make_tri(0.2, [0.0, 1.0, 0.0, 1.0]);
 
-    let red_vb = Buffer::with_data(&device, &red_verts, DataAccess::Scattered)
+    let red_vb = device
+        .alloc_buffer_with_data(&red_verts, DataAccess::Scattered)
         .expect("Failed to create red VB");
-    let green_vb = Buffer::with_data(&device, &green_verts, DataAccess::Scattered)
+    let green_vb = device
+        .alloc_buffer_with_data(&green_verts, DataAccess::Scattered)
         .expect("Failed to create green VB");
 
     let mut encoder = CommandEncoder::new();
@@ -648,7 +657,9 @@ fn test_render_target_bindless_buffer_read() {
     };
 
     let data = vec![1u32; 4];
-    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+    let buffer = device
+        .alloc_buffer_with_data(&data, DataAccess::Scattered)
+        .expect("create buffer");
 
     // Fragment shader reads buffer[0] via bindless resource binding.
     // Outputs bright green when value == 1 (alive), dark gray otherwise.

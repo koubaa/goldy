@@ -117,13 +117,14 @@ impl RenderState {
             });
         }
 
-        let particle_buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
+        let particle_buffer = device.alloc_buffer_with_data(&particles, DataAccess::Scattered)?;
 
         // Per-frame simulation params (dt written each frame before dispatch)
-        let params_buffer = Buffer::new(
-            &device,
+        let params_buffer = device.alloc_buffer(
             std::mem::size_of::<SimParams>() as u64,
             DataAccess::Broadcast,
+            None,
+            BufferFlags::empty(),
         )?;
 
         // Create compute pipeline

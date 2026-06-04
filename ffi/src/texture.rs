@@ -39,14 +39,10 @@ pub unsafe extern "C" fn goldy_texture_create(
         return ptr::null_mut();
     }
 
-    match goldy::Texture::new(
-        &(*device).inner,
-        width,
-        height,
-        format.into(),
-        access.into(),
-        flags.into(),
-    ) {
+    match (*device)
+        .inner
+        .alloc_texture(width, height, format.into(), access.into(), flags.into())
+    {
         Ok(texture) => Box::into_raw(Box::new(GoldyTexture { inner: texture })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

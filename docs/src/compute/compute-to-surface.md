@@ -124,7 +124,7 @@ let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
 // Create uniform buffer
-let uniform_buffer = Buffer::with_data(
+let uniform_buffer = device.alloc_buffer_with_data(
     &device,
     &[Uniforms {
         width: surface.width(),

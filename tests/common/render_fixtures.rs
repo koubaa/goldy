@@ -79,8 +79,9 @@ pub fn render_triangle(
     )
     .expect("Failed to create pipeline");
 
-    let vertex_buffer =
-        Buffer::with_data(device, &vertices, DataAccess::Scattered).expect("Failed to create VB");
+    let vertex_buffer = device
+        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
+        .expect("Failed to create VB");
 
     let mut encoder = CommandEncoder::new();
     {
@@ -185,9 +186,11 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     .expect("Failed to load render shader");
 
     let initial_state = create_gol_initial_state();
-    let buffer_a = Buffer::with_data(device, &initial_state, DataAccess::Scattered)
+    let buffer_a = device
+        .alloc_buffer_with_data(&initial_state, DataAccess::Scattered)
         .expect("Failed to create buffer A");
-    let buffer_b = Buffer::with_data(device, &initial_state, DataAccess::Scattered)
+    let buffer_b = device
+        .alloc_buffer_with_data(&initial_state, DataAccess::Scattered)
         .expect("Failed to create buffer B");
 
     let compute_pipeline =
@@ -333,9 +336,11 @@ pub fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u
     let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
     let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
 
-    let red_vb =
-        Buffer::with_data(device, &red_verts, DataAccess::Scattered).expect("Failed to create VB");
-    let green_vb = Buffer::with_data(device, &green_verts, DataAccess::Scattered)
+    let red_vb = device
+        .alloc_buffer_with_data(&red_verts, DataAccess::Scattered)
+        .expect("Failed to create VB");
+    let green_vb = device
+        .alloc_buffer_with_data(&green_verts, DataAccess::Scattered)
         .expect("Failed to create VB");
 
     let mut encoder = CommandEncoder::new();

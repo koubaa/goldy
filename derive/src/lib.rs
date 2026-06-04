@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
-/// Marker trait for types safe to pass to [`goldy::Buffer::with_data`].
+/// Marker trait for types safe to pass to [`goldy::Device::alloc_buffer_with_data`].
 ///
 /// Add this alongside `bytemuck::Pod` on `#[repr(C)]` structs used as GPU buffer elements.
 #[proc_macro_derive(StructuredBufferElement)]

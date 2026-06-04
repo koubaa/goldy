@@ -61,7 +61,7 @@ impl Texture {
     /// # Errors
     ///
     /// Returns an error if GPU resource allocation fails.
-    pub fn new(
+    pub(crate) fn new(
         device: &Device,
         width: u32,
         height: u32,
@@ -94,7 +94,7 @@ impl Texture {
     /// The data must be in the correct format for the texture's pixel format.
     /// For RGBA8 textures, this is 4 bytes per pixel in RGBA order.
     ///
-    /// See [`Texture::new`] for access pattern documentation.
+    /// See [`Device::alloc_texture`](crate::Device::alloc_texture) for access pattern documentation.
     ///
     /// # Arguments
     ///

@@ -59,7 +59,7 @@ impl TexturePool {
         }
     }
 
-    /// Take a pooled texture matching the key, or create a new one with [`Texture::new`].
+    /// Take a pooled texture matching the key, or create a new one through [`Device::alloc_texture`](crate::Device::alloc_texture).
     pub fn acquire(
         &mut self,
         device: &Device,

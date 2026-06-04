@@ -35,7 +35,7 @@ Goldy uses **bindless access**. Resources get a slot index at creation time, and
 
 ```rust
 // Goldy: buffer already has a bindless slot, shader reads it by index
-let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered)?;
+let buffer = device.alloc_buffer_with_data( &data, DataAccess::Scattered)?;
 pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
 ```
 

@@ -82,10 +82,11 @@ impl App {
         )?;
 
         // Create uniform buffer
-        let uniform_buffer = Buffer::new(
-            device.as_ref(),
+        let uniform_buffer = device.as_ref().alloc_buffer(
             std::mem::size_of::<Uniforms>() as u64,
             DataAccess::Broadcast,
+            None,
+            goldy::BufferFlags::empty(),
         )?;
 
         self.device = Some(device);

@@ -263,9 +263,9 @@ impl App {
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
-        let vertex_buffer = Buffer::with_data(device.as_ref(), &vertices, DataAccess::Scattered)?;
+        let vertex_buffer = device.as_ref().alloc_buffer_with_data(&vertices, DataAccess::Scattered)?;
         let index_buffer =
-            Buffer::with_data(device.as_ref(), &sorted_indices, DataAccess::Scattered)?;
+            device.as_ref().alloc_buffer_with_data(&sorted_indices, DataAccess::Scattered)?;
 
         let frame = surface.begin()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {

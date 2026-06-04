@@ -13,7 +13,7 @@ Traditional GPU APIs require you to declare descriptor set layouts, allocate des
 ```
 CPU side:                         GPU side:
                                   
-Buffer::with_data(...)            goldy_scattered<T>(slot)
+device.alloc_buffer_with_data(...) goldy_scattered<T>(slot)
   → BindlessHandle {                → descriptor_heap[slot]
       category: Scattered,            → RWStructuredBuffer<T>
       index: 3,
@@ -39,7 +39,7 @@ Goldy's descriptor heaps are organized into five pools, one per access pattern. 
 `BindlessHandle` is the typed wrapper that carries both the raw index and the resource category:
 
 ```rust
-let buf = Buffer::with_data(&device, DataAccess::Scattered, &particles)?;
+let buf = device.alloc_buffer_with_data( DataAccess::Scattered, &particles)?;
 let handle: BindlessHandle = buf.bindless_handle().unwrap();
 
 assert_eq!(handle.category(), BindlessCategory::Scattered);
@@ -119,8 +119,8 @@ void cs_main(SimParams params, Scattered<Particle> particles, ThreadId id) {
 **Rust dispatch**:
 
 ```rust
-let params_buf = Buffer::with_data(&device, DataAccess::Broadcast, &[sim_params])?;
-let particle_buf = Buffer::with_data(&device, DataAccess::Scattered, &particles)?;
+let params_buf = device.alloc_buffer_with_data( DataAccess::Broadcast, &[sim_params])?;
+let particle_buf = device.alloc_buffer_with_data( DataAccess::Scattered, &particles)?;
 
 let shader = ShaderModule::from_slang(&device, PARTICLE_UPDATE_SOURCE)?;
 let pipeline = ComputePipeline::new(&device, &shader)?;
