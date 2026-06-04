@@ -189,11 +189,6 @@ impl Context {
             backend.set_reclamation_context(self.inner.handle, Some(epoch));
             drop(backend);
             self.device().vram_allocator().boundary_crossed(retired);
-            if let Ok(mut heap_guard) = self.inner.device.inner.placement_heap.lock() {
-                if let Some(heap) = heap_guard.as_mut() {
-                    heap.reclaim(epoch);
-                }
-            }
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_post");
