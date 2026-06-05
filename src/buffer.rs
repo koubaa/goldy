@@ -340,6 +340,11 @@ impl Buffer {
         self.size
     }
 
+    /// Committed byte size for accounting (equals logical [`Self::size`] today).
+    pub fn byte_size(&self) -> u64 {
+        self.size
+    }
+
     /// Reserved byte capacity (physical or virtual backing size).
     pub fn allocated_size(&self) -> u64 {
         self.allocated_size

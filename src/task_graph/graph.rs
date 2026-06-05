@@ -1500,6 +1500,18 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
+    /// Declare that this node accesses a retained [`crate::Parcel`] (buffer or texture).
+    ///
+    /// The backend resource handle is resolved inside the runtime; the client does not
+    /// pass a raw handle.
+    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
     pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientBuffer(id),
