@@ -1,18 +1,32 @@
 //! Gate-free retained allocation pool — the public door for deed-held GPU memory.
 //!
-//! [`RetainedPool::acquire_texture`] and [`RetainedPool::acquire_buffer`] are the only
-//! supported way to create retained parcels in this unit. Parcels are opaque [`Parcel`]
-//! values; relinquish via [`Self::transfer_out`] or by dropping the parcel.
+//! [`RetainedPool::acquire_texture`], [`RetainedPool::acquire_buffer`], and
+//! [`RetainedPool::mosaic`] are the supported ways to create retained parcels. Parcels are
+//! opaque [`Parcel`] values; relinquish via [`Self::transfer_out`] or by dropping the parcel.
 //!
 //! Reuse-gate, transient pool, backpressure, and host-visible `copy_into` are deferred.
 
+use crate::buffer::{BufferPool, StructuredBufferElement};
 use crate::device::Device;
-use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping};
+use crate::parcel::{BookkeepingGuard, BytesByKind, MosaicSlot, Parcel, PoolBookkeeping};
 use crate::timeline::TimelineValue;
 use crate::types::{DataAccess, SpatialAccess, TextureFlags, TextureFormat};
 use crate::vram_allocator::ParcelKind;
 use anyhow::Result;
 use std::sync::Arc;
+
+struct MosaicSpec {
+    data: Option<Vec<u8>>,
+    count: u64,
+    stride: u32,
+}
+
+/// Builder for a retained mosaic parcel (one backing buffer, multiple sub-views).
+pub struct MosaicBuilder<'a> {
+    device: &'a Arc<Device>,
+    bookkeeping: &'a Arc<PoolBookkeeping>,
+    specs: Vec<MosaicSpec>,
+}
 
 /// A parcel relinquished from the retained pool, stamped for handoff to the transient pool.
 pub struct StampedParcel {
@@ -63,6 +77,15 @@ impl RetainedPool {
                 .map_err(|e| anyhow::anyhow!("{e}"))?
         };
         self.wrap_texture(tex)
+    }
+
+    /// Begin building a retained mosaic parcel (one backing buffer, multiple sub-views).
+    pub fn mosaic(&mut self) -> MosaicBuilder<'_> {
+        MosaicBuilder {
+            device: &self.device,
+            bookkeeping: &self.bookkeeping,
+            specs: Vec::new(),
+        }
     }
 
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
@@ -123,6 +146,59 @@ impl RetainedPool {
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
         Ok(Parcel::from_buffer(buf, guard))
+    }
+}
+
+impl<'a> MosaicBuilder<'a> {
+    /// Reserve space for `count` elements of type `T` (no initial upload).
+    pub fn reserve<T: StructuredBufferElement>(&mut self, count: u64) -> MosaicSlot {
+        let stride = std::mem::size_of::<T>() as u32;
+        let slot = MosaicSlot(self.specs.len() as u32);
+        self.specs.push(MosaicSpec {
+            data: None,
+            count,
+            stride,
+        });
+        slot
+    }
+
+    /// Reserve space and upload `data` in one step.
+    pub fn emplace<T: StructuredBufferElement>(&mut self, data: &[T]) -> MosaicSlot {
+        let stride = std::mem::size_of::<T>() as u32;
+        let slot = MosaicSlot(self.specs.len() as u32);
+        self.specs.push(MosaicSpec {
+            data: Some(bytemuck::cast_slice(data).to_vec()),
+            count: data.len() as u64,
+            stride,
+        });
+        slot
+    }
+
+    /// Allocate the backing buffer, carve sub-views, and return the mosaic parcel.
+    pub fn build(self) -> Result<Parcel> {
+        let pairs: Vec<(usize, usize)> = self
+            .specs
+            .iter()
+            .map(|s| (s.count as usize, s.stride as usize))
+            .collect();
+        let total = BufferPool::padded_size(&pairs);
+        let mut pool = BufferPool::new(self.device, total)?;
+
+        let mut views = Vec::with_capacity(self.specs.len());
+        for spec in &self.specs {
+            let size = spec.count * spec.stride as u64;
+            let view = pool.alloc_bytes(size, Some(spec.stride))?;
+            if let Some(data) = &spec.data {
+                view.write_data(data.as_slice())?;
+            }
+            views.push(view);
+        }
+
+        let bytes = pool.capacity();
+        let kind = ParcelKind::Buffer;
+        self.bookkeeping.add(kind, bytes);
+        let guard = BookkeepingGuard::new(Arc::downgrade(self.bookkeeping), kind, bytes);
+        Ok(Parcel::from_mosaic(pool, views, guard))
     }
 }
 
@@ -247,6 +323,62 @@ mod tests {
         let stamped = pool.transfer_out(p);
         assert_eq!(pool.bytes_by_kind().texture, 0);
         drop(stamped);
+    }
+
+    #[test]
+    fn mosaic_build_allocates_backing_and_views() {
+        let mut pool = RetainedPool::new(test_device());
+        let mut m = pool.mosaic();
+        let a = m.emplace(&[1u32, 2, 3]);
+        let b = m.reserve::<u32>(4);
+        let parcel = m.build().unwrap();
+
+        assert_eq!(parcel.kind(), ParcelKind::Buffer);
+        assert!(parcel.byte_size() >= 3 * 4 + 4 * 4);
+        assert_eq!(parcel.view(a).size(), 12);
+        assert_eq!(parcel.view(b).size(), 16);
+    }
+
+    #[test]
+    fn mosaic_emplace_uploads_and_reserve_leaves_space() {
+        let mut pool = RetainedPool::new(test_device());
+        let mut m = pool.mosaic();
+        let slot = m.emplace(&[42u32, 99]);
+        let _reserved = m.reserve::<u32>(8);
+        let parcel = m.build().unwrap();
+
+        assert!(parcel.view(slot).bindless_index().is_some());
+        assert_eq!(parcel.view(slot).offset(), 0);
+        assert!(parcel.view(slot).size() > 0);
+    }
+
+    #[test]
+    fn mosaic_bytes_by_kind_and_transfer_out() {
+        let mut pool = RetainedPool::new(test_device());
+        let mut m = pool.mosaic();
+        m.emplace(&[0u32; 16]);
+        let parcel = m.build().unwrap();
+        let bytes_before = parcel.byte_size();
+        assert!(pool.bytes_by_kind().buffer >= bytes_before);
+
+        let h_before = parcel.buffer_handle().unwrap();
+        let stamped = pool.transfer_out(parcel);
+        assert_eq!(pool.bytes_by_kind().buffer, 0);
+        assert_eq!(stamped.parcel.buffer_handle(), Some(h_before));
+        drop(stamped);
+    }
+
+    #[test]
+    fn mosaic_mark_referenced_is_monotonic() {
+        let mut pool = RetainedPool::new(test_device());
+        let mut m = pool.mosaic();
+        m.emplace(&[1u32]);
+        let mut parcel = m.build().unwrap();
+        parcel.mark_referenced(10);
+        parcel.mark_referenced(5);
+        assert_eq!(parcel.last_referenced(), Some(10));
+        parcel.mark_referenced(20);
+        assert_eq!(parcel.last_referenced(), Some(20));
     }
 
     #[test]

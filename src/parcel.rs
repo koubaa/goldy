@@ -4,7 +4,7 @@
 //! Bindless indices for shader binding are exposed via [`Parcel::bindless_index`];
 //! the runtime uses [`Parcel::resource_id`] when wiring [`TaskGraph`] nodes.
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, BufferPool, BufferView};
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
@@ -14,10 +14,21 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Weak;
 
+/// Index into a [`Parcel`] mosaic's sub-ranges (returned by [`crate::retained_pool::MosaicBuilder`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MosaicSlot(pub u32);
+
+/// One backing buffer subdivided into multiple bindless sub-ranges (lifetime-homogeneous).
+struct Mosaic {
+    pool: BufferPool,
+    views: Vec<BufferView>,
+}
+
 /// Storage variant for a retained parcel (not exposed to clients).
 enum ParcelStorage {
     Buffer(Buffer),
     Texture(Texture),
+    Mosaic(Mosaic),
 }
 
 /// Per-kind byte totals for parcels currently held through a [`crate::retained_pool::RetainedPool`].
@@ -120,10 +131,28 @@ impl Parcel {
         }
     }
 
+    pub(crate) fn from_mosaic(pool: BufferPool, views: Vec<BufferView>, bookkeeping: BookkeepingGuard) -> Self {
+        Self {
+            storage: ParcelStorage::Mosaic(Mosaic { pool, views }),
+            last_referenced: None,
+            bookkeeping: Some(bookkeeping),
+        }
+    }
+
+    /// Sub-range of a mosaic parcel for vertex/index binding (`BufferSource`).
+    ///
+    /// Panics if `slot` is out of range or the parcel is not a mosaic.
+    pub fn view(&self, slot: MosaicSlot) -> &BufferView {
+        match &self.storage {
+            ParcelStorage::Mosaic(m) => &m.views[slot.0 as usize],
+            _ => panic!("Parcel::view called on non-mosaic parcel"),
+        }
+    }
+
     /// Zoning / telemetry label (buffer vs texture).
     pub fn kind(&self) -> ParcelKind {
         match &self.storage {
-            ParcelStorage::Buffer(_) => ParcelKind::Buffer,
+            ParcelStorage::Buffer(_) | ParcelStorage::Mosaic(_) => ParcelKind::Buffer,
             ParcelStorage::Texture(_) => ParcelKind::Texture,
         }
     }
@@ -133,6 +162,7 @@ impl Parcel {
         match &self.storage {
             ParcelStorage::Buffer(b) => b.byte_size(),
             ParcelStorage::Texture(t) => t.byte_size() as u64,
+            ParcelStorage::Mosaic(m) => m.pool.capacity(),
         }
     }
 
@@ -141,6 +171,7 @@ impl Parcel {
         match &self.storage {
             ParcelStorage::Buffer(b) => b.bindless_index(),
             ParcelStorage::Texture(t) => t.bindless_index(),
+            ParcelStorage::Mosaic(_) => None,
         }
     }
 
@@ -149,6 +180,7 @@ impl Parcel {
         match &self.storage {
             ParcelStorage::Buffer(b) => b.bindless_handle(),
             ParcelStorage::Texture(t) => t.bindless_handle(),
+            ParcelStorage::Mosaic(_) => None,
         }
     }
 
@@ -172,6 +204,9 @@ impl Parcel {
         match &self.storage {
             ParcelStorage::Buffer(b) => ResourceId::Buffer(b.gpu_buffer_handle()),
             ParcelStorage::Texture(t) => ResourceId::Texture(t.handle()),
+            ParcelStorage::Mosaic(m) => {
+                ResourceId::Buffer(m.pool.backing_buffer().gpu_buffer_handle())
+            }
         }
     }
 
@@ -190,6 +225,7 @@ impl Parcel {
     pub(crate) fn buffer_handle(&self) -> Option<crate::backend::BufferHandle> {
         match &self.storage {
             ParcelStorage::Buffer(b) => Some(b.gpu_buffer_handle()),
+            ParcelStorage::Mosaic(m) => Some(m.pool.backing_buffer().gpu_buffer_handle()),
             _ => None,
         }
     }

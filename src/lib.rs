@@ -57,8 +57,8 @@ pub mod vram_allocator;
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
-pub use parcel::{BytesByKind, Parcel};
-pub use retained_pool::{RetainedPool, StampedParcel};
+pub use parcel::{BytesByKind, MosaicSlot, Parcel};
+pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
 pub use vram_allocator::{DeferredPayload, ParcelKind};
 
 // Re-export main types
