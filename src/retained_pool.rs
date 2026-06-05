@@ -4,7 +4,7 @@
 //! [`RetainedPool::mosaic`] are the supported ways to create retained parcels. Parcels are
 //! opaque [`Parcel`] values; relinquish via [`Self::transfer_out`] or by dropping the parcel.
 //!
-//! Reuse-gate, transient pool, backpressure, and host-visible `copy_into` are deferred.
+//! Reuse-gate, transient pool, and backpressure are deferred.
 
 use crate::buffer::{BufferPool, StructuredBufferElement};
 use crate::device::Device;

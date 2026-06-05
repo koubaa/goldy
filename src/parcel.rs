@@ -10,7 +10,6 @@ use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::BindlessHandle;
 use crate::vram_allocator::ParcelKind;
-use anyhow::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Weak;
 
@@ -235,13 +234,4 @@ impl Parcel {
         self.bookkeeping = None;
     }
 
-    // TODO(Unit 2+): copy_into(&self, data) for host-visible parcels.
-    // Strict contract: errors unless the parcel was acquired host-visible.
-    // Not needed in Unit 1 — level textures take their bytes via construction-time `init`.
-    #[allow(dead_code)]
-    fn copy_into_stub(&self, _data: &[u8]) -> Result<()> {
-        anyhow::bail!(
-            "copy_into is not implemented yet; use construction-time init on acquire_*"
-        )
-    }
 }
