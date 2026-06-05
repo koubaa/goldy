@@ -116,7 +116,7 @@ struct AdapterInfo {
 /**
  * @brief Data access pattern for buffers.
  */
-enum class DataAccess {
+enum class BufferKind {
     /// Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
     Scattered = 0,
     /// All threads same address, broadcast optimized (ConstantBuffer).
@@ -126,7 +126,7 @@ enum class DataAccess {
 /**
  * @brief Spatial access pattern for textures.
  */
-enum class SpatialAccess {
+enum class TextureKind {
     /// Hardware filtering between neighbors (Texture2D with sampler).
     Interpolated = 0,
     /// Direct 2D/3D indexing, no filtering (RWTexture2D).
@@ -342,8 +342,8 @@ inline Device Instance::create_device_for_adapter(uint32_t adapter_id) {
  * @brief A GPU buffer for data storage.
  *
  * Buffers hold data on the GPU with a specific access pattern:
- * - DataAccess::Scattered: Any thread can access any address (StructuredBuffer, RWStructuredBuffer)
- * - DataAccess::Broadcast: All threads read same address, broadcast optimized (ConstantBuffer)
+ * - BufferKind::Scattered: Any thread can access any address (StructuredBuffer, RWStructuredBuffer)
+ * - BufferKind::Broadcast: All threads read same address, broadcast optimized (ConstantBuffer)
  */
 class Buffer {
 public:
@@ -354,8 +354,8 @@ public:
      * @param access Data access pattern.
      * @throws Exception if creation fails.
      */
-    Buffer(const Device& device, uint64_t size, DataAccess access) {
-        GoldyBuffer* ptr = goldy_buffer_create(device.get(), size, static_cast<GoldyDataAccess>(access));
+    Buffer(const Device& device, uint64_t size, BufferKind access) {
+        GoldyBuffer* ptr = goldy_buffer_create(device.get(), size, static_cast<GoldyBufferKind>(access));
         if (!ptr) {
             throw Exception::from_last_error();
         }
@@ -369,9 +369,9 @@ public:
      * @param access Data access pattern.
      * @throws Exception if creation fails.
      */
-    Buffer(const Device& device, std::span<const uint8_t> data, DataAccess access) {
+    Buffer(const Device& device, std::span<const uint8_t> data, BufferKind access) {
         GoldyBuffer* ptr = goldy_buffer_create_with_data(
-            device.get(), data.data(), data.size(), static_cast<GoldyDataAccess>(access));
+            device.get(), data.data(), data.size(), static_cast<GoldyBufferKind>(access));
         if (!ptr) {
             throw Exception::from_last_error();
         }
@@ -382,7 +382,7 @@ public:
      * @brief Create a buffer from typed data.
      */
     template<typename T>
-    Buffer(const Device& device, std::span<const T> data, DataAccess access)
+    Buffer(const Device& device, std::span<const T> data, BufferKind access)
         : Buffer(device, std::span<const uint8_t>(
             reinterpret_cast<const uint8_t*>(data.data()),
             data.size() * sizeof(T)), access) {}
@@ -413,7 +413,7 @@ public:
     /**
      * @brief Get buffer's access pattern.
      */
-    DataAccess access() const { return static_cast<DataAccess>(goldy_buffer_access(ptr_.get())); }
+    BufferKind access() const { return static_cast<BufferKind>(goldy_buffer_access(ptr_.get())); }
 
     /**
      * @brief Get raw pointer (for advanced use).
@@ -863,9 +863,9 @@ private:
  * @brief A GPU texture.
  *
  * Textures hold image data on the GPU with a specific spatial access pattern:
- * - SpatialAccess::Interpolated: Hardware filtering between neighbors (Texture2D with sampler)
- * - SpatialAccess::Direct: Direct 2D indexing, no filtering (RWTexture2D)
- * - SpatialAccess::DirectInterpolated: Both storage (UAV) and sampled (SRV) access
+ * - TextureKind::Interpolated: Hardware filtering between neighbors (Texture2D with sampler)
+ * - TextureKind::Direct: Direct 2D indexing, no filtering (RWTexture2D)
+ * - TextureKind::DirectInterpolated: Both storage (UAV) and sampled (SRV) access
  */
 class Texture {
 public:
@@ -880,9 +880,9 @@ public:
      * @throws Exception if creation fails.
      */
     Texture(const Device& device, uint32_t width, uint32_t height,
-            GoldyTextureFormat format, SpatialAccess access, uint32_t flags = 0) {
+            GoldyTextureFormat format, TextureKind access, uint32_t flags = 0) {
         GoldyTexture* ptr = goldy_texture_create(device.get(), width, height, format,
-            static_cast<GoldySpatialAccess>(access), GoldyTextureFlags{flags});
+            static_cast<GoldyTextureKind>(access), GoldyTextureFlags{flags});
         if (!ptr) {
             throw Exception::from_last_error();
         }

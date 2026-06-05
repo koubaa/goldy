@@ -1,15 +1,15 @@
 //! Opaque retained parcel — the shared unit moved between retained and transient containers.
 //!
 //! The client holds a [`Parcel`] by value and never sees backend resource handles.
-//! Bindless indices for shader binding are exposed via [`Parcel::bindless_index`];
+//! Resource indices for shader binding are exposed via [`Parcel::resource_index`];
 //! the runtime uses [`Parcel::resource_id`] when wiring [`TaskGraph`] nodes.
 
 use crate::buffer::{Buffer, BufferPool, BufferView};
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::BindlessHandle;
-use crate::vram_allocator::ParcelKind;
+use crate::types::{ResourceAccess, ResourceHandle};
+use crate::vram_allocator::ParcelType;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Weak;
 
@@ -51,23 +51,23 @@ impl PoolBookkeeping {
         }
     }
 
-    pub(crate) fn add(&self, kind: ParcelKind, bytes: u64) {
+    pub(crate) fn add(&self, kind: ParcelType, bytes: u64) {
         match kind {
-            ParcelKind::Buffer => {
+            ParcelType::Buffer => {
                 self.buffer_bytes.fetch_add(bytes, Ordering::Relaxed);
             }
-            ParcelKind::Texture => {
+            ParcelType::Texture => {
                 self.texture_bytes.fetch_add(bytes, Ordering::Relaxed);
             }
         }
     }
 
-    pub(crate) fn subtract(&self, kind: ParcelKind, bytes: u64) {
+    pub(crate) fn subtract(&self, kind: ParcelType, bytes: u64) {
         match kind {
-            ParcelKind::Buffer => {
+            ParcelType::Buffer => {
                 self.buffer_bytes.fetch_sub(bytes, Ordering::Relaxed);
             }
-            ParcelKind::Texture => {
+            ParcelType::Texture => {
                 self.texture_bytes.fetch_sub(bytes, Ordering::Relaxed);
             }
         }
@@ -85,12 +85,12 @@ impl PoolBookkeeping {
 #[derive(Debug)]
 pub(crate) struct BookkeepingGuard {
     pool: Weak<PoolBookkeeping>,
-    kind: ParcelKind,
+    kind: ParcelType,
     bytes: u64,
 }
 
 impl BookkeepingGuard {
-    pub(crate) fn new(pool: Weak<PoolBookkeeping>, kind: ParcelKind, bytes: u64) -> Self {
+    pub(crate) fn new(pool: Weak<PoolBookkeeping>, kind: ParcelType, bytes: u64) -> Self {
         Self { pool, kind, bytes }
     }
 }
@@ -149,10 +149,10 @@ impl Parcel {
     }
 
     /// Zoning / telemetry label (buffer vs texture).
-    pub fn kind(&self) -> ParcelKind {
+    pub fn kind(&self) -> ParcelType {
         match &self.storage {
-            ParcelStorage::Buffer(_) | ParcelStorage::Mosaic(_) => ParcelKind::Buffer,
-            ParcelStorage::Texture(_) => ParcelKind::Texture,
+            ParcelStorage::Buffer(_) | ParcelStorage::Mosaic(_) => ParcelType::Buffer,
+            ParcelStorage::Texture(_) => ParcelType::Texture,
         }
     }
 
@@ -165,21 +165,42 @@ impl Parcel {
         }
     }
 
-    /// Bindless descriptor index for push constants / resource slots (not the backend handle).
-    pub fn bindless_index(&self) -> Option<u32> {
+    /// Resource descriptor index for how this parcel will be accessed in the current dispatch.
+    ///
+    /// Mosaic parcels always return `None` — bind per-view via [`Parcel::view`].
+    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         match &self.storage {
-            ParcelStorage::Buffer(b) => b.bindless_index(),
-            ParcelStorage::Texture(t) => t.bindless_index(),
+            ParcelStorage::Buffer(b) => b.resource_index(access),
+            ParcelStorage::Texture(t) => t.resource_index(access),
             ParcelStorage::Mosaic(_) => None,
         }
     }
 
-    /// Typed bindless handle for validation and dispatch wiring.
-    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
+    /// Typed resource descriptor handle for validation and dispatch wiring.
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
         match &self.storage {
-            ParcelStorage::Buffer(b) => b.bindless_handle(),
-            ParcelStorage::Texture(t) => t.bindless_handle(),
+            ParcelStorage::Buffer(b) => b.handle(access),
+            ParcelStorage::Texture(t) => t.handle(access),
             ParcelStorage::Mosaic(_) => None,
+        }
+    }
+
+    /// Overwrite a buffer parcel's contents in place.
+    ///
+    /// Observationally async: the backend may service this as a staged GPU copy (storage) or
+    /// a direct mapped write (uniform). We never expose write completion and do not support
+    /// readback on this path, so the synchronous case is an invisible special case of the
+    /// async contract. A future depth>1 consumer that needs ordering should add a GPU-side
+    /// queue wait (threading the device internally via the owned [`Buffer`]), not a
+    /// client-facing CPU gate.
+    ///
+    /// Valid only for non-mosaic buffer parcels acquired via [`crate::RetainedPool::acquire_buffer`].
+    pub fn copy_into<T: bytemuck::Pod>(&self, data: &[T]) -> anyhow::Result<()> {
+        match &self.storage {
+            ParcelStorage::Buffer(b) => b.write_data(0, data),
+            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
+                anyhow::bail!("Parcel::copy_into is only valid for non-mosaic buffer parcels")
+            }
         }
     }
 
@@ -202,7 +223,7 @@ impl Parcel {
     pub(crate) fn resource_id(&self) -> ResourceId {
         match &self.storage {
             ParcelStorage::Buffer(b) => ResourceId::Buffer(b.gpu_buffer_handle()),
-            ParcelStorage::Texture(t) => ResourceId::Texture(t.handle()),
+            ParcelStorage::Texture(t) => ResourceId::Texture(t.gpu_handle()),
             ParcelStorage::Mosaic(m) => {
                 ResourceId::Buffer(m.pool.backing_buffer().gpu_buffer_handle())
             }
@@ -213,7 +234,7 @@ impl Parcel {
     #[cfg(test)]
     pub(crate) fn texture_handle(&self) -> Option<crate::backend::TextureHandle> {
         match &self.storage {
-            ParcelStorage::Texture(t) => Some(t.handle()),
+            ParcelStorage::Texture(t) => Some(t.gpu_handle()),
             _ => None,
         }
     }

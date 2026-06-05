@@ -157,8 +157,8 @@ public sealed class Device : IDisposable
 ```csharp
 public sealed class Buffer : IDisposable
 {
-    public static Buffer New(Device device, ulong size, DataAccess access);
-    public static Buffer WithData<T>(Device device, T[] data, DataAccess access)
+    public static Buffer New(Device device, ulong size, BufferKind access);
+    public static Buffer WithData<T>(Device device, T[] data, BufferKind access)
         where T : unmanaged;
     public void Write<T>(T[] data) where T : unmanaged;
     public void Write<T>(ulong offset, T[] data) where T : unmanaged;
@@ -274,7 +274,7 @@ public sealed class ComputeEncoder
 public sealed class Texture : IDisposable
 {
     public Texture(Device device, uint width, uint height, TextureFormat format,
-                   SpatialAccess access, TextureFlags flags = TextureFlags.None);
+                   TextureKind access, TextureFlags flags = TextureFlags.None);
     public void Write(byte[] data);
     public uint Width { get; }
     public uint Height { get; }
@@ -300,8 +300,8 @@ public struct SamplerDesc
 ```csharp
 public enum DeviceType   { DiscreteGpu, IntegratedGpu, Cpu, Other }
 public enum BackendType  { Vulkan, Metal, Dx12 }
-public enum DataAccess   { Scattered, Broadcast }
-public enum SpatialAccess { Interpolated, Direct }
+public enum BufferKind   { Scattered, Broadcast }
+public enum TextureKind { Interpolated, Direct }
 public enum FilterMode   { Nearest, Linear }
 public enum AddressMode  { Repeat, MirrorRepeat, ClampToEdge, ClampToBorder }
 

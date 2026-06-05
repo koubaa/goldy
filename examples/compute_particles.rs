@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, Color, CommandEncoder, ComputePipeline, DataAccess, DeviceDescriptor,
+    Buffer, BufferFlags, Color, CommandEncoder, ComputePipeline, BufferKind, DeviceDescriptor,
     Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    RequestAdapterOptions, ResourceAccess, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -117,12 +117,12 @@ impl RenderState {
             });
         }
 
-        let particle_buffer = device.alloc_buffer_with_data(&particles, DataAccess::Scattered)?;
+        let particle_buffer = device.alloc_buffer_with_data(&particles, BufferKind::Scattered)?;
 
         // Per-frame simulation params (dt written each frame before dispatch)
         let params_buffer = device.alloc_buffer(
             std::mem::size_of::<SimParams>() as u64,
-            DataAccess::Broadcast,
+            BufferKind::Broadcast,
             None,
             BufferFlags::empty(),
         )?;
@@ -179,8 +179,8 @@ impl RenderState {
             .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
             .bind_buffer(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
-                self.particle_buffer.bindless_index().unwrap(),
-                self.params_buffer.bindless_index().unwrap(),
+                self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
+                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
             ])
             .dispatch(workgroups, 1, 1);
         graph.dispatch(&self.context)?;

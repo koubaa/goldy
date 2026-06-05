@@ -39,7 +39,7 @@ vertices = np.array([
     -0.5,  0.5, 0.0, 1.0, 0.0, 1.0,  # green
      0.5,  0.5, 0.0, 0.0, 1.0, 1.0,  # blue
 ], dtype=np.float32)
-buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
+buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
 
 # Create shader and pipeline
 shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
@@ -81,7 +81,7 @@ python examples/hello_triangle.py
 Buffers accept numpy arrays directly:
 ```python
 vertices = np.array([...], dtype=np.float32)
-buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
+buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
 ```
 
 Render targets return numpy arrays:
@@ -141,7 +141,7 @@ device.register_library('mylib', '''
 |------|--------|
 | `DeviceType` | `DISCRETE_GPU`, `INTEGRATED_GPU`, `CPU`, `OTHER` |
 | `TextureFormat` | `RGBA8_UNORM`, `BGRA8_UNORM`, `RGBA16_FLOAT`, ... |
-| `DataAccess` | `SCATTERED` (storage), `BROADCAST` (uniform) |
+| `BufferKind` | `SCATTERED` (storage), `BROADCAST` (uniform) |
 | `PrimitiveTopology` | `TRIANGLE_LIST`, `LINE_LIST`, `POINT_LIST`, ... |
 
 ### Types

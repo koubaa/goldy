@@ -98,8 +98,8 @@ def main():
     initial_state = create_initial_state()
     alive_count = np.sum(initial_state)
     print(f"Initial alive cells: {alive_count} / {len(initial_state)}")
-    buffer_a = goldy.Buffer(device, initial_state, goldy.DataAccess.SCATTERED)
-    buffer_b = goldy.Buffer(device, initial_state, goldy.DataAccess.SCATTERED)
+    buffer_a = goldy.Buffer(device, initial_state, goldy.BufferKind.SCATTERED)
+    buffer_b = goldy.Buffer(device, initial_state, goldy.BufferKind.SCATTERED)
 
     # Create compute pipeline
     compute_pipeline = goldy.ComputePipeline(device, compute_shader)

@@ -14,7 +14,7 @@ use super::super::{
     BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
-use crate::backend::DataAccess;
+use crate::backend::BufferKind;
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::{HashMap, VecDeque};
@@ -765,7 +765,7 @@ pub(crate) struct ResourceRegistry {
     /// (local_index, access) for each live buffer handle. The access is
     /// needed at `unregister_buffer()` time to know which free list the slot
     /// should be returned to.
-    pub buffer_indices: HashMap<BufferHandle, (u32, DataAccess)>,
+    pub buffer_indices: HashMap<BufferHandle, (u32, BufferKind)>,
     pub texture_indices: HashMap<TextureHandle, u32>,
     pub sampler_indices: HashMap<SamplerHandle, u32>,
 }
@@ -807,16 +807,16 @@ impl ResourceRegistry {
             self.buffer_indices.len(),
             self.buffer_indices
                 .values()
-                .filter(|(_, a)| *a == DataAccess::Scattered)
+                .filter(|(_, a)| *a == BufferKind::Scattered)
                 .count(),
             self.buffer_indices
                 .values()
-                .filter(|(_, a)| *a == DataAccess::Broadcast)
+                .filter(|(_, a)| *a == BufferKind::Broadcast)
                 .count(),
         );
         let local_index = self.storage_buffer.alloc();
         self.buffer_indices
-            .insert(handle, (local_index, DataAccess::Scattered));
+            .insert(handle, (local_index, BufferKind::Scattered));
         local_index
     }
 
@@ -839,7 +839,7 @@ impl ResourceRegistry {
         );
         let local_index = self.uniform_buffer.alloc();
         self.buffer_indices
-            .insert(handle, (local_index, DataAccess::Broadcast));
+            .insert(handle, (local_index, BufferKind::Broadcast));
         local_index
     }
 
@@ -948,17 +948,17 @@ impl ResourceRegistry {
     pub fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>) {
         if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
             match (access, barrier) {
-                (DataAccess::Scattered, None) => {
+                (BufferKind::Scattered, None) => {
                     self.storage_buffer.free(local_index);
                 }
-                (DataAccess::Scattered, Some(b)) => {
+                (BufferKind::Scattered, Some(b)) => {
                     self.pending_free_storage_buffer_slots
                         .push((local_index, b));
                 }
-                (DataAccess::Broadcast, None) => {
+                (BufferKind::Broadcast, None) => {
                     self.uniform_buffer.free(local_index);
                 }
-                (DataAccess::Broadcast, Some(b)) => {
+                (BufferKind::Broadcast, Some(b)) => {
                     self.pending_free_uniform_buffer_slots
                         .push((local_index, b));
                 }
@@ -1015,13 +1015,13 @@ impl ResourceRegistry {
     /// Includes both recycled free-list entries and not-yet-minted slots up to
     /// [`MAX_RESOURCES_PER_CATEGORY`]. Pending-free slots (awaiting GPU timeline)
     /// are counted as occupied.
-    pub fn available_slots(&self, category: crate::types::BindlessCategory) -> u32 {
+    pub fn available_slots(&self, category: crate::types::ResourceCategory) -> u32 {
         let allocator = match category {
-            crate::types::BindlessCategory::Scattered => &self.storage_buffer,
-            crate::types::BindlessCategory::Broadcast => &self.uniform_buffer,
-            crate::types::BindlessCategory::Texture => &self.texture,
-            crate::types::BindlessCategory::StorageImage => &self.storage_image,
-            crate::types::BindlessCategory::Sampler => &self.sampler,
+            crate::types::ResourceCategory::Scattered => &self.storage_buffer,
+            crate::types::ResourceCategory::Broadcast => &self.uniform_buffer,
+            crate::types::ResourceCategory::Texture => &self.texture,
+            crate::types::ResourceCategory::StorageImage => &self.storage_image,
+            crate::types::ResourceCategory::Sampler => &self.sampler,
         };
         MAX_RESOURCES_PER_CATEGORY.saturating_sub(allocator.live_count())
     }
@@ -1066,7 +1066,7 @@ pub(crate) struct BufferState {
     /// For buffer views: parent [`BufferHandle`]. `None` for root buffers.
     pub parent_for_view: Option<BufferHandle>,
     /// Access pattern at creation (for argument-buffer re-encoding on resize).
-    pub access: DataAccess,
+    pub access: BufferKind,
     /// Byte offset into parent for views; [`None`] for root buffers.
     pub view_byte_offset: Option<u64>,
 }
@@ -1100,7 +1100,7 @@ pub(crate) struct PipelineState {
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
     /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
@@ -1114,7 +1114,7 @@ pub(crate) struct ComputePipelineState {
     /// Thread group size from [numthreads(x, y, z)] attribute
     pub workgroup_size: [u32; 3],
     /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
@@ -1146,7 +1146,7 @@ pub(crate) struct TextureState {
     /// texture was registered in (`storageImages[]` when `is_storage_image`,
     /// otherwise `textures[]`).
     pub arg_buffer_index: u32,
-    /// For `SpatialAccess::DirectInterpolated` textures, the LOCAL index in the
+    /// For `TextureKind::DirectInterpolated` textures, the LOCAL index in the
     /// sampled-texture pool (separate from the storage-image `arg_buffer_index`).
     pub sampled_arg_buffer_index: Option<u32>,
     /// Which bindless region the `arg_buffer_index` belongs to; needed at

@@ -35,8 +35,8 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyDeviceType>()?;
     m.add_class::<types::PyBackendType>()?;
     m.add_class::<types::PyTextureFormat>()?;
-    m.add_class::<types::PyDataAccess>()?;
-    m.add_class::<types::PySpatialAccess>()?;
+    m.add_class::<types::PyBufferKind>()?;
+    m.add_class::<types::PyTextureKind>()?;
     m.add_class::<types::PyVertexFormat>()?;
     m.add_class::<types::PyPrimitiveTopology>()?;
     m.add_class::<types::PyIndexFormat>()?;

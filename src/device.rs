@@ -628,7 +628,7 @@ impl Device {
     pub fn alloc_buffer(
         &self,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
@@ -647,7 +647,7 @@ impl Device {
         &self,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
         let mut buf = self.inner.vram_allocator.alloc_buffer_with_capacity(
@@ -665,7 +665,7 @@ impl Device {
     pub fn alloc_buffer_with_data<T: crate::buffer::StructuredBufferElement>(
         &self,
         data: &[T],
-        access: DataAccess,
+        access: BufferKind,
     ) -> anyhow::Result<crate::buffer::Buffer> {
         let bytes = bytemuck::cast_slice(data);
         let stride = std::mem::size_of::<T>() as u32;
@@ -676,7 +676,7 @@ impl Device {
     pub fn alloc_buffer_with_bytes(
         &self,
         data: &[u8],
-        access: DataAccess,
+        access: BufferKind,
     ) -> anyhow::Result<crate::buffer::Buffer> {
         self.alloc_buffer_with_bytes_stride(data, access, 1)
     }
@@ -685,7 +685,7 @@ impl Device {
     pub fn alloc_buffer_with_bytes_stride(
         &self,
         data: &[u8],
-        access: DataAccess,
+        access: BufferKind,
         element_stride: u32,
     ) -> anyhow::Result<crate::buffer::Buffer> {
         self.alloc_buffer_with_bytes_stride_and_flags(
@@ -700,7 +700,7 @@ impl Device {
     pub fn alloc_buffer_with_bytes_stride_and_flags(
         &self,
         data: &[u8],
-        access: DataAccess,
+        access: BufferKind,
         element_stride: u32,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
@@ -721,7 +721,7 @@ impl Device {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> anyhow::Result<crate::texture::Texture> {
         let mut tex = self
@@ -830,7 +830,7 @@ impl Device {
     ///
     /// Returns `u32::MAX` on backends that don't enforce a per-category cap
     /// (currently Vulkan and DX12, which support 16 384+ per category).
-    pub fn available_bindless_slots(&self, category: BindlessCategory) -> u32 {
+    pub fn available_bindless_slots(&self, category: ResourceCategory) -> u32 {
         let backend = self.inner.backend.lock().unwrap();
         backend.available_bindless_slots(self.inner.handle, category)
     }
@@ -838,7 +838,7 @@ impl Device {
     /// Maximum number of bindless descriptor slots per category for this device.
     ///
     /// Returns `u32::MAX` on backends that don't enforce a meaningful per-category cap.
-    pub fn max_bindless_slots_per_category(&self, category: BindlessCategory) -> u32 {
+    pub fn max_bindless_slots_per_category(&self, category: ResourceCategory) -> u32 {
         let backend = self.inner.backend.lock().unwrap();
         backend.max_bindless_slots_per_category(self.inner.handle, category)
     }

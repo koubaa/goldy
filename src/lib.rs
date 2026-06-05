@@ -59,7 +59,7 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use parcel::{BytesByKind, MosaicSlot, Parcel};
 pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
-pub use vram_allocator::{DeferredPayload, ParcelKind};
+pub use vram_allocator::{DeferredPayload, ParcelType};
 
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};

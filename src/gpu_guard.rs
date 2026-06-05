@@ -276,7 +276,7 @@ mod tests {
         let buf = device
             .alloc_buffer(
                 1024,
-                crate::types::DataAccess::Scattered,
+                crate::types::BufferKind::Scattered,
                 None,
                 crate::types::BufferFlags::empty(),
             )

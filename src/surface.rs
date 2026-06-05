@@ -11,7 +11,7 @@ use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
 use crate::tracy_zone;
-use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
+use crate::types::{PresentMode, ResourceAccess, SurfaceConfig, TextureFormat};
 use crate::vram_allocator::DeferredPayload;
 use anyhow::{Context, Result};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -287,8 +287,8 @@ impl Surface {
         let swapchain_tex = frame.texture();
         let sc_handle = swapchain_tex.handle;
         let uav_index = swapchain_tex
-            .bindless_index()
-            .context("swapchain texture has no UAV bindless index")?;
+            .resource_index(ResourceAccess::Write)
+            .context("swapchain texture has no UAV resource index")?;
 
         let mut full_resolver = resolver.unwrap_or_default();
         full_resolver.swapchain = Some(crate::task_graph::ResolvedSwapchain {
@@ -364,8 +364,8 @@ impl Surface {
         let swapchain_tex = frame.texture();
         let sc_handle = swapchain_tex.handle;
         let uav_index = swapchain_tex
-            .bindless_index()
-            .context("swapchain texture has no UAV bindless index")?;
+            .resource_index(ResourceAccess::Write)
+            .context("swapchain texture has no UAV resource index")?;
 
         let mut full_resolver = resolver.unwrap_or_default();
         full_resolver.swapchain = Some(crate::task_graph::ResolvedSwapchain {

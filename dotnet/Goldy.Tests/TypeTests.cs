@@ -60,19 +60,19 @@ public class TypeTests
     }
 
     [Fact]
-    public void DataAccess_Enum_HasCorrectValues()
+    public void BufferKind_Enum_HasCorrectValues()
     {
         // Verify enum values match C FFI
-        Assert.Equal(0, (int)DataAccess.Scattered);
-        Assert.Equal(1, (int)DataAccess.Broadcast);
+        Assert.Equal(0, (int)BufferKind.Scattered);
+        Assert.Equal(1, (int)BufferKind.Broadcast);
     }
 
     [Fact]
-    public void SpatialAccess_Enum_HasCorrectValues()
+    public void TextureKind_Enum_HasCorrectValues()
     {
         // Verify enum values match C FFI
-        Assert.Equal(0, (int)SpatialAccess.Interpolated);
-        Assert.Equal(1, (int)SpatialAccess.Direct);
+        Assert.Equal(0, (int)TextureKind.Interpolated);
+        Assert.Equal(1, (int)TextureKind.Direct);
     }
 
     [Fact]

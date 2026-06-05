@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceDescriptor,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, BufferKind, DeviceDescriptor,
     Instance, Instance2D, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
 };
@@ -120,7 +120,7 @@ impl RenderState {
             }
         }
 
-        let instance_buffer = device.alloc_buffer_with_data(&instances, DataAccess::Scattered)?;
+        let instance_buffer = device.alloc_buffer_with_data(&instances, BufferKind::Scattered)?;
 
         // Create params buffer
         let params = AnimParams {
@@ -129,7 +129,7 @@ impl RenderState {
             total_instances: NUM_QUADS,
             _pad: 0,
         };
-        let params_buffer = device.alloc_buffer_with_data(&[params], DataAccess::Broadcast)?;
+        let params_buffer = device.alloc_buffer_with_data(&[params], BufferKind::Broadcast)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

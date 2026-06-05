@@ -81,11 +81,11 @@ pass.set_index_buffer_offset(&index_buffer, byte_offset, IndexFormat::Uint32);
 
 Goldy's bindless model passes resource indices to shaders through push constants. There are three binding methods:
 
-**Typed handles** (preferred for new code) — each handle carries its `BindlessCategory`, enabling validation against shader reflection:
+**Typed handles** (preferred for new code) — each handle carries its `ResourceCategory`, enabling validation against shader reflection:
 
 ```rust
-let tex = texture.bindless_handle().unwrap();
-let samp = sampler.bindless_handle().unwrap();
+let tex = texture.handle(ResourceAccess::Read).unwrap();
+let samp = sampler.handle(ResourceAccess::Read).unwrap();
 pass.bind_resources_typed(&[tex, samp]);
 ```
 
@@ -98,8 +98,8 @@ pass.bind_resources(&[&uniform_buffer, &data_buffer]);
 **Raw indices** — for manual control or when mixing resource types:
 
 ```rust
-let tex_idx = texture.bindless_index().unwrap();
-let samp_idx = sampler.bindless_index().unwrap();
+let tex_idx = texture.resource_index(ResourceAccess::Read).unwrap();
+let samp_idx = sampler.resource_index(ResourceAccess::Read).unwrap();
 pass.bind_resources_raw(&[tex_idx, samp_idx]);
 ```
 

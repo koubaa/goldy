@@ -124,7 +124,27 @@ impl TextureFormat {
 // Access Pattern Types
 // ============================================================================
 
-/// Data access pattern for buffers.
+/// Use-time access direction for a resource descriptor slot.
+///
+/// Passed to [`crate::Buffer::resource_index`], [`crate::Texture::resource_index`],
+/// and related accessors to select the correct descriptor pool entry for how the
+/// resource will be used in the current dispatch — read-only, write-only, or
+/// read-write.
+///
+/// This is distinct from [`crate::task_graph::NodeAccess`], which describes
+/// scheduling / SWMR hazards between graph nodes rather than shader binding slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ResourceAccess {
+    /// Read-only access (SRV, CBV, sampled texture, etc.).
+    #[default]
+    Read,
+    /// Write-only access (UAV, storage image, etc.).
+    Write,
+    /// Read-write access (UAV / storage where both directions are valid).
+    ReadWrite,
+}
+
+/// Buffer kind / data access pattern for buffers.
 ///
 /// This describes how threads will access the buffer, which determines
 /// hardware optimization strategies:
@@ -138,7 +158,7 @@ impl TextureFormat {
 /// `bytemuck::bytes_of`) sets stride to 1 byte; for structured data use a typed slice or
 /// [`crate::Device::alloc_buffer_with_bytes_stride`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum DataAccess {
+pub enum BufferKind {
     /// Any thread, any address, read/write. No coherence assumptions.
     ///
     /// Structured-buffer views use the buffer's recorded **element stride** (from
@@ -168,20 +188,19 @@ pub enum BufferResizeCost {
     Copy,
 }
 
-/// Category of a bindless descriptor slot.
+/// Category of a resource descriptor slot.
 ///
 /// Goldy's bindless argument buffers / descriptor heaps are organized into
-/// separate pools per access pattern. A resource's bindless index is only
-/// meaningful relative to its category — e.g. a `Scattered` slot #3 and a
-/// `Broadcast` slot #3 refer to different physical entries on Metal
-/// (`storageBuffers[3]` vs `uniformBuffers[3]`) even though the `u32`
-/// indices are identical.
+/// separate pools per access pattern. A resource index is only meaningful
+/// relative to its category — e.g. a `Scattered` slot #3 and a `Broadcast`
+/// slot #3 refer to different physical entries on Metal (`storageBuffers[3]`
+/// vs `uniformBuffers[3]`) even though the `u32` indices are identical.
 ///
 /// Capturing the category alongside the index lets the CPU API and the
 /// shader-side `goldy_exp` access functions be type-checked against each
-/// other — see [`BindlessHandle`].
+/// other — see [`ResourceHandle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum BindlessCategory {
+pub enum ResourceCategory {
     /// Storage-buffer slot. Used with `goldy_scattered<T>` / `goldy_buf_ro<T>`
     /// (both shader functions index the same pool).
     Scattered,
@@ -195,15 +214,15 @@ pub enum BindlessCategory {
     Sampler,
 }
 
-impl BindlessCategory {
+impl ResourceCategory {
     /// Short human-readable name for diagnostics.
     pub fn name(self) -> &'static str {
         match self {
-            BindlessCategory::Scattered => "scattered",
-            BindlessCategory::Broadcast => "broadcast",
-            BindlessCategory::StorageImage => "storage_image",
-            BindlessCategory::Texture => "texture",
-            BindlessCategory::Sampler => "sampler",
+            ResourceCategory::Scattered => "scattered",
+            ResourceCategory::Broadcast => "broadcast",
+            ResourceCategory::StorageImage => "storage_image",
+            ResourceCategory::Texture => "texture",
+            ResourceCategory::Sampler => "sampler",
         }
     }
 
@@ -212,52 +231,53 @@ impl BindlessCategory {
     /// `Scattered` and `Broadcast` are strictly distinct (different pools on Metal,
     /// different descriptor types on Vulkan/DX12). `StorageImage`, `Texture`, and
     /// `Sampler` are likewise non-interchangeable.
-    pub fn is_compatible_with(self, expected: BindlessCategory) -> bool {
+    pub fn is_compatible_with(self, expected: ResourceCategory) -> bool {
         self == expected
     }
 }
 
-impl From<DataAccess> for BindlessCategory {
-    fn from(access: DataAccess) -> Self {
+impl From<BufferKind> for ResourceCategory {
+    fn from(access: BufferKind) -> Self {
         match access {
-            DataAccess::Scattered => BindlessCategory::Scattered,
-            DataAccess::Broadcast => BindlessCategory::Broadcast,
+            BufferKind::Scattered => ResourceCategory::Scattered,
+            BufferKind::Broadcast => ResourceCategory::Broadcast,
         }
     }
 }
 
-impl From<SpatialAccess> for BindlessCategory {
-    fn from(access: SpatialAccess) -> Self {
+impl From<TextureKind> for ResourceCategory {
+    fn from(access: TextureKind) -> Self {
         match access {
-            SpatialAccess::Interpolated => BindlessCategory::Texture,
-            SpatialAccess::Direct => BindlessCategory::StorageImage,
+            TextureKind::Interpolated => ResourceCategory::Texture,
+            TextureKind::Direct => ResourceCategory::StorageImage,
             // Primary slot for DirectInterpolated is the storage (UAV) handle.
-            // The secondary sampled (SRV) handle is obtained via Texture::bindless_sampled_index().
-            SpatialAccess::DirectInterpolated => BindlessCategory::StorageImage,
+            // The secondary sampled (SRV) handle is obtained via
+            // `Texture::resource_index(ResourceAccess::Read)`.
+            TextureKind::DirectInterpolated => ResourceCategory::StorageImage,
         }
     }
 }
 
-/// A typed bindless descriptor handle: `(category, index)`.
+/// A typed resource descriptor handle: `(category, index)`.
 ///
-/// Goldy's resources (`Buffer`, `Texture`, `Sampler`) expose `bindless_handle()`
-/// which returns one of these. Push-constant setters that accept `BindlessHandle`
+/// Goldy's resources (`Buffer`, `Texture`, `Sampler`) expose `handle(access)`
+/// which returns one of these. Push-constant setters that accept `ResourceHandle`
 /// can be validated against the shader's reflection: a
-/// [`BindlessCategory::Broadcast`] handle bound to a slot the shader reads
+/// [`ResourceCategory::Broadcast`] handle bound to a slot the shader reads
 /// through `goldy_buf_ro` (`Scattered`) is a type error caught at dispatch
 /// time rather than silently producing a garbage read.
 ///
-/// The raw u32 index is recoverable via [`BindlessHandle::index`] — the typed
+/// The raw u32 index is recoverable via [`ResourceHandle::index`] — the typed
 /// wrapper is zero-cost at runtime when validation is disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BindlessHandle {
-    pub category: BindlessCategory,
+pub struct ResourceHandle {
+    pub category: ResourceCategory,
     pub index: u32,
 }
 
-impl BindlessHandle {
+impl ResourceHandle {
     /// Build a handle from a category and raw index.
-    pub const fn new(category: BindlessCategory, index: u32) -> Self {
+    pub const fn new(category: ResourceCategory, index: u32) -> Self {
         Self { category, index }
     }
 
@@ -267,7 +287,7 @@ impl BindlessHandle {
     }
 
     /// Category this handle was tagged with at creation.
-    pub const fn category(self) -> BindlessCategory {
+    pub const fn category(self) -> ResourceCategory {
         self.category
     }
 }
@@ -298,7 +318,7 @@ pub struct SurfaceConfig {
     pub depth_format: Option<DepthFormat>,
 }
 
-/// Spatial access pattern for textures/images.
+/// Texture kind / spatial access pattern for textures and images.
 ///
 /// This describes how the texture will be accessed:
 ///
@@ -308,7 +328,7 @@ pub struct SurfaceConfig {
 ///   Suitable for filter layers that are written by one pass and read with hardware bilinear
 ///   by the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum SpatialAccess {
+pub enum TextureKind {
     /// Hardware filtering between neighbors (texture units).
     /// Maps to sampled images (Texture2D with sampler in shaders).
     #[default]
@@ -319,9 +339,10 @@ pub enum SpatialAccess {
     /// Both UAV (storage/write via `DirectSpatial`) and SRV (sampled/read via `Interpolated`)
     /// access on the same underlying texture resource.
     ///
-    /// The primary bindless handle (returned by [`crate::Texture::bindless_index`]) is the
-    /// storage slot; the secondary sampled handle is returned by
-    /// [`crate::Texture::bindless_sampled_index`].
+    /// The primary resource handle (returned by
+    /// [`crate::Texture::resource_index`](ResourceAccess::Write)) is the storage slot;
+    /// the secondary sampled handle is returned by
+    /// [`crate::Texture::resource_index`](ResourceAccess::Read).
     DirectInterpolated,
 }
 
@@ -833,13 +854,13 @@ mod tests {
     }
 
     #[test]
-    fn test_data_access_default() {
-        assert_eq!(DataAccess::default(), DataAccess::Scattered);
+    fn test_buffer_kind_default() {
+        assert_eq!(BufferKind::default(), BufferKind::Scattered);
     }
 
     #[test]
-    fn test_spatial_access_default() {
-        assert_eq!(SpatialAccess::default(), SpatialAccess::Interpolated);
+    fn test_texture_kind_default() {
+        assert_eq!(TextureKind::default(), TextureKind::Interpolated);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use goldy_ffi::{
     goldy_get_last_error, goldy_instance_adapter_count, goldy_instance_create,
     goldy_instance_create_device_for_adapter, goldy_instance_destroy, goldy_instance_get_adapter,
     goldy_shader_create, goldy_shader_destroy, GoldyAdapterInfo, GoldyBuffer, GoldyComputeEncoder,
-    GoldyComputePipeline, GoldyDataAccess, GoldyDevice, GoldyDeviceType, GoldyInstance,
+    GoldyComputePipeline, GoldyBufferKind, GoldyDevice, GoldyDeviceType, GoldyInstance,
     GoldyResult, GoldyShaderModule,
 };
 use std::ffi::{CStr, CString};
@@ -78,7 +78,7 @@ fn main() {
             device,
             bytemuck::cast_slice(&data).as_ptr(),
             std::mem::size_of_val(&data),
-            GoldyDataAccess::Scattered,
+            GoldyBufferKind::Scattered,
         );
         assert!(!buf.is_null(), "{}", last_ffi_message());
 

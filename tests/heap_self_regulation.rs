@@ -15,8 +15,8 @@
 //! DX12 and Vulkan use committed resources without a shared heap cap.
 
 use goldy::task_graph::TaskGraph;
-use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
-use goldy::{Buffer, DataAccess, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
+use goldy::types::{BufferFlags, TextureKind, TextureFlags, TextureFormat};
+use goldy::{Buffer, BufferKind, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 mod common;
 #[path = "common/submission.rs"]
@@ -72,7 +72,7 @@ fn buffer_allocation_increments_count() {
     let device = make_device();
     let before = device.buffer_heap_stats().unwrap().buffer_count;
     let _buf = device
-        .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     let after = device.buffer_heap_stats().unwrap().buffer_count;
     assert!(
@@ -87,7 +87,7 @@ fn gpu_only_buffer_does_not_use_heap() {
     let device = make_device();
     let before = device.buffer_heap_stats().unwrap().buffer_count;
     let _buf = device
-        .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::GPU_ONLY)
+        .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::GPU_ONLY)
         .unwrap();
     let after = device.buffer_heap_stats().unwrap().buffer_count;
     assert_eq!(
@@ -105,7 +105,7 @@ fn buffer_drop_frees_heap_space_after_flush() {
     // Submit trivial work so timeline advances.
     let mut graph = TaskGraph::new();
     let setup_buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&setup_buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -118,7 +118,7 @@ fn buffer_drop_frees_heap_space_after_flush() {
             device
                 .alloc_buffer(
                     alloc_size,
-                    DataAccess::Scattered,
+                    BufferKind::Scattered,
                     None,
                     BufferFlags::empty(),
                 )
@@ -166,7 +166,7 @@ fn many_buffers_create_overflow_heaps() {
     for _ in 0..12 {
         match device.alloc_buffer(
             alloc_size,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             None,
             BufferFlags::empty(),
         ) {
@@ -197,7 +197,7 @@ fn compact_overflow_removes_empty_heaps() {
     for _ in 0..12 {
         match device.alloc_buffer(
             alloc_size,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             None,
             BufferFlags::empty(),
         ) {
@@ -235,7 +235,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
     // Submit some trivial GPU work so we have a timeline and in-flight CBs.
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -248,7 +248,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
             device
                 .alloc_buffer(
                     alloc_size,
-                    DataAccess::Scattered,
+                    BufferKind::Scattered,
                     None,
                     BufferFlags::empty(),
                 )
@@ -270,7 +270,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
     let _fresh = device
         .alloc_buffer(
             alloc_size,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             None,
             BufferFlags::empty(),
         )
@@ -292,7 +292,7 @@ fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
                 device
                     .alloc_buffer(
                         alloc_size,
-                        DataAccess::Scattered,
+                        BufferKind::Scattered,
                         None,
                         BufferFlags::empty(),
                     )
@@ -343,7 +343,7 @@ fn steady_state_overflow_stays_bounded() {
                 device
                     .alloc_buffer(
                         alloc_size,
-                        DataAccess::Scattered,
+                        BufferKind::Scattered,
                         None,
                         BufferFlags::empty(),
                     )
@@ -378,7 +378,7 @@ fn steady_state_overflow_stays_bounded() {
                 device
                     .alloc_buffer(
                         alloc_size,
-                        DataAccess::Scattered,
+                        BufferKind::Scattered,
                         None,
                         BufferFlags::empty(),
                     )
@@ -424,7 +424,7 @@ fn texture_allocation_increments_count() {
             64,
             64,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -447,7 +447,7 @@ fn many_textures_create_overflow_then_compact() {
             512,
             512,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         ) {
             Ok(tex) => textures.push(tex),
@@ -477,7 +477,7 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
     // Submit trivial GPU work.
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -490,7 +490,7 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
                 256,
                 256,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Direct,
+                TextureKind::Direct,
                 TextureFlags::COPY_DST,
             )
             .unwrap();
@@ -508,7 +508,7 @@ fn texture_allocation_survives_pressure_with_gpu_work() {
             256,
             256,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("texture allocation should succeed after reclaim");
@@ -528,7 +528,7 @@ fn flush_deferred_deletions_advances_with_gpu_progress() {
     for _ in 0..3 {
         let mut graph = TaskGraph::new();
         let buf = device
-            .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -567,7 +567,7 @@ fn wait_and_flush_reclaims_all_deferred() {
 
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -594,7 +594,7 @@ fn in_flight_cb_count_increases_after_submit() {
 
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let _tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -613,7 +613,7 @@ fn in_flight_cbs_drain_after_wait() {
 
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -642,7 +642,7 @@ fn gpu_progress_advances_after_wait() {
 
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -664,7 +664,7 @@ fn multiple_submits_advance_timeline_monotonically() {
     for _ in 0..5 {
         let mut graph = TaskGraph::new();
         let buf = device
-            .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -685,14 +685,14 @@ fn deletion_queue_populated_after_buffer_drop() {
     // Submit so we have a non-zero timeline barrier.
     let mut graph = TaskGraph::new();
     let trigger = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&trigger, 0, 256);
     let _tv = ctx.submit_pipelined(&mut graph).unwrap();
 
     let before = ctx.deferred_deletion_pending_count();
     let buf = device
-        .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     drop(buf);
     let after = ctx.deferred_deletion_pending_count();
@@ -709,13 +709,13 @@ fn deletion_queue_drains_after_flush() {
 
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
     let extra = device
-        .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     drop(extra);
 
@@ -749,7 +749,7 @@ fn rapid_submit_without_explicit_wait_survives_50_frames() {
                 device
                     .alloc_buffer(
                         alloc_size,
-                        DataAccess::Scattered,
+                        BufferKind::Scattered,
                         None,
                         BufferFlags::empty(),
                     )
@@ -789,7 +789,7 @@ fn rapid_submit_large_buffers_50_frames() {
                 device
                     .alloc_buffer(
                         alloc_size,
-                        DataAccess::Scattered,
+                        BufferKind::Scattered,
                         None,
                         BufferFlags::empty(),
                     )
@@ -829,7 +829,7 @@ fn overflow_count_never_exceeds_16() {
     for _ in 0..200 {
         match device.alloc_buffer(
             alloc_size,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             None,
             BufferFlags::empty(),
         ) {
@@ -860,7 +860,7 @@ fn mixed_buffer_and_texture_allocation_survives_30_frames() {
         let bufs: Vec<Buffer> = (0..2)
             .map(|_| {
                 device
-                    .alloc_buffer(buf_size, DataAccess::Scattered, None, BufferFlags::empty())
+                    .alloc_buffer(buf_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap_or_else(|e| panic!("frame {frame}: buffer alloc failed: {e}"))
             })
             .collect();
@@ -870,7 +870,7 @@ fn mixed_buffer_and_texture_allocation_survives_30_frames() {
                 128,
                 128,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Direct,
+                TextureKind::Direct,
                 TextureFlags::COPY_DST,
             )
             .unwrap_or_else(|e| panic!("frame {frame}: texture alloc failed: {e}"));
@@ -904,7 +904,7 @@ fn buffer_resize_works_under_heap_pressure() {
 
     // Allocate a buffer, submit work so it has a timeline.
     let mut buf = device
-        .alloc_buffer(1024, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
     let mut graph = TaskGraph::new();
@@ -927,7 +927,7 @@ fn buffer_resize_preserves_contents() {
     let ctx = submission_context(&device);
     let initial_data: Vec<u32> = (0..64).collect();
     let mut buf = device
-        .alloc_buffer_with_data(&initial_data, DataAccess::Scattered)
+        .alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
         .unwrap();
 
     // Grow the buffer (triggers blit-copy internally).
@@ -976,7 +976,7 @@ fn deferred_buffers_returned_to_caller_after_flush() {
     let bufs: Vec<Buffer> = (0..3)
         .map(|_| {
             device
-                .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
+                .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap()
         })
         .collect();
@@ -1026,7 +1026,7 @@ fn double_flush_is_idempotent() {
     let ctx = submission_context(&device);
     let mut graph = TaskGraph::new();
     let buf = device
-        .alloc_buffer(256, DataAccess::Scattered, None, BufferFlags::empty())
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     graph.clear_buffer(&buf, 0, 256);
     let tv = ctx.submit_pipelined(&mut graph).unwrap();

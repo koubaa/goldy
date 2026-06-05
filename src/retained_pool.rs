@@ -10,8 +10,8 @@ use crate::buffer::{BufferPool, StructuredBufferElement};
 use crate::device::Device;
 use crate::parcel::{BookkeepingGuard, BytesByKind, MosaicSlot, Parcel, PoolBookkeeping};
 use crate::timeline::TimelineValue;
-use crate::types::{DataAccess, SpatialAccess, TextureFlags, TextureFormat};
-use crate::vram_allocator::ParcelKind;
+use crate::types::{BufferKind, TextureFlags, TextureFormat, TextureKind};
+use crate::vram_allocator::ParcelType;
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -57,7 +57,7 @@ impl RetainedPool {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
         init: Option<&[u8]>,
     ) -> Result<Parcel> {
@@ -90,16 +90,28 @@ impl RetainedPool {
 
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
     ///
-    /// Permanently host-visible buffers and repeated CPU writes are deferred (Unit 2+).
+    /// For in-place per-frame CPU rewrites, use [`Parcel::copy_into`] on the returned parcel.
     pub fn acquire_buffer(
         &mut self,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
         init: Option<&[u8]>,
     ) -> Result<Parcel> {
-        let buf = if let Some(data) = init {
+        let buf = self.alloc_raw_buffer(size, access, element_stride, flags, init)?;
+        self.wrap_buffer(buf)
+    }
+
+    fn alloc_raw_buffer(
+        &self,
+        size: u64,
+        access: BufferKind,
+        element_stride: Option<u32>,
+        flags: crate::types::BufferFlags,
+        init: Option<&[u8]>,
+    ) -> Result<crate::buffer::Buffer> {
+        if let Some(data) = init {
             self.device
                 .alloc_buffer_with_bytes_stride_and_flags(
                     data,
@@ -107,13 +119,12 @@ impl RetainedPool {
                     element_stride.unwrap_or(1),
                     flags,
                 )
-                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .map_err(|e| anyhow::anyhow!("{e}"))
         } else {
             self.device
                 .alloc_buffer(size, access, element_stride, flags)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-        };
-        self.wrap_buffer(buf)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
     }
 
     /// Relinquish a parcel from the retained pool. The unit moves to the transient seam;
@@ -127,14 +138,14 @@ impl RetainedPool {
         }
     }
 
-    /// Committed bytes currently held through this pool, by [`ParcelKind`].
+    /// Committed bytes currently held through this pool, by [`ParcelType`].
     pub fn bytes_by_kind(&self) -> BytesByKind {
         self.bookkeeping.snapshot()
     }
 
     fn wrap_texture(&self, tex: crate::texture::Texture) -> Result<Parcel> {
         let bytes = tex.byte_size() as u64;
-        let kind = ParcelKind::Texture;
+        let kind = ParcelType::Texture;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
         Ok(Parcel::from_texture(tex, guard))
@@ -142,7 +153,7 @@ impl RetainedPool {
 
     fn wrap_buffer(&self, buf: crate::buffer::Buffer) -> Result<Parcel> {
         let bytes = buf.byte_size();
-        let kind = ParcelKind::Buffer;
+        let kind = ParcelType::Buffer;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
         Ok(Parcel::from_buffer(buf, guard))
@@ -195,7 +206,7 @@ impl<'a> MosaicBuilder<'a> {
         }
 
         let bytes = pool.capacity();
-        let kind = ParcelKind::Buffer;
+        let kind = ParcelType::Buffer;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(self.bookkeeping), kind, bytes);
         Ok(Parcel::from_mosaic(pool, views, guard))
@@ -206,7 +217,7 @@ impl<'a> MosaicBuilder<'a> {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::types::TextureFormat;
+    use crate::types::{ResourceAccess, TextureFormat};
 
     fn test_device() -> Arc<Device> {
         Arc::new(
@@ -214,10 +225,10 @@ mod tests {
         )
     }
 
-    fn rgba_interpolated() -> (TextureFormat, SpatialAccess, TextureFlags) {
+    fn rgba_interpolated() -> (TextureFormat, TextureKind, TextureFlags) {
         (
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
         )
     }
@@ -229,7 +240,7 @@ mod tests {
         let p = pool
             .acquire_texture(64, 64, fmt, acc, flags, None)
             .unwrap();
-        assert_eq!(p.kind(), ParcelKind::Texture);
+        assert_eq!(p.kind(), ParcelType::Texture);
         assert!(pool.bytes_by_kind().texture > 0);
         assert_eq!(pool.bytes_by_kind().buffer, 0);
     }
@@ -251,13 +262,13 @@ mod tests {
         let p = pool
             .acquire_buffer(
                 256,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 crate::types::BufferFlags::empty(),
                 None,
             )
             .unwrap();
-        assert_eq!(p.kind(), ParcelKind::Buffer);
+        assert_eq!(p.kind(), ParcelType::Buffer);
         assert_eq!(p.byte_size(), 256);
         assert!(pool.bytes_by_kind().buffer >= 256);
     }
@@ -333,7 +344,7 @@ mod tests {
         let b = m.reserve::<u32>(4);
         let parcel = m.build().unwrap();
 
-        assert_eq!(parcel.kind(), ParcelKind::Buffer);
+        assert_eq!(parcel.kind(), ParcelType::Buffer);
         assert!(parcel.byte_size() >= 3 * 4 + 4 * 4);
         assert_eq!(parcel.view(a).size(), 12);
         assert_eq!(parcel.view(b).size(), 16);
@@ -347,7 +358,7 @@ mod tests {
         let _reserved = m.reserve::<u32>(8);
         let parcel = m.build().unwrap();
 
-        assert!(parcel.view(slot).bindless_index().is_some());
+        assert!(parcel.view(slot).resource_index(ResourceAccess::Write).is_some());
         assert_eq!(parcel.view(slot).offset(), 0);
         assert!(parcel.view(slot).size() > 0);
     }
@@ -382,10 +393,67 @@ mod tests {
     }
 
     #[test]
+    fn copy_into_on_buffer_parcel_succeeds() {
+        let mut pool = RetainedPool::new(test_device());
+        let parcel = pool
+            .acquire_buffer(
+                16,
+                BufferKind::Scattered,
+                Some(4),
+                crate::types::BufferFlags::empty(),
+                None,
+            )
+            .unwrap();
+        assert!(parcel.copy_into(&[1u32, 2, 3, 4]).is_ok());
+    }
+
+    #[test]
+    fn copy_into_on_texture_parcel_errors() {
+        let mut pool = RetainedPool::new(test_device());
+        let (fmt, acc, flags) = rgba_interpolated();
+        let parcel = pool
+            .acquire_texture(4, 4, fmt, acc, flags, None)
+            .unwrap();
+        let err = parcel.copy_into(&[0u32]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only valid for non-mosaic buffer parcels")
+        );
+    }
+
+    #[test]
+    fn copy_into_on_mosaic_parcel_errors() {
+        let mut pool = RetainedPool::new(test_device());
+        let mut m = pool.mosaic();
+        m.emplace(&[1u32]);
+        let parcel = m.build().unwrap();
+        let err = parcel.copy_into(&[0u32]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only valid for non-mosaic buffer parcels")
+        );
+    }
+
+    #[test]
+    fn resource_index_read_on_scattered_buffer_parcel() {
+        let mut pool = RetainedPool::new(test_device());
+        let parcel = pool
+            .acquire_buffer(
+                64,
+                BufferKind::Scattered,
+                Some(4),
+                crate::types::BufferFlags::empty(),
+                None,
+            )
+            .unwrap();
+        assert!(parcel.resource_index(ResourceAccess::Read).is_some());
+    }
+
+    #[test]
     fn bind_parcel_wires_parcel_resource_id() {
         use crate::compute::ComputePipeline;
         use crate::shader::ShaderModule;
-        use crate::task_graph::{NodeAccess, ResourceId, TaskGraph};
+        use crate::task_graph::{ResourceId, TaskGraph};
 
         let device = test_device();
         let mut pool = RetainedPool::new(device.clone());
@@ -401,7 +469,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("a", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::Read)
+            .bind_parcel(&parcel, ResourceAccess::Read)
             .dispatch(1, 1, 1);
 
         let binding = graph.ir().nodes[0].bindings[0].resource;

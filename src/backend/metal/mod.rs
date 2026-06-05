@@ -237,7 +237,7 @@ impl GpuBackend for MetalBackend {
         &mut self,
         device: DeviceHandle,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
     ) -> Result<BufferHandle> {
@@ -265,7 +265,7 @@ impl GpuBackend for MetalBackend {
         device: DeviceHandle,
         initial_size: u64,
         capacity: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
@@ -488,7 +488,7 @@ impl GpuBackend for MetalBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
         texture::create(
@@ -851,7 +851,7 @@ impl GpuBackend for MetalBackend {
     fn available_bindless_slots(
         &self,
         device: DeviceHandle,
-        category: crate::types::BindlessCategory,
+        category: crate::types::ResourceCategory,
     ) -> u32 {
         self.state
             .devices
@@ -863,7 +863,7 @@ impl GpuBackend for MetalBackend {
     fn max_bindless_slots_per_category(
         &self,
         _device: DeviceHandle,
-        _category: crate::types::BindlessCategory,
+        _category: crate::types::ResourceCategory,
     ) -> u32 {
         types::MAX_RESOURCES_PER_CATEGORY
     }
@@ -1080,7 +1080,7 @@ mod tests {
             .create_buffer(
                 device,
                 256,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 crate::types::BufferFlags::empty(),
             )

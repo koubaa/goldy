@@ -1,7 +1,7 @@
 //! Shared offscreen rendering helpers for FLIP screenshot tests and the `update-screenshots` tool.
 
 use goldy::{
-    Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DataAccess,
+    Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, BufferKind,
     DepthFormat, DepthStencilState, Device, DeviceDescriptor, Instance, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
     TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
@@ -80,7 +80,7 @@ pub fn render_triangle(
     .expect("Failed to create pipeline");
 
     let vertex_buffer = device
-        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
+        .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("Failed to create VB");
 
     let mut encoder = CommandEncoder::new();
@@ -187,10 +187,10 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
 
     let initial_state = create_gol_initial_state();
     let buffer_a = device
-        .alloc_buffer_with_data(&initial_state, DataAccess::Scattered)
+        .alloc_buffer_with_data(&initial_state, BufferKind::Scattered)
         .expect("Failed to create buffer A");
     let buffer_b = device
-        .alloc_buffer_with_data(&initial_state, DataAccess::Scattered)
+        .alloc_buffer_with_data(&initial_state, BufferKind::Scattered)
         .expect("Failed to create buffer B");
 
     let compute_pipeline =
@@ -337,10 +337,10 @@ pub fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u
     let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
 
     let red_vb = device
-        .alloc_buffer_with_data(&red_verts, DataAccess::Scattered)
+        .alloc_buffer_with_data(&red_verts, BufferKind::Scattered)
         .expect("Failed to create VB");
     let green_vb = device
-        .alloc_buffer_with_data(&green_verts, DataAccess::Scattered)
+        .alloc_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("Failed to create VB");
 
     let mut encoder = CommandEncoder::new();

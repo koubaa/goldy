@@ -56,7 +56,7 @@ fn render_reflection_data(
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
 ) -> (
-    Vec<Option<crate::types::BindlessCategory>>,
+    Vec<Option<crate::types::ResourceCategory>>,
     Vec<Option<u32>>,
 ) {
     let preferred = shaders
@@ -376,7 +376,7 @@ impl GpuBackend for VulkanBackend {
         &mut self,
         device_handle: DeviceHandle,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
     ) -> Result<BufferHandle> {
@@ -431,7 +431,7 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         initial_size: u64,
         capacity: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
@@ -439,7 +439,7 @@ impl GpuBackend for VulkanBackend {
         let use_sparse = self.state.devices.get(&device_handle).is_some_and(|d| {
             d.supports_sparse_buffer
                 && cap > initial_size
-                && access == DataAccess::Scattered
+                && access == BufferKind::Scattered
                 && !flags.contains(crate::types::BufferFlags::CPU_READABLE)
         });
         if use_sparse {
@@ -936,7 +936,7 @@ impl GpuBackend for VulkanBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
         texture::create(
@@ -1331,7 +1331,7 @@ impl GpuBackend for VulkanBackend {
     fn available_bindless_slots(
         &self,
         device_handle: DeviceHandle,
-        category: crate::types::BindlessCategory,
+        category: crate::types::ResourceCategory,
     ) -> u32 {
         self.state
             .devices
@@ -1343,7 +1343,7 @@ impl GpuBackend for VulkanBackend {
     fn max_bindless_slots_per_category(
         &self,
         _device_handle: DeviceHandle,
-        _category: crate::types::BindlessCategory,
+        _category: crate::types::ResourceCategory,
     ) -> u32 {
         types::MAX_BINDLESS_RESOURCES
     }

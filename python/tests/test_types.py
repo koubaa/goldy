@@ -89,32 +89,32 @@ class TestColor:
         assert '0.1' in r
 
 
-class TestDataAccess:
-    """Test DataAccess enum."""
+class TestBufferKind:
+    """Test BufferKind enum."""
     
     def test_scattered(self):
         import goldy
         
-        access = goldy.DataAccess.SCATTERED
-        assert access == goldy.DataAccess.SCATTERED
+        access = goldy.BufferKind.SCATTERED
+        assert access == goldy.BufferKind.SCATTERED
     
     def test_broadcast(self):
         import goldy
         
-        access = goldy.DataAccess.BROADCAST
-        assert access == goldy.DataAccess.BROADCAST
+        access = goldy.BufferKind.BROADCAST
+        assert access == goldy.BufferKind.BROADCAST
     
     def test_different_values(self):
         import goldy
         
-        assert goldy.DataAccess.SCATTERED != goldy.DataAccess.BROADCAST
+        assert goldy.BufferKind.SCATTERED != goldy.BufferKind.BROADCAST
     
     def test_all_variants_exist(self):
         import goldy
         
         # Verify all variants are accessible
-        _ = goldy.DataAccess.SCATTERED
-        _ = goldy.DataAccess.BROADCAST
+        _ = goldy.BufferKind.SCATTERED
+        _ = goldy.BufferKind.BROADCAST
 
 
 class TestEnums:

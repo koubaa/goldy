@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DataAccess, DeviceDescriptor,
+    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, BufferKind, DeviceDescriptor,
     Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     ShaderModule, Surface, VertexBufferLayout,
 };
@@ -121,7 +121,7 @@ impl RenderState {
             });
         }
 
-        let line_buffer = device.alloc_buffer_with_data(&lines, DataAccess::Scattered)?;
+        let line_buffer = device.alloc_buffer_with_data(&lines, BufferKind::Scattered)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

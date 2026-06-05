@@ -13,7 +13,7 @@ use goldy_ffi::{
     goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy,
     goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format, goldy_surface_frame_render,
     goldy_surface_present, goldy_surface_resize, GoldyAdapterInfo, GoldyBuffer, GoldyColor,
-    GoldyDataAccess, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
+    GoldyBufferKind, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
     GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult, GoldyShaderModule, GoldySurface,
     GoldyVertexAttribute, GoldyVertexFormat,
 };
@@ -135,7 +135,7 @@ impl App {
             self.device,
             vb_bytes.as_ptr(),
             vb_bytes.len(),
-            GoldyDataAccess::Scattered,
+            GoldyBufferKind::Scattered,
         );
         if self.vertex_buffer.is_null() {
             return Err(format!(

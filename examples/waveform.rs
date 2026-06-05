@@ -5,7 +5,7 @@
 //! Run with: cargo run --example waveform
 
 use goldy::{
-    Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance, PrimitiveTopology,
+    Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
@@ -170,7 +170,7 @@ impl App {
             channel_buffers.push(
                 device
                     .as_ref()
-                    .alloc_buffer_with_data(&vertices, DataAccess::Scattered)?,
+                    .alloc_buffer_with_data(&vertices, BufferKind::Scattered)?,
             );
         }
 

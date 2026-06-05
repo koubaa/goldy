@@ -2,7 +2,7 @@
 
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
-use crate::types::GoldyDataAccess;
+use crate::types::GoldyBufferKind;
 use std::ptr;
 use std::slice;
 
@@ -25,7 +25,7 @@ pub struct GoldyBuffer {
 pub unsafe extern "C" fn goldy_buffer_create(
     device: *const GoldyDevice,
     size: u64,
-    access: GoldyDataAccess,
+    access: GoldyBufferKind,
 ) -> *mut GoldyBuffer {
     if device.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
@@ -58,7 +58,7 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data(
     device: *const GoldyDevice,
     data: *const u8,
     size: usize,
-    access: GoldyDataAccess,
+    access: GoldyBufferKind,
 ) -> *mut GoldyBuffer {
     if device.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
@@ -149,9 +149,9 @@ pub unsafe extern "C" fn goldy_buffer_size(buffer: *const GoldyBuffer) -> u64 {
 /// # Safety
 /// The buffer pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_buffer_access(buffer: *const GoldyBuffer) -> GoldyDataAccess {
+pub unsafe extern "C" fn goldy_buffer_access(buffer: *const GoldyBuffer) -> GoldyBufferKind {
     if buffer.is_null() {
-        return GoldyDataAccess::Scattered;
+        return GoldyBufferKind::Scattered;
     }
     (*buffer).inner.access().into()
 }

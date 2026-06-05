@@ -5,13 +5,13 @@
 ## Creating a Texture
 
 ```rust
-use goldy::{Texture, SpatialAccess, TextureFormat, TextureFlags};
+use goldy::{Texture, TextureKind, TextureFormat, TextureFlags};
 
 let texture = Texture::new(
     &device,
     512, 512,
     TextureFormat::Rgba8Unorm,
-    SpatialAccess::Interpolated,
+    TextureKind::Interpolated,
     TextureFlags::COPY_DST,
 )?;
 ```
@@ -27,7 +27,7 @@ let texture = Texture::with_data(
     &pixels,
     256, 256,
     TextureFormat::Rgba8Unorm,
-    SpatialAccess::Interpolated,
+    TextureKind::Interpolated,
     TextureFlags::COPY_DST,
 )?;
 ```
@@ -100,21 +100,21 @@ texture.width();
 texture.height();
 texture.format();
 texture.byte_size();  // width * height * bytes_per_pixel
-texture.access();     // SpatialAccess
+texture.access();     // TextureKind
 texture.flags();      // TextureFlags
 texture.is_owned();   // true if dropping destroys the GPU resource
 ```
 
 ## Bindless Descriptors
 
-Textures are registered in the global bindless descriptor set. The category depends on the access pattern: `Interpolated` maps to `BindlessCategory::Texture`, `Direct` maps to `BindlessCategory::StorageImage`.
+Textures are registered in the global bindless descriptor set. The category depends on the access pattern: `Interpolated` maps to `ResourceCategory::Texture`, `Direct` maps to `ResourceCategory::StorageImage`.
 
 ```rust
 // Typed handle (preferred)
-let handle = texture.bindless_handle().unwrap();
+let handle = texture.handle(ResourceAccess::Read).unwrap();
 
 // Raw index
-let index = texture.bindless_index().unwrap();
+let index = texture.resource_index(ResourceAccess::Read).unwrap();
 ```
 
 ## Texture Borrowing
@@ -155,7 +155,7 @@ let offscreen = Texture::new(
     &device,
     1920, 1080,
     TextureFormat::Rgba16Float,
-    SpatialAccess::Interpolated,
+    TextureKind::Interpolated,
     TextureFlags::RENDER_TARGET | TextureFlags::COPY_SRC,
 )?;
 ```
@@ -237,11 +237,11 @@ let shadow_sampler = Sampler::new(&device, &SamplerDesc {
 
 ### Bindless Descriptors
 
-Samplers are registered under `BindlessCategory::Sampler`:
+Samplers are registered under `ResourceCategory::Sampler`:
 
 ```rust
-let handle = sampler.bindless_handle().unwrap();
-let index = sampler.bindless_index().unwrap();
+let handle = sampler.handle(ResourceAccess::Read).unwrap();
+let index = sampler.resource_index(ResourceAccess::Read).unwrap();
 ```
 
 ## Binding Textures and Samplers in Shaders
@@ -249,8 +249,8 @@ let index = sampler.bindless_index().unwrap();
 Pass texture and sampler indices together through resource bindings:
 
 ```rust
-let tex = texture.bindless_handle().unwrap();
-let samp = sampler.bindless_handle().unwrap();
+let tex = texture.handle(ResourceAccess::Read).unwrap();
+let samp = sampler.handle(ResourceAccess::Read).unwrap();
 pass.bind_resources_typed(&[tex, samp]);
 ```
 

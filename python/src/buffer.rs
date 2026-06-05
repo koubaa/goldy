@@ -2,7 +2,7 @@
 
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
-use crate::types::PyDataAccess;
+use crate::types::PyBufferKind;
 use numpy::{PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -10,8 +10,8 @@ use std::sync::Arc;
 /// A GPU buffer.
 ///
 /// Buffers hold data on the GPU with a specific access pattern:
-/// - DataAccess.SCATTERED: Any thread, any address (StructuredBuffer, RWStructuredBuffer)
-/// - DataAccess.BROADCAST: All threads same address (ConstantBuffer/uniforms)
+/// - BufferKind.SCATTERED: Any thread, any address (StructuredBuffer, RWStructuredBuffer)
+/// - BufferKind.BROADCAST: All threads same address (ConstantBuffer/uniforms)
 #[pyclass(name = "Buffer", module = "goldy")]
 pub struct PyBuffer {
     pub(crate) inner: Arc<goldy::Buffer>,
@@ -24,7 +24,7 @@ impl PyBuffer {
     /// Args:
     ///     device: The GPU device.
     ///     data: Buffer data as a numpy array (any numeric dtype) or bytes.
-    ///     access: Access pattern (DataAccess.SCATTERED or DataAccess.BROADCAST).
+    ///     access: Access pattern (BufferKind.SCATTERED or BufferKind.BROADCAST).
     ///
     /// Returns:
     ///     A new Buffer instance.
@@ -32,9 +32,9 @@ impl PyBuffer {
     /// Example:
     ///     >>> import numpy as np
     ///     >>> data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-    ///     >>> buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
+    ///     >>> buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
     #[new]
-    fn new(device: &PyDevice, data: &Bound<'_, PyAny>, access: PyDataAccess) -> PyResult<Self> {
+    fn new(device: &PyDevice, data: &Bound<'_, PyAny>, access: PyBufferKind) -> PyResult<Self> {
         let (bytes, element_stride) = extract_bytes_with_stride(data)?;
         // Use the correct element stride for StructuredBuffer views on DX12
         let buffer = device
@@ -52,12 +52,12 @@ impl PyBuffer {
     /// Args:
     ///     device: The GPU device.
     ///     size: Size in bytes.
-    ///     access: Access pattern (DataAccess.SCATTERED or DataAccess.BROADCAST).
+    ///     access: Access pattern (BufferKind.SCATTERED or BufferKind.BROADCAST).
     ///
     /// Returns:
     ///     A new empty Buffer instance.
     #[staticmethod]
-    fn empty(device: &PyDevice, size: u64, access: PyDataAccess) -> PyResult<Self> {
+    fn empty(device: &PyDevice, size: u64, access: PyBufferKind) -> PyResult<Self> {
         let buffer = device
             .inner
             .alloc_buffer(size, access.into(), None, goldy::BufferFlags::empty())

@@ -74,7 +74,7 @@ Compute nodes must be finalized with `dispatch(x, y, z)` or `dispatch_indirect(&
 
 ## NodeAccess and SWMR scheduling
 
-`NodeAccess` is the per-node logical access, orthogonal to a buffer's physical `DataAccess`:
+`NodeAccess` is the per-node logical access, orthogonal to a buffer's physical `BufferKind`:
 
 ```rust
 pub enum NodeAccess {
@@ -232,8 +232,8 @@ graph.node("game_of_life", &compute_pipeline)
     .bind_buffer_view(read_view, NodeAccess::Read)
     .bind_buffer_view(write_view, NodeAccess::Write)
     .bind_resources_raw(&[
-        read_view.bindless_handle().unwrap().index(),
-        write_view.bindless_handle().unwrap().index(),
+        read_view.handle(ResourceAccess::Read).unwrap().index(),
+        write_view.handle(ResourceAccess::Write).unwrap().index(),
     ])
     .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
 graph.dispatch(&device)?;

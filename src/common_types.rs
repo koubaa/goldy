@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use goldy::{Buffer, DataAccess, Particle2D};
+//! use goldy::{Buffer, BufferKind, Particle2D};
 //!
 //! // Create particles on CPU
 //! let particles = vec![
@@ -15,7 +15,7 @@
 //! ];
 //!
 //! // Upload directly to GPU - layout matches shader struct exactly
-//! let buffer = device.alloc_buffer_with_data(&particles, DataAccess::Scattered)?;
+//! let buffer = device.alloc_buffer_with_data(&particles, BufferKind::Scattered)?;
 //! ```
 
 use crate::buffer::StructuredBufferElement;

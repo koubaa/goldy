@@ -4,7 +4,7 @@ use crate::backend::{ComputePipelineHandle, GpuBackend, GpuCommand};
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::shader::ShaderModule;
-use crate::types::BindlessHandle;
+use crate::types::ResourceHandle;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -184,7 +184,7 @@ impl<'a> ComputePass<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// let tex_idx = texture.bindless_index().unwrap();
+    /// let tex_idx = texture.resource_index(ResourceAccess::Write).unwrap();
     /// pass.bind_resources_raw(&[buf_idx_0, buf_idx_1, tex_idx]);
     /// ```
     pub fn bind_resources_raw(&mut self, indices: &[u32]) {
@@ -202,20 +202,20 @@ impl<'a> ComputePass<'a> {
         });
     }
 
-    /// Bind resource slots from typed [`BindlessHandle`]s.
+    /// Bind resource slots from typed [`ResourceHandle`]s.
     ///
     /// Each handle carries both the raw index and the resource's
-    /// [`crate::types::BindlessCategory`]. The indices are extracted in order and
+    /// [`crate::types::ResourceCategory`]. The indices are extracted in order and
     /// passed to the shader's `uniform uint` entry-point parameters in the
     /// same order as this slice.
     ///
     /// # Example
     /// ```ignore
-    /// let uniforms = uniform_buf.bindless_handle().unwrap();    // Broadcast
-    /// let output  = output_tex.bindless_handle().unwrap();      // StorageImage
+    /// let uniforms = uniform_buf.handle(ResourceAccess::Read).unwrap();    // Broadcast
+    /// let output  = output_tex.handle(ResourceAccess::Write).unwrap();      // StorageImage
     /// pass.bind_resources_typed(&[uniforms, output]);
     /// ```
-    pub fn bind_resources_typed(&mut self, handles: &[BindlessHandle]) {
+    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) {
         self.encoder.commands.push(GpuCommand::BindResourcesTyped {
             handles: handles.to_vec(),
         });

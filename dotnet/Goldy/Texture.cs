@@ -19,7 +19,7 @@ public sealed class Texture : IDisposable
     /// <param name="format">Pixel format.</param>
     /// <param name="access">Spatial access pattern (Interpolated for filtering, Direct for indexing).</param>
     /// <param name="flags">Texture flags for copy and render operations.</param>
-    public Texture(Device device, uint width, uint height, TextureFormat format, SpatialAccess access, TextureFlags flags = TextureFlags.None)
+    public Texture(Device device, uint width, uint height, TextureFormat format, TextureKind access, TextureFlags flags = TextureFlags.None)
     {
         device.ThrowIfDisposed();
         

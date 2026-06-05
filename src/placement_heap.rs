@@ -35,7 +35,7 @@ use crate::task_graph::TransientTextureKey;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::tracy_plot;
-use crate::types::{BufferFlags, DataAccess, SpatialAccess, TextureFlags};
+use crate::types::{BufferFlags, BufferKind, ResourceAccess, TextureFlags, TextureKind};
 use crate::vram_allocator::DeferredPayload;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -125,7 +125,7 @@ impl PlacementHeap {
         let page_size = page_size.max(256);
         let capacity = round_up(capacity.max(page_size), page_size);
         let buffer = device
-            .alloc_buffer(capacity, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(capacity, BufferKind::Scattered, None, BufferFlags::empty())
             .context("PlacementHeap: failed to allocate backing buffer")?;
         Ok(Self {
             buffer,
@@ -215,7 +215,7 @@ impl PlacementHeap {
             self.buffer = device
                 .alloc_buffer(
                     required_cap,
-                    DataAccess::Scattered,
+                    BufferKind::Scattered,
                     None,
                     BufferFlags::empty(),
                 )
@@ -288,8 +288,14 @@ impl PlacementHeap {
 
         if is_hit {
             let entry = self.view_cache.get(&slot_id).unwrap();
-            let uav = entry.view.bindless_index().unwrap_or(u32::MAX);
-            let srv = entry.view.bindless_srv_index().unwrap_or(uav);
+            let uav = entry
+                .view
+                .resource_index(ResourceAccess::Write)
+                .unwrap_or(u32::MAX);
+            let srv = entry
+                .view
+                .resource_index(ResourceAccess::Read)
+                .unwrap_or(uav);
             tracy_plot!("goldy.transient_resolve.cache_hit", 1.0_f64);
             return Ok((uav, srv, true));
         }
@@ -305,8 +311,12 @@ impl PlacementHeap {
         // Create a fresh view and cache it.
         let view = self.buffer.create_view(base_offset, size, Some(stride))?;
         self.view_create_count += 1;
-        let uav = view.bindless_index().unwrap_or(u32::MAX);
-        let srv = view.bindless_srv_index().unwrap_or(uav);
+        let uav = view
+            .resource_index(ResourceAccess::Write)
+            .unwrap_or(u32::MAX);
+        let srv = view
+            .resource_index(ResourceAccess::Read)
+            .unwrap_or(uav);
         self.view_cache.insert(
             slot_id,
             CachedView {
@@ -351,7 +361,7 @@ impl PlacementHeap {
         for (i, key) in color_keys.iter().enumerate() {
             if i < self.texture_cache.len() && self.texture_cache[i].key == *key {
                 // Cache hit.
-                handles.push(self.texture_cache[i].texture.handle());
+                handles.push(self.texture_cache[i].texture.gpu_handle());
             } else {
                 // Cache miss: evict old entry if present, create new texture.
                 if i < self.texture_cache.len() {
@@ -363,11 +373,11 @@ impl PlacementHeap {
                             key.width,
                             key.height,
                             key.format,
-                            SpatialAccess::Direct,
+                            TextureKind::Direct,
                             TextureFlags::COPY_DST,
                         )?;
                         self.texture_create_count += 1;
-                        let h = new_tex.handle();
+                        let h = new_tex.gpu_handle();
                         let old = std::mem::replace(
                             &mut self.texture_cache[i],
                             CachedTexture {
@@ -385,11 +395,11 @@ impl PlacementHeap {
                             key.width,
                             key.height,
                             key.format,
-                            SpatialAccess::Direct,
+                            TextureKind::Direct,
                             TextureFlags::COPY_DST,
                         )?;
                         self.texture_create_count += 1;
-                        let h = new_tex.handle();
+                        let h = new_tex.gpu_handle();
                         self.texture_cache[i] = CachedTexture {
                             texture: new_tex,
                             key: *key,
@@ -403,11 +413,11 @@ impl PlacementHeap {
                         key.width,
                         key.height,
                         key.format,
-                        SpatialAccess::Direct,
+                        TextureKind::Direct,
                         TextureFlags::COPY_DST,
                     )?;
                     self.texture_create_count += 1;
-                    let h = new_tex.handle();
+                    let h = new_tex.gpu_handle();
                     self.texture_cache.push(CachedTexture {
                         texture: new_tex,
                         key: *key,
@@ -490,7 +500,7 @@ impl PlacementHeap {
         self.buffer = device
             .alloc_buffer(
                 aligned_cap,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )

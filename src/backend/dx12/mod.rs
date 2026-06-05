@@ -561,7 +561,7 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         device_handle: DeviceHandle,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
     ) -> Result<BufferHandle> {
@@ -602,7 +602,7 @@ impl GpuBackend for Dx12Backend {
         device_handle: DeviceHandle,
         initial_size: u64,
         capacity: u64,
-        access: crate::backend::DataAccess,
+        access: crate::backend::BufferKind,
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
@@ -1102,7 +1102,7 @@ impl GpuBackend for Dx12Backend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
         texture::create(
@@ -1214,7 +1214,7 @@ impl GpuBackend for Dx12Backend {
     fn available_bindless_slots(
         &self,
         device_handle: DeviceHandle,
-        category: crate::types::BindlessCategory,
+        category: crate::types::ResourceCategory,
     ) -> u32 {
         self.state
             .devices
@@ -1226,7 +1226,7 @@ impl GpuBackend for Dx12Backend {
     fn max_bindless_slots_per_category(
         &self,
         _device_handle: DeviceHandle,
-        category: crate::types::BindlessCategory,
+        category: crate::types::ResourceCategory,
     ) -> u32 {
         types::ResourceRegistry::max_slots(category)
     }

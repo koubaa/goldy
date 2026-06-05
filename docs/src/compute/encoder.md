@@ -17,7 +17,7 @@ Open a `ComputePass`, set a pipeline, bind resources, and dispatch:
 ```rust
 let mut pass = encoder.begin_compute_pass();
 pass.set_pipeline(&pipeline);
-pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
+pass.bind_resources_raw(&[buffer.resource_index(ResourceAccess::Read).unwrap()]);
 pass.dispatch(16, 1, 1);
 ```
 
@@ -36,16 +36,16 @@ pass.bind_resources(&[&particle_buffer, &params_buffer]);
 **`bind_resources_raw`** — pass raw `u32` slot indices. Use this when you need to mix buffer, texture, and sampler indices:
 
 ```rust
-let tex_idx = texture.bindless_index().unwrap();
-let buf_idx = buffer.bindless_index().unwrap();
+let tex_idx = texture.resource_index(ResourceAccess::Read).unwrap();
+let buf_idx = buffer.resource_index(ResourceAccess::Read).unwrap();
 pass.bind_resources_raw(&[buf_idx, tex_idx]);
 ```
 
-**`bind_resources_typed`** — pass typed `BindlessHandle`s that carry both the index and the resource category:
+**`bind_resources_typed`** — pass typed `ResourceHandle`s that carry both the index and the resource category:
 
 ```rust
-let uniforms = uniform_buf.bindless_handle().unwrap();
-let output = output_tex.bindless_handle().unwrap();
+let uniforms = uniform_buf.handle(ResourceAccess::Read).unwrap();
+let output = output_tex.handle(ResourceAccess::Write).unwrap();
 pass.bind_resources_typed(&[uniforms, output]);
 ```
 
@@ -62,14 +62,14 @@ void cs_main(Scattered<uint> data, uint offset, uint stride, ThreadId id) {
 ```
 
 ```rust
-pass.bind_resources_raw(&[data_buf.bindless_index().unwrap(), offset, stride]);
+pass.bind_resources_raw(&[data_buf.resource_index(ResourceAccess::Read).unwrap(), offset, stride]);
 ```
 
 Or use the two-region form to separate resource indices (region A) from user scalars (region B):
 
 ```rust
 pass.bind_resources_raw_with_user(
-    &[data_buf.bindless_index().unwrap()],
+    &[data_buf.resource_index(ResourceAccess::Read).unwrap()],
     &[offset, stride],
 );
 ```
@@ -139,7 +139,7 @@ let mut graph = TaskGraph::new();
 
 graph.node("my_pass", &pipeline)
     .bind_buffer(&buf, NodeAccess::ReadWrite)
-    .bind_resources_raw(&[buf.bindless_index().unwrap()])
+    .bind_resources_raw(&[buf.resource_index(ResourceAccess::Read).unwrap()])
     .dispatch(16, 1, 1);
 
 graph.dispatch(&device)?;

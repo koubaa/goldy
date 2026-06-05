@@ -114,7 +114,7 @@ frame.submit_compute(&task_graph)?;
 frame.present()?;
 ```
 
-`frame.texture()` returns a `&Texture` with `SpatialAccess::Direct`, suitable for binding as a storage image in compute shaders.
+`frame.texture()` returns a `&Texture` with `TextureKind::Direct`, suitable for binding as a storage image in compute shaders.
 
 ### Presenting
 

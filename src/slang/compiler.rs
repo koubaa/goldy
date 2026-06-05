@@ -91,11 +91,11 @@ pub struct ParameterBlockLayout {
 pub struct ShaderReflection {
     /// All parameter blocks found in the shader
     pub parameter_blocks: Vec<ParameterBlockLayout>,
-    /// Per push-constant slot, the [`BindlessCategory`](crate::types::BindlessCategory)
+    /// Per push-constant slot, the [`ResourceCategory`](crate::types::ResourceCategory)
     /// the shader expects. Populated from `[goldy_*]` entry-point analysis at compile time.
     /// Used by backend validation when `BindResourcesTyped` is used to catch category
     /// mismatches against the shader's reflected expectations.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot, the expected element stride (bytes) of the bound
     /// buffer. Populated from `[goldy_*]` source analysis + Slang reflection at
     /// compile time.  At dispatch time, backends compare each bound buffer's

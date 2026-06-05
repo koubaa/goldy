@@ -40,7 +40,7 @@ def main():
     print(f"Input data (first 10): {input_data[:10]}")
     
     # Create GPU storage buffer
-    buffer = goldy.Buffer(device, input_data, goldy.DataAccess.SCATTERED)
+    buffer = goldy.Buffer(device, input_data, goldy.BufferKind.SCATTERED)
     print(f"Created buffer: {buffer.size} bytes")
     
     # Compile compute shader

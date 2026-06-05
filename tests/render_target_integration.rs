@@ -4,7 +4,7 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
+    Buffer, Color, CommandEncoder, CompareFunction, BufferKind, DepthFormat, DepthStencilState,
     DeviceDescriptor, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RenderTarget, RequestAdapterOptions, ShaderModule, TextureFormat, Vertex2D, VertexAttribute,
     VertexBufferLayout, VertexFormat,
@@ -92,7 +92,7 @@ fn test_vulkan_render_and_readback() {
         Vertex2D::new(0.5, 0.5, Color::BLUE),
     ];
     let vertex_buffer = device
-        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
+        .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("Failed to create vertex buffer");
 
     // Render
@@ -257,7 +257,7 @@ fn test_indexed_drawing() {
         Vertex2D::new(-0.5, 0.5, Color::WHITE), // 3: top-left
     ];
     let vertex_buffer = device
-        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
+        .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("Failed to create vertex buffer");
 
     // Indices for two triangles forming a quad
@@ -266,7 +266,7 @@ fn test_indexed_drawing() {
         0, 2, 3, // Second triangle
     ];
     let index_buffer = device
-        .alloc_buffer_with_data(&indices, DataAccess::Scattered)
+        .alloc_buffer_with_data(&indices, BufferKind::Scattered)
         .expect("Failed to create index buffer");
 
     // Render using indexed drawing
@@ -356,13 +356,13 @@ fn test_indexed_drawing_uint32() {
         Vertex2D::new(0.8, 0.8, Color::RED),
     ];
     let vertex_buffer = device
-        .alloc_buffer_with_data(&vertices, DataAccess::Scattered)
+        .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("Failed to create vertex buffer");
 
     // Use u32 indices
     let indices: [u32; 3] = [0, 1, 2];
     let index_buffer = device
-        .alloc_buffer_with_data(&indices, DataAccess::Scattered)
+        .alloc_buffer_with_data(&indices, BufferKind::Scattered)
         .expect("Failed to create index buffer");
 
     let mut encoder = CommandEncoder::new();
@@ -496,10 +496,10 @@ fn test_depth_occlusion_red_beats_green() {
     let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
 
     let red_vb = device
-        .alloc_buffer_with_data(&red_verts, DataAccess::Scattered)
+        .alloc_buffer_with_data(&red_verts, BufferKind::Scattered)
         .expect("Failed to create red VB");
     let green_vb = device
-        .alloc_buffer_with_data(&green_verts, DataAccess::Scattered)
+        .alloc_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("Failed to create green VB");
 
     let mut encoder = CommandEncoder::new();
@@ -604,10 +604,10 @@ fn test_depth_occlusion_green_beats_red() {
     let green_verts = make_tri(0.2, [0.0, 1.0, 0.0, 1.0]);
 
     let red_vb = device
-        .alloc_buffer_with_data(&red_verts, DataAccess::Scattered)
+        .alloc_buffer_with_data(&red_verts, BufferKind::Scattered)
         .expect("Failed to create red VB");
     let green_vb = device
-        .alloc_buffer_with_data(&green_verts, DataAccess::Scattered)
+        .alloc_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("Failed to create green VB");
 
     let mut encoder = CommandEncoder::new();
@@ -658,7 +658,7 @@ fn test_render_target_bindless_buffer_read() {
 
     let data = vec![1u32; 4];
     let buffer = device
-        .alloc_buffer_with_data(&data, DataAccess::Scattered)
+        .alloc_buffer_with_data(&data, BufferKind::Scattered)
         .expect("create buffer");
 
     // Fragment shader reads buffer[0] via bindless resource binding.

@@ -151,13 +151,13 @@ impl ResourceRegistry {
     }
 
     /// Number of available (allocatable) slots in the given category.
-    pub fn available_slots(&self, category: crate::types::BindlessCategory) -> u32 {
+    pub fn available_slots(&self, category: crate::types::ResourceCategory) -> u32 {
         let allocator = match category {
-            crate::types::BindlessCategory::Scattered => &self.storage_buffer,
-            crate::types::BindlessCategory::Broadcast => &self.uniform_buffer,
-            crate::types::BindlessCategory::Texture => &self.sampled_texture,
-            crate::types::BindlessCategory::StorageImage => &self.storage_image,
-            crate::types::BindlessCategory::Sampler => &self.sampler,
+            crate::types::ResourceCategory::Scattered => &self.storage_buffer,
+            crate::types::ResourceCategory::Broadcast => &self.uniform_buffer,
+            crate::types::ResourceCategory::Texture => &self.sampled_texture,
+            crate::types::ResourceCategory::StorageImage => &self.storage_image,
+            crate::types::ResourceCategory::Sampler => &self.sampler,
         };
         MAX_BINDLESS_RESOURCES.saturating_sub(allocator.live_count())
     }
@@ -468,7 +468,7 @@ pub(crate) struct PipelineState {
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
@@ -486,7 +486,7 @@ pub(crate) struct ComputePipelineState {
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
@@ -533,7 +533,7 @@ pub(crate) struct TextureState {
     /// Index in the global bindless descriptor set (if bindless enabled).
     /// For `DirectInterpolated` textures this is the storage-image (UAV) slot.
     pub bindless_index: Option<u32>,
-    /// For `SpatialAccess::DirectInterpolated` textures, the sampled-texture (SRV) slot.
+    /// For `TextureKind::DirectInterpolated` textures, the sampled-texture (SRV) slot.
     pub sampled_bindless_index: Option<u32>,
     /// Current image layout (for subregion writes / transitions)
     pub current_layout: vk::ImageLayout,

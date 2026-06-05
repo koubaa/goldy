@@ -4,7 +4,7 @@ use super::super::{BufferHandle, DeviceHandle};
 use super::types::{
     BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE, MAX_HEAP_SIZE,
 };
-use crate::backend::DataAccess;
+use crate::backend::BufferKind;
 use crate::types::BufferFlags;
 use ::metal as mtl;
 use anyhow::{bail, Context, Result};
@@ -123,7 +123,7 @@ fn insert_buffer_common(
     logical_size: u64,
     allocation_size: u64,
     is_device_allocated: bool,
-    access: DataAccess,
+    access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
     parent_for_view: Option<BufferHandle>,
@@ -131,7 +131,7 @@ fn insert_buffer_common(
 ) -> Result<()> {
     debug_assert!(logical_size <= allocation_size);
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
-    let is_storage = access == DataAccess::Scattered;
+    let is_storage = access == BufferKind::Scattered;
 
     let logical_device = state
         .devices
@@ -139,16 +139,16 @@ fn insert_buffer_common(
         .context("Invalid device handle")?;
 
     let arg_buffer_index = match access {
-        DataAccess::Broadcast => logical_device
+        BufferKind::Broadcast => logical_device
             .resource_registry
             .register_uniform_buffer(handle),
-        DataAccess::Scattered => logical_device
+        BufferKind::Scattered => logical_device
             .resource_registry
             .register_storage_buffer(handle),
     };
     let encoding_index = match access {
-        DataAccess::Broadcast => ResourceRegistry::uniform_global_index(arg_buffer_index),
-        DataAccess::Scattered => arg_buffer_index,
+        BufferKind::Broadcast => ResourceRegistry::uniform_global_index(arg_buffer_index),
+        BufferKind::Scattered => arg_buffer_index,
     };
     tracing::debug!(
         "Allocated buffer {} (device heap={}) at bindless index {}",
@@ -204,15 +204,15 @@ pub(super) fn create(
     state: &mut MetalState,
     device_handle: DeviceHandle,
     size: u64,
-    access: DataAccess,
+    access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
-    let is_storage = access == DataAccess::Scattered;
+    let is_storage = access == BufferKind::Scattered;
     if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
         );
     }
     if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
@@ -249,15 +249,15 @@ pub(super) fn create_with_capacity(
     device_handle: DeviceHandle,
     logical_size: u64,
     capacity: u64,
-    access: DataAccess,
+    access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<(BufferHandle, u64)> {
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
-    let is_storage = access == DataAccess::Scattered;
+    let is_storage = access == BufferKind::Scattered;
     if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
         );
     }
     if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
@@ -430,7 +430,7 @@ pub(super) fn create_view(
             flags: parent_flags,
             element_stride,
             parent_for_view: Some(parent_handle),
-            access: DataAccess::Scattered,
+            access: BufferKind::Scattered,
             view_byte_offset: Some(offset),
         },
     );
@@ -501,8 +501,8 @@ pub(super) fn resize(
 
     let encoded_length = logical_device.argument_encoder.encoded_length();
     let encoding_index = match old_state.access {
-        DataAccess::Broadcast => ResourceRegistry::uniform_global_index(old_state.arg_buffer_index),
-        DataAccess::Scattered => old_state.arg_buffer_index,
+        BufferKind::Broadcast => ResourceRegistry::uniform_global_index(old_state.arg_buffer_index),
+        BufferKind::Scattered => old_state.arg_buffer_index,
     };
     let off = (encoding_index as u64) * encoded_length;
     if off + encoded_length <= ARGUMENT_BUFFER_SIZE {
@@ -515,7 +515,7 @@ pub(super) fn resize(
     }
 
     if old_state.flags.contains(BufferFlags::CPU_READABLE)
-        && old_state.access == DataAccess::Scattered
+        && old_state.access == BufferKind::Scattered
     {
         let ptr = new_buffer.contents() as *mut u8;
         if ptr.is_null() {

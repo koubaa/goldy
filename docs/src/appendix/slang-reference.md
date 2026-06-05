@@ -256,8 +256,8 @@ Resources are bound in declaration order (left to right in the shader signature)
 
 ```rust
 pass.bind_resources_raw(&[
-    cfg_buf.bindless_index().unwrap(),
-    particle_buf.bindless_index().unwrap(),
+    cfg_buf.resource_index(ResourceAccess::Read).unwrap(),
+    particle_buf.resource_index(ResourceAccess::Write).unwrap(),
 ]);
 ```
 

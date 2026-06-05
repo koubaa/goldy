@@ -51,7 +51,7 @@ def main():
         -0.5,  0.5,    0.0, 1.0, 0.0, 1.0,  # Bottom-left (green)
          0.5,  0.5,    0.0, 0.0, 1.0, 1.0,  # Bottom-right (blue)
     ], dtype=np.float32)
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
+    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
 
     # Create shader and pipeline using surface's actual format
     shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)

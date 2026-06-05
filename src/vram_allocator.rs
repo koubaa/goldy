@@ -131,14 +131,14 @@ impl Default for DeferredPayload {
 }
 
 // -----------------------------------------------------------------------
-// ParcelKind
+// ParcelType
 // -----------------------------------------------------------------------
 
 /// Zoning / telemetry label for a freed parcel (buffer-kind vs texture-kind).
 ///
 /// Not used for separate accounting code paths — only passed to [`VramAllocator::notify_freed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParcelKind {
+pub enum ParcelType {
     Buffer,
     Texture,
 }
@@ -165,7 +165,7 @@ pub trait VramAllocator: Send + Sync {
         &self,
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<Buffer> {
@@ -180,7 +180,7 @@ pub trait VramAllocator: Send + Sync {
         device: &Device,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Buffer> {
         Buffer::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)
@@ -195,7 +195,7 @@ pub trait VramAllocator: Send + Sync {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Texture> {
         Texture::new(device, width, height, format, access, flags)
@@ -209,7 +209,7 @@ pub trait VramAllocator: Send + Sync {
     ///
     /// `reserved` is the parcel's reserved backing size; `committed` is the runtime's
     /// handed-out estimate (logical size for buffers, [`Texture::byte_size`] for textures).
-    fn notify_freed(&self, _reserved: u64, _committed: u64, _kind: ParcelKind) {}
+    fn notify_freed(&self, _reserved: u64, _committed: u64, _kind: ParcelType) {}
 
     /// Net bytes allocated by this allocator (allocations minus frees).
     ///
@@ -434,7 +434,7 @@ impl VramAllocator for TrackingVramAllocator {
         &self,
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<Buffer> {
@@ -452,7 +452,7 @@ impl VramAllocator for TrackingVramAllocator {
         device: &Device,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(expected_max.max(initial_size))?;
@@ -474,7 +474,7 @@ impl VramAllocator for TrackingVramAllocator {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Texture> {
         let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
@@ -487,7 +487,7 @@ impl VramAllocator for TrackingVramAllocator {
         Ok(tex)
     }
 
-    fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelKind) {
+    fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
         self.live_bytes
             .fetch_sub(reserved as i64, Ordering::Relaxed);
         self.inner.notify_freed(reserved, committed, kind);
@@ -574,7 +574,7 @@ mod tests {
             .alloc_buffer(
                 &device,
                 1024,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -592,7 +592,7 @@ mod tests {
                 64,
                 64,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Interpolated,
+                TextureKind::Interpolated,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .unwrap();
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(tracking.allocated_bytes(), 0);
 
         let buf = device
-            .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         assert!(tracking.allocated_bytes() >= 4096);
 
@@ -624,7 +624,7 @@ mod tests {
             .alloc_buffer(
                 &device,
                 4096,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -633,7 +633,7 @@ mod tests {
         let result = alloc.alloc_buffer(
             &device,
             8192,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             None,
             BufferFlags::empty(),
         );
@@ -649,7 +649,7 @@ mod tests {
                 32,
                 32,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Interpolated,
+                TextureKind::Interpolated,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .unwrap();
@@ -668,17 +668,17 @@ mod tests {
             assert_eq!(tracking.allocated_bytes(), 0);
 
             let buf = device
-                .alloc_buffer(1024, DataAccess::Scattered, None, BufferFlags::empty())
+                .alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap();
             let hinted = device
-                .alloc_buffer_with_capacity(512, 4096, DataAccess::Scattered, BufferFlags::empty())
+                .alloc_buffer_with_capacity(512, 4096, BufferKind::Scattered, BufferFlags::empty())
                 .unwrap();
             let tex = device
                 .alloc_texture(
                     16,
                     16,
                     TextureFormat::Rgba8Unorm,
-                    SpatialAccess::Interpolated,
+                    TextureKind::Interpolated,
                     TextureFlags::COPY_DST,
                 )
                 .unwrap();
@@ -711,7 +711,7 @@ mod tests {
         let device = base.with_vram_allocator(tracking.clone());
 
         let buf = device
-            .alloc_buffer(2048, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(2048, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         assert!(tracking.allocated_bytes() >= 2048);
         drop(buf);

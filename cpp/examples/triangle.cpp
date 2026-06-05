@@ -108,7 +108,7 @@ int main() {
         goldy::Buffer vertex_buffer(device,
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(vertices.data()),
                                      vertices.size() * sizeof(Vertex)),
-            goldy::DataAccess::Scattered);
+            goldy::BufferKind::Scattered);
         std::cout << "Created vertex buffer: " << vertex_buffer.size() << " bytes\n";
 
         // Compile shader

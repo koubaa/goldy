@@ -5,7 +5,7 @@
 
 use crate::backend::{GpuBackend, SamplerHandle};
 use crate::device::Device;
-use crate::types::{BindlessCategory, BindlessHandle, SamplerDesc};
+use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, SamplerDesc};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -126,28 +126,25 @@ impl Sampler {
     }
 
     /// Get the backend handle for this sampler.
-    pub fn handle(&self) -> SamplerHandle {
+    pub fn gpu_handle(&self) -> SamplerHandle {
         self.handle
     }
 
-    /// Get the sampler's index in the global descriptor set.
-    ///
-    /// Returns `Some(index)` if this sampler is registered.
-    /// Returns `None` otherwise.
-    ///
-    /// **Prefer [`Sampler::bindless_handle`]** for new code; the typed handle
-    /// lets resource-slot setters validate that a slot expected to be a sampler
-    /// (via `goldy_filter`) is actually bound to a `Sampler`.
-    pub fn bindless_index(&self) -> Option<u32> {
-        let backend = self.backend.lock().unwrap();
-        backend.sampler_bindless_index(self.handle)
+    /// Resource descriptor index for how this sampler will be accessed in the current dispatch.
+    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+        match access {
+            ResourceAccess::Read => {
+                let backend = self.backend.lock().unwrap();
+                backend.sampler_bindless_index(self.handle)
+            }
+            ResourceAccess::Write | ResourceAccess::ReadWrite => None,
+        }
     }
 
-    /// Get this sampler's typed bindless handle
-    /// ([`BindlessCategory::Sampler`]).
-    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
-        self.bindless_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::Sampler, i))
+    /// Typed resource descriptor handle for validation and dispatch wiring.
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.resource_index(access)
+            .map(|i| ResourceHandle::new(ResourceCategory::Sampler, i))
     }
 }
 

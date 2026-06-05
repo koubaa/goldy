@@ -8,7 +8,7 @@
 //! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example checkerboard`
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance,
+    shaders, Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance,
     LayoutCheckable, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule,
     Surface, VertexBufferLayout,
 };
@@ -88,7 +88,7 @@ impl App {
         // Create uniform buffer for time
         let uniform_buffer = device.as_ref().alloc_buffer(
             std::mem::size_of::<TimeUniforms>() as u64,
-            DataAccess::Broadcast,
+            BufferKind::Broadcast,
             None,
             goldy::BufferFlags::empty(),
         )?;

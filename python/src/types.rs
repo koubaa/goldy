@@ -127,7 +127,7 @@ impl From<goldy::TextureFormat> for PyTextureFormat {
 }
 
 // =============================================================================
-// DataAccess
+// BufferKind
 // =============================================================================
 
 /// Data access pattern for buffers.
@@ -135,9 +135,9 @@ impl From<goldy::TextureFormat> for PyTextureFormat {
 /// Describes how threads will access the buffer, which determines hardware optimization strategies:
 /// - SCATTERED: Any thread can access any address (read/write). No coherence assumptions.
 /// - BROADCAST: All threads read same address. Hardware broadcast optimization.
-#[pyclass(name = "DataAccess", module = "goldy", eq, eq_int)]
+#[pyclass(name = "BufferKind", module = "goldy", eq, eq_int)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum PyDataAccess {
+pub enum PyBufferKind {
     /// Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
     #[default]
     SCATTERED = 0,
@@ -145,26 +145,26 @@ pub enum PyDataAccess {
     BROADCAST = 1,
 }
 
-impl From<PyDataAccess> for goldy::DataAccess {
-    fn from(access: PyDataAccess) -> Self {
+impl From<PyBufferKind> for goldy::BufferKind {
+    fn from(access: PyBufferKind) -> Self {
         match access {
-            PyDataAccess::SCATTERED => goldy::DataAccess::Scattered,
-            PyDataAccess::BROADCAST => goldy::DataAccess::Broadcast,
+            PyBufferKind::SCATTERED => goldy::BufferKind::Scattered,
+            PyBufferKind::BROADCAST => goldy::BufferKind::Broadcast,
         }
     }
 }
 
-impl From<goldy::DataAccess> for PyDataAccess {
-    fn from(access: goldy::DataAccess) -> Self {
+impl From<goldy::BufferKind> for PyBufferKind {
+    fn from(access: goldy::BufferKind) -> Self {
         match access {
-            goldy::DataAccess::Scattered => PyDataAccess::SCATTERED,
-            goldy::DataAccess::Broadcast => PyDataAccess::BROADCAST,
+            goldy::BufferKind::Scattered => PyBufferKind::SCATTERED,
+            goldy::BufferKind::Broadcast => PyBufferKind::BROADCAST,
         }
     }
 }
 
 // =============================================================================
-// SpatialAccess
+// TextureKind
 // =============================================================================
 
 /// Spatial access pattern for textures.
@@ -173,9 +173,9 @@ impl From<goldy::DataAccess> for PyDataAccess {
 /// - INTERPOLATED: Hardware filtering between neighbors (texture units).
 /// - DIRECT: Direct 2D/3D indexing, no filtering, read/write.
 /// - DIRECT_INTERPOLATED: Both storage (UAV) and sampled (SRV) access on the same texture.
-#[pyclass(name = "SpatialAccess", module = "goldy", eq, eq_int)]
+#[pyclass(name = "TextureKind", module = "goldy", eq, eq_int)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum PySpatialAccess {
+pub enum PyTextureKind {
     /// Hardware filtering between neighbors (Texture2D with sampler).
     #[default]
     INTERPOLATED = 0,
@@ -185,22 +185,22 @@ pub enum PySpatialAccess {
     DIRECT_INTERPOLATED = 2,
 }
 
-impl From<PySpatialAccess> for goldy::SpatialAccess {
-    fn from(access: PySpatialAccess) -> Self {
+impl From<PyTextureKind> for goldy::TextureKind {
+    fn from(access: PyTextureKind) -> Self {
         match access {
-            PySpatialAccess::INTERPOLATED => goldy::SpatialAccess::Interpolated,
-            PySpatialAccess::DIRECT => goldy::SpatialAccess::Direct,
-            PySpatialAccess::DIRECT_INTERPOLATED => goldy::SpatialAccess::DirectInterpolated,
+            PyTextureKind::INTERPOLATED => goldy::TextureKind::Interpolated,
+            PyTextureKind::DIRECT => goldy::TextureKind::Direct,
+            PyTextureKind::DIRECT_INTERPOLATED => goldy::TextureKind::DirectInterpolated,
         }
     }
 }
 
-impl From<goldy::SpatialAccess> for PySpatialAccess {
-    fn from(access: goldy::SpatialAccess) -> Self {
+impl From<goldy::TextureKind> for PyTextureKind {
+    fn from(access: goldy::TextureKind) -> Self {
         match access {
-            goldy::SpatialAccess::Interpolated => PySpatialAccess::INTERPOLATED,
-            goldy::SpatialAccess::Direct => PySpatialAccess::DIRECT,
-            goldy::SpatialAccess::DirectInterpolated => PySpatialAccess::DIRECT_INTERPOLATED,
+            goldy::TextureKind::Interpolated => PyTextureKind::INTERPOLATED,
+            goldy::TextureKind::Direct => PyTextureKind::DIRECT,
+            goldy::TextureKind::DirectInterpolated => PyTextureKind::DIRECT_INTERPOLATED,
         }
     }
 }

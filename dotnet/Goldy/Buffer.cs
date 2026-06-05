@@ -17,7 +17,7 @@ public sealed class Buffer : IDisposable
     /// <param name="device">The GPU device to create the buffer on.</param>
     /// <param name="size">Size in bytes.</param>
     /// <param name="access">Access pattern (Scattered for general data, Broadcast for uniforms).</param>
-    public Buffer(Device device, ulong size, DataAccess access)
+    public Buffer(Device device, ulong size, BufferKind access)
     {
         device.ThrowIfDisposed();
         
@@ -35,7 +35,7 @@ public sealed class Buffer : IDisposable
     /// <param name="device">The GPU device to create the buffer on.</param>
     /// <param name="data">Initial data to upload.</param>
     /// <param name="access">Access pattern (Scattered for general data, Broadcast for uniforms).</param>
-    public Buffer(Device device, ReadOnlySpan<byte> data, DataAccess access)
+    public Buffer(Device device, ReadOnlySpan<byte> data, BufferKind access)
     {
         device.ThrowIfDisposed();
         
@@ -57,7 +57,7 @@ public sealed class Buffer : IDisposable
     /// <summary>
     /// Create a buffer initialized with typed data.
     /// </summary>
-    public static Buffer WithData<T>(Device device, ReadOnlySpan<T> data, DataAccess access) where T : unmanaged
+    public static Buffer WithData<T>(Device device, ReadOnlySpan<T> data, BufferKind access) where T : unmanaged
     {
         var bytes = MemoryMarshal.AsBytes(data);
         return new Buffer(device, bytes, access);
@@ -71,7 +71,7 @@ public sealed class Buffer : IDisposable
     /// <summary>
     /// Get the buffer's access pattern.
     /// </summary>
-    public DataAccess Access { get; }
+    public BufferKind Access { get; }
 
     /// <summary>
     /// Write data to the buffer.

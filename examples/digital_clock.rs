@@ -10,7 +10,7 @@ use goldy::{
     examples::digital_clock::{
         generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE,
     },
-    Buffer, CommandEncoder, DataAccess, DeviceDescriptor, Instance, RenderPipeline,
+    Buffer, CommandEncoder, BufferKind, DeviceDescriptor, Instance, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
 };
 use std::sync::Arc;
@@ -134,7 +134,7 @@ impl App {
         let vertex_data: &[u8] = bytemuck::cast_slice(&vertices);
         let vertex_buffer = device
             .as_ref()
-            .alloc_buffer_with_bytes(vertex_data, DataAccess::Scattered)?;
+            .alloc_buffer_with_bytes(vertex_data, BufferKind::Scattered)?;
 
         // Render directly to surface
         let frame = surface.begin()?;

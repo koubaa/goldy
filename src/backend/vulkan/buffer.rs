@@ -4,7 +4,7 @@ use super::sparse;
 use super::types::{self, BufferState};
 use super::utils::find_memory_type;
 use super::{BufferHandle, DeviceHandle};
-use crate::backend::DataAccess;
+use crate::backend::BufferKind;
 use crate::types::BufferFlags;
 use anyhow::{Context, Result};
 use ash::vk;
@@ -85,7 +85,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     logical_size: u64,
     allocation_size: u64,
-    access: DataAccess,
+    access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
@@ -99,7 +99,7 @@ pub(super) fn create(
     let mut vk_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
 
     let is_storage = match access {
-        DataAccess::Scattered => {
+        BufferKind::Scattered => {
             vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::VERTEX_BUFFER
                 | vk::BufferUsageFlags::INDEX_BUFFER;
@@ -109,7 +109,7 @@ pub(super) fn create(
             }
             true
         }
-        DataAccess::Broadcast => {
+        BufferKind::Broadcast => {
             vk_usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
             false
         }
@@ -118,7 +118,7 @@ pub(super) fn create(
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
         );
     }
 
@@ -791,7 +791,7 @@ fn allocate_vk_buffer_memory(
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     if cpu_readable && !is_storage {
         anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers"
+            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
         );
     }
 

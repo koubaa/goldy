@@ -34,7 +34,7 @@ The `VramAllocator` trait sits **below** all three, providing a single customiza
 Every `Device` ships with a `DefaultVramAllocator` that delegates directly to the backend with zero overhead. You can allocate through it explicitly via convenience methods:
 
 ```rust
-let buf = device.alloc_buffer(size, DataAccess::Scattered, None, BufferFlags::empty())?;
+let buf = device.alloc_buffer(size, BufferKind::Scattered, None, BufferFlags::empty())?;
 let tex = device.alloc_texture(width, height, format, access, flags)?;
 ```
 
@@ -89,7 +89,7 @@ impl VramAllocator for MyAllocator {
         &self,
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<Buffer> {
@@ -104,7 +104,7 @@ impl VramAllocator for MyAllocator {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> anyhow::Result<Texture> {
         Texture::new(device, width, height, format, access, flags)
@@ -114,7 +114,7 @@ impl VramAllocator for MyAllocator {
         &self,
         reserved: u64,
         _committed: u64,
-        _kind: goldy::vram_allocator::ParcelKind,
+        _kind: goldy::vram_allocator::ParcelType,
     ) {
         // Decrement your tracked bytes (reserved is the parcel's reserved backing size).
         let _ = reserved;
