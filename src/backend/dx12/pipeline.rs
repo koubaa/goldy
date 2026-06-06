@@ -35,7 +35,7 @@ pub(super) fn create(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     // Use the shared bindless root signature from the device
@@ -287,7 +287,7 @@ pub(super) fn create_with_depth(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     let root_signature = logical_device

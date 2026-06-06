@@ -492,7 +492,7 @@ pub(super) fn create(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     // Use the shared bindless root signature from the device
@@ -1469,7 +1469,7 @@ fn execute_signal_and_finish(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
+    if let Some(ld) = state.devices.get(&device_handle) {
         ld.ledger
             .lock()
             .unwrap()
@@ -1535,7 +1535,7 @@ fn execute_signal_and_finish(
         .get_mut(&ctx)
         .map(|sc| sc.deletion_queue.drain_up_to_completed(ctx_completed))
         .unwrap_or_default();
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
+    if let Some(dev) = state.devices.get(&device_handle) {
         let ledger_arc = std::sync::Arc::clone(&dev.ledger);
         let mut ledger = ledger_arc.lock().unwrap();
         for resource in ctx_del_batch {
@@ -2194,7 +2194,7 @@ pub(super) fn try_resubmit_retained(
             .context("Failed to signal context fence after retained resubmit")?;
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
+    if let Some(ld) = state.devices.get(&device_handle) {
         ld.ledger
             .lock()
             .unwrap()
@@ -2217,7 +2217,7 @@ pub(super) fn try_resubmit_retained(
                 .drain_up_to_completed(retired_ctx_completed)
         })
         .unwrap_or_default();
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
+    if let Some(dev) = state.devices.get(&device_handle) {
         let ledger_arc = std::sync::Arc::clone(&dev.ledger);
         let mut ledger = ledger_arc.lock().unwrap();
         for resource in retained_del_batch {

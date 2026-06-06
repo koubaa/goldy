@@ -753,12 +753,12 @@ pub(crate) struct LogicalDevice {
     /// Device-global submission sequence (shared value space; contexts signal their own fences).
     pub timeline_next: Arc<AtomicU64>,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
-    pub retired_floor: u64,
+    pub retired_floor: AtomicU64,
 
     // Bindless infrastructure
     /// `true` when adapter reports tiled resources tier >= 1 (buffer reserved resources).
     pub supports_reserved_buffers: bool,
-    pub tile_heap_pool: Option<super::tiles::TileHeapPool>,
+    pub tile_heap_pool: Mutex<Option<super::tiles::TileHeapPool>>,
     /// Shared root signature for all bindless pipelines (graphics and compute)
     pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
     /// Command signature for indirect compute dispatch (ExecuteIndirect, dispatch-only)
@@ -776,7 +776,7 @@ pub(crate) struct LogicalDevice {
     pub zero_buffer: Direct3D12::ID3D12Resource,
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
-    pub deletion_queue: DeletionQueue,
+    pub deletion_queue: Mutex<DeletionQueue>,
     /// Descriptor-heap ledger: `ResourceRegistry` + slot reference-tracking.
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
@@ -786,9 +786,16 @@ pub(crate) struct LogicalDevice {
     pub pso_cache: Arc<RwLock<PsoCache>>,
 }
 
+/// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
+pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
+
 impl LogicalDevice {
-    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
-        let batch = self.deletion_queue.drain_up_to_completed(completed);
+    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+        let batch = self
+            .deletion_queue
+            .lock()
+            .unwrap()
+            .drain_up_to_completed(completed);
         if batch.is_empty() {
             return;
         }
@@ -799,14 +806,14 @@ impl LogicalDevice {
         }
     }
 
-    pub(crate) fn flush_deletion_queue(&mut self) {
+    pub(crate) fn flush_deletion_queue(&self) {
         // Called only at device teardown, after wait_for_gpu ensures all GPU work has
         // completed. Slots queued here via reclaim_*_slots will have empty requirements
         // (slot_last_seen was cleared as contexts were destroyed before the device) and
         // are freed immediately in queue_slot_reclamation. Any slots that somehow still
         // have requirements are just dropped with the LogicalDevice — the whole allocator
         // is discarded at this point, so skipping drain_ready_slot_reclamations is safe.
-        let batch = self.deletion_queue.drain_everything();
+        let batch = self.deletion_queue.lock().unwrap().drain_everything();
         if batch.is_empty() {
             return;
         }
@@ -819,7 +826,7 @@ impl LogicalDevice {
 }
 
 pub(crate) fn destroy_pending_deletion(
-    ld: &mut LogicalDevice,
+    ld: &LogicalDevice,
     ledger: &mut DeviceLedger,
     resource: PendingDeletion,
 ) {
@@ -833,9 +840,10 @@ pub(crate) fn destroy_pending_deletion(
         } => {
             ledger.reclaim_buffer_slots(buffer_handle);
             if let Some(tiles) = reserved_tiles {
+                let mut pool = ld.tile_heap_pool.lock().unwrap();
                 super::tiles::teardown_reserved_mappings(
                     &ld.command_queue,
-                    &mut ld.tile_heap_pool,
+                    &mut *pool,
                     &resource,
                     &tiles,
                 );
@@ -868,12 +876,15 @@ pub(crate) fn destroy_pending_deletion(
             upload_buffer,
             coherent_readback,
         } => {
-            super::tiles::teardown_reserved_mappings(
-                &ld.command_queue,
-                &mut ld.tile_heap_pool,
-                &resource,
-                &tiles,
-            );
+            {
+                let mut pool = ld.tile_heap_pool.lock().unwrap();
+                super::tiles::teardown_reserved_mappings(
+                    &ld.command_queue,
+                    &mut *pool,
+                    &resource,
+                    &tiles,
+                );
+            }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
             let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
@@ -1115,7 +1126,7 @@ pub(super) struct Dx12State {
     /// (needed for tear-free immediate presentation in windowed mode).
     pub allow_tearing: bool,
     pub adapters: Vec<DxgiAdapterInfo>,
-    pub devices: HashMap<DeviceHandle, LogicalDevice>,
+    pub devices: HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
     pub contexts: HashMap<super::ContextHandle, Dx12SubmissionContext>,
     pub next_context_id: super::ContextHandle,

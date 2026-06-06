@@ -413,7 +413,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
 
     state.devices.insert(
         handle,
-        LogicalDevice {
+        std::sync::Arc::new(LogicalDevice {
             device,
             adapter_id,
             command_queue,
@@ -428,24 +428,24 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             sampler_descriptor_size,
             fence,
             timeline_next: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            retired_floor: 0,
+            retired_floor: std::sync::atomic::AtomicU64::new(0),
             supports_reserved_buffers,
-            tile_heap_pool: if supports_reserved_buffers {
+            tile_heap_pool: std::sync::Mutex::new(if supports_reserved_buffers {
                 Some(super::tiles::TileHeapPool::new())
             } else {
                 None
-            },
+            }),
             bindless_root_signature,
             compute_dispatch_indirect_signature,
             compute_batch_dispatch_signature,
             zero_buffer,
-            deletion_queue: super::types::DeletionQueue::new(),
+            deletion_queue: std::sync::Mutex::new(super::types::DeletionQueue::new()),
             ledger: std::sync::Arc::new(std::sync::Mutex::new(super::types::DeviceLedger::new())),
             pso_cache: std::sync::Arc::new(std::sync::RwLock::new(super::types::PsoCache::new(
                 graphics_pso_blobs,
                 compute_pso_blobs,
             ))),
-        },
+        }),
     );
 
     tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);

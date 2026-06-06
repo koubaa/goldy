@@ -411,7 +411,7 @@ pub(super) fn acquire(
 
     // Process deferred deletions now that the fence wait has completed.
     let retired = super::context::device_retired(state, device_handle);
-    if let Some(device) = state.devices.get_mut(&device_handle) {
+    if let Some(device) = state.devices.get(&device_handle) {
         let _tz = crate::tracy_zone!("surface.acquire.deletion_queue");
         device.process_deletion_queue_up_to(retired);
     }
@@ -1052,7 +1052,7 @@ pub(super) fn resize(
     if let Some(df) = depth_format {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Surface's device is invalid")?;
 
         let heap_properties = D3D12_HEAP_PROPERTIES {

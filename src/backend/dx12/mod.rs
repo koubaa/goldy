@@ -361,7 +361,7 @@ impl Dx12Backend {
 
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
-        if let Some(mut logical_device) = self.state.devices.remove(&device_handle) {
+        if let Some(logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
             // Advance timeline_next past the value consumed by wait_for_gpu so that
             // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing
@@ -953,7 +953,7 @@ impl GpuBackend for Dx12Backend {
             anyhow::bail!("GPU device removed (TDR)");
         }
         let retired = context::device_retired(&self.state, device_handle);
-        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+        if let Some(ld) = self.state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(value.min(retired));
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
             ledger_arc
@@ -993,7 +993,7 @@ impl GpuBackend for Dx12Backend {
                 anyhow::bail!("GPU device removed (TDR)");
             }
             let retired = context::device_retired(&self.state, device_handle);
-            if let Some(dev) = self.state.devices.get_mut(&device_handle) {
+            if let Some(dev) = self.state.devices.get(&device_handle) {
                 dev.process_deletion_queue_up_to(value.min(retired));
                 let ledger_arc = std::sync::Arc::clone(&dev.ledger);
                 ledger_arc
@@ -1243,7 +1243,7 @@ impl GpuBackend for Dx12Backend {
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device_handle = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device_handle);
-        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+        if let Some(ld) = self.state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
             ledger_arc
@@ -1258,7 +1258,7 @@ impl GpuBackend for Dx12Backend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|d| d.deletion_queue.pending_len())
+            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
             .unwrap_or(0)
     }
 }

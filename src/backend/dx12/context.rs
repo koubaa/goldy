@@ -10,7 +10,7 @@ pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
     let floor = state
         .devices
         .get(&device)
-        .map(|d| d.retired_floor)
+        .map(|d| d.retired_floor.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(0);
     let max_ctx = state
         .contexts
@@ -99,8 +99,9 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     }
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
-    if let Some(ld) = state.devices.get_mut(&device) {
-        ld.retired_floor = ld.retired_floor.max(completed);
+    if let Some(ld) = state.devices.get(&device) {
+        ld.retired_floor
+            .fetch_max(completed, std::sync::atomic::Ordering::Relaxed);
     }
 
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
@@ -118,7 +119,7 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     // Drain any remaining per-context pending deletions now that the GPU is idle.
     let batch = sc.deletion_queue.drain_everything();
     if !batch.is_empty() {
-        if let Some(ld) = state.devices.get_mut(&device) {
+        if let Some(ld) = state.devices.get(&device) {
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
             let mut ledger = ledger_arc.lock().unwrap();
             for resource in batch {

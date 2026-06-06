@@ -40,7 +40,7 @@ pub(super) fn create_with_depth(
 ) -> Result<RenderTargetHandle> {
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     // Create color render target texture
@@ -383,7 +383,7 @@ pub(super) fn render(
 ) -> Result<()> {
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     // Reset the single shared command allocator. This is safe only because we do

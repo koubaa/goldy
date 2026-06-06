@@ -275,7 +275,7 @@ fn patch_buffer_views_after_parent_resize(
             if num_elements > 0 {
                 let logical_device = state
                     .devices
-                    .get_mut(&device_handle)
+                    .get(&device_handle)
                     .context("patch_buffer_views: device")?;
 
                 let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
@@ -532,7 +532,7 @@ pub(super) fn resize(
         wait_for_fence(&device.fence, fence_value)?;
         deletion_fence_marker = fence_value;
 
-        if let Some(dev) = state.devices.get_mut(&device_handle) {
+        if let Some(dev) = state.devices.get(&device_handle) {
             dev.timeline_next
                 .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -569,7 +569,7 @@ pub(super) fn resize(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("resize_buffer: device for descriptors")?;
     rewrite_root_buffer_descriptors(logical_device, &new_resource, new_size, &old)?;
 
@@ -600,12 +600,12 @@ pub(super) fn resize(
 
     patch_buffer_views_after_parent_resize(state, buffer_handle)?;
 
-    let dev_mut = state
+    let dev = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("resize_buffer: queue deletion")?;
     if old.is_reserved {
-        dev_mut.deletion_queue.queue(
+        dev.deletion_queue.lock().unwrap().queue(
             deletion_fence_marker,
             super::types::PendingDeletion::ReplacedReservedBufferGpu {
                 resource: old_resource,
@@ -615,7 +615,7 @@ pub(super) fn resize(
             },
         );
     } else {
-        dev_mut.deletion_queue.queue(
+        dev.deletion_queue.lock().unwrap().queue(
             deletion_fence_marker,
             super::types::PendingDeletion::ReplacedBufferGpu {
                 resource: old_resource,
@@ -795,7 +795,7 @@ pub(super) fn create(
     let (bindless_offset, bindless_srv_offset) = if is_storage || is_uniform {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
 
         if is_storage {
@@ -1005,10 +1005,10 @@ pub(super) fn create_reserved_with_capacity(
     let (resource, reserved_tiles) = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
-        let pool = ld
-            .tile_heap_pool
+        let mut pool_guard = ld.tile_heap_pool.lock().unwrap();
+        let pool = pool_guard
             .as_mut()
             .context("internal: tile heap pool missing")?;
         let queue = ld.command_queue.clone();
@@ -1050,7 +1050,7 @@ pub(super) fn create_reserved_with_capacity(
     let (bindless_offset, bindless_srv_offset) = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         let uav_offset = ld
             .ledger
@@ -1153,7 +1153,7 @@ pub(super) fn create_with_capacity(
     let use_reserved = !super::env_disable_reserved_buffers()
         && state.devices.get(&device_handle).is_some_and(|d| {
             d.supports_reserved_buffers
-                && d.tile_heap_pool.is_some()
+                && d.tile_heap_pool.lock().unwrap().is_some()
                 && cap > initial_size
                 && access == BufferKind::Scattered
                 && !flags.contains(BufferFlags::CPU_READABLE)
@@ -1234,10 +1234,10 @@ pub(super) fn set_logical_size(
         {
             let ld = state
                 .devices
-                .get_mut(&device_handle)
+                .get(&device_handle)
                 .context("set_logical_size: device")?;
-            let pool = ld
-                .tile_heap_pool
+            let mut pool_guard = ld.tile_heap_pool.lock().unwrap();
+            let pool = pool_guard
                 .as_mut()
                 .context("set_logical_size: tile heap pool")?;
             let queue = ld.command_queue.clone();
@@ -1291,14 +1291,14 @@ pub(super) fn set_logical_size(
 /// For views, only the descriptor slots are deferred.
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
-        if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
+        if let Some(device) = state.devices.get(&buffer.device_handle) {
             let last_fence = device
                 .timeline_next
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .saturating_sub(1);
 
             if buffer.is_view {
-                device.deletion_queue.queue(
+                device.deletion_queue.lock().unwrap().queue(
                     last_fence,
                     super::types::PendingDeletion::BufferView { buffer_handle },
                 );
@@ -1319,7 +1319,7 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
                     unsafe { rb.Unmap(0, Some(&no_write)) };
                 }
             }
-            device.deletion_queue.queue(
+            device.deletion_queue.lock().unwrap().queue(
                 last_fence,
                 super::types::PendingDeletion::Buffer {
                     buffer_handle,
@@ -1356,15 +1356,15 @@ pub(super) fn hint_unused_above(state: &mut Dx12State, buffer_handle: BufferHand
         }
         (buf.device_handle, ft)
     };
-    let (devices, buffers) = (&mut state.devices, &mut state.buffers);
-    let Some(ld) = devices.get_mut(&device_handle) else {
+    let Some(ld) = state.devices.get(&device_handle) else {
         return;
     };
-    let Some(pool) = ld.tile_heap_pool.as_mut() else {
+    let mut pool_guard = ld.tile_heap_pool.lock().unwrap();
+    let Some(pool) = pool_guard.as_mut() else {
         return;
     };
     let queue = &ld.command_queue;
-    let Some(buf_mut) = buffers.get_mut(&buffer_handle) else {
+    let Some(buf_mut) = state.buffers.get_mut(&buffer_handle) else {
         return;
     };
     let mut i = first_tile;
@@ -1445,7 +1445,7 @@ pub(super) fn create_view(
     let (bindless_offset, bindless_srv_offset) = {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
 
         if num_elements == 0 {
@@ -1821,7 +1821,7 @@ pub(super) fn write(
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
-        if let Some(dev) = state.devices.get_mut(&device_handle) {
+        if let Some(dev) = state.devices.get(&device_handle) {
             dev.timeline_next
                 .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1954,7 +1954,7 @@ fn standalone_copy_coherent_readback(
         .context("Failed to signal fence (coherent readback)")?;
     wait_for_fence(&device.fence, fence_value)?;
 
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
+    if let Some(dev) = state.devices.get(&device_handle) {
         dev.timeline_next
             .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -2126,7 +2126,7 @@ pub(super) fn read_to_cpu(
             .context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
 
-        if let Some(dev) = state.devices.get_mut(&device_handle) {
+        if let Some(dev) = state.devices.get(&device_handle) {
             dev.timeline_next
                 .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -2272,7 +2272,7 @@ pub(super) fn clear(
             anyhow::bail!("Device removed during buffer clear: {:?}", removed_reason);
         }
 
-        if let Some(dev) = state.devices.get_mut(&device_handle) {
+        if let Some(dev) = state.devices.get(&device_handle) {
             dev.timeline_next
                 .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
