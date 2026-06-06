@@ -19,14 +19,17 @@
 //! per-frame bindless-slot churn that previously caused ~100 µs overhead before
 //! `surface.submit_partition_early`.
 //!
-//! ### One-graph-per-device invariant
+//! ### One-graph-per-context invariant
 //!
 //! The view cache is keyed on `TransientId` (a `u32` from `0..N` per graph). Since
 //! `TransientId` is assigned by declaration order and reset to 0 on each
 //! [`TaskGraph::clear`](crate::TaskGraph::clear), `TransientId(0)` from graph A and
-//! `TransientId(0)` from graph B would collide. **This heap therefore assumes exactly
-//! one `TaskGraph` per device.** Debug-assertions telemetry in [`TaskGraph`](crate::TaskGraph)
-//! enforces deterministic declaration order across frames.
+//! `TransientId(0)` from graph B would collide. The heap is owned per-`Context`
+//! (`ContextInner::placement_heap`), so **this heap assumes exactly one `TaskGraph`
+//! per context**; independent contexts each get their own heap and `TransientId`
+//! namespace and never share transient `BufferView`/`Texture` handles. Debug-assertions
+//! telemetry in [`TaskGraph`](crate::TaskGraph) enforces deterministic declaration order
+//! across frames.
 
 use crate::backend::TextureHandle;
 use crate::buffer::{Buffer, BufferView};
