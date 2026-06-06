@@ -6,10 +6,9 @@ use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::{ext, khr};
-use std::collections::HashMap;
 use std::ffi::CStr;
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Enumerate available physical devices/adapters.
 pub(super) fn enumerate(physical_devices: &[PhysicalDeviceInfo]) -> Vec<AdapterInfo> {
@@ -486,10 +485,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_descriptor_set_layout,
             bindless_descriptor_set,
             bindless_pipeline_layout,
-            resource_registry: types::ResourceRegistry::new(),
+            ledger: Arc::new(Mutex::new(types::DeviceLedger::new())),
             deletion_queue: types::DeletionQueue::new(),
-            slot_last_seen: HashMap::new(),
-            pending_slot_reclamations: Vec::new(),
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: 0,
             pipeline_cache,
@@ -571,8 +568,12 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
 
             // Flush any pending deferred deletions
             let pending = logical_device.deletion_queue.flush_all_drain();
-            for r in pending {
-                types::destroy_pending_deletion(&mut logical_device, r);
+            if !pending.is_empty() {
+                let ledger_arc = std::sync::Arc::clone(&logical_device.ledger);
+                let mut ledger = ledger_arc.lock().unwrap();
+                for r in pending {
+                    types::destroy_pending_deletion(&mut logical_device, &mut ledger, r);
+                }
             }
 
             // Destroy per-context staging belt and texture pool for this device.

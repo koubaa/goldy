@@ -51,7 +51,12 @@ pub(super) fn create(
 
     let bindless_index = {
         let logical_device = devices.get_mut(&device_handle).unwrap();
-        let index = logical_device.resource_registry.register_sampler(handle);
+        let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_sampler(handle);
 
         // Update the global descriptor set with this sampler
         if let Some(descriptor_set) = bindless_descriptor_set {
@@ -99,7 +104,11 @@ pub(super) fn destroy(
         if let Some(logical_device) = devices.get_mut(&sampler.device_handle) {
             // Defer reclamation: sampler slot must not be reused until all
             // in-flight submissions that referenced it have retired.
-            logical_device.reclaim_sampler_slots(sampler_handle);
+            logical_device
+                .ledger
+                .lock()
+                .unwrap()
+                .reclaim_sampler_slots(sampler_handle);
 
             unsafe {
                 logical_device.device.device_wait_idle().ok();

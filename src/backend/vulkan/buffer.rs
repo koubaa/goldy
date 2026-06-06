@@ -199,6 +199,9 @@ pub(super) fn create(
     let bindless_index = {
         let logical_device = devices.get_mut(&device_handle).unwrap();
         let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_buffer(handle, is_storage);
 
@@ -355,7 +358,12 @@ pub(super) fn create_sparse_with_capacity(
     *next_buffer_handle += 1;
 
     let bindless_index = {
-        let index = ld.resource_registry.register_buffer(handle, true);
+        let index = ld
+            .ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_buffer(handle, true);
         if let Some(descriptor_set) = bindless_descriptor_set {
             let buffer_info = vk::DescriptorBufferInfo::default()
                 .buffer(buffer)
@@ -1222,7 +1230,11 @@ pub(super) fn destroy(
             }
 
             if buffer.transient_heap_suballoc {
-                device.reclaim_buffer_slots(buffer_handle);
+                device
+                    .ledger
+                    .lock()
+                    .unwrap()
+                    .reclaim_buffer_slots(buffer_handle);
                 unsafe {
                     device.device.destroy_buffer(buffer.buffer, None);
                 }
@@ -1317,6 +1329,9 @@ pub(super) fn create_view(
     } else {
         let handle_for_registry = *next_buffer_handle;
         let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_buffer(handle_for_registry, is_storage);
 

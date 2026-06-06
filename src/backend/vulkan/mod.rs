@@ -1208,10 +1208,17 @@ impl GpuBackend for VulkanBackend {
             };
             {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
+                let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+                let mut ledger = ledger_arc.lock().unwrap();
                 for r in drained {
-                    types::destroy_pending_deletion(ld, r);
+                    types::destroy_pending_deletion(ld, &mut ledger, r);
                 }
-                ld.drain_ready_slot_reclamations(&self.state.contexts);
+                let completed_values = types::snapshot_context_completed_values(
+                    &ld.device,
+                    &self.state.contexts,
+                    device_handle,
+                );
+                ledger.drain_ready_slot_reclamations(&completed_values);
             }
         }
         Ok(())
@@ -1241,10 +1248,17 @@ impl GpuBackend for VulkanBackend {
                 compute::reap_timeline_cmd_buffers_up_to(&mut self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get_mut(&device_handle) {
                     let drained = ld.deletion_queue.drain_up_to(value.min(retired));
+                    let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+                    let mut ledger = ledger_arc.lock().unwrap();
                     for r in drained {
-                        types::destroy_pending_deletion(ld, r);
+                        types::destroy_pending_deletion(ld, &mut ledger, r);
                     }
-                    ld.drain_ready_slot_reclamations(&self.state.contexts);
+                    let completed_values = types::snapshot_context_completed_values(
+                        &ld.device,
+                        &self.state.contexts,
+                        device_handle,
+                    );
+                    ledger.drain_ready_slot_reclamations(&completed_values);
                 }
                 Ok(true)
             }
@@ -1338,7 +1352,13 @@ impl GpuBackend for VulkanBackend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| ld.resource_registry.available_slots(category))
+            .map(|ld| {
+                ld.ledger
+                    .lock()
+                    .unwrap()
+                    .resource_registry
+                    .available_slots(category)
+            })
             .unwrap_or(0)
     }
 
@@ -1361,12 +1381,21 @@ impl GpuBackend for VulkanBackend {
             .map(|sc| sc.deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            for r in ctx_batch {
-                types::destroy_pending_deletion(ld, r);
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            {
+                let mut ledger = ledger_arc.lock().unwrap();
+                for r in ctx_batch {
+                    types::destroy_pending_deletion(ld, &mut ledger, r);
+                }
+                let completed_values = types::snapshot_context_completed_values(
+                    &ld.device,
+                    &self.state.contexts,
+                    device_handle,
+                );
+                ledger.drain_ready_slot_reclamations(&completed_values);
             }
             // Device-level queue: user-destroyed resources without context attribution.
             ld.process_deletion_queue_up_to(completed);
-            ld.drain_ready_slot_reclamations(&self.state.contexts);
         }
     }
 
