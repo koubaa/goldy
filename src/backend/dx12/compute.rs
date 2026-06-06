@@ -504,9 +504,16 @@ pub(super) fn create(
 
     tracing::debug!("Using shared bindless root signature for compute pipeline");
 
-    let disk_blob = logical_device.compute_pso_blobs.get(&key);
-    let mut try_drop_stale_cached_blob = disk_blob.is_some();
-    let cached_pso = disk_blob
+    let pso_cache_arc = std::sync::Arc::clone(&logical_device.pso_cache);
+    let disk_blob_bytes: Option<Vec<u8>> = pso_cache_arc
+        .read()
+        .unwrap()
+        .compute_blobs
+        .get(&key)
+        .cloned();
+    let mut try_drop_stale_cached_blob = disk_blob_bytes.is_some();
+    let cached_pso = disk_blob_bytes
+        .as_ref()
         .map(|b| pso_cache::d3d12_cached_pso(b.as_slice()))
         .unwrap_or_default();
 
@@ -533,8 +540,10 @@ pub(super) fn create(
                         error = ?e,
                         "discarding stale DX12 compute PSO blob; rebuilding without cache entry"
                     );
-                    logical_device.compute_pso_blobs.remove(&key);
-                    logical_device.pso_disk_cache_dirty = true;
+                    let mut cache = pso_cache_arc.write().unwrap();
+                    cache.compute_blobs.remove(&key);
+                    cache.dirty = true;
+                    drop(cache);
                     pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
                     try_drop_stale_cached_blob = false;
                 }
@@ -550,11 +559,14 @@ pub(super) fn create(
     };
     let new_blob = unsafe { pso_cache::id3dblob_to_vec(&blob) };
 
-    match logical_device.compute_pso_blobs.get(&key) {
-        Some(prev) if *prev == new_blob => {}
-        _ => {
-            logical_device.compute_pso_blobs.insert(key, new_blob);
-            logical_device.pso_disk_cache_dirty = true;
+    {
+        let mut cache = pso_cache_arc.write().unwrap();
+        match cache.compute_blobs.get(&key) {
+            Some(prev) if *prev == new_blob => {}
+            _ => {
+                cache.compute_blobs.insert(key, new_blob);
+                cache.dirty = true;
+            }
         }
     }
 
@@ -1458,7 +1470,10 @@ fn execute_signal_and_finish(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+        ld.ledger
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
     }
 
     let logical_device = state.devices.get(&device_handle).unwrap();
@@ -1521,10 +1536,12 @@ fn execute_signal_and_finish(
         .map(|sc| sc.deletion_queue.drain_up_to_completed(ctx_completed))
         .unwrap_or_default();
     if let Some(dev) = state.devices.get_mut(&device_handle) {
+        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
         for resource in ctx_del_batch {
-            types::destroy_pending_deletion(dev, resource);
+            types::destroy_pending_deletion(dev, &mut ledger, resource);
         }
-        dev.drain_ready_slot_reclamations(&state.contexts);
+        ledger.drain_ready_slot_reclamations(&state.contexts);
     }
 
     state
@@ -2178,7 +2195,10 @@ pub(super) fn try_resubmit_retained(
     }
 
     if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+        ld.ledger
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
     }
 
     if let Some(sc) = state.contexts.get_mut(&ctx) {
@@ -2198,10 +2218,12 @@ pub(super) fn try_resubmit_retained(
         })
         .unwrap_or_default();
     if let Some(dev) = state.devices.get_mut(&device_handle) {
+        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
         for resource in retained_del_batch {
-            types::destroy_pending_deletion(dev, resource);
+            types::destroy_pending_deletion(dev, &mut ledger, resource);
         }
-        dev.drain_ready_slot_reclamations(&state.contexts);
+        ledger.drain_ready_slot_reclamations(&state.contexts);
     }
 
     Ok(Some(fence_value))

@@ -21,8 +21,12 @@ pub(super) fn create(
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
-    // Use ResourceRegistry for sampler offset tracking
-    let sampler_offset = logical_device.resource_registry.register_sampler(handle);
+    let sampler_offset = logical_device
+        .ledger
+        .lock()
+        .unwrap()
+        .resource_registry
+        .register_sampler(handle);
 
     let sampler_desc = D3D12_SAMPLER_DESC {
         Filter: utils::filter_to_d3d12(desc.min_filter, desc.mag_filter, desc.mipmap_filter),
@@ -71,7 +75,10 @@ pub(super) fn create(
 pub(super) fn destroy(state: &mut Dx12State, sampler_handle: SamplerHandle) {
     if let Some(sampler) = state.samplers.remove(&sampler_handle) {
         if let Some(ld) = state.devices.get_mut(&sampler.device_handle) {
-            ld.reclaim_sampler_slots(sampler_handle);
+            ld.ledger
+                .lock()
+                .unwrap()
+                .reclaim_sampler_slots(sampler_handle);
         }
     }
 }

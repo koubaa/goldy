@@ -197,7 +197,12 @@ pub(super) fn create(
         .devices
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
-    let srv_offset = logical_device.resource_registry.register_texture(handle);
+    let srv_offset = logical_device
+        .ledger
+        .lock()
+        .unwrap()
+        .resource_registry
+        .register_texture(handle);
 
     let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
         Format: format_to_dxgi(format),
@@ -230,6 +235,9 @@ pub(super) fn create(
     // bindless_offset must point to UAV for goldy_direct_spatial.
     let bindless_offset = if is_storage {
         let uav_offset = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_texture_uav(handle);
         let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
@@ -269,6 +277,9 @@ pub(super) fn create(
             .get_mut(&device_handle)
             .context("Invalid device handle")?;
         let srv2_offset = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_texture_srv(handle);
         let srv2_cpu_handle = unsafe {
@@ -1041,7 +1052,10 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.remove(&texture_handle) {
         if let Some(dev) = state.devices.get_mut(&tex.device_handle) {
             if tex.transient_placed {
-                dev.reclaim_texture_slots(texture_handle);
+                dev.ledger
+                    .lock()
+                    .unwrap()
+                    .reclaim_texture_slots(texture_handle);
                 return;
             }
             let last_fence = dev

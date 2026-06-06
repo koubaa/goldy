@@ -373,15 +373,16 @@ impl Dx12Backend {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             logical_device.flush_deletion_queue();
 
-            if logical_device.pso_disk_cache_dirty {
+            let pso_cache = logical_device.pso_cache.read().unwrap();
+            if pso_cache.dirty {
                 if let Some(cache_root) = dirs::cache_dir() {
                     let path = cache_root
                         .join("goldy")
                         .join(format!("dx12_pso_{}.bin", logical_device.adapter_id));
                     if let Err(e) = pso_cache::save_maps(
                         &path,
-                        &logical_device.graphics_pso_blobs,
-                        &logical_device.compute_pso_blobs,
+                        &pso_cache.graphics_blobs,
+                        &pso_cache.compute_blobs,
                     ) {
                         tracing::warn!(
                             error = ?e,
@@ -954,7 +955,11 @@ impl GpuBackend for Dx12Backend {
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(value.min(retired));
-            ld.drain_ready_slot_reclamations(&self.state.contexts);
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            ledger_arc
+                .lock()
+                .unwrap()
+                .drain_ready_slot_reclamations(&self.state.contexts);
         }
         Ok(())
     }
@@ -990,7 +995,11 @@ impl GpuBackend for Dx12Backend {
             let retired = context::device_retired(&self.state, device_handle);
             if let Some(dev) = self.state.devices.get_mut(&device_handle) {
                 dev.process_deletion_queue_up_to(value.min(retired));
-                dev.drain_ready_slot_reclamations(&self.state.contexts);
+                let ledger_arc = std::sync::Arc::clone(&dev.ledger);
+                ledger_arc
+                    .lock()
+                    .unwrap()
+                    .drain_ready_slot_reclamations(&self.state.contexts);
             }
         }
         Ok(ok)
@@ -1213,7 +1222,13 @@ impl GpuBackend for Dx12Backend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| ld.resource_registry.available_slots(category))
+            .map(|ld| {
+                ld.ledger
+                    .lock()
+                    .unwrap()
+                    .resource_registry
+                    .available_slots(category)
+            })
             .unwrap_or(0)
     }
 
@@ -1230,7 +1245,11 @@ impl GpuBackend for Dx12Backend {
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
-            ld.drain_ready_slot_reclamations(&self.state.contexts);
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            ledger_arc
+                .lock()
+                .unwrap()
+                .drain_ready_slot_reclamations(&self.state.contexts);
         }
     }
 

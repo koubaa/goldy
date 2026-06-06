@@ -400,8 +400,6 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
-    let resource_registry = types::ResourceRegistry::new();
-
     let (graphics_pso_blobs, compute_pso_blobs) = dirs::cache_dir().map_or_else(
         || (HashMap::new(), HashMap::new()),
         |cache_root| {
@@ -440,14 +438,13 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             bindless_root_signature,
             compute_dispatch_indirect_signature,
             compute_batch_dispatch_signature,
-            resource_registry,
             zero_buffer,
             deletion_queue: super::types::DeletionQueue::new(),
-            slot_last_seen: HashMap::new(),
-            pending_slot_reclamations: Vec::new(),
-            graphics_pso_blobs,
-            compute_pso_blobs,
-            pso_disk_cache_dirty: false,
+            ledger: std::sync::Arc::new(std::sync::Mutex::new(super::types::DeviceLedger::new())),
+            pso_cache: std::sync::Arc::new(std::sync::RwLock::new(super::types::PsoCache::new(
+                graphics_pso_blobs,
+                compute_pso_blobs,
+            ))),
         },
     );
 
