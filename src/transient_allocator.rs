@@ -999,4 +999,68 @@ mod tests {
             .expect("wait");
         a.begin_frame(&device, 0).expect("begin 2 should not block");
     }
+
+    /// `end_frame` may arrive after the next `begin_frame` (surface-present path).
+    /// Mid-frame frees with `epoch=None` must still be stamped and reclaimed correctly.
+    #[test]
+    fn heap_end_frame_after_next_begin_frame() {
+        let device = test_device();
+        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
+
+        alloc.begin_frame(&device, 0).unwrap();
+        let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        let (v1_off, v1_sz) = (v1.offset(), v1.size());
+        alloc.free(v1_off, v1_sz, None);
+
+        // Next frame begins before the previous frame's epoch is known.
+        alloc.begin_frame(&device, 0).unwrap();
+        let v2 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        assert_ne!(
+            v2.offset(),
+            v1_off,
+            "None-epoch range must not be reused before end_frame stamps it"
+        );
+
+        let mut graph = crate::task_graph::TaskGraph::new();
+        let ctx = device.create_context().unwrap();
+        let tv = ctx.submit(&mut graph).expect("submit");
+        alloc.end_frame(&device, tv);
+
+        ctx.wait_until(tv).unwrap();
+        alloc.begin_frame(&device, 0).unwrap();
+        let v3 = alloc.alloc(&device, 1024, Some(4)).unwrap();
+        assert_eq!(
+            v3.offset(),
+            v1_off,
+            "stamped range should be reused after the epoch retires"
+        );
+    }
+
+    /// `begin_frame` must block until the previous frame's epoch retires before resetting.
+    #[test]
+    fn bump_reset_begin_frame_blocks_until_epoch_retires() {
+        let device = test_device();
+        let mut alloc = BumpResetAllocator::new(&device, small_config()).expect("create");
+
+        alloc.begin_frame(&device, 0).expect("begin 1");
+        let v1 = alloc.alloc(&device, 512, Some(4)).expect("alloc");
+        let v1_off = v1.offset();
+        let mut graph = crate::task_graph::TaskGraph::new();
+        let ctx = device.create_context().unwrap();
+        let tv = ctx.submit(&mut graph).expect("submit");
+        alloc.end_frame(&device, tv);
+
+        // Do not wait — begin_frame should internally wait for tv before reset.
+        alloc
+            .begin_frame(&device, 0)
+            .expect("begin 2 blocks then resets");
+        let v2 = alloc
+            .alloc(&device, 512, Some(4))
+            .expect("alloc after reset");
+        assert_eq!(
+            v2.offset(),
+            v1_off,
+            "bump pool should reset and reuse offset 0 after epoch retires"
+        );
+    }
 }

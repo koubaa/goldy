@@ -2786,6 +2786,97 @@ fn test_regular_buffer_write_then_copy() {
     );
 }
 
+/// Scale each element: `data[id.x] = (id.x + 1) * 100`.
+const WRITE_SCALE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    if (id.x < 64) data[id.x] = (id.x + 1u) * 100u;
+}
+"#;
+
+/// Two transients with disjoint wave lifetimes alias the same heap offset via graph
+/// coloring. Wave 0 writes `t0`; wave 1 overwrites the aliased bytes via `t1` with a
+/// different pattern; wave 2 copies `t1` to a regular output buffer.
+#[test]
+fn test_transient_buffer_aliased_disjoint_waves() {
+    use goldy::{NodeAccess, TaskGraph};
+
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let iota_shader =
+        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile iota shader");
+    let iota_pipeline = ComputePipeline::new(&device, &iota_shader).expect("create iota pipeline");
+
+    let scale_shader =
+        ShaderModule::from_slang(&device, WRITE_SCALE_SHADER).expect("compile scale shader");
+    let scale_pipeline =
+        ComputePipeline::new(&device, &scale_shader).expect("create scale pipeline");
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
+
+    const N: usize = 64;
+    let byte_size = (N * core::mem::size_of::<u32>()) as u64;
+
+    let bridge = device
+        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("bridge buffer");
+    let output = device
+        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
+    let output_uav = output
+        .resource_index(ResourceAccess::Write)
+        .expect("output UAV");
+
+    let mut graph = TaskGraph::new();
+    let t0 = graph.transient_buffer(byte_size);
+    let t1 = graph.transient_buffer(byte_size);
+
+    // Wave 0: populate t0. The bridge write is a schedule-only edge (shader has one slot).
+    graph
+        .node("wave0_iota", &iota_pipeline)
+        .bind_transient_buffer(t0, NodeAccess::Write)
+        .bind_buffer(&bridge, NodeAccess::Write)
+        .bind_resources_raw_slice(&[u32::MAX])
+        .dispatch(1, 1, 1);
+
+    // Wave 1: bridge read forces wave ordering; overwrite aliased bytes via t1.
+    // Transient is listed first so the single shader slot resolves to t1 (not bridge).
+    graph
+        .node("wave1_scale", &scale_pipeline)
+        .bind_transient_buffer(t1, NodeAccess::Write)
+        .bind_buffer(&bridge, NodeAccess::Read)
+        .bind_resources_raw_slice(&[u32::MAX])
+        .dispatch(1, 1, 1);
+
+    // Wave 2: copy the final aliased transient to a regular buffer for readback.
+    graph
+        .node("wave2_copy", &copy_pipeline)
+        .bind_transient_buffer(t1, NodeAccess::ReadWrite)
+        .bind_buffer(&output, NodeAccess::Write)
+        .bind_resources_raw_slice(&[u32::MAX, output_uav])
+        .dispatch(1, 1, 1);
+
+    graph
+        .dispatch(&ctx)
+        .expect("dispatch aliased transient graph");
+
+    let mut raw = vec![0u8; byte_size as usize];
+    output.read_to_cpu(&device, &mut raw).expect("read output");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    let expected: Vec<u32> = (1..=N as u32).map(|i| i * 100).collect();
+    assert_eq!(
+        result,
+        &expected[..],
+        "aliased transient buffers produced wrong data — graph coloring or heap placement bug"
+    );
+}
+
 // ─── collectives: GPU execution tests ────────────────────────────────────────
 //
 // Each test runs a small compute shader that exercises one collective algorithm

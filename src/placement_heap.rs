@@ -782,4 +782,98 @@ mod tests {
             "same keys on second frame must be cache hits"
         );
     }
+
+    fn sample_texture_keys() -> Vec<TransientTextureKey> {
+        vec![TransientTextureKey {
+            width: 4,
+            height: 4,
+            format: TextureFormat::Rgba8Unorm,
+        }]
+    }
+
+    /// `slot_timelines` must withhold a cached texture while the slot epoch is in-flight.
+    #[test]
+    fn texture_slot_gate_withholds_until_retired() {
+        let device = test_device();
+        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024).unwrap();
+        heap.configure_pages(1024, 2, &device).unwrap();
+
+        let keys = sample_texture_keys();
+        let slot = 0usize;
+        const SLOT_EPOCH: TimelineValue = 10;
+
+        let _ = heap.advance_page();
+        let handles_initial = heap
+            .get_or_create_textures(&device, &keys, slot, 0)
+            .unwrap();
+        assert_eq!(heap.texture_create_count(), 1);
+        heap.stamp_pending(SLOT_EPOCH);
+
+        // Wrap back to the same page slot before the GPU has retired SLOT_EPOCH.
+        let _ = heap.advance_page();
+        let _ = heap.advance_page();
+
+        let handles_in_flight = heap
+            .get_or_create_textures(&device, &keys, slot, SLOT_EPOCH - 1)
+            .unwrap();
+        assert_eq!(
+            heap.texture_create_count(),
+            2,
+            "in-flight slot must allocate a fresh texture, not reuse the cached handle"
+        );
+        assert_ne!(
+            handles_initial[0], handles_in_flight[0],
+            "in-flight reuse would be a write-write race on the same TextureHandle"
+        );
+
+        // Once retired_timeline catches up, the cached texture is safe to hand back.
+        let handles_retired = heap
+            .get_or_create_textures(&device, &keys, slot, SLOT_EPOCH)
+            .unwrap();
+        assert_eq!(
+            heap.texture_create_count(),
+            2,
+            "retired slot must be a cache hit (no extra Texture::new)"
+        );
+        assert_eq!(
+            handles_retired[0], handles_in_flight[0],
+            "retired path should return the texture created for the in-flight render"
+        );
+    }
+
+    /// Two concurrent renders sharing one heap that wrap to the same page slot must not
+    /// reuse a live `TextureHandle` before the prior occupant retires.
+    #[test]
+    fn texture_slot_gate_concurrent_wraparound_race() {
+        let device = test_device();
+        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024).unwrap();
+        heap.configure_pages(1024, 2, &device).unwrap();
+
+        let keys = sample_texture_keys();
+
+        // Render A: page slot 0, timeline 5 still in flight.
+        let _ = heap.advance_page();
+        let render_a = heap.get_or_create_textures(&device, &keys, 0, 0).unwrap();
+        heap.stamp_pending(5);
+
+        // Render B: uses slot 1, then wraps to slot 0 while render A is still in flight.
+        let _ = heap.advance_page();
+        let _ = heap.advance_page();
+        let render_b = heap.get_or_create_textures(&device, &keys, 0, 3).unwrap();
+
+        assert_eq!(
+            heap.texture_create_count(),
+            2,
+            "wraparound while slot epoch=5 > retired=3 must force a fresh texture"
+        );
+        assert_ne!(
+            render_a[0], render_b[0],
+            "concurrent renders must not share a TextureHandle on the same page slot"
+        );
+
+        // After retirement, slot 0 reuses render B's texture.
+        let render_c = heap.get_or_create_textures(&device, &keys, 0, 5).unwrap();
+        assert_eq!(heap.texture_create_count(), 2);
+        assert_eq!(render_c[0], render_b[0]);
+    }
 }
