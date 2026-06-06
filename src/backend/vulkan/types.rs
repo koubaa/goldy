@@ -404,7 +404,7 @@ mod registry_tests {
 
         let mut retired = HashMap::from([(CTX_A, 0u64), (CTX_B, 0u64)]);
 
-        let mut drain_pending =
+        let drain_pending =
             |retired: &HashMap<ContextHandle, u64>,
              reg: &mut ResourceRegistry,
              pending: &mut Vec<PendingSlotReclamation>| {
