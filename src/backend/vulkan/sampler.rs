@@ -97,10 +97,9 @@ pub(super) fn destroy(
 ) {
     if let Some(sampler) = samplers.remove(&sampler_handle) {
         if let Some(logical_device) = devices.get_mut(&sampler.device_handle) {
-            // Unregister from bindless registry
-            logical_device
-                .resource_registry
-                .unregister_sampler(sampler_handle);
+            // Defer reclamation: sampler slot must not be reused until all
+            // in-flight submissions that referenced it have retired.
+            logical_device.reclaim_sampler_slots(sampler_handle);
 
             unsafe {
                 logical_device.device.device_wait_idle().ok();

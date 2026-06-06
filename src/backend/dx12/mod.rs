@@ -964,6 +964,7 @@ impl GpuBackend for Dx12Backend {
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(value.min(retired));
+            ld.drain_ready_slot_reclamations(&self.state.contexts);
         }
         Ok(())
     }
@@ -999,6 +1000,7 @@ impl GpuBackend for Dx12Backend {
             let retired = context::device_retired(&self.state, device_handle);
             if let Some(dev) = self.state.devices.get_mut(&device_handle) {
                 dev.process_deletion_queue_up_to(value.min(retired));
+                dev.drain_ready_slot_reclamations(&self.state.contexts);
             }
         }
         Ok(ok)
@@ -1236,6 +1238,7 @@ impl GpuBackend for Dx12Backend {
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
+            ld.drain_ready_slot_reclamations(&self.state.contexts);
         }
     }
 

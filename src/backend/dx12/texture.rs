@@ -1062,7 +1062,7 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.remove(&texture_handle) {
         if let Some(dev) = state.devices.get_mut(&tex.device_handle) {
             if tex.transient_placed {
-                dev.resource_registry.unregister_texture(texture_handle);
+                dev.reclaim_texture_slots(texture_handle);
                 return;
             }
             let last_fence = dev.timeline_next.saturating_sub(1);

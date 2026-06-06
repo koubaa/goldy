@@ -1213,6 +1213,7 @@ impl GpuBackend for VulkanBackend {
                 for r in drained {
                     types::destroy_pending_deletion(ld, r);
                 }
+                ld.drain_ready_slot_reclamations(&self.state.contexts);
             }
         }
         Ok(())
@@ -1245,6 +1246,7 @@ impl GpuBackend for VulkanBackend {
                     for r in drained {
                         types::destroy_pending_deletion(ld, r);
                     }
+                    ld.drain_ready_slot_reclamations(&self.state.contexts);
                 }
                 Ok(true)
             }
@@ -1353,6 +1355,7 @@ impl GpuBackend for VulkanBackend {
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
+            ld.drain_ready_slot_reclamations(&self.state.contexts);
         }
     }
 

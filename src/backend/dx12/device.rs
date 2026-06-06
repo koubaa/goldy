@@ -443,6 +443,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             resource_registry,
             zero_buffer,
             deletion_queue: super::types::DeletionQueue::new(),
+            slot_last_seen: HashMap::new(),
+            pending_slot_reclamations: Vec::new(),
             graphics_pso_blobs,
             compute_pso_blobs,
             pso_disk_cache_dirty: false,

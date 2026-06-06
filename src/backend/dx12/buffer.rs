@@ -1274,7 +1274,7 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
             }
 
             if buffer.transient_placed {
-                device.resource_registry.unregister_buffer(buffer_handle);
+                device.reclaim_buffer_slots(buffer_handle);
                 return;
             }
             if buffer.coherent_readback_mapped.is_some() {

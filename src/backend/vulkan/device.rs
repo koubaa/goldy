@@ -6,6 +6,7 @@ use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::{ext, khr};
+use std::collections::HashMap;
 use std::ffi::CStr;
 
 /// Enumerate available physical devices/adapters.
@@ -485,6 +486,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_pipeline_layout,
             resource_registry: types::ResourceRegistry::new(),
             deletion_queue: types::DeletionQueue::new(),
+            slot_last_seen: HashMap::new(),
+            pending_slot_reclamations: Vec::new(),
             timeline_next: 1,
             retired_floor: 0,
             pipeline_cache,

@@ -134,29 +134,56 @@ impl ResourceRegistry {
         self.cbv_srv_uav.alloc()
     }
 
-    /// Unregister a buffer, returning all of its descriptor slots to the free list.
-    ///
-    /// Storage buffers may occupy two slots (UAV primary + SRV secondary); both are
-    /// recycled here. Without this, per-frame buffer churn exhausts the 16 384-slot
-    /// heap in seconds and subsequent descriptor writes corrupt adjacent entries.
-    pub fn unregister_buffer(&mut self, handle: BufferHandle) {
+    /// Remove a buffer's handle mappings and return its raw descriptor slot(s)
+    /// without recycling them (caller must [`LogicalDevice::queue_slot_reclamation`]).
+    pub fn extract_buffer_slots(&mut self, handle: BufferHandle) -> Vec<u32> {
+        let mut slots = Vec::new();
         if let Some(offset) = self.buffer_offsets.remove(&handle) {
-            self.cbv_srv_uav.free(offset);
+            slots.push(offset);
         }
         if let Some(offset) = self.buffer_srv_offsets.remove(&handle) {
-            self.cbv_srv_uav.free(offset);
+            slots.push(offset);
+        }
+        slots
+    }
+
+    /// Remove a texture's handle mappings and return its raw descriptor slot(s)
+    /// without recycling them (caller must [`LogicalDevice::queue_slot_reclamation`]).
+    pub fn extract_texture_slots(&mut self, handle: TextureHandle) -> Vec<u32> {
+        let mut slots = Vec::new();
+        if let Some(offset) = self.texture_offsets.remove(&handle) {
+            slots.push(offset);
+        }
+        if let Some(offset) = self.texture_uav_offsets.remove(&handle) {
+            slots.push(offset);
+        }
+        slots
+    }
+
+    /// Return a CBV/SRV/UAV slot to the free list (immediate reclaim).
+    pub fn free_cbv_srv_uav_slot(&mut self, slot: u32) {
+        self.cbv_srv_uav.free(slot);
+    }
+
+    /// Remove a sampler's handle mapping and return its slot without recycling.
+    pub fn extract_sampler_slots(&mut self, handle: SamplerHandle) -> Vec<DeferredSlot> {
+        if let Some(offset) = self.sampler_offsets.remove(&handle) {
+            vec![DeferredSlot::Sampler(offset)]
+        } else {
+            Vec::new()
         }
     }
 
-    /// Unregister a texture, returning all of its descriptor slots to the free list.
-    ///
-    /// Storage textures may occupy two slots (SRV + UAV); both are recycled here.
-    pub fn unregister_texture(&mut self, handle: TextureHandle) {
-        if let Some(offset) = self.texture_offsets.remove(&handle) {
-            self.cbv_srv_uav.free(offset);
-        }
-        if let Some(offset) = self.texture_uav_offsets.remove(&handle) {
-            self.cbv_srv_uav.free(offset);
+    /// Return a sampler slot to the free list (immediate reclaim).
+    pub fn free_sampler_slot(&mut self, slot: u32) {
+        self.sampler.free(slot);
+    }
+
+    /// Free a [`DeferredSlot`] — dispatches to the correct heap allocator.
+    pub fn free_deferred_slot(&mut self, slot: DeferredSlot) {
+        match slot {
+            DeferredSlot::CbvSrvUav(s) => self.cbv_srv_uav.free(s),
+            DeferredSlot::Sampler(s) => self.sampler.free(s),
         }
     }
 
@@ -194,6 +221,18 @@ impl ResourceRegistry {
 mod registry_tests {
     use super::*;
 
+    fn free_buffer_slots(reg: &mut ResourceRegistry, handle: BufferHandle) {
+        for slot in reg.extract_buffer_slots(handle) {
+            reg.free_cbv_srv_uav_slot(slot);
+        }
+    }
+
+    fn free_texture_slots(reg: &mut ResourceRegistry, handle: TextureHandle) {
+        for slot in reg.extract_texture_slots(handle) {
+            reg.free_cbv_srv_uav_slot(slot);
+        }
+    }
+
     /// Simulate the per-frame create/destroy churn that ekrano generates for transient
     /// pool-view buffers. The counter must stay bounded — well below MAX_BINDLESS_CBV_SRV_UAV
     /// — even after far more iterations than the heap limit.
@@ -203,7 +242,7 @@ mod registry_tests {
         for i in 0..50_000u64 {
             let handle = i as BufferHandle;
             reg.register_buffer_uav(handle);
-            reg.unregister_buffer(handle);
+            free_buffer_slots(&mut reg, handle);
         }
         assert_eq!(
             reg.cbv_srv_uav.next_fresh(),
@@ -222,7 +261,7 @@ mod registry_tests {
             let handle = i as BufferHandle;
             reg.register_buffer_uav(handle);
             reg.register_buffer_srv(handle);
-            reg.unregister_buffer(handle);
+            free_buffer_slots(&mut reg, handle);
         }
         assert_eq!(
             reg.cbv_srv_uav.next_fresh(),
@@ -244,7 +283,7 @@ mod registry_tests {
             let handle = i as TextureHandle;
             reg.register_texture(handle);
             reg.register_texture_uav(handle);
-            reg.unregister_texture(handle);
+            free_texture_slots(&mut reg, handle);
         }
         assert_eq!(reg.cbv_srv_uav.next_fresh(), 2);
         assert_eq!(reg.cbv_srv_uav.free_count(), 2);
@@ -292,7 +331,7 @@ mod registry_tests {
             reg.register_buffer_uav(i as BufferHandle);
         }
         for i in LIVE..LIVE + ROUNDS {
-            reg.unregister_buffer((i - LIVE) as BufferHandle);
+            free_buffer_slots(&mut reg, (i - LIVE) as BufferHandle);
             reg.register_buffer_uav(i as BufferHandle);
         }
         assert!(
@@ -300,6 +339,111 @@ mod registry_tests {
             "counter ({}) exceeded live count ({LIVE}); slot recycling broken",
             reg.cbv_srv_uav.next_fresh()
         );
+    }
+
+    /// Per-slot retirement: slot stays off the free list until referencing contexts retire.
+    #[test]
+    fn slot_deferred_until_context_retires() {
+        use crate::backend::ContextHandle;
+        let mut reg = ResourceRegistry::new();
+        let handle = 1u64 as BufferHandle;
+        let slot = reg.register_buffer_uav(handle);
+        const CTX_A: ContextHandle = 10;
+        const SEQ: u64 = 5;
+
+        let slots = reg.extract_buffer_slots(handle);
+        assert_eq!(slots, vec![slot]);
+
+        let mut pending = vec![PendingSlotReclamation {
+            slot: DeferredSlot::CbvSrvUav(slot),
+            requirements: vec![(CTX_A, SEQ)],
+        }];
+
+        assert_eq!(
+            reg.cbv_srv_uav.free_count(),
+            0,
+            "slot must not be freed yet"
+        );
+
+        let mut retired = HashMap::from([(CTX_A, 4u64)]);
+        let mut drain_pending =
+            |retired: &HashMap<ContextHandle, u64>,
+             reg: &mut ResourceRegistry,
+             pending: &mut Vec<PendingSlotReclamation>| {
+                let mut i = 0;
+                while i < pending.len() {
+                    let ready = pending[i]
+                        .requirements
+                        .iter()
+                        .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
+                    if ready {
+                        let entry = pending.swap_remove(i);
+                        reg.free_deferred_slot(entry.slot);
+                    } else {
+                        i += 1;
+                    }
+                }
+            };
+
+        drain_pending(&retired, &mut reg, &mut pending);
+        assert_eq!(reg.cbv_srv_uav.free_count(), 0, "still in flight at seq 4");
+
+        retired.insert(CTX_A, SEQ);
+        drain_pending(&retired, &mut reg, &mut pending);
+        assert_eq!(
+            reg.cbv_srv_uav.free_count(),
+            1,
+            "slot freed after context retires"
+        );
+    }
+
+    /// Slot used by two contexts waits for both to retire.
+    #[test]
+    fn slot_waits_for_all_referencing_contexts() {
+        use crate::backend::ContextHandle;
+        let mut reg = ResourceRegistry::new();
+        let handle = 2u64 as BufferHandle;
+        let slot = reg.register_buffer_uav(handle);
+        const CTX_A: ContextHandle = 1;
+        const CTX_B: ContextHandle = 2;
+
+        let mut pending = vec![PendingSlotReclamation {
+            slot: DeferredSlot::CbvSrvUav(slot),
+            requirements: vec![(CTX_A, 3), (CTX_B, 7)],
+        }];
+        reg.extract_buffer_slots(handle);
+
+        let mut retired = HashMap::from([(CTX_A, 0u64), (CTX_B, 0u64)]);
+
+        let mut drain_pending =
+            |retired: &HashMap<ContextHandle, u64>,
+             reg: &mut ResourceRegistry,
+             pending: &mut Vec<PendingSlotReclamation>| {
+                let mut i = 0;
+                while i < pending.len() {
+                    let ready = pending[i]
+                        .requirements
+                        .iter()
+                        .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
+                    if ready {
+                        let entry = pending.swap_remove(i);
+                        reg.free_deferred_slot(entry.slot);
+                    } else {
+                        i += 1;
+                    }
+                }
+            };
+
+        drain_pending(&retired, &mut reg, &mut pending);
+        assert_eq!(reg.cbv_srv_uav.free_count(), 0);
+
+        retired.insert(CTX_A, 3);
+        drain_pending(&retired, &mut reg, &mut pending);
+        assert_eq!(reg.cbv_srv_uav.free_count(), 0, "CTX_B still in flight");
+
+        retired.insert(CTX_B, 7);
+        drain_pending(&retired, &mut reg, &mut pending);
+        assert_eq!(reg.cbv_srv_uav.free_count(), 1);
     }
 }
 
@@ -356,6 +500,8 @@ pub(crate) struct RetainedGraph {
     pub command_list: Direct3D12::ID3D12GraphicsCommandList,
     /// Index into [`Dx12SubmissionContext::compute_allocator_pool`] for the backing allocator slot.
     pub slot_idx: usize,
+    /// Bindless heap indices baked into this command list (for slot retirement on resubmit).
+    pub used_slots: Vec<DeferredSlot>,
 }
 
 /// Resource pending deferred deletion.
@@ -394,6 +540,23 @@ pub(crate) enum PendingDeletion {
     /// tracked in any resource map.  Dropping it releases the COM reference and
     /// frees the GPU memory once the fence is met.
     StandaloneResource(Direct3D12::ID3D12Resource),
+}
+
+/// Identifies which descriptor heap owns a deferred slot reclamation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DeferredSlot {
+    /// Slot in the shared CBV/SRV/UAV heap (buffers and textures).
+    CbvSrvUav(u32),
+    /// Slot in the separate sampler heap.
+    Sampler(u32),
+}
+
+/// One deferred descriptor-slot reclamation.
+/// Ready when every `(context, required_seq)` pair has retired.
+pub(crate) struct PendingSlotReclamation {
+    pub slot: DeferredSlot,
+    /// `(context_handle, min_seq_that_must_retire)`
+    pub requirements: Vec<(super::ContextHandle, u64)>,
 }
 
 /// Deferred deletion queue for a DX12 device.
@@ -472,6 +635,11 @@ pub(crate) struct LogicalDevice {
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
     pub deletion_queue: DeletionQueue,
+    /// Maps bindless slot → per-context last-submitted seq that referenced it.
+    /// Updated at every submit. Entry removed when the slot is queued for reclamation.
+    pub slot_last_seen: HashMap<DeferredSlot, HashMap<super::ContextHandle, u64>>,
+    /// Slots waiting for referencing contexts to retire before returning to the free list.
+    pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
     /// Cached graphics PSO blobs from `ID3D12PipelineState::GetCachedBlob` (cold-load via `CachedPSO`).
     pub graphics_pso_blobs: HashMap<u64, Vec<u8>>,
     /// Cached compute PSO blobs.
@@ -481,6 +649,85 @@ pub(crate) struct LogicalDevice {
 }
 
 impl LogicalDevice {
+    /// Record that `ctx` submitted `seq` referencing each bindless slot in `slots`.
+    pub(crate) fn record_slot_usage(
+        &mut self,
+        ctx: super::ContextHandle,
+        seq: u64,
+        slots: impl IntoIterator<Item = DeferredSlot>,
+    ) {
+        for slot in slots {
+            self.slot_last_seen
+                .entry(slot)
+                .or_default()
+                .entry(ctx)
+                .and_modify(|v| *v = (*v).max(seq))
+                .or_insert(seq);
+        }
+    }
+
+    /// Queue a slot for deferred reclamation once all referencing contexts retire.
+    pub(crate) fn queue_slot_reclamation(&mut self, slot: DeferredSlot) {
+        let requirements: Vec<_> = self
+            .slot_last_seen
+            .remove(&slot)
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default();
+        if requirements.is_empty() {
+            self.resource_registry.free_deferred_slot(slot);
+        } else {
+            self.pending_slot_reclamations
+                .push(PendingSlotReclamation { slot, requirements });
+        }
+    }
+
+    /// Reclaim all descriptor slots for a destroyed buffer handle.
+    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) {
+        let slots = self.resource_registry.extract_buffer_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(DeferredSlot::CbvSrvUav(slot));
+        }
+    }
+
+    /// Reclaim all descriptor slots for a destroyed texture handle.
+    pub(crate) fn reclaim_texture_slots(&mut self, handle: TextureHandle) {
+        let slots = self.resource_registry.extract_texture_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(DeferredSlot::CbvSrvUav(slot));
+        }
+    }
+
+    /// Reclaim all descriptor slots for a destroyed sampler handle.
+    pub(crate) fn reclaim_sampler_slots(&mut self, handle: SamplerHandle) {
+        let slots = self.resource_registry.extract_sampler_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(slot);
+        }
+    }
+
+    /// Return pending slots to the free list once every referencing context has retired.
+    pub(crate) fn drain_ready_slot_reclamations(
+        &mut self,
+        contexts: &HashMap<super::ContextHandle, Dx12SubmissionContext>,
+    ) {
+        let mut i = 0;
+        while i < self.pending_slot_reclamations.len() {
+            let ready = self.pending_slot_reclamations[i].requirements.iter().all(
+                |(ctx_id, required_seq)| {
+                    contexts
+                        .get(ctx_id)
+                        .is_none_or(|ctx| unsafe { ctx.fence.GetCompletedValue() >= *required_seq })
+                },
+            );
+            if ready {
+                let entry = self.pending_slot_reclamations.swap_remove(i);
+                self.resource_registry.free_deferred_slot(entry.slot);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
         let batch = self.deletion_queue.drain_up_to_completed(completed);
         for resource in batch {
@@ -489,6 +736,12 @@ impl LogicalDevice {
     }
 
     pub(crate) fn flush_deletion_queue(&mut self) {
+        // Called only at device teardown, after wait_for_gpu ensures all GPU work has
+        // completed. Slots queued here via reclaim_*_slots will have empty requirements
+        // (slot_last_seen was cleared as contexts were destroyed before the device) and
+        // are freed immediately in queue_slot_reclamation. Any slots that somehow still
+        // have requirements are just dropped with the LogicalDevice — the whole allocator
+        // is discarded at this point, so skipping drain_ready_slot_reclamations is safe.
         let batch = self.deletion_queue.drain_everything();
         for resource in batch {
             destroy_pending_deletion(self, resource);
@@ -505,7 +758,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             coherent_readback,
             reserved_tiles,
         } => {
-            ld.resource_registry.unregister_buffer(buffer_handle);
+            ld.reclaim_buffer_slots(buffer_handle);
             if let Some(tiles) = reserved_tiles {
                 super::tiles::teardown_reserved_mappings(
                     &ld.command_queue,
@@ -526,7 +779,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             drop(coherent_readback);
         }
         PendingDeletion::BufferView { buffer_handle } => {
-            ld.resource_registry.unregister_buffer(buffer_handle);
+            ld.reclaim_buffer_slots(buffer_handle);
         }
         PendingDeletion::ReplacedBufferGpu {
             resource,
@@ -564,7 +817,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             texture_handle,
             resource,
         } => {
-            ld.resource_registry.unregister_texture(texture_handle);
+            ld.reclaim_texture_slots(texture_handle);
             drop(resource);
         }
         PendingDeletion::StandaloneResource(resource) => {
