@@ -8,6 +8,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 /// Latest device-global seq retired on `device` (max over live context shared events, floored).
+///
+/// Sound only because all contexts commit to a single `LogicalDevice::command_queue`
+/// (FIFO order guaranteed by Metal).  If contexts ever get their own queues, the
+/// `max`-over-contexts approach breaks: a slot freed once context A retires could
+/// still be live in context B.  See `LogicalDevice::command_queue` for details.
 pub(super) fn device_retired(state: &MetalState, device: DeviceHandle) -> u64 {
     let floor = state
         .devices

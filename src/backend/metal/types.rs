@@ -658,6 +658,22 @@ pub(crate) struct MetalSubmissionContext {
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
 pub(crate) struct LogicalDevice {
     pub device: MTLDevice,
+    /// The single command queue shared by all contexts on this device.
+    ///
+    /// Metal guarantees that command buffers committed to the same queue execute
+    /// in FIFO order.  The slot-reclamation logic in `unregister_buffer` and
+    /// `drain_pending_slots_up_to` relies on this: it defers recycling a
+    /// descriptor slot until `device_retired` (max signaled timeline across all
+    /// contexts) passes `timeline_scheduled_max`, which is only sound when every
+    /// submission that could reference the slot is ordered behind every other
+    /// submission on the same queue.
+    ///
+    /// **If this ever changes to per-context `MTLCommandQueue`s**, that ordering
+    /// guarantee disappears.  Submissions from different contexts could then race,
+    /// and a slot freed once *one* context retires could still be in use by
+    /// another.  The fix would be the same per-resource per-context retirement
+    /// tracking used by the DX12/Vulkan backends (see `slot_last_seen` and
+    /// `pending_slot_reclamations` there).
     pub command_queue: CommandQueue,
 
     // Bindless infrastructure (always present — Tier 2 required)
