@@ -11,8 +11,8 @@
 //! - Shaders access resources by indexing into the descriptor heaps
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
+    RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
@@ -683,17 +683,21 @@ impl DeviceLedger {
     }
 
     /// Return pending slots to the free list once every referencing context has retired.
+    ///
+    /// Takes the per-state `context_fences` index (not the full context map) so this
+    /// method can be called while holding the ledger lock without risking a lock-ordering
+    /// deadlock with per-context `Mutex<Dx12SubmissionContext>`.
     pub(crate) fn drain_ready_slot_reclamations(
         &mut self,
-        contexts: &HashMap<super::ContextHandle, Dx12SubmissionContext>,
+        context_fences: &HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
     ) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
             let ready = self.pending_slot_reclamations[i].requirements.iter().all(
                 |(ctx_id, required_seq)| {
-                    contexts
-                        .get(ctx_id)
-                        .is_none_or(|ctx| unsafe { ctx.fence.GetCompletedValue() >= *required_seq })
+                    context_fences.get(ctx_id).is_none_or(|(_, fence)| unsafe {
+                        fence.GetCompletedValue() >= *required_seq
+                    })
                 },
             );
             if ready {
@@ -788,6 +792,10 @@ pub(crate) struct LogicalDevice {
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
 pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
+
+/// Shared submission context handle — allows cloning a context reference out of `Dx12State`
+/// before dropping the global backend lock, enabling fine-grained per-context locking.
+pub(crate) type SharedSubmissionContext = Arc<Mutex<Dx12SubmissionContext>>;
 
 impl LogicalDevice {
     pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
@@ -1128,8 +1136,15 @@ pub(super) struct Dx12State {
     pub adapters: Vec<DxgiAdapterInfo>,
     pub devices: HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: HashMap<super::ContextHandle, Dx12SubmissionContext>,
+    pub contexts: HashMap<ContextHandle, SharedSubmissionContext>,
     pub next_context_id: super::ContextHandle,
+    /// Fence handles for every live context, keyed by context ID.
+    ///
+    /// Maintained in sync with `contexts` (inserted on create, removed on destroy).
+    /// Used by [`DeviceLedger::drain_ready_slot_reclamations`] and [`device_retired`] so
+    /// those paths can query fence completion without acquiring any per-context lock,
+    /// avoiding a ledger-lock → context-lock ordering hazard.
+    pub context_fences: HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: HashMap<ShaderHandle, ShaderState>,

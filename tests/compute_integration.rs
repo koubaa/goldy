@@ -3436,3 +3436,99 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         }
     }
 }
+
+// ── multi-context ─────────────────────────────────────────────────────────────
+
+/// Two contexts on one device can both submit work and the deferred deletion
+/// queue on context A drains when A's timeline retires — without requiring
+/// context B to have made any progress.
+///
+/// This guards against reintroducing a device-global retirement horizon
+/// (`device_retired`) as the reclaim gate, which would stall context A's
+/// cleanup if context B is idle (Phase 5b regression test).
+#[test]
+fn two_contexts_reclaim_independently() {
+    let instance = Instance::new().expect("instance");
+    let device = request_default_device(&instance);
+    let ctx_a = submission_context(&device);
+    let ctx_b = submission_context(&device);
+
+    // Allocate a buffer and do some work on ctx_a.
+    let buf = device
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("buffer");
+    let tv_a = ComputeEncoder::new().submit(&ctx_a).expect("ctx_a submit");
+
+    // Drop the buffer — its descriptor slot enters ctx_a's deferred queue.
+    drop(buf);
+
+    // ctx_b has never submitted; its timeline is still at seq 0.
+    // With a correct per-context reclaim gate, waiting for ctx_a's timeline
+    // must be sufficient to drain ctx_a's queue.
+    ctx_a.wait_until(tv_a).expect("ctx_a wait_until");
+    ctx_a.flush_deferred_deletions();
+
+    assert_eq!(
+        ctx_a.deferred_deletion_pending_count(),
+        0,
+        "ctx_a must reclaim without waiting for ctx_b (no device-global horizon)"
+    );
+}
+
+/// Both contexts on one device can complete a roundtrip dispatch independently
+/// and in sequence, exercising allocator-slot reuse across both.
+#[test]
+fn two_contexts_both_submit_and_complete() {
+    let instance = Instance::new().expect("instance");
+    let device = request_default_device(&instance);
+    let ctx_a = submission_context(&device);
+    let ctx_b = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
+
+    let data_a: Vec<u32> = (0..64).collect();
+    let buf_a = device
+        .alloc_buffer_with_data(&data_a, BufferKind::Scattered)
+        .expect("buf_a");
+    let data_b: Vec<u32> = (100..164).collect();
+    let buf_b = device
+        .alloc_buffer_with_data(&data_b, BufferKind::Scattered)
+        .expect("buf_b");
+
+    // Submit from both contexts.
+    let mut enc_a = ComputeEncoder::new();
+    {
+        let mut pass = enc_a.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buf_a]);
+        pass.dispatch(1, 1, 1);
+    }
+    let tv_a = enc_a.submit(&ctx_a).expect("ctx_a submit");
+
+    let mut enc_b = ComputeEncoder::new();
+    {
+        let mut pass = enc_b.begin_compute_pass();
+        pass.set_pipeline(&pipeline);
+        pass.bind_resources(&[&buf_b]);
+        pass.dispatch(1, 1, 1);
+    }
+    let tv_b = enc_b.submit(&ctx_b).expect("ctx_b submit");
+
+    ctx_a.wait_until(tv_a).expect("ctx_a wait");
+    ctx_b.wait_until(tv_b).expect("ctx_b wait");
+
+    // Both buffers should have been doubled.
+    let mut raw_a = vec![0u8; 64 * 4];
+    buf_a.read_to_cpu(&device, &mut raw_a).expect("read buf_a");
+    let result_a: &[u32] = bytemuck::cast_slice(&raw_a);
+
+    let mut raw_b = vec![0u8; 64 * 4];
+    buf_b.read_to_cpu(&device, &mut raw_b).expect("read buf_b");
+    let result_b: &[u32] = bytemuck::cast_slice(&raw_b);
+
+    for i in 0..64 {
+        assert_eq!(result_a[i], i as u32 * 2, "buf_a[{i}]");
+        assert_eq!(result_b[i], (100 + i as u32) * 2, "buf_b[{i}]");
+    }
+}

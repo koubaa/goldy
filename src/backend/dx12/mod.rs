@@ -321,6 +321,7 @@ impl Dx12Backend {
             next_device_handle: 1,
             contexts: HashMap::new(),
             next_context_id: 1,
+            context_fences: HashMap::new(),
             buffers: HashMap::new(),
             next_buffer_handle: 1,
             shaders: HashMap::new(),
@@ -508,7 +509,7 @@ impl GpuBackend for Dx12Backend {
             .state
             .contexts
             .iter()
-            .filter(|(_, sc)| sc.device == device_handle)
+            .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
             .collect();
         for ctx in ctxs {
@@ -844,10 +845,10 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
-        let Some(sc) = self.state.contexts.get(&ctx) else {
+        let Some(sc_arc) = self.state.contexts.get(&ctx) else {
             return 0;
         };
-        unsafe { sc.fence.GetCompletedValue() }
+        unsafe { sc_arc.lock().unwrap().fence.GetCompletedValue() }
     }
 
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
@@ -867,8 +868,15 @@ impl GpuBackend for Dx12Backend {
             .state
             .contexts
             .values()
-            .find(|c| c.device == device && c.last_submitted_seq >= value)
-            .map(|c| c.fence.clone());
+            .filter_map(|sc_arc| {
+                let sc = sc_arc.lock().unwrap();
+                if sc.device == device && sc.last_submitted_seq >= value {
+                    Some(sc.fence.clone())
+                } else {
+                    None
+                }
+            })
+            .next();
         if let Some(fence) = fence {
             utils::wait_for_fence(&fence, value)?;
         }
@@ -886,7 +894,7 @@ impl GpuBackend for Dx12Backend {
             .state
             .contexts
             .get(&ctx)
-            .map(|sc| std::sync::Arc::clone(&sc.signal_queue));
+            .map(|sc_arc| std::sync::Arc::clone(&sc_arc.lock().unwrap().signal_queue));
         let Some(signal_queue) = signal_queue else {
             return Vec::new();
         };
@@ -909,8 +917,9 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.state.contexts.get(&ctx)?;
-        let progress = self.gpu_progress(ctx);
+        let sc_arc = self.state.contexts.get(&ctx)?;
+        let sc = sc_arc.lock().unwrap();
+        let progress = unsafe { sc.fence.GetCompletedValue() };
         if progress < sc.last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {
@@ -934,10 +943,10 @@ impl GpuBackend for Dx12Backend {
         let device_handle = self.context_device(ctx);
         let fence = self
             .state
-            .contexts
+            .context_fences
             .get(&ctx)
             .context("Invalid context handle")?
-            .fence
+            .1
             .clone();
         utils::wait_for_fence(&fence, value)?;
         // Detect TDR: device removal signals all fences with u64::MAX.
@@ -959,7 +968,7 @@ impl GpuBackend for Dx12Backend {
             ledger_arc
                 .lock()
                 .unwrap()
-                .drain_ready_slot_reclamations(&self.state.contexts);
+                .drain_ready_slot_reclamations(&self.state.context_fences);
         }
         Ok(())
     }
@@ -973,10 +982,10 @@ impl GpuBackend for Dx12Backend {
         let device_handle = self.context_device(ctx);
         let fence = self
             .state
-            .contexts
+            .context_fences
             .get(&ctx)
             .context("Invalid context handle")?
-            .fence
+            .1
             .clone();
         let ok = utils::wait_for_fence_timeout(&fence, value, timeout_ms)?;
         if ok {
@@ -999,7 +1008,7 @@ impl GpuBackend for Dx12Backend {
                 ledger_arc
                     .lock()
                     .unwrap()
-                    .drain_ready_slot_reclamations(&self.state.contexts);
+                    .drain_ready_slot_reclamations(&self.state.context_fences);
             }
         }
         Ok(ok)
@@ -1207,7 +1216,8 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
-        for sc in self.state.contexts.values_mut() {
+        for sc_arc in self.state.contexts.values() {
+            let mut sc = sc_arc.lock().unwrap();
             if sc.device == device_handle {
                 sc.staging_belt.trim();
             }
@@ -1249,7 +1259,7 @@ impl GpuBackend for Dx12Backend {
             ledger_arc
                 .lock()
                 .unwrap()
-                .drain_ready_slot_reclamations(&self.state.contexts);
+                .drain_ready_slot_reclamations(&self.state.context_fences);
         }
     }
 

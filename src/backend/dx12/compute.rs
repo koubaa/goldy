@@ -623,6 +623,8 @@ fn acquire_allocator_slot(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let logical_device = state
         .devices
@@ -630,17 +632,20 @@ fn acquire_allocator_slot(
         .context("Invalid device handle")?;
 
     let ctx_fence = state
+        .context_fences
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .1
+        .clone();
+    let completed = unsafe { ctx_fence.GetCompletedValue() };
+
+    let sc_arc = state
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
-        .fence
         .clone();
-    let completed = unsafe { ctx_fence.GetCompletedValue() };
-    let pool = &mut state
-        .contexts
-        .get_mut(&ctx)
-        .context("Invalid context handle")?
-        .compute_allocator_pool;
+    let mut sc = sc_arc.lock().unwrap();
+    let pool = &mut sc.compute_allocator_pool;
     // Skip retained slots — their allocator must not be reset until evict_retained is called.
     let slot_idx = pool
         .iter()
@@ -1001,8 +1006,8 @@ fn record_gpu_command(
                     .timeline_next
                     .load(std::sync::atomic::Ordering::Relaxed)
                     .saturating_sub(1);
-                if let Some(sc) = state.contexts.get_mut(&ctx_handle) {
-                    sc.deletion_queue.queue(
+                if let Some(sc_arc) = state.contexts.get(&ctx_handle) {
+                    sc_arc.lock().unwrap().deletion_queue.queue(
                         fence_val,
                         super::types::PendingDeletion::StandaloneResource(arg_resource),
                     );
@@ -1478,10 +1483,10 @@ fn execute_signal_and_finish(
 
     let logical_device = state.devices.get(&device_handle).unwrap();
     let ctx_fence = state
-        .contexts
+        .context_fences
         .get(&ctx)
         .context("Invalid context handle")?
-        .fence
+        .1
         .clone();
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
@@ -1502,7 +1507,8 @@ fn execute_signal_and_finish(
         }
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
@@ -1532,8 +1538,14 @@ fn execute_signal_and_finish(
     let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
     let ctx_del_batch: Vec<_> = state
         .contexts
-        .get_mut(&ctx)
-        .map(|sc| sc.deletion_queue.drain_up_to_completed(ctx_completed))
+        .get(&ctx)
+        .map(|sc_arc| {
+            sc_arc
+                .lock()
+                .unwrap()
+                .deletion_queue
+                .drain_up_to_completed(ctx_completed)
+        })
         .unwrap_or_default();
     if let Some(dev) = state.devices.get(&device_handle) {
         let ledger_arc = std::sync::Arc::clone(&dev.ledger);
@@ -1541,21 +1553,25 @@ fn execute_signal_and_finish(
         for resource in ctx_del_batch {
             types::destroy_pending_deletion(dev, &mut ledger, resource);
         }
-        ledger.drain_ready_slot_reclamations(&state.contexts);
+        ledger.drain_ready_slot_reclamations(&state.context_fences);
     }
 
     state
         .contexts
-        .get_mut(&ctx)
-        .map(|sc| sc.staging_belt.finish(fence_value));
+        .get(&ctx)
+        .map(|sc_arc| sc_arc.lock().unwrap().staging_belt.finish(fence_value));
 
     if !staged_texture_uploads.is_empty() {
         let entries = staged_texture_uploads
             .into_iter()
             .map(|u| u.staging_entry)
             .collect::<Vec<_>>();
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
-            sc.texture_staging_pool.release(fence_value, entries);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .texture_staging_pool
+                .release(fence_value, entries);
         }
     }
 
@@ -1576,6 +1592,8 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("dx12.submit");
     let (command_list, fence_value, slot_idx) = {
@@ -1589,10 +1607,10 @@ pub(super) fn submit(
             .get(&device_handle)
             .context("Invalid device handle")?;
         let ctx_fence = state
-            .contexts
+            .context_fences
             .get(&ctx)
             .context("Invalid context handle")?
-            .fence
+            .1
             .clone();
         (ctx_fence, dev.adapter_id == super::WARP_ADAPTER_ID)
     };
@@ -1608,10 +1626,12 @@ pub(super) fn submit(
     if has_upload {
         let _tz_reclaim = tracy_zone!("dx12.submit.staging_reclaim");
         let completed = super::context::device_retired(state, device_handle);
-        let sc = state
+        let sc_arc = state
             .contexts
-            .get_mut(&ctx)
-            .context("Invalid context handle")?;
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .clone();
+        let mut sc = sc_arc.lock().unwrap();
         sc.staging_belt.reclaim(&ctx_fence_clone)?;
         sc.texture_staging_pool.reclaim(completed);
     }
@@ -1624,10 +1644,12 @@ pub(super) fn submit(
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
         let mut pool = {
-            let sc = state
+            let sc_arc = state
                 .contexts
-                .get_mut(&ctx)
-                .context("Invalid context handle")?;
+                .get(&ctx)
+                .context("Invalid context handle")?
+                .clone();
+            let mut sc = sc_arc.lock().unwrap();
             std::mem::replace(
                 &mut sc.texture_staging_pool,
                 super::staging::TextureStagingPool::new(),
@@ -1652,10 +1674,12 @@ pub(super) fn submit(
                             .devices
                             .get(&buf_dev)
                             .context("WriteBuffer pre-pass: device missing")?;
-                        let sc = state
+                        let sc_arc = state
                             .contexts
-                            .get_mut(&ctx)
-                            .context("WriteBuffer pre-pass: context missing")?;
+                            .get(&ctx)
+                            .context("WriteBuffer pre-pass: context missing")?
+                            .clone();
+                        let mut sc = sc_arc.lock().unwrap();
                         let (res, off) = sc.staging_belt.write(ld, data)?;
                         belt_slices.push((res, off));
                     }
@@ -1702,8 +1726,8 @@ pub(super) fn submit(
             }
         }
 
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
-            sc.texture_staging_pool = pool;
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().texture_staging_pool = pool;
         }
     }
 
@@ -1829,6 +1853,8 @@ pub(super) fn submit_graph(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("dx12.submit_graph");
     let (command_list, fence_value, slot_idx) = acquire_allocator_slot(state, ctx)?;
@@ -1839,10 +1865,10 @@ pub(super) fn submit_graph(
             .get(&device_handle)
             .context("Invalid device handle")?;
         let ctx_fence = state
-            .contexts
+            .context_fences
             .get(&ctx)
             .context("Invalid context handle")?
-            .fence
+            .1
             .clone();
         (ctx_fence, dev.adapter_id == super::WARP_ADAPTER_ID)
     };
@@ -1859,10 +1885,12 @@ pub(super) fn submit_graph(
     });
     if has_upload {
         let completed = super::context::device_retired(state, device_handle);
-        let sc = state
+        let sc_arc = state
             .contexts
-            .get_mut(&ctx)
-            .context("Invalid context handle")?;
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .clone();
+        let mut sc = sc_arc.lock().unwrap();
         sc.staging_belt.reclaim(&ctx_fence_clone)?;
         sc.texture_staging_pool.reclaim(completed);
     }
@@ -1875,10 +1903,12 @@ pub(super) fn submit_graph(
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
         let mut pool = {
-            let sc = state
+            let sc_arc = state
                 .contexts
-                .get_mut(&ctx)
-                .context("Invalid context handle")?;
+                .get(&ctx)
+                .context("Invalid context handle")?
+                .clone();
+            let mut sc = sc_arc.lock().unwrap();
             std::mem::replace(
                 &mut sc.texture_staging_pool,
                 super::staging::TextureStagingPool::new(),
@@ -1904,10 +1934,12 @@ pub(super) fn submit_graph(
                                 .devices
                                 .get(&buf_dev)
                                 .context("WriteBuffer pre-pass: device missing")?;
-                            let sc = state
+                            let sc_arc = state
                                 .contexts
-                                .get_mut(&ctx)
-                                .context("WriteBuffer pre-pass: context missing")?;
+                                .get(&ctx)
+                                .context("WriteBuffer pre-pass: context missing")?
+                                .clone();
+                            let mut sc = sc_arc.lock().unwrap();
                             let (res, off) = sc.staging_belt.write(ld, data)?;
                             belt_slices.push((res, off));
                         }
@@ -1955,8 +1987,8 @@ pub(super) fn submit_graph(
             }
         }
 
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
-            sc.texture_staging_pool = pool;
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().texture_staging_pool = pool;
         }
     }
 
@@ -2151,9 +2183,16 @@ pub(super) fn try_resubmit_retained(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let retained = {
-        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc_arc = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .clone();
+        let sc = sc_arc.lock().unwrap();
         match sc.retained_graph.as_ref() {
             Some(r) if r.fingerprint == key => {
                 Some((r.command_list.clone(), r.slot_idx, r.used_slots.clone()))
@@ -2178,12 +2217,17 @@ pub(super) fn try_resubmit_retained(
         .context("Failed to cast retained command list")?;
 
     let (ctx_fence, command_queue) = {
-        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let ctx_fence = state
+            .context_fences
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .1
+            .clone();
         let ld = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        (sc.fence.clone(), ld.command_queue.clone())
+        (ctx_fence, ld.command_queue.clone())
     };
     {
         let _tz = tracy_zone!("dx12.resubmit_retained");
@@ -2201,7 +2245,8 @@ pub(super) fn try_resubmit_retained(
             .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
@@ -2211,9 +2256,12 @@ pub(super) fn try_resubmit_retained(
     let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
     let retained_del_batch: Vec<_> = state
         .contexts
-        .get_mut(&ctx)
-        .map(|sc| {
-            sc.deletion_queue
+        .get(&ctx)
+        .map(|sc_arc| {
+            sc_arc
+                .lock()
+                .unwrap()
+                .deletion_queue
                 .drain_up_to_completed(retired_ctx_completed)
         })
         .unwrap_or_default();
@@ -2223,7 +2271,7 @@ pub(super) fn try_resubmit_retained(
         for resource in retained_del_batch {
             types::destroy_pending_deletion(dev, &mut ledger, resource);
         }
-        ledger.drain_ready_slot_reclamations(&state.contexts);
+        ledger.drain_ready_slot_reclamations(&state.context_fences);
     }
 
     Ok(Some(fence_value))
@@ -2231,7 +2279,8 @@ pub(super) fn try_resubmit_retained(
 
 /// Drop the retained command list for `key`, marking its pool slot as reusable.
 pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle) {
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_graph.take() {
             if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                 slot.retained = false;

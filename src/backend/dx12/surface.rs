@@ -449,8 +449,11 @@ pub(super) fn acquire(
         surface.pending_acquire_count = surface.pending_acquire_count.saturating_add(1);
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
-        sc.signal_queue
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc
+            .lock()
+            .unwrap()
+            .signal_queue
             .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
@@ -920,8 +923,11 @@ pub(super) fn present(
         }
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
-        if let Some(sc) = state.contexts.get(&ctx) {
-            sc.signal_queue
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .signal_queue
                 .push(crate::signal::Signal::SwapchainReturned {
                     image_index: return_image,
                 });
