@@ -1352,9 +1352,9 @@ impl GpuBackend for VulkanBackend {
 
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device_handle = self.context_device(ctx);
-        let retired = context::device_retired(&self.state, device_handle);
+        let completed = compute::ctx_completed_value(&self.state, ctx, device_handle);
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
+            ld.process_deletion_queue_up_to(completed);
             ld.drain_ready_slot_reclamations(&self.state.contexts);
         }
     }

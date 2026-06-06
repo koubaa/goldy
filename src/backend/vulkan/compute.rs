@@ -428,6 +428,28 @@ unsafe fn vulkan_finish_gpu_profile(
     Ok(())
 }
 
+/// Returns the GPU-completed timeline value for a single context by reading its
+/// timeline semaphore counter directly, without consulting any other context.
+///
+/// Used on the submit hot path to replace `device_retired` (max-over-contexts)
+/// as the reclaim gate. Because all contexts submit to the same `vk::Queue`,
+/// when this context's semaphore reaches V every submit with a global timeline
+/// value ≤ V — including those from other contexts — has already completed on
+/// that queue. Draining with V is therefore safe and never creates a
+/// cross-context dependency.
+pub(super) fn ctx_completed_value(
+    state: &super::types::VulkanState,
+    ctx: super::ContextHandle,
+    device_handle: super::DeviceHandle,
+) -> u64 {
+    let sem = state.contexts.get(&ctx).map(|sc| sc.timeline_semaphore);
+    let dev = state.devices.get(&device_handle).map(|ld| &ld.device);
+    match (dev, sem) {
+        (Some(dev), Some(sem)) => unsafe { dev.get_semaphore_counter_value(sem).unwrap_or(0) },
+        _ => 0,
+    }
+}
+
 /// Reap fences that have already signaled from the compute fence pool.
 ///
 /// Without this, every `submit_graph` that doesn't have a paired `wait_fence`
@@ -599,7 +621,7 @@ pub(super) fn submit(
 
     if has_write_buffer || has_write_texture {
         let _rz = tracy_zone!("vk.submit.belt_reclaim");
-        let completed_timeline = super::context::device_retired(state, device_handle);
+        let completed_timeline = ctx_completed_value(state, ctx, device_handle);
 
         if has_write_buffer {
             let (fence_pool, devices, contexts) = (
@@ -718,9 +740,9 @@ pub(super) fn submit(
         };
         r.context("Failed queue_submit2 for empty compute submit")?;
         {
-            let retired = super::context::device_retired(state, device_handle);
+            let completed = ctx_completed_value(state, ctx, device_handle);
             if let Some(ld) = state.devices.get_mut(&device_handle) {
-                ld.process_deletion_queue_up_to(retired);
+                ld.process_deletion_queue_up_to(completed);
             }
         }
         if let Some(sc) = state.contexts.get_mut(&ctx) {
@@ -1493,9 +1515,9 @@ pub(super) fn submit(
     }
 
     {
-        let retired = super::context::device_retired(state, device_handle);
+        let completed = ctx_completed_value(state, ctx, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
+            ld.process_deletion_queue_up_to(completed);
             ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
@@ -1563,7 +1585,7 @@ fn submit_graph_impl(
 
     if has_upload {
         let _rz = tracy_zone!("vk.submit_graph.belt_reclaim");
-        let completed_timeline = super::context::device_retired(state, device_handle);
+        let completed_timeline = ctx_completed_value(state, ctx, device_handle);
 
         {
             let (fence_pool, devices, contexts) = (
@@ -2482,9 +2504,9 @@ fn submit_graph_impl(
     }
 
     {
-        let retired = super::context::device_retired(state, device_handle);
+        let completed = ctx_completed_value(state, ctx, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
+            ld.process_deletion_queue_up_to(completed);
             ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
@@ -2583,9 +2605,9 @@ pub(super) fn try_resubmit_retained(
     }
 
     {
-        let retired = super::context::device_retired(state, device_handle);
+        let completed = ctx_completed_value(state, ctx, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
+            ld.process_deletion_queue_up_to(completed);
             ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
