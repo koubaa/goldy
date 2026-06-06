@@ -314,7 +314,6 @@ impl Adapter {
                 adapter: self.clone(),
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
-                placement_heap: Mutex::new(None),
                 owns_backend_device: true,
             }),
         })
@@ -443,7 +442,6 @@ pub(crate) struct DeviceInner {
     adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
-    pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
@@ -611,7 +609,6 @@ impl Device {
                 adapter: self.inner.adapter.clone(),
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
-                placement_heap: Mutex::new(None),
                 owns_backend_device: false,
             }),
         }
@@ -857,50 +854,6 @@ impl Device {
     pub fn texture_heap_stats(&self) -> Option<crate::backend::TextureHeapStats> {
         let backend = self.inner.backend.lock().unwrap();
         backend.texture_heap_stats(self.inner.handle)
-    }
-
-    /// Snapshot of the device-owned placement heap's state for diagnostics.
-    ///
-    /// Returns `None` if the heap hasn't been created yet (no transient-buffer
-    /// graphs have been submitted).
-    pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.stats())
-    }
-
-    /// Number of `BufferView`s and `Texture`s currently held in the placement heap's
-    /// stable-slot view cache. Returns `(cached_views, cached_textures)`.
-    ///
-    /// Useful for the `[PERF]` log and diagnostics; non-zero values in steady state
-    /// confirm that the cache is active and hitting.
-    pub fn transient_cache_counts(&self) -> (usize, usize) {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        match heap_guard.as_ref() {
-            Some(h) => (h.cached_view_count(), h.cached_texture_count()),
-            None => (0, 0),
-        }
-    }
-
-    /// Total number of `create_buffer_view` backend calls made by the placement heap's
-    /// view cache since initialization. Monotonically increasing.
-    ///
-    /// Use this in tests to verify that steady-state frames produce zero new creates.
-    pub fn transient_view_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard
-            .as_ref()
-            .map(|h| h.view_create_count())
-            .unwrap_or(0)
-    }
-
-    /// Total number of `Texture::new` calls made by the placement heap's texture cache
-    /// since initialization. Monotonically increasing.
-    pub fn transient_texture_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard
-            .as_ref()
-            .map(|h| h.texture_create_count())
-            .unwrap_or(0)
     }
 
     /// Get device capabilities and format preferences.
@@ -1150,7 +1103,6 @@ impl Device {
                 adapter,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
-                placement_heap: Mutex::new(None),
                 owns_backend_device: true,
             }),
         })
@@ -1176,10 +1128,9 @@ impl Drop for DeviceInner {
         }
         // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
-        // Drop the placement heap (and its views/buffer) while the device is still alive.
-        if let Ok(mut heap_guard) = self.placement_heap.lock() {
-            *heap_guard = None;
-        }
+        // The placement heap is owned per-`Context` and dropped in `ContextInner::drop`,
+        // which runs before this (contexts hold a `Device` clone, so they outlive nothing
+        // but are dropped first by ekrano/users tearing down renderers before devices).
         if self.owns_backend_device {
             let mut backend = self.backend.lock().unwrap();
             backend.destroy_device(self.handle);

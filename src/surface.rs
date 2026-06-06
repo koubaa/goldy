@@ -419,12 +419,15 @@ impl Surface {
 
         // ── Initialise the placement heap ────────────────────────────────────────
         let device = self.context.device();
-        let mut heap_guard = device.inner.placement_heap.lock().unwrap();
+        // Query GPU-retired timeline before locking the heap to avoid acquiring
+        // the backend lock while the heap guard is held.
+        let retired_timeline = device.timeline_retired();
+        let mut heap_guard = self.context.inner.placement_heap.lock().unwrap();
         if heap_guard.is_none() {
             let cap = (256 * 1024 * 1024u64).max(alloc_size * GpuContext::DEFAULT_PIPELINE_DEPTH);
             *heap_guard = Some(
                 PlacementHeap::with_capacity(device, cap)
-                    .context("failed to create device placement heap")?,
+                    .context("failed to create context placement heap")?,
             );
         }
         let heap = heap_guard.as_mut().unwrap();
@@ -438,9 +441,16 @@ impl Surface {
         }
 
         // ── Resolve transient textures ───────────────────────────────────────────
+        let tex_page_slot = heap.current_page_slot();
         let tex_handles = {
             let _tz = tracy_zone!("surface.build_resolver.resolve_textures");
-            graph.resolve_transient_textures_with_heap(device, heap, node_waves)?
+            graph.resolve_transient_textures_with_heap(
+                device,
+                heap,
+                node_waves,
+                tex_page_slot,
+                retired_timeline,
+            )?
         };
         for (id, handle) in &tex_handles {
             resolver
@@ -566,7 +576,7 @@ impl Frame {
 
     fn apply_frame_bookkeeping(&self, submit_tv: TimelineValue) -> Result<()> {
         tracy_frame_mark!();
-        if let Ok(mut heap_guard) = self.context.device().inner.placement_heap.lock() {
+        if let Ok(mut heap_guard) = self.context.inner.placement_heap.lock() {
             if let Some(ref mut heap) = *heap_guard {
                 heap.stamp_all_pending(submit_tv);
             }

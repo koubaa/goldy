@@ -612,6 +612,8 @@ impl TaskGraph {
         device: &Device,
         heap: &mut crate::placement_heap::PlacementHeap,
         node_waves: &[u32],
+        page_slot: usize,
+        retired_timeline: crate::timeline::TimelineValue,
     ) -> Result<HashMap<u32, TextureHandle>> {
         if self.transient_texture_specs.is_empty() {
             return Ok(HashMap::new());
@@ -627,7 +629,8 @@ impl TaskGraph {
         }
         let (id_to_color, color_keys) =
             Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
-        let per_color_handles = heap.get_or_create_textures(device, &color_keys)?;
+        let per_color_handles =
+            heap.get_or_create_textures(device, &color_keys, page_slot, retired_timeline)?;
         let mut out = HashMap::new();
         for s in &self.transient_texture_specs {
             let c = id_to_color[&s.id];

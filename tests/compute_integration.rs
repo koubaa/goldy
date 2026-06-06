@@ -1131,8 +1131,12 @@ fn test_buffer_view_copy_between_sub_regions() {
         .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
         .expect("create view B");
 
+    // `COPY_SHADER` declares its source as `Scattered<uint>` (an `RWStructuredBuffer` /
+    // UAV on DX12), which reads through the UAV descriptor. Bind the UAV index — the SRV
+    // index (`ResourceAccess::Read`) would point a UAV-typed access at an SRV descriptor
+    // and read back garbage (zeros on WARP). `Read` is reserved for `BufRO<T>` params.
     let idx_a = view_a
-        .resource_index(ResourceAccess::Read)
+        .resource_index(ResourceAccess::ReadWrite)
         .expect("view A bindless index");
     let idx_b = view_b
         .resource_index(ResourceAccess::Write)
@@ -1254,8 +1258,10 @@ fn test_buffer_pool_alloc_and_dispatch() {
         .write_data(0, &src_data)
         .expect("write src data");
 
+    // `COPY_SHADER` reads its source as `Scattered<uint>` (UAV), so bind the UAV index.
+    // `ResourceAccess::Read` would yield the SRV index, which only matches `BufRO<T>` params.
     let src_idx = src_view
-        .resource_index(ResourceAccess::Read)
+        .resource_index(ResourceAccess::ReadWrite)
         .expect("src bindless index");
     let dst_idx = dst_view
         .resource_index(ResourceAccess::Write)

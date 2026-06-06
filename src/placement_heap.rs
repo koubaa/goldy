@@ -91,9 +91,13 @@ pub struct PlacementHeap {
     /// Per-slot `BufferView` cache. Indexed by `TransientId` (raw `u32`).
     /// Survives across frames; invalidated on `grow` or explicit shape change.
     view_cache: HashMap<u32, CachedView>,
-    /// Per-color-slot `Texture` cache for transient textures.
-    /// Index corresponds to the graph-coloring color index.
-    texture_cache: Vec<CachedTexture>,
+    /// Per-page-slot, per-color `Texture` cache for transient textures.
+    ///
+    /// Indexed as `texture_cache[page_slot][color]`.  Each page slot holds an
+    /// independent set of colored textures so that concurrent in-flight renders
+    /// that use different page slots (from [`Self::advance_page`]) never write to
+    /// the same `TextureHandle` simultaneously.
+    texture_cache: Vec<Vec<CachedTexture>>,
     /// Number of `create_buffer_view` backend calls since last reset (for tests and Tracy).
     view_create_count: usize,
     /// Number of `Texture::new` calls since last reset (for tests and Tracy).
@@ -114,6 +118,15 @@ struct PagedState {
     frame_counter: u64,
     /// Most recently stamped timeline, used for safe eviction of stale cache entries.
     last_timeline: Option<TimelineValue>,
+    /// Per-slot last-stamped timeline, indexed by `frame_counter % depth`.
+    ///
+    /// When a page slot is reused by a concurrent renderer, `get_or_create_textures`
+    /// checks whether `slot_timelines[slot]` has been retired by the GPU before
+    /// handing out the cached `TextureHandle`.  If not yet retired, a fresh texture
+    /// is created so the two renders never share a `TextureHandle` on the GPU.
+    slot_timelines: Vec<Option<TimelineValue>>,
+    /// The page slot selected by the most recent `advance_page` call.
+    last_slot_used: usize,
 }
 
 impl PlacementHeap {
@@ -167,7 +180,7 @@ impl PlacementHeap {
 
     /// Number of `Texture`s currently held in the stable-slot texture cache.
     pub fn cached_texture_count(&self) -> usize {
-        self.texture_cache.len()
+        self.texture_cache.iter().map(|slot| slot.len()).sum()
     }
 
     /// Reset the diagnostic counters (for test isolation).
@@ -227,6 +240,8 @@ impl PlacementHeap {
             depth,
             frame_counter: 0,
             last_timeline: None,
+            slot_timelines: vec![None; depth],
+            last_slot_used: 0,
         });
         Ok(())
     }
@@ -245,12 +260,26 @@ impl PlacementHeap {
             .expect("PlacementHeap::advance_page called before configure_pages");
         let page_idx = p.frame_counter % (p.depth as u64);
         p.frame_counter += 1;
+        p.last_slot_used = page_idx as usize;
         page_idx * p.page_alloc_size
     }
 
     /// Returns `true` if pages have been configured via [`Self::configure_pages`].
     pub fn is_paged(&self) -> bool {
         self.pages.is_some()
+    }
+
+    /// The page slot that the next [`Self::advance_page`] call will use.
+    ///
+    /// Equals `frame_counter % depth`. Returns 0 when pages are not configured.
+    /// Use this before calling [`Self::advance_page`] to tie transient texture
+    /// allocation to the same slot as the transient buffer allocation for a frame.
+    pub fn current_page_slot(&self) -> usize {
+        if let Some(ref p) = self.pages {
+            (p.frame_counter % p.depth as u64) as usize
+        } else {
+            0
+        }
     }
 
     /// Return the cached `BufferView` for `slot_id` if its shape and placement match,
@@ -338,74 +367,63 @@ impl PlacementHeap {
         &mut self,
         device: &Device,
         color_keys: &[TransientTextureKey],
+        page_slot: usize,
+        retired_timeline: TimelineValue,
     ) -> Result<Vec<TextureHandle>> {
+        // Grow the outer vec so that index `page_slot` exists.
+        while self.texture_cache.len() <= page_slot {
+            self.texture_cache.push(Vec::new());
+        }
+
         // Evict surplus cached slots when the color count shrinks.
-        if self.texture_cache.len() > color_keys.len() {
-            let surplus: Vec<CachedTexture> =
-                self.texture_cache.drain(color_keys.len()..).collect();
-            let epoch = self.max_in_flight_timeline();
-            if let Some(epoch) = epoch {
-                let mut payload = DeferredPayload::new();
-                for ct in surplus {
-                    payload.push(ct.texture);
+        {
+            let slot = &mut self.texture_cache[page_slot];
+            if slot.len() > color_keys.len() {
+                let surplus: Vec<CachedTexture> = slot.drain(color_keys.len()..).collect();
+                let epoch = self.max_in_flight_timeline();
+                if let Some(epoch) = epoch {
+                    let mut payload = DeferredPayload::new();
+                    for ct in surplus {
+                        payload.push(ct.texture);
+                    }
+                    device.defer_release(epoch, payload);
                 }
-                device.defer_release(epoch, payload);
+                // if no in-flight epoch the textures can be dropped synchronously
             }
-            // if no in-flight epoch the textures can be dropped synchronously
         }
 
         let mut handles = Vec::with_capacity(color_keys.len());
 
         for (i, key) in color_keys.iter().enumerate() {
-            if i < self.texture_cache.len() && self.texture_cache[i].key == *key {
-                // Cache hit.
-                handles.push(self.texture_cache[i].texture.gpu_handle());
-            } else {
-                // Cache miss: evict old entry if present, create new texture.
-                if i < self.texture_cache.len() {
-                    let epoch = self.max_in_flight_timeline();
-                    if let Some(epoch) = epoch {
-                        let mut payload = DeferredPayload::new();
-                        let new_tex = Texture::new(
-                            device,
-                            key.width,
-                            key.height,
-                            key.format,
-                            TextureKind::Direct,
-                            TextureFlags::COPY_DST,
-                        )?;
-                        self.texture_create_count += 1;
-                        let h = new_tex.gpu_handle();
-                        let old = std::mem::replace(
-                            &mut self.texture_cache[i],
-                            CachedTexture {
-                                texture: new_tex,
-                                key: *key,
-                            },
-                        );
-                        payload.push(old.texture);
-                        device.defer_release(epoch, payload);
-                        handles.push(h);
-                    } else {
-                        // No in-flight work; safe to replace synchronously.
-                        let new_tex = Texture::new(
-                            device,
-                            key.width,
-                            key.height,
-                            key.format,
-                            TextureKind::Direct,
-                            TextureFlags::COPY_DST,
-                        )?;
-                        self.texture_create_count += 1;
-                        let h = new_tex.gpu_handle();
-                        self.texture_cache[i] = CachedTexture {
-                            texture: new_tex,
-                            key: *key,
-                        };
-                        handles.push(h);
-                    }
-                } else {
-                    // New slot (cache is growing): just create.
+            // Potential cache hit check.
+            if i < self.texture_cache[page_slot].len()
+                && self.texture_cache[page_slot][i].key == *key
+            {
+                // Verify the previous occupant of this page slot has been retired.
+                // When two concurrent renderers share the same heap they advance to
+                // different page slots, but once the counter wraps the slot may still
+                // be in-flight.  Returning a live handle to a second renderer would
+                // produce a GPU-level write-write race.
+                let slot_epoch = self
+                    .pages
+                    .as_ref()
+                    .and_then(|p| p.slot_timelines.get(page_slot).copied().flatten());
+                let in_flight = slot_epoch.is_some_and(|epoch| epoch > retired_timeline);
+                if !in_flight {
+                    // Cache hit: previous use has retired, safe to reuse.
+                    handles.push(self.texture_cache[page_slot][i].texture.gpu_handle());
+                    continue;
+                }
+                // The slot is still in-flight from a concurrent render.  Fall
+                // through to the cache-miss path to evict (defer-release) the old
+                // texture and allocate a fresh one for this render.
+            }
+
+            // Cache miss (or in-flight eviction): create a new texture.
+            if i < self.texture_cache[page_slot].len() {
+                let epoch = self.max_in_flight_timeline();
+                if let Some(epoch) = epoch {
+                    let mut payload = DeferredPayload::new();
                     let new_tex = Texture::new(
                         device,
                         key.width,
@@ -416,12 +434,51 @@ impl PlacementHeap {
                     )?;
                     self.texture_create_count += 1;
                     let h = new_tex.gpu_handle();
-                    self.texture_cache.push(CachedTexture {
+                    let old = std::mem::replace(
+                        &mut self.texture_cache[page_slot][i],
+                        CachedTexture {
+                            texture: new_tex,
+                            key: *key,
+                        },
+                    );
+                    payload.push(old.texture);
+                    device.defer_release(epoch, payload);
+                    handles.push(h);
+                } else {
+                    // No in-flight work; safe to replace synchronously.
+                    let new_tex = Texture::new(
+                        device,
+                        key.width,
+                        key.height,
+                        key.format,
+                        TextureKind::Direct,
+                        TextureFlags::COPY_DST,
+                    )?;
+                    self.texture_create_count += 1;
+                    let h = new_tex.gpu_handle();
+                    self.texture_cache[page_slot][i] = CachedTexture {
                         texture: new_tex,
                         key: *key,
-                    });
+                    };
                     handles.push(h);
                 }
+            } else {
+                // New slot (cache is growing): just create.
+                let new_tex = Texture::new(
+                    device,
+                    key.width,
+                    key.height,
+                    key.format,
+                    TextureKind::Direct,
+                    TextureFlags::COPY_DST,
+                )?;
+                self.texture_create_count += 1;
+                let h = new_tex.gpu_handle();
+                self.texture_cache[page_slot].push(CachedTexture {
+                    texture: new_tex,
+                    key: *key,
+                });
+                handles.push(h);
             }
         }
 
@@ -435,13 +492,16 @@ impl PlacementHeap {
     /// optionally on VRAM-pressure events (Plan 3).
     pub fn invalidate_all(&mut self, device: &Device) {
         let epoch = self.max_in_flight_timeline();
-        if !self.view_cache.is_empty() || !self.texture_cache.is_empty() {
+        let has_textures = self.texture_cache.iter().any(|slot| !slot.is_empty());
+        if !self.view_cache.is_empty() || has_textures {
             let mut payload = DeferredPayload::new();
             for (_, entry) in self.view_cache.drain() {
                 payload.push(entry.view);
             }
-            for ct in self.texture_cache.drain(..) {
-                payload.push(ct.texture);
+            for slot in self.texture_cache.iter_mut() {
+                for ct in slot.drain(..) {
+                    payload.push(ct.texture);
+                }
             }
             if let Some(epoch) = epoch {
                 device.defer_release(epoch, payload);
@@ -456,6 +516,7 @@ impl PlacementHeap {
     pub fn stamp_pending(&mut self, timeline: TimelineValue) {
         if let Some(ref mut p) = self.pages {
             p.last_timeline = Some(timeline);
+            p.slot_timelines[p.last_slot_used] = Some(timeline);
         }
     }
 
@@ -706,10 +767,12 @@ mod tests {
             },
         ];
 
-        heap.get_or_create_textures(&device, &keys).unwrap();
+        // page_slot 0, retired_timeline 0: pages aren't configured here, so the slot
+        // in-flight check is a no-op and the second call must hit the cache.
+        heap.get_or_create_textures(&device, &keys, 0, 0).unwrap();
         assert_eq!(heap.texture_create_count(), 2);
 
-        heap.get_or_create_textures(&device, &keys).unwrap();
+        heap.get_or_create_textures(&device, &keys, 0, 0).unwrap();
         assert_eq!(
             heap.texture_create_count(),
             2,
