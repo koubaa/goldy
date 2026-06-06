@@ -741,8 +741,15 @@ pub(super) fn submit(
         r.context("Failed queue_submit2 for empty compute submit")?;
         {
             let completed = ctx_completed_value(state, ctx, device_handle);
+            let ctx_batch: Vec<_> = state
+                .contexts
+                .get_mut(&ctx)
+                .map(|sc| sc.deletion_queue.drain_up_to(completed))
+                .unwrap_or_default();
             if let Some(ld) = state.devices.get_mut(&device_handle) {
-                ld.process_deletion_queue_up_to(completed);
+                for r in ctx_batch {
+                    super::types::destroy_pending_deletion(ld, r);
+                }
             }
         }
         if let Some(sc) = state.contexts.get_mut(&ctx) {
@@ -1516,8 +1523,15 @@ pub(super) fn submit(
 
     {
         let completed = ctx_completed_value(state, ctx, device_handle);
+        let ctx_batch: Vec<_> = state
+            .contexts
+            .get_mut(&ctx)
+            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .unwrap_or_default();
         if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(completed);
+            for r in ctx_batch {
+                super::types::destroy_pending_deletion(ld, r);
+            }
             ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
@@ -2505,8 +2519,15 @@ fn submit_graph_impl(
 
     {
         let completed = ctx_completed_value(state, ctx, device_handle);
+        let ctx_batch: Vec<_> = state
+            .contexts
+            .get_mut(&ctx)
+            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .unwrap_or_default();
         if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(completed);
+            for r in ctx_batch {
+                super::types::destroy_pending_deletion(ld, r);
+            }
             ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
@@ -2606,8 +2627,15 @@ pub(super) fn try_resubmit_retained(
 
     {
         let completed = ctx_completed_value(state, ctx, device_handle);
+        let ctx_batch: Vec<_> = state
+            .contexts
+            .get_mut(&ctx)
+            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .unwrap_or_default();
         if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(completed);
+            for r in ctx_batch {
+                super::types::destroy_pending_deletion(ld, r);
+            }
             ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }

@@ -86,6 +86,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
                 super::staging::DEFAULT_STAGING_CHUNK_SIZE,
             ),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
+            deletion_queue: super::types::DeletionQueue::new(),
         },
     );
     Ok(id)
@@ -113,11 +114,26 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
 
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
 
+    let ctx_batch = sc.deletion_queue.flush_all_drain();
+
+    {
+        // Use `get_mut` while we still need `&mut LogicalDevice` for
+        // `destroy_pending_deletion` (sparse page pool etc.).
+        let Some(ld) = state.devices.get_mut(&device) else {
+            return;
+        };
+        unsafe {
+            let _ = ld.device.device_wait_idle();
+        }
+        for r in ctx_batch {
+            super::types::destroy_pending_deletion(ld, r);
+        }
+    }
+
     let Some(ld) = state.devices.get(&device) else {
         return;
     };
     unsafe {
-        let _ = ld.device.device_wait_idle();
         sc.staging_belt.destroy_all(ld);
         sc.texture_staging_pool.destroy_all(ld);
         for (_, cbs) in sc.timeline_cmd_buffers.drain() {

@@ -471,6 +471,19 @@ pub(crate) struct SubmissionContext {
     /// Per-context pool for texture-upload staging buffers.
     /// Eliminates per-frame vkAllocateMemory / vkFreeMemory for WriteTexture.
     pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// Per-context deferred deletion queue.
+    ///
+    /// Holds resources whose GPU lifetime is bounded exclusively by **this**
+    /// context's timeline semaphore (e.g. submit-internal temporaries).  Drained
+    /// on each submit using `ctx_completed_value` — never via `device_retired` —
+    /// so no other context's progress can block reclaim here.
+    ///
+    /// User-destroyed resources (buffers, textures, …) whose context is unknown
+    /// at destroy time still go to `LogicalDevice::deletion_queue` and are drained
+    /// in the explicit-wait paths (`wait_until`, `flush_deferred_deletions`,
+    /// surface acquire).  As a result the submit hot path no longer touches the
+    /// device-level queue at all, which is required for Phase 5 (lock-free submit).
+    pub deletion_queue: DeletionQueue,
 }
 
 /// A logical Vulkan device with associated resources.

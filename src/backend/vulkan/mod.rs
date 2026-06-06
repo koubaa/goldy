@@ -1353,7 +1353,18 @@ impl GpuBackend for VulkanBackend {
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device_handle = self.context_device(ctx);
         let completed = compute::ctx_completed_value(&self.state, ctx, device_handle);
+        // Per-context queue: resources whose lifetime is bounded by this context.
+        let ctx_batch: Vec<_> = self
+            .state
+            .contexts
+            .get_mut(&ctx)
+            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .unwrap_or_default();
         if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+            for r in ctx_batch {
+                types::destroy_pending_deletion(ld, r);
+            }
+            // Device-level queue: user-destroyed resources without context attribution.
             ld.process_deletion_queue_up_to(completed);
             ld.drain_ready_slot_reclamations(&self.state.contexts);
         }
