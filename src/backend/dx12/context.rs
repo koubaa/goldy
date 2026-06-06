@@ -10,13 +10,14 @@ pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
     let floor = state
         .devices
         .get(&device)
-        .map(|d| d.retired_floor)
+        .map(|d| d.retired_floor.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(0);
+    // Use context_fences for a lock-free scan over per-context fence completion values.
     let max_ctx = state
-        .contexts
+        .context_fences
         .values()
-        .filter(|c| c.device == device)
-        .map(|c| unsafe { c.fence.GetCompletedValue() })
+        .filter(|(dev, _)| *dev == device)
+        .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
         .max()
         .unwrap_or(0);
     let device_sync = state
@@ -66,9 +67,14 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 
     let id = state.next_context_id;
     state.next_context_id = state.next_context_id.saturating_add(1);
+
+    // Register the fence in the lock-free index before inserting the context so that
+    // any concurrent drain_ready_slot_reclamations sees a consistent view.
+    state.context_fences.insert(id, (device, fence.clone()));
+
     state.contexts.insert(
         id,
-        Dx12SubmissionContext {
+        std::sync::Arc::new(std::sync::Mutex::new(Dx12SubmissionContext {
             device,
             fence,
             last_submitted_seq: 0,
@@ -77,15 +83,29 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence_thread,
             compute_allocator_pool,
             retained_graph: None,
-        },
+            staging_belt: super::staging::StagingBelt::new(
+                super::staging::DEFAULT_STAGING_CHUNK_SIZE,
+            ),
+            texture_staging_pool: super::staging::TextureStagingPool::new(),
+            deletion_queue: super::types::DeletionQueue::new(),
+        })),
     );
     Ok(id)
 }
 
 pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
-    let Some(mut sc) = state.contexts.remove(&ctx) else {
+    // Remove from both maps first; the fence index must not outlive the context.
+    let Some(sc_arc) = state.contexts.remove(&ctx) else {
         return;
     };
+    state.context_fences.remove(&ctx);
+
+    // We are the sole owner at this point (no Phase-5c clone is outstanding yet),
+    // so try_unwrap should always succeed.
+    let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
+        .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));
+    let mut sc = sc_mutex.into_inner().expect("context Mutex poisoned");
+
     let device = sc.device;
 
     // Drain in-flight GPU work before releasing command allocators / retained CLs.
@@ -94,8 +114,9 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     }
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
-    if let Some(ld) = state.devices.get_mut(&device) {
-        ld.retired_floor = ld.retired_floor.max(completed);
+    if let Some(ld) = state.devices.get(&device) {
+        ld.retired_floor
+            .fetch_max(completed, std::sync::atomic::Ordering::Relaxed);
     }
 
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
@@ -105,6 +126,22 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
             slot.retained = false;
         }
     }
+
+    // GPU is idle for this context (waited above); destroy per-context staging resources.
+    unsafe { sc.staging_belt.destroy_all() };
+    unsafe { sc.texture_staging_pool.destroy_all() };
+
+    // Drain any remaining per-context pending deletions now that the GPU is idle.
+    let batch = sc.deletion_queue.drain_everything();
+    if !batch.is_empty() {
+        if let Some(ld) = state.devices.get(&device) {
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            let mut ledger = ledger_arc.lock().unwrap();
+            for resource in batch {
+                super::types::destroy_pending_deletion(ld, &mut ledger, resource);
+            }
+        }
+    }
 }
 
 pub(super) fn context_device(state: &Dx12State, ctx: ContextHandle) -> DeviceHandle {
@@ -112,5 +149,7 @@ pub(super) fn context_device(state: &Dx12State, ctx: ContextHandle) -> DeviceHan
         .contexts
         .get(&ctx)
         .expect("invalid context handle")
+        .lock()
+        .expect("context Mutex poisoned")
         .device
 }

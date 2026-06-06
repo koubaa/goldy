@@ -40,7 +40,7 @@ pub(super) fn create_with_depth(
 ) -> Result<RenderTargetHandle> {
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     // Create color render target texture
@@ -383,7 +383,7 @@ pub(super) fn render(
 ) -> Result<()> {
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     // Reset the single shared command allocator. This is safe only because we do
@@ -427,7 +427,9 @@ pub(super) fn render(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -437,10 +439,6 @@ pub(super) fn render(
     // Blocking wait — required so the shared command_allocator can be safely
     // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;
-
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
-    }
 
     if let Some(rt) = state.render_targets.get_mut(&target) {
         rt.has_rendered = true;
@@ -587,7 +585,9 @@ pub(super) fn read_to_cpu(
     }
 
     // Wait for copy to complete
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -595,11 +595,6 @@ pub(super) fn read_to_cpu(
     }
     .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
-
-    // Increment fence value
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
-    }
 
     // Map and copy data
     let mut mapped_data: *mut u8 = std::ptr::null_mut();

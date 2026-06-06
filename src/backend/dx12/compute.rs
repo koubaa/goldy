@@ -5,7 +5,6 @@ use super::super::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
 use super::barriers;
 use super::pso_cache;
 use super::shader;
-use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
@@ -493,7 +492,7 @@ pub(super) fn create(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     // Use the shared bindless root signature from the device
@@ -505,9 +504,16 @@ pub(super) fn create(
 
     tracing::debug!("Using shared bindless root signature for compute pipeline");
 
-    let disk_blob = logical_device.compute_pso_blobs.get(&key);
-    let mut try_drop_stale_cached_blob = disk_blob.is_some();
-    let cached_pso = disk_blob
+    let pso_cache_arc = std::sync::Arc::clone(&logical_device.pso_cache);
+    let disk_blob_bytes: Option<Vec<u8>> = pso_cache_arc
+        .read()
+        .unwrap()
+        .compute_blobs
+        .get(&key)
+        .cloned();
+    let mut try_drop_stale_cached_blob = disk_blob_bytes.is_some();
+    let cached_pso = disk_blob_bytes
+        .as_ref()
         .map(|b| pso_cache::d3d12_cached_pso(b.as_slice()))
         .unwrap_or_default();
 
@@ -534,8 +540,10 @@ pub(super) fn create(
                         error = ?e,
                         "discarding stale DX12 compute PSO blob; rebuilding without cache entry"
                     );
-                    logical_device.compute_pso_blobs.remove(&key);
-                    logical_device.pso_disk_cache_dirty = true;
+                    let mut cache = pso_cache_arc.write().unwrap();
+                    cache.compute_blobs.remove(&key);
+                    cache.dirty = true;
+                    drop(cache);
                     pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
                     try_drop_stale_cached_blob = false;
                 }
@@ -551,11 +559,14 @@ pub(super) fn create(
     };
     let new_blob = unsafe { pso_cache::id3dblob_to_vec(&blob) };
 
-    match logical_device.compute_pso_blobs.get(&key) {
-        Some(prev) if *prev == new_blob => {}
-        _ => {
-            logical_device.compute_pso_blobs.insert(key, new_blob);
-            logical_device.pso_disk_cache_dirty = true;
+    {
+        let mut cache = pso_cache_arc.write().unwrap();
+        match cache.compute_blobs.get(&key) {
+            Some(prev) if *prev == new_blob => {}
+            _ => {
+                cache.compute_blobs.insert(key, new_blob);
+                cache.dirty = true;
+            }
         }
     }
 
@@ -612,6 +623,8 @@ fn acquire_allocator_slot(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let logical_device = state
         .devices
@@ -619,17 +632,20 @@ fn acquire_allocator_slot(
         .context("Invalid device handle")?;
 
     let ctx_fence = state
+        .context_fences
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .1
+        .clone();
+    let completed = unsafe { ctx_fence.GetCompletedValue() };
+
+    let sc_arc = state
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
-        .fence
         .clone();
-    let completed = unsafe { ctx_fence.GetCompletedValue() };
-    let pool = &mut state
-        .contexts
-        .get_mut(&ctx)
-        .context("Invalid context handle")?
-        .compute_allocator_pool;
+    let mut sc = sc_arc.lock().unwrap();
+    let pool = &mut sc.compute_allocator_pool;
     // Skip retained slots — their allocator must not be reset until evict_retained is called.
     let slot_idx = pool
         .iter()
@@ -683,12 +699,8 @@ fn acquire_allocator_slot(
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?
-        .timeline_next;
-    state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?
-        .timeline_next += 1;
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok((cmd_list, token, slot_idx))
 }
 
@@ -711,6 +723,7 @@ struct CmdCtx<'a> {
 fn record_gpu_command(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
+    ctx_handle: super::ContextHandle,
     ctx: &mut CmdCtx<'_>,
     cmd: &GpuCommand,
 ) -> Result<()> {
@@ -989,15 +1002,16 @@ fn record_gpu_command(
                     cl.ExecuteIndirect(&batch_sig, *count, &arg_resource, 0, None, 0);
                 }
 
-                let fence_val = logical_device.timeline_next.saturating_sub(1);
-                let dev = state
-                    .devices
-                    .get_mut(&device_handle)
-                    .context("DispatchBatch: device gone")?;
-                dev.deletion_queue.queue(
-                    fence_val,
-                    super::types::PendingDeletion::StandaloneResource(arg_resource),
-                );
+                let fence_val = logical_device
+                    .timeline_next
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .saturating_sub(1);
+                if let Some(sc_arc) = state.contexts.get(&ctx_handle) {
+                    sc_arc.lock().unwrap().deletion_queue.queue(
+                        fence_val,
+                        super::types::PendingDeletion::StandaloneResource(arg_resource),
+                    );
+                }
             } else {
                 use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
                 let stride = DISPATCH_BATCH_STRIDE;
@@ -1460,16 +1474,19 @@ fn execute_signal_and_finish(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+    if let Some(ld) = state.devices.get(&device_handle) {
+        ld.ledger
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
     }
 
     let logical_device = state.devices.get(&device_handle).unwrap();
     let ctx_fence = state
-        .contexts
+        .context_fences
         .get(&ctx)
         .context("Invalid context handle")?
-        .fence
+        .1
         .clone();
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
@@ -1490,7 +1507,8 @@ fn execute_signal_and_finish(
         }
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
@@ -1517,28 +1535,44 @@ fn execute_signal_and_finish(
         sc.last_submitted_seq = fence_value;
     }
 
-    let retired = super::context::device_retired(state, device_handle);
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.process_deletion_queue_up_to(retired);
-        dev.drain_ready_slot_reclamations(&state.contexts);
+    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+    let ctx_del_batch: Vec<_> = state
+        .contexts
+        .get(&ctx)
+        .map(|sc_arc| {
+            sc_arc
+                .lock()
+                .unwrap()
+                .deletion_queue
+                .drain_up_to_completed(ctx_completed)
+        })
+        .unwrap_or_default();
+    if let Some(dev) = state.devices.get(&device_handle) {
+        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
+        for resource in ctx_del_batch {
+            types::destroy_pending_deletion(dev, &mut ledger, resource);
+        }
+        ledger.drain_ready_slot_reclamations(&state.context_fences);
     }
 
     state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .finish(fence_value);
+        .contexts
+        .get(&ctx)
+        .map(|sc_arc| sc_arc.lock().unwrap().staging_belt.finish(fence_value));
 
     if !staged_texture_uploads.is_empty() {
         let entries = staged_texture_uploads
             .into_iter()
             .map(|u| u.staging_entry)
             .collect::<Vec<_>>();
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(super::staging::TextureStagingPool::new)
-            .release(fence_value, entries);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .texture_staging_pool
+                .release(fence_value, entries);
+        }
     }
 
     Ok(fence_value)
@@ -1558,6 +1592,8 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("dx12.submit");
     let (command_list, fence_value, slot_idx) = {
@@ -1571,10 +1607,10 @@ pub(super) fn submit(
             .get(&device_handle)
             .context("Invalid device handle")?;
         let ctx_fence = state
-            .contexts
+            .context_fences
             .get(&ctx)
             .context("Invalid context handle")?
-            .fence
+            .1
             .clone();
         (ctx_fence, dev.adapter_id == super::WARP_ADAPTER_ID)
     };
@@ -1589,15 +1625,15 @@ pub(super) fn submit(
     });
     if has_upload {
         let _tz_reclaim = tracy_zone!("dx12.submit.staging_reclaim");
-        state
-            .staging_belts
-            .entry(device_handle)
-            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-            .reclaim(&ctx_fence_clone)?;
         let completed = super::context::device_retired(state, device_handle);
-        if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-            pool.reclaim(completed);
-        }
+        let sc_arc = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .clone();
+        let mut sc = sc_arc.lock().unwrap();
+        sc.staging_belt.reclaim(&ctx_fence_clone)?;
+        sc.texture_staging_pool.reclaim(completed);
     }
 
     let command_list7: ID3D12GraphicsCommandList7 = command_list
@@ -1607,10 +1643,18 @@ pub(super) fn submit(
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
-        let mut pool = state
-            .texture_staging_pools
-            .remove(&device_handle)
-            .unwrap_or_else(super::staging::TextureStagingPool::new);
+        let mut pool = {
+            let sc_arc = state
+                .contexts
+                .get(&ctx)
+                .context("Invalid context handle")?
+                .clone();
+            let mut sc = sc_arc.lock().unwrap();
+            std::mem::replace(
+                &mut sc.texture_staging_pool,
+                super::staging::TextureStagingPool::new(),
+            )
+        };
 
         let _tz_prepass = tracy_zone!("dx12.submit.upload_prepass");
         for command in commands {
@@ -1630,10 +1674,13 @@ pub(super) fn submit(
                             .devices
                             .get(&buf_dev)
                             .context("WriteBuffer pre-pass: device missing")?;
-                        let belt = state.staging_belts.entry(buf_dev).or_insert_with(|| {
-                            staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                        });
-                        let (res, off) = belt.write(ld, data)?;
+                        let sc_arc = state
+                            .contexts
+                            .get(&ctx)
+                            .context("WriteBuffer pre-pass: context missing")?
+                            .clone();
+                        let mut sc = sc_arc.lock().unwrap();
+                        let (res, off) = sc.staging_belt.write(ld, data)?;
                         belt_slices.push((res, off));
                     }
                 }
@@ -1679,7 +1726,9 @@ pub(super) fn submit(
             }
         }
 
-        state.texture_staging_pools.insert(device_handle, pool);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().texture_staging_pool = pool;
+        }
     }
 
     let mut dx_gpu_profile = {
@@ -1714,7 +1763,7 @@ pub(super) fn submit(
 
     let belt_idx_final = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
-        let mut ctx = CmdCtx {
+        let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
             command_list7: &command_list7,
             use_global_buffer_barriers,
@@ -1727,14 +1776,14 @@ pub(super) fn submit(
             current_compute_pipeline: None,
         };
         for cmd in commands {
-            record_gpu_command(state, device_handle, &mut ctx, cmd)?;
+            record_gpu_command(state, device_handle, ctx, &mut cmd_ctx, cmd)?;
         }
         debug_assert_eq!(
-            ctx.texture_upload_idx,
+            cmd_ctx.texture_upload_idx,
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        ctx.belt_idx
+        cmd_ctx.belt_idx
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.
@@ -1804,6 +1853,8 @@ pub(super) fn submit_graph(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("dx12.submit_graph");
     let (command_list, fence_value, slot_idx) = acquire_allocator_slot(state, ctx)?;
@@ -1814,10 +1865,10 @@ pub(super) fn submit_graph(
             .get(&device_handle)
             .context("Invalid device handle")?;
         let ctx_fence = state
-            .contexts
+            .context_fences
             .get(&ctx)
             .context("Invalid context handle")?
-            .fence
+            .1
             .clone();
         (ctx_fence, dev.adapter_id == super::WARP_ADAPTER_ID)
     };
@@ -1833,15 +1884,15 @@ pub(super) fn submit_graph(
         )
     });
     if has_upload {
-        state
-            .staging_belts
-            .entry(device_handle)
-            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-            .reclaim(&ctx_fence_clone)?;
         let completed = super::context::device_retired(state, device_handle);
-        if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-            pool.reclaim(completed);
-        }
+        let sc_arc = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .clone();
+        let mut sc = sc_arc.lock().unwrap();
+        sc.staging_belt.reclaim(&ctx_fence_clone)?;
+        sc.texture_staging_pool.reclaim(completed);
     }
 
     let command_list7: ID3D12GraphicsCommandList7 = command_list
@@ -1851,10 +1902,18 @@ pub(super) fn submit_graph(
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
-        let mut pool = state
-            .texture_staging_pools
-            .remove(&device_handle)
-            .unwrap_or_else(super::staging::TextureStagingPool::new);
+        let mut pool = {
+            let sc_arc = state
+                .contexts
+                .get(&ctx)
+                .context("Invalid context handle")?
+                .clone();
+            let mut sc = sc_arc.lock().unwrap();
+            std::mem::replace(
+                &mut sc.texture_staging_pool,
+                super::staging::TextureStagingPool::new(),
+            )
+        };
 
         let _tz_prepass = tracy_zone!("dx12.submit_graph.upload_prepass");
         for graph_cmd in commands {
@@ -1875,10 +1934,13 @@ pub(super) fn submit_graph(
                                 .devices
                                 .get(&buf_dev)
                                 .context("WriteBuffer pre-pass: device missing")?;
-                            let belt = state.staging_belts.entry(buf_dev).or_insert_with(|| {
-                                staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                            });
-                            let (res, off) = belt.write(ld, data)?;
+                            let sc_arc = state
+                                .contexts
+                                .get(&ctx)
+                                .context("WriteBuffer pre-pass: context missing")?
+                                .clone();
+                            let mut sc = sc_arc.lock().unwrap();
+                            let (res, off) = sc.staging_belt.write(ld, data)?;
                             belt_slices.push((res, off));
                         }
                     }
@@ -1925,7 +1987,9 @@ pub(super) fn submit_graph(
             }
         }
 
-        state.texture_staging_pools.insert(device_handle, pool);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().texture_staging_pool = pool;
+        }
     }
 
     let mut dx_gpu_profile = {
@@ -1962,7 +2026,7 @@ pub(super) fn submit_graph(
     let belt_idx_final;
     {
         let _tz_cmds = tracy_zone!("dx12.submit_graph.record_commands");
-        let mut ctx = CmdCtx {
+        let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
             command_list7: &command_list7,
             use_global_buffer_barriers,
@@ -1978,7 +2042,7 @@ pub(super) fn submit_graph(
         for graph_cmd in commands {
             match graph_cmd {
                 GraphCommand::Compute(gpu_cmd) => {
-                    record_gpu_command(state, device_handle, &mut ctx, gpu_cmd)?;
+                    record_gpu_command(state, device_handle, ctx, &mut cmd_ctx, gpu_cmd)?;
                 }
                 GraphCommand::Render {
                     target,
@@ -2005,7 +2069,9 @@ pub(super) fn submit_graph(
                                 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                         ),
                     };
-                    unsafe { barriers::barrier_globals(ctx.command_list7, &[compute_to_render]) };
+                    unsafe {
+                        barriers::barrier_globals(cmd_ctx.command_list7, &[compute_to_render])
+                    };
 
                     super::render_target::record_render_pass_to_list(
                         state,
@@ -2033,18 +2099,20 @@ pub(super) fn submit_graph(
                                 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                         ),
                     };
-                    unsafe { barriers::barrier_globals(ctx.command_list7, &[render_to_compute]) };
+                    unsafe {
+                        barriers::barrier_globals(cmd_ctx.command_list7, &[render_to_compute])
+                    };
                 }
             }
         }
 
         debug_assert_eq!(
-            ctx.texture_upload_idx,
+            cmd_ctx.texture_upload_idx,
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        belt_idx_final = ctx.belt_idx;
-    } // drop ctx → release borrows on command_list / command_list7
+        belt_idx_final = cmd_ctx.belt_idx;
+    } // drop cmd_ctx → release borrows on command_list / command_list7
 
     let tail = D3D12_GLOBAL_BARRIER {
         SyncBefore: D3D12_BARRIER_SYNC(
@@ -2115,9 +2183,16 @@ pub(super) fn try_resubmit_retained(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let retained = {
-        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc_arc = state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .clone();
+        let sc = sc_arc.lock().unwrap();
         match sc.retained_graph.as_ref() {
             Some(r) if r.fingerprint == key => {
                 Some((r.command_list.clone(), r.slot_idx, r.used_slots.clone()))
@@ -2130,27 +2205,29 @@ pub(super) fn try_resubmit_retained(
         return Ok(None);
     };
 
-    let fence_value = {
-        let dev = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
-        let token = dev.timeline_next;
-        dev.timeline_next += 1;
-        token
-    };
+    let fence_value = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let cmd_list: ID3D12CommandList = command_list
         .cast()
         .context("Failed to cast retained command list")?;
 
     let (ctx_fence, command_queue) = {
-        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let ctx_fence = state
+            .context_fences
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .1
+            .clone();
         let ld = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        (sc.fence.clone(), ld.command_queue.clone())
+        (ctx_fence, ld.command_queue.clone())
     };
     {
         let _tz = tracy_zone!("dx12.resubmit_retained");
@@ -2161,21 +2238,40 @@ pub(super) fn try_resubmit_retained(
             .context("Failed to signal context fence after retained resubmit")?;
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+    if let Some(ld) = state.devices.get(&device_handle) {
+        ld.ledger
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
         sc.last_submitted_seq = fence_value;
     }
 
-    let retired = super::context::device_retired(state, device_handle);
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.process_deletion_queue_up_to(retired);
-        dev.drain_ready_slot_reclamations(&state.contexts);
+    let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+    let retained_del_batch: Vec<_> = state
+        .contexts
+        .get(&ctx)
+        .map(|sc_arc| {
+            sc_arc
+                .lock()
+                .unwrap()
+                .deletion_queue
+                .drain_up_to_completed(retired_ctx_completed)
+        })
+        .unwrap_or_default();
+    if let Some(dev) = state.devices.get(&device_handle) {
+        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
+        for resource in retained_del_batch {
+            types::destroy_pending_deletion(dev, &mut ledger, resource);
+        }
+        ledger.drain_ready_slot_reclamations(&state.context_fences);
     }
 
     Ok(Some(fence_value))
@@ -2183,7 +2279,8 @@ pub(super) fn try_resubmit_retained(
 
 /// Drop the retained command list for `key`, marking its pool slot as reusable.
 pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle) {
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_graph.take() {
             if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                 slot.retained = false;

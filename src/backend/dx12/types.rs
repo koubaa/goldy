@@ -11,11 +11,15 @@
 //! - Shaders access resources by indexing into the descriptor heaps
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
+    RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, RwLock,
+};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
 
@@ -366,7 +370,7 @@ mod registry_tests {
         );
 
         let mut retired = HashMap::from([(CTX_A, 4u64)]);
-        let mut drain_pending =
+        let drain_pending =
             |retired: &HashMap<ContextHandle, u64>,
              reg: &mut ResourceRegistry,
              pending: &mut Vec<PendingSlotReclamation>| {
@@ -415,7 +419,7 @@ mod registry_tests {
 
         let mut retired = HashMap::from([(CTX_A, 0u64), (CTX_B, 0u64)]);
 
-        let mut drain_pending =
+        let drain_pending =
             |retired: &HashMap<ContextHandle, u64>,
              reg: &mut ResourceRegistry,
              pending: &mut Vec<PendingSlotReclamation>| {
@@ -485,6 +489,14 @@ pub(crate) struct Dx12SubmissionContext {
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
     /// A single retained command list for zero-recording-cost re-submission.
     pub retained_graph: Option<RetainedGraph>,
+    /// Upload belt for `GpuCommand::WriteBuffer` on this context.
+    pub staging_belt: super::staging::StagingBelt,
+    /// Pool that recycles texture-upload staging buffers across frames on this context.
+    pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// Per-context deferred deletion queue — only resources exclusively bound to this
+    /// context's timeline (e.g. temporary dispatch-batch arg buffers).  Drained at each
+    /// submit by this context's own completed fence value, never by `device_retired`.
+    pub deletion_queue: DeletionQueue,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.
@@ -588,67 +600,32 @@ impl DeletionQueue {
     }
 }
 
-/// A logical D3D12 device with associated resources.
-#[allow(dead_code)]
-pub(crate) struct LogicalDevice {
-    pub device: Direct3D12::ID3D12Device10,
-    pub adapter_id: u32,
-    pub command_queue: Direct3D12::ID3D12CommandQueue,
-    /// Legacy single allocator for non-compute paths (e.g. render target). Compute uses the pool.
-    pub command_allocator: Direct3D12::ID3D12CommandAllocator,
-    pub rtv_heap: Direct3D12::ID3D12DescriptorHeap,
-    pub rtv_descriptor_size: u32,
-    pub dsv_heap: Direct3D12::ID3D12DescriptorHeap,
-    pub dsv_descriptor_size: u32,
-    pub cbv_srv_uav_heap: Direct3D12::ID3D12DescriptorHeap,
-    pub cbv_srv_uav_descriptor_size: u32,
-    pub sampler_heap: Direct3D12::ID3D12DescriptorHeap,
-    pub sampler_descriptor_size: u32,
-    /// Device fence for synchronous Signal+wait paths only (not per-submit timeline).
-    pub fence: Direct3D12::ID3D12Fence,
-    /// Device-global submission sequence (shared value space; contexts signal their own fences).
-    pub timeline_next: u64,
-    /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
-    pub retired_floor: u64,
-
-    // Bindless infrastructure
-    /// `true` when adapter reports tiled resources tier >= 1 (buffer reserved resources).
-    pub supports_reserved_buffers: bool,
-    pub tile_heap_pool: Option<super::tiles::TileHeapPool>,
-    /// Shared root signature for all bindless pipelines (graphics and compute)
-    pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
-    /// Command signature for indirect compute dispatch (ExecuteIndirect, dispatch-only)
-    pub compute_dispatch_indirect_signature: Option<Direct3D12::ID3D12CommandSignature>,
-    /// Command signature for batched dispatch: sets push constants then dispatches.
-    /// Each argument entry contains `[PushLayout (TOTAL_PUSH_BYTES)] [wg_x] [wg_y] [wg_z]`.
-    /// Requires the shared `bindless_root_signature` to be non-None.
-    pub compute_batch_dispatch_signature: Option<Direct3D12::ID3D12CommandSignature>,
-    /// Registry tracking resource offsets in descriptor heaps
+/// Device-shared descriptor-heap ledger.
+///
+/// Contains the irreducible shared state for bindless slot allocation: the
+/// `ResourceRegistry` (descriptor slot allocator), the per-context
+/// `slot_last_seen` reference table, and the `pending_slot_reclamations`
+/// list.  Wrapped in `Arc<Mutex<>>` on `LogicalDevice` so that future phases
+/// can lock it independently of the global backend mutex.
+pub(crate) struct DeviceLedger {
+    /// Registry tracking resource offsets in descriptor heaps.
     pub resource_registry: ResourceRegistry,
-    /// Device-lifetime zero-filled UPLOAD-heap buffer used as the source for
-    /// `CopyBufferRegion` clears. One buffer per device; clears of any size are
-    /// handled by chunking `CopyBufferRegion` calls. Using a copy instead of
-    /// `ClearUnorderedAccessViewUint` avoids the shared-descriptor aliasing hazard
-    /// that caused silent corruption on WARP when multiple buffers were cleared in
-    /// the same wave (all clears rewrote the same single-slot descriptor heap).
-    pub zero_buffer: Direct3D12::ID3D12Resource,
-    /// Deferred deletion queue — resources are dropped only after the GPU finishes
-    /// the command list that was last submitted when the resource was queued.
-    pub deletion_queue: DeletionQueue,
     /// Maps bindless slot → per-context last-submitted seq that referenced it.
     /// Updated at every submit. Entry removed when the slot is queued for reclamation.
     pub slot_last_seen: HashMap<DeferredSlot, HashMap<super::ContextHandle, u64>>,
     /// Slots waiting for referencing contexts to retire before returning to the free list.
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
-    /// Cached graphics PSO blobs from `ID3D12PipelineState::GetCachedBlob` (cold-load via `CachedPSO`).
-    pub graphics_pso_blobs: HashMap<u64, Vec<u8>>,
-    /// Cached compute PSO blobs.
-    pub compute_pso_blobs: HashMap<u64, Vec<u8>>,
-    /// `true` if either blob map changed since loading from [`super::pso_cache`] disk file.
-    pub pso_disk_cache_dirty: bool,
 }
 
-impl LogicalDevice {
+impl DeviceLedger {
+    pub(crate) fn new() -> Self {
+        Self {
+            resource_registry: ResourceRegistry::new(),
+            slot_last_seen: HashMap::new(),
+            pending_slot_reclamations: Vec::new(),
+        }
+    }
+
     /// Record that `ctx` submitted `seq` referencing each bindless slot in `slots`.
     pub(crate) fn record_slot_usage(
         &mut self,
@@ -706,17 +683,21 @@ impl LogicalDevice {
     }
 
     /// Return pending slots to the free list once every referencing context has retired.
+    ///
+    /// Takes the per-state `context_fences` index (not the full context map) so this
+    /// method can be called while holding the ledger lock without risking a lock-ordering
+    /// deadlock with per-context `Mutex<Dx12SubmissionContext>`.
     pub(crate) fn drain_ready_slot_reclamations(
         &mut self,
-        contexts: &HashMap<super::ContextHandle, Dx12SubmissionContext>,
+        context_fences: &HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
     ) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
             let ready = self.pending_slot_reclamations[i].requirements.iter().all(
                 |(ctx_id, required_seq)| {
-                    contexts
-                        .get(ctx_id)
-                        .is_none_or(|ctx| unsafe { ctx.fence.GetCompletedValue() >= *required_seq })
+                    context_fences.get(ctx_id).is_none_or(|(_, fence)| unsafe {
+                        fence.GetCompletedValue() >= *required_seq
+                    })
                 },
             );
             if ready {
@@ -727,29 +708,136 @@ impl LogicalDevice {
             }
         }
     }
+}
 
-    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
-        let batch = self.deletion_queue.drain_up_to_completed(completed);
+/// Cached PSO blobs and disk-dirty flag for a logical device.
+///
+/// Wrapped in `Arc<RwLock<>>` on `LogicalDevice` so that PSO creation (which
+/// is write-rare after warmup) does not need the global backend lock.
+pub(crate) struct PsoCache {
+    /// Cached graphics PSO blobs from `ID3D12PipelineState::GetCachedBlob`.
+    pub graphics_blobs: HashMap<u64, Vec<u8>>,
+    /// Cached compute PSO blobs.
+    pub compute_blobs: HashMap<u64, Vec<u8>>,
+    /// `true` if either blob map changed since loading from the disk file.
+    pub dirty: bool,
+}
+
+impl PsoCache {
+    pub(crate) fn new(
+        graphics_blobs: HashMap<u64, Vec<u8>>,
+        compute_blobs: HashMap<u64, Vec<u8>>,
+    ) -> Self {
+        Self {
+            graphics_blobs,
+            compute_blobs,
+            dirty: false,
+        }
+    }
+}
+
+/// A logical D3D12 device with associated resources.
+#[allow(dead_code)]
+pub(crate) struct LogicalDevice {
+    pub device: Direct3D12::ID3D12Device10,
+    pub adapter_id: u32,
+    pub command_queue: Direct3D12::ID3D12CommandQueue,
+    /// Legacy single allocator for non-compute paths (e.g. render target). Compute uses the pool.
+    pub command_allocator: Direct3D12::ID3D12CommandAllocator,
+    pub rtv_heap: Direct3D12::ID3D12DescriptorHeap,
+    pub rtv_descriptor_size: u32,
+    pub dsv_heap: Direct3D12::ID3D12DescriptorHeap,
+    pub dsv_descriptor_size: u32,
+    pub cbv_srv_uav_heap: Direct3D12::ID3D12DescriptorHeap,
+    pub cbv_srv_uav_descriptor_size: u32,
+    pub sampler_heap: Direct3D12::ID3D12DescriptorHeap,
+    pub sampler_descriptor_size: u32,
+    /// Device fence for synchronous Signal+wait paths only (not per-submit timeline).
+    pub fence: Direct3D12::ID3D12Fence,
+    /// Device-global submission sequence (shared value space; contexts signal their own fences).
+    pub timeline_next: Arc<AtomicU64>,
+    /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
+    pub retired_floor: AtomicU64,
+
+    // Bindless infrastructure
+    /// `true` when adapter reports tiled resources tier >= 1 (buffer reserved resources).
+    pub supports_reserved_buffers: bool,
+    pub tile_heap_pool: Mutex<Option<super::tiles::TileHeapPool>>,
+    /// Shared root signature for all bindless pipelines (graphics and compute)
+    pub bindless_root_signature: Option<Direct3D12::ID3D12RootSignature>,
+    /// Command signature for indirect compute dispatch (ExecuteIndirect, dispatch-only)
+    pub compute_dispatch_indirect_signature: Option<Direct3D12::ID3D12CommandSignature>,
+    /// Command signature for batched dispatch: sets push constants then dispatches.
+    /// Each argument entry contains `[PushLayout (TOTAL_PUSH_BYTES)] [wg_x] [wg_y] [wg_z]`.
+    /// Requires the shared `bindless_root_signature` to be non-None.
+    pub compute_batch_dispatch_signature: Option<Direct3D12::ID3D12CommandSignature>,
+    /// Device-lifetime zero-filled UPLOAD-heap buffer used as the source for
+    /// `CopyBufferRegion` clears. One buffer per device; clears of any size are
+    /// handled by chunking `CopyBufferRegion` calls. Using a copy instead of
+    /// `ClearUnorderedAccessViewUint` avoids the shared-descriptor aliasing hazard
+    /// that caused silent corruption on WARP when multiple buffers were cleared in
+    /// the same wave (all clears rewrote the same single-slot descriptor heap).
+    pub zero_buffer: Direct3D12::ID3D12Resource,
+    /// Deferred deletion queue — resources are dropped only after the GPU finishes
+    /// the command list that was last submitted when the resource was queued.
+    pub deletion_queue: Mutex<DeletionQueue>,
+    /// Descriptor-heap ledger: `ResourceRegistry` + slot reference-tracking.
+    /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
+    /// global backend lock.
+    pub ledger: Arc<Mutex<DeviceLedger>>,
+    /// Cached PSO blobs (graphics + compute) and disk-dirty flag.
+    /// `RwLock` because reads dominate after warmup; `Arc` for Phase 5 cloning.
+    pub pso_cache: Arc<RwLock<PsoCache>>,
+}
+
+/// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
+pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
+
+/// Shared submission context handle — allows cloning a context reference out of `Dx12State`
+/// before dropping the global backend lock, enabling fine-grained per-context locking.
+pub(crate) type SharedSubmissionContext = Arc<Mutex<Dx12SubmissionContext>>;
+
+impl LogicalDevice {
+    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+        let batch = self
+            .deletion_queue
+            .lock()
+            .unwrap()
+            .drain_up_to_completed(completed);
+        if batch.is_empty() {
+            return;
+        }
+        let ledger_arc = Arc::clone(&self.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
         for resource in batch {
-            destroy_pending_deletion(self, resource);
+            destroy_pending_deletion(self, &mut ledger, resource);
         }
     }
 
-    pub(crate) fn flush_deletion_queue(&mut self) {
+    pub(crate) fn flush_deletion_queue(&self) {
         // Called only at device teardown, after wait_for_gpu ensures all GPU work has
         // completed. Slots queued here via reclaim_*_slots will have empty requirements
         // (slot_last_seen was cleared as contexts were destroyed before the device) and
         // are freed immediately in queue_slot_reclamation. Any slots that somehow still
         // have requirements are just dropped with the LogicalDevice — the whole allocator
         // is discarded at this point, so skipping drain_ready_slot_reclamations is safe.
-        let batch = self.deletion_queue.drain_everything();
+        let batch = self.deletion_queue.lock().unwrap().drain_everything();
+        if batch.is_empty() {
+            return;
+        }
+        let ledger_arc = Arc::clone(&self.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
         for resource in batch {
-            destroy_pending_deletion(self, resource);
+            destroy_pending_deletion(self, &mut ledger, resource);
         }
     }
 }
 
-pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: PendingDeletion) {
+pub(crate) fn destroy_pending_deletion(
+    ld: &LogicalDevice,
+    ledger: &mut DeviceLedger,
+    resource: PendingDeletion,
+) {
     match resource {
         PendingDeletion::Buffer {
             buffer_handle,
@@ -758,19 +846,19 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             coherent_readback,
             reserved_tiles,
         } => {
-            ld.reclaim_buffer_slots(buffer_handle);
+            ledger.reclaim_buffer_slots(buffer_handle);
             if let Some(tiles) = reserved_tiles {
+                let mut pool = ld.tile_heap_pool.lock().unwrap();
                 super::tiles::teardown_reserved_mappings(
                     &ld.command_queue,
-                    &mut ld.tile_heap_pool,
+                    &mut *pool,
                     &resource,
                     &tiles,
                 );
             }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.timeline_next;
-            ld.timeline_next += 1;
+            let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
             if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
@@ -779,7 +867,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             drop(coherent_readback);
         }
         PendingDeletion::BufferView { buffer_handle } => {
-            ld.reclaim_buffer_slots(buffer_handle);
+            ledger.reclaim_buffer_slots(buffer_handle);
         }
         PendingDeletion::ReplacedBufferGpu {
             resource,
@@ -796,16 +884,18 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             upload_buffer,
             coherent_readback,
         } => {
-            super::tiles::teardown_reserved_mappings(
-                &ld.command_queue,
-                &mut ld.tile_heap_pool,
-                &resource,
-                &tiles,
-            );
+            {
+                let mut pool = ld.tile_heap_pool.lock().unwrap();
+                super::tiles::teardown_reserved_mappings(
+                    &ld.command_queue,
+                    &mut *pool,
+                    &resource,
+                    &tiles,
+                );
+            }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.timeline_next;
-            ld.timeline_next += 1;
+            let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
             if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
@@ -817,7 +907,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             texture_handle,
             resource,
         } => {
-            ld.reclaim_texture_slots(texture_handle);
+            ledger.reclaim_texture_slots(texture_handle);
             drop(resource);
         }
         PendingDeletion::StandaloneResource(resource) => {
@@ -1044,10 +1134,17 @@ pub(super) struct Dx12State {
     /// (needed for tear-free immediate presentation in windowed mode).
     pub allow_tearing: bool,
     pub adapters: Vec<DxgiAdapterInfo>,
-    pub devices: HashMap<DeviceHandle, LogicalDevice>,
+    pub devices: HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: HashMap<super::ContextHandle, Dx12SubmissionContext>,
+    pub contexts: HashMap<ContextHandle, SharedSubmissionContext>,
     pub next_context_id: super::ContextHandle,
+    /// Fence handles for every live context, keyed by context ID.
+    ///
+    /// Maintained in sync with `contexts` (inserted on create, removed on destroy).
+    /// Used by [`DeviceLedger::drain_ready_slot_reclamations`] and [`device_retired`] so
+    /// those paths can query fence completion without acquiring any per-context lock,
+    /// avoiding a ledger-lock → context-lock ordering hazard.
+    pub context_fences: HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: HashMap<ShaderHandle, ShaderState>,
@@ -1074,10 +1171,6 @@ pub(super) struct Dx12State {
     pub free_dsv_offsets: Vec<u32>,
     /// Per-backend Slang compiler instance
     pub slang_compiler: crate::slang::SlangCompiler,
-    /// Per-device upload belts for `GpuCommand::WriteBuffer`.
-    pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
-    /// Per-device pools that recycle texture-upload staging buffers across frames.
-    pub(super) texture_staging_pools: HashMap<DeviceHandle, super::staging::TextureStagingPool>,
     /// Set to `true` when a TDR / device-removal is detected (fence completed with `u64::MAX`
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.

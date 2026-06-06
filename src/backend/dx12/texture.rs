@@ -100,7 +100,9 @@ pub(super) fn init_storage_texture_uav_layout(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -108,10 +110,6 @@ pub(super) fn init_storage_texture_uav_layout(
     }
     .context("Failed to signal fence for init barrier")?;
     super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
-
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
-    }
 
     Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
 }
@@ -197,9 +195,14 @@ pub(super) fn create(
     // (textures and buffers share the same CBV/SRV/UAV heap)
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
-    let srv_offset = logical_device.resource_registry.register_texture(handle);
+    let srv_offset = logical_device
+        .ledger
+        .lock()
+        .unwrap()
+        .resource_registry
+        .register_texture(handle);
 
     let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
         Format: format_to_dxgi(format),
@@ -232,6 +235,9 @@ pub(super) fn create(
     // bindless_offset must point to UAV for goldy_direct_spatial.
     let bindless_offset = if is_storage {
         let uav_offset = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_texture_uav(handle);
         let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
@@ -268,9 +274,12 @@ pub(super) fn create(
     let sampled_bindless_offset = if is_dual_access {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         let srv2_offset = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_texture_srv(handle);
         let srv2_cpu_handle = unsafe {
@@ -343,7 +352,7 @@ pub(super) fn create(
 /// Build a staged full-texture upload (caller runs GPU copy via task graph or
 /// [`execute_staged_uploads_sync`]).
 pub(super) fn stage_texture_upload_full(
-    devices: &std::collections::HashMap<DeviceHandle, super::types::LogicalDevice>,
+    devices: &std::collections::HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     textures: &std::collections::HashMap<TextureHandle, super::types::TextureState>,
     pool: &mut super::staging::TextureStagingPool,
     texture_handle: TextureHandle,
@@ -415,7 +424,7 @@ pub(super) fn stage_texture_upload_full(
 
 /// Build a staged subregion texture upload.
 pub(super) fn stage_texture_upload_region(
-    devices: &std::collections::HashMap<DeviceHandle, super::types::LogicalDevice>,
+    devices: &std::collections::HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     textures: &std::collections::HashMap<TextureHandle, super::types::TextureState>,
     pool: &mut super::staging::TextureStagingPool,
     region: TextureUploadRegion<'_>,
@@ -603,20 +612,12 @@ pub(super) fn write(
     width: u32,
     height: u32,
 ) -> Result<()> {
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture")?;
-    let device_handle = texture.device_handle;
     let staged = {
-        let pool = state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(super::staging::TextureStagingPool::new);
+        let mut pool = super::staging::TextureStagingPool::new();
         stage_texture_upload_full(
             &state.devices,
             &state.textures,
-            pool,
+            &mut pool,
             texture_handle,
             data,
             width,
@@ -638,20 +639,12 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture")?;
-    let device_handle = texture.device_handle;
     let staged = {
-        let pool = state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(super::staging::TextureStagingPool::new);
+        let mut pool = super::staging::TextureStagingPool::new();
         stage_texture_upload_region(
             &state.devices,
             &state.textures,
-            pool,
+            &mut pool,
             TextureUploadRegion {
                 texture_handle,
                 x,
@@ -811,7 +804,9 @@ pub(super) fn execute_staged_uploads_sync(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -820,16 +815,10 @@ pub(super) fn execute_staged_uploads_sync(
     .context("flush_pending_copies: failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
-    }
-
     // Release and reclaim the staging entries back to the pool immediately.
-    if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-        let entries: Vec<super::staging::TextureStagingEntry> =
-            copies.into_iter().map(|c| c.staging_entry).collect();
-        pool.release(fence_value, entries);
-        pool.reclaim(fence_value);
+    // The GPU is idle for this submission (we just waited), so we can safely destroy them.
+    for copy in copies {
+        unsafe { copy.staging_entry.destroy() };
     }
 
     tracing::debug!("Flushed {} pending texture copies in one submission", count);
@@ -1009,7 +998,9 @@ pub(super) fn read_to_cpu(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -1018,8 +1009,7 @@ pub(super) fn read_to_cpu(
     .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
+    if let Some(dev) = state.devices.get(&device_handle) {
         // Check for device removal (compute passes may have caused TDR)
         let removed = unsafe { dev.device.GetDeviceRemovedReason() };
         if removed.is_err() {
@@ -1060,13 +1050,19 @@ pub(super) fn read_to_cpu(
 /// for deferred deletion after in-flight GPU work completes.
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.remove(&texture_handle) {
-        if let Some(dev) = state.devices.get_mut(&tex.device_handle) {
+        if let Some(dev) = state.devices.get(&tex.device_handle) {
             if tex.transient_placed {
-                dev.reclaim_texture_slots(texture_handle);
+                dev.ledger
+                    .lock()
+                    .unwrap()
+                    .reclaim_texture_slots(texture_handle);
                 return;
             }
-            let last_fence = dev.timeline_next.saturating_sub(1);
-            dev.deletion_queue.queue(
+            let last_fence = dev
+                .timeline_next
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(1);
+            dev.deletion_queue.lock().unwrap().queue(
                 last_fence,
                 PendingDeletion::Texture {
                     texture_handle,
