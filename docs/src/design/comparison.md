@@ -35,8 +35,8 @@ Goldy uses **bindless access**. Resources get a slot index at creation time, and
 
 ```rust
 // Goldy: buffer already has a bindless slot, shader reads it by index
-let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered)?;
-pass.bind_resources_raw(&[buffer.bindless_index().unwrap()]);
+let buffer = device.alloc_buffer_with_data( &data, BufferKind::Scattered)?;
+pass.bind_resources_raw(&[buffer.resource_index(ResourceAccess::Read).unwrap()]);
 ```
 
 The bindless approach eliminates an entire layer of API surface and the pipeline layout permutations that come with it.

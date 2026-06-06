@@ -137,27 +137,27 @@ impl From<goldy::TextureFormat> for GoldyTextureFormat {
 /// - `Broadcast`: All threads read same address. Hardware broadcast optimization.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GoldyDataAccess {
+pub enum GoldyBufferKind {
     /// Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
     Scattered = 0,
     /// All threads same address, broadcast optimized (ConstantBuffer).
     Broadcast = 1,
 }
 
-impl From<GoldyDataAccess> for goldy::DataAccess {
-    fn from(a: GoldyDataAccess) -> Self {
+impl From<GoldyBufferKind> for goldy::BufferKind {
+    fn from(a: GoldyBufferKind) -> Self {
         match a {
-            GoldyDataAccess::Scattered => goldy::DataAccess::Scattered,
-            GoldyDataAccess::Broadcast => goldy::DataAccess::Broadcast,
+            GoldyBufferKind::Scattered => goldy::BufferKind::Scattered,
+            GoldyBufferKind::Broadcast => goldy::BufferKind::Broadcast,
         }
     }
 }
 
-impl From<goldy::DataAccess> for GoldyDataAccess {
-    fn from(a: goldy::DataAccess) -> Self {
+impl From<goldy::BufferKind> for GoldyBufferKind {
+    fn from(a: goldy::BufferKind) -> Self {
         match a {
-            goldy::DataAccess::Scattered => GoldyDataAccess::Scattered,
-            goldy::DataAccess::Broadcast => GoldyDataAccess::Broadcast,
+            goldy::BufferKind::Scattered => GoldyBufferKind::Scattered,
+            goldy::BufferKind::Broadcast => GoldyBufferKind::Broadcast,
         }
     }
 }
@@ -169,7 +169,7 @@ impl From<goldy::DataAccess> for GoldyDataAccess {
 /// - `DirectInterpolated`: Both storage (UAV) and sampled (SRV) access on the same texture.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GoldySpatialAccess {
+pub enum GoldyTextureKind {
     /// Hardware filtering between neighbors (Texture2D with sampler).
     Interpolated = 0,
     /// Direct 2D/3D indexing, no filtering (RWTexture2D).
@@ -178,22 +178,22 @@ pub enum GoldySpatialAccess {
     DirectInterpolated = 2,
 }
 
-impl From<GoldySpatialAccess> for goldy::SpatialAccess {
-    fn from(a: GoldySpatialAccess) -> Self {
+impl From<GoldyTextureKind> for goldy::TextureKind {
+    fn from(a: GoldyTextureKind) -> Self {
         match a {
-            GoldySpatialAccess::Interpolated => goldy::SpatialAccess::Interpolated,
-            GoldySpatialAccess::Direct => goldy::SpatialAccess::Direct,
-            GoldySpatialAccess::DirectInterpolated => goldy::SpatialAccess::DirectInterpolated,
+            GoldyTextureKind::Interpolated => goldy::TextureKind::Interpolated,
+            GoldyTextureKind::Direct => goldy::TextureKind::Direct,
+            GoldyTextureKind::DirectInterpolated => goldy::TextureKind::DirectInterpolated,
         }
     }
 }
 
-impl From<goldy::SpatialAccess> for GoldySpatialAccess {
-    fn from(a: goldy::SpatialAccess) -> Self {
+impl From<goldy::TextureKind> for GoldyTextureKind {
+    fn from(a: goldy::TextureKind) -> Self {
         match a {
-            goldy::SpatialAccess::Interpolated => GoldySpatialAccess::Interpolated,
-            goldy::SpatialAccess::Direct => GoldySpatialAccess::Direct,
-            goldy::SpatialAccess::DirectInterpolated => GoldySpatialAccess::DirectInterpolated,
+            goldy::TextureKind::Interpolated => GoldyTextureKind::Interpolated,
+            goldy::TextureKind::Direct => GoldyTextureKind::Direct,
+            goldy::TextureKind::DirectInterpolated => GoldyTextureKind::DirectInterpolated,
         }
     }
 }

@@ -11,7 +11,7 @@ use anyhow::Result;
 use goldy::{
     BufferPool, BufferView, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    ResourceAccess, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -235,8 +235,8 @@ impl RenderState {
                 .bind_buffer_view(read_view, NodeAccess::Read)
                 .bind_buffer_view(write_view, NodeAccess::Write)
                 .bind_resources_raw_slice(&[
-                    read_view.bindless_handle().unwrap().index(),
-                    write_view.bindless_handle().unwrap().index(),
+                    read_view.handle(ResourceAccess::Read).unwrap().index(),
+                    write_view.handle(ResourceAccess::Write).unwrap().index(),
                 ])
                 .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
             graph.dispatch(&self.context)?;
@@ -256,9 +256,9 @@ impl RenderState {
 
             // Read from the view that is now "current" (after the ping-pong swap).
             let current_handle = if self.use_buffer_a {
-                self.view_a.bindless_handle().unwrap()
+                self.view_a.handle(ResourceAccess::Read).unwrap()
             } else {
-                self.view_b.bindless_handle().unwrap()
+                self.view_b.handle(ResourceAccess::Read).unwrap()
             };
             pass.bind_resources_typed(&[current_handle]);
 

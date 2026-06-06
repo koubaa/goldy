@@ -1,10 +1,10 @@
 # VRAM Allocator
 
-Goldy has three independent GPU memory allocation paths:
+All GPU buffer and texture allocations route through the device's installed `VramAllocator`:
 
-1. **Transient sub-allocations** — `TransientAllocator` → `BufferPool` → `Buffer::new`. Pluggable recycling policy, but no control over *where* memory comes from.
-2. **Standalone buffers** — consumers call `Buffer::new` directly for bump readback, staging, indirect dispatch, etc.
-3. **Textures** — `TexturePool` → `Texture::new`.
+1. **Transient sub-allocations** — `TransientAllocator` → `BufferPool` → `Device::alloc_buffer`
+2. **Standalone buffers** — `Device::alloc_buffer` / `alloc_buffer_with_*`
+3. **Textures** — `TexturePool` → `Device::alloc_texture`
 
 The `VramAllocator` trait sits **below** all three, providing a single customization point for where GPU memory comes from. The transient allocator controls *when* to reclaim; the VRAM allocator controls *how* to allocate.
 
@@ -34,16 +34,11 @@ The `VramAllocator` trait sits **below** all three, providing a single customiza
 Every `Device` ships with a `DefaultVramAllocator` that delegates directly to the backend with zero overhead. You can allocate through it explicitly via convenience methods:
 
 ```rust
-// These go through the device's VramAllocator (parcel carries a deed; Drop notifies the allocator):
-let buf = device.alloc_buffer(size, DataAccess::Scattered, None, BufferFlags::empty())?;
+let buf = device.alloc_buffer(size, BufferKind::Scattered, None, BufferFlags::empty())?;
 let tex = device.alloc_texture(width, height, format, access, flags)?;
-
-// These bypass the allocator (direct backend call; no deed, no allocator accounting on Drop):
-let buf = Buffer::new(&device, size, DataAccess::Scattered)?;
-let tex = Texture::new(&device, width, height, format, access, flags)?;
 ```
 
-Only allocations through `device.alloc_*` attach an allocator **deed** and call `VramAllocator::notify_freed` on drop. Borrowing sub-parcels such as `BufferView` never account.
+Every `device.alloc_*` call attaches an allocator **deed** and calls `VramAllocator::notify_freed` on drop. Borrowing sub-parcels such as `BufferView` never account.
 
 Goldy's built-in pooling systems (`TexturePool`, `BufferPool`, ekrano's `ResourcePool`) all route through the device's allocator automatically.
 
@@ -94,7 +89,7 @@ impl VramAllocator for MyAllocator {
         &self,
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<Buffer> {
@@ -109,7 +104,7 @@ impl VramAllocator for MyAllocator {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> anyhow::Result<Texture> {
         Texture::new(device, width, height, format, access, flags)
@@ -119,7 +114,7 @@ impl VramAllocator for MyAllocator {
         &self,
         reserved: u64,
         _committed: u64,
-        _kind: goldy::vram_allocator::ParcelKind,
+        _kind: goldy::vram_allocator::ParcelType,
     ) {
         // Decrement your tracked bytes (reserved is the parcel's reserved backing size).
         let _ = reserved;

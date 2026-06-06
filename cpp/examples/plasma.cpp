@@ -85,7 +85,7 @@ int main() {
         std::cout << "Has goldy_exp library: " << (device.has_library("goldy_exp") ? "yes" : "no") << "\n\n";
 
         // Create uniform buffer for time (Broadcast = all threads read same address)
-        goldy::Buffer uniform_buffer(device, sizeof(Uniforms), goldy::DataAccess::Broadcast);
+        goldy::Buffer uniform_buffer(device, sizeof(Uniforms), goldy::BufferKind::Broadcast);
         std::cout << "Created uniform buffer: " << uniform_buffer.size() << " bytes\n";
 
         // Load and compile shader from shared shaders directory

@@ -26,7 +26,7 @@ This texture is valid until the frame is presented. You can obtain its bindless 
 
 ```rust
 let texture_handle = texture
-    .bindless_handle()
+    .handle(ResourceAccess::Read)
     .expect("Surface texture has no bindless handle");
 ```
 
@@ -102,7 +102,7 @@ A complete compute-to-surface application rendering an animated plasma effect:
 
 ```rust
 use goldy::{
-    Buffer, ComputePipeline, DataAccess, DeviceType, Instance,
+    Buffer, ComputePipeline, BufferKind, DeviceType, Instance,
     NodeAccess, PresentMode, ShaderModule, Surface, SurfaceConfig, TaskGraph,
 };
 
@@ -124,7 +124,7 @@ let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
 // Create uniform buffer
-let uniform_buffer = Buffer::with_data(
+let uniform_buffer = device.alloc_buffer_with_data(
     &device,
     &[Uniforms {
         width: surface.width(),
@@ -132,7 +132,7 @@ let uniform_buffer = Buffer::with_data(
         time: 0.0,
         _padding: 0.0,
     }],
-    DataAccess::Scattered,
+    BufferKind::Scattered,
 )?;
 
 // --- Render loop ---
@@ -147,10 +147,10 @@ let frame = surface.begin()?;
 let texture = frame.texture();
 
 let uniform_handle = uniform_buffer
-    .bindless_srv_handle()
+    .handle(ResourceAccess::Read)
     .expect("Uniform buffer has no bindless SRV handle");
 let texture_handle = texture
-    .bindless_handle()
+    .handle(ResourceAccess::Read)
     .expect("Surface texture has no bindless handle");
 
 // Build and submit compute graph

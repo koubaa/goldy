@@ -3,7 +3,7 @@
 use super::super::{DeviceHandle, TextureHandle};
 use super::types::{MetalState, ResourceRegistry, TextureState, ARGUMENT_BUFFER_SIZE};
 use super::utils::format_to_mtl;
-use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use ::metal as mtl;
 use anyhow::{bail, Context, Result};
 use mtl::{MTLOrigin, MTLRegion, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
@@ -88,7 +88,7 @@ pub(super) fn create(
     width: u32,
     height: u32,
     format: TextureFormat,
-    access: SpatialAccess,
+    access: TextureKind,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
     let handle = state.next_texture_handle;
@@ -101,10 +101,10 @@ pub(super) fn create(
 
     let mut mtl_usage = mtl::MTLTextureUsage::Unknown;
     match access {
-        SpatialAccess::Interpolated => {
+        TextureKind::Interpolated => {
             mtl_usage |= MTLTextureUsage::ShaderRead;
         }
-        SpatialAccess::Direct => {
+        TextureKind::Direct => {
             // Storage images (RWTexture2D / DirectSpatial) need both read and
             // write usage bits. Metal's `texture2d<T, access::read_write>` —
             // which Slang emits for DirectSpatial — requires ShaderRead even
@@ -115,7 +115,7 @@ pub(super) fn create(
             // on every subsequent frame.
             mtl_usage |= MTLTextureUsage::ShaderWrite | MTLTextureUsage::ShaderRead;
         }
-        SpatialAccess::DirectInterpolated => {
+        TextureKind::DirectInterpolated => {
             // Dual-access: writable as a storage image (UAV) and readable via
             // hardware sampling (SRV). Needs ShaderRead | ShaderWrite.
             mtl_usage |= MTLTextureUsage::ShaderWrite | MTLTextureUsage::ShaderRead;
@@ -136,7 +136,7 @@ pub(super) fn create(
 
     let is_storage_image = matches!(
         access,
-        SpatialAccess::Direct | SpatialAccess::DirectInterpolated
+        TextureKind::Direct | TextureKind::DirectInterpolated
     );
     let (arg_buffer_index, encoding_index) = if is_storage_image {
         let local = logical_device
@@ -149,7 +149,7 @@ pub(super) fn create(
     };
 
     // For DirectInterpolated, additionally register in the sampled-texture pool.
-    let sampled_arg_buffer_index = if matches!(access, SpatialAccess::DirectInterpolated) {
+    let sampled_arg_buffer_index = if matches!(access, TextureKind::DirectInterpolated) {
         let local = logical_device.resource_registry.register_texture(handle);
         let global = ResourceRegistry::texture_global_index(local);
         let enc = &logical_device.texture_encoder;

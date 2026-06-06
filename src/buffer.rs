@@ -2,19 +2,19 @@
 
 use crate::backend::{BufferHandle, GpuBackend};
 use crate::device::Device;
-use crate::types::{BindlessCategory, BindlessHandle, BufferFlags, DataAccess};
-use crate::vram_allocator::{ParcelKind, VramAllocator};
+use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceCategory, ResourceHandle};
+use crate::vram_allocator::{ParcelType, VramAllocator};
 use anyhow::Result;
 use std::sync::{Arc, Mutex, Weak};
 
-/// Types allowed as elements in [`Buffer::with_data`] and [`BufferPool::alloc_with_data`].
+/// Types allowed as elements in [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data) and [`BufferPool::alloc_with_data`].
 ///
 /// This is implemented for common multi-byte primitives, arrays of those types, and
 /// `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
 ///
 /// **Not** implemented for `u8` / `i8`: passing `&[u8]` (e.g. from `bytemuck::bytes_of`) would
 /// set element stride to 1 while shaders usually expect a larger struct stride. Use
-/// [`Buffer::with_bytes_stride`] or a typed slice instead.
+/// [`Device::alloc_buffer_with_bytes_stride`](crate::Device::alloc_buffer_with_bytes_stride) or a typed slice instead.
 ///
 /// Unit type `()` is included so empty slices type-check.
 pub trait StructuredBufferElement: bytemuck::Pod {}
@@ -55,7 +55,7 @@ pub struct Buffer {
     size: u64,
     /// Reserved byte size (`MTLBuffer.length` / Vulkan allocation / …); >= [`Self::size`].
     allocated_size: u64,
-    access: DataAccess,
+    access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
     /// Peak `allocated_size` ever observed on this buffer (telemetry; for profiling/tuning hints).
@@ -66,6 +66,7 @@ pub struct Buffer {
     deed: Option<Weak<dyn VramAllocator>>,
 }
 
+#[allow(dead_code)]
 impl Buffer {
     #[inline]
     pub(crate) fn gpu_buffer_handle(&self) -> BufferHandle {
@@ -81,23 +82,23 @@ impl Buffer {
     ///
     /// # Access Patterns
     ///
-    /// - `DataAccess::Scattered`: Any thread can access any address (read/write).
+    /// - `BufferKind::Scattered`: Any thread can access any address (read/write).
     ///   Use for general-purpose data (StructuredBuffer, RWStructuredBuffer).
     ///
-    /// - `DataAccess::Broadcast`: All threads read the same address.
+    /// - `BufferKind::Broadcast`: All threads read the same address.
     ///   Hardware optimizes for wave-wide broadcast (ConstantBuffer).
-    pub fn new(device: &Device, size: u64, access: DataAccess) -> Result<Self> {
+    pub(crate) fn new(device: &Device, size: u64, access: BufferKind) -> Result<Self> {
         Self::new_with_stride_and_flags(device, size, access, None, BufferFlags::empty())
     }
 
     /// Like [`Self::new`], with a peak-capacity hint for backends that support oversize virtual
     /// reservations (e.g. Metal). `expected_max` is clamped with `initial_size`; allocation is at
     /// least `max(initial_size, expected_max)` on supporting backends.
-    pub fn new_with_capacity_hint(
+    pub(crate) fn new_with_capacity_hint(
         device: &Device,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
     ) -> Result<Self> {
         Self::new_with_capacity_hint_and_flags(
             device,
@@ -111,11 +112,11 @@ impl Buffer {
     /// Like [`Self::new_with_capacity_hint`], with explicit [`BufferFlags`].
     ///
     /// Use [`BufferFlags::GPU_ONLY`] for device-local frame scratch pools on Metal.
-    pub fn new_with_capacity_hint_and_flags(
+    pub(crate) fn new_with_capacity_hint_and_flags(
         device: &Device,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Self> {
         if flags.contains(BufferFlags::GPU_ONLY) && flags.contains(BufferFlags::CPU_READABLE) {
@@ -154,20 +155,20 @@ impl Buffer {
             deed: None,
         })
     }
-    pub fn new_with_stride(
+    pub(crate) fn new_with_stride(
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
     ) -> Result<Self> {
         Self::new_with_stride_and_flags(device, size, access, element_stride, BufferFlags::empty())
     }
 
     /// Create a buffer with optional element stride and [`BufferFlags`].
-    pub fn new_with_stride_and_flags(
+    pub(crate) fn new_with_stride_and_flags(
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<Self> {
@@ -207,20 +208,20 @@ impl Buffer {
     ///
     /// See [`StructuredBufferElement`] for which `T` are allowed (`u8` / `i8` are not).
     ///
-    /// See [`Buffer::new`] and [`DataAccess::Scattered`] for access-pattern details.
-    pub fn with_data<T: StructuredBufferElement>(
+    /// See [`Buffer::new`] and [`BufferKind::Scattered`] for access-pattern details.
+    pub(crate) fn with_data<T: StructuredBufferElement>(
         device: &Device,
         data: &[T],
-        access: DataAccess,
+        access: BufferKind,
     ) -> Result<Self> {
         Self::with_data_and_flags(device, data, access, BufferFlags::empty())
     }
 
     /// Like [`Self::with_data`], with explicit [`BufferFlags`].
-    pub fn with_data_and_flags<T: StructuredBufferElement>(
+    pub(crate) fn with_data_and_flags<T: StructuredBufferElement>(
         device: &Device,
         data: &[T],
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Self> {
         let bytes = bytemuck::cast_slice(data);
@@ -258,7 +259,7 @@ impl Buffer {
     /// structs, prefer [`Buffer::with_data`] with `&[T]` so stride matches the shader type.
     ///
     /// See [`Buffer::new`] for access pattern documentation.
-    pub fn with_bytes(device: &Device, data: &[u8], access: DataAccess) -> Result<Self> {
+    pub(crate) fn with_bytes(device: &Device, data: &[u8], access: BufferKind) -> Result<Self> {
         // For raw bytes, use stride of 1 (byte-addressable)
         Self::with_bytes_stride_and_flags(device, data, access, 1, BufferFlags::empty())
     }
@@ -270,10 +271,10 @@ impl Buffer {
     /// interpret the buffer as `StructuredBuffer<uint>`.
     ///
     /// See [`Buffer::new`] for access pattern documentation.
-    pub fn with_bytes_stride(
+    pub(crate) fn with_bytes_stride(
         device: &Device,
         data: &[u8],
-        access: DataAccess,
+        access: BufferKind,
         element_stride: u32,
     ) -> Result<Self> {
         Self::with_bytes_stride_and_flags(
@@ -286,10 +287,10 @@ impl Buffer {
     }
 
     /// Like [`Self::with_bytes_stride`], with explicit [`BufferFlags`].
-    pub fn with_bytes_stride_and_flags(
+    pub(crate) fn with_bytes_stride_and_flags(
         device: &Device,
         data: &[u8],
-        access: DataAccess,
+        access: BufferKind,
         element_stride: u32,
         flags: BufferFlags,
     ) -> Result<Self> {
@@ -339,12 +340,17 @@ impl Buffer {
         self.size
     }
 
+    /// Committed byte size for accounting (equals logical [`Self::size`] today).
+    pub fn byte_size(&self) -> u64 {
+        self.size
+    }
+
     /// Reserved byte capacity (physical or virtual backing size).
     pub fn allocated_size(&self) -> u64 {
         self.allocated_size
     }
     /// Get the buffer's access pattern.
-    pub fn access(&self) -> DataAccess {
+    pub fn access(&self) -> BufferKind {
         self.access
     }
 
@@ -377,7 +383,7 @@ impl Buffer {
     }
 
     /// Resize the buffer in place, preserving contents in `[0..min(old, new))` and zero-initialising
-    /// any newly exposed bytes. The [`Self::bindless_handle`] and internal resource handle stay stable.
+    /// any newly exposed bytes. [`Self::resource_index`] values and the internal resource handle stay stable.
     pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
         if new_size == self.size {
             return Ok(());
@@ -435,50 +441,29 @@ impl Buffer {
         backend.hint_buffer_unused_above(self.handle, offset);
     }
 
-    /// Get the buffer's index in the global bindless descriptor set.
+    /// Resource descriptor index for how this buffer will be accessed in the current dispatch.
     ///
-    /// Returns `Some(index)` if this buffer is registered in the global descriptor set.
-    /// All buffers with Scattered or Broadcast access are registered.
-    ///
-    /// **Prefer [`Buffer::bindless_handle`]** for new code: the typed handle
-    /// captures the buffer's [`DataAccess`] category alongside the raw index.
-    pub fn bindless_index(&self) -> Option<u32> {
+    /// Returns `None` for invalid access/kind combinations (e.g. write on `Broadcast`).
+    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
-        backend.buffer_bindless_index(self.handle)
+        match (self.access, access) {
+            (BufferKind::Broadcast, ResourceAccess::Read) => {
+                backend.buffer_bindless_index(self.handle)
+            }
+            (BufferKind::Broadcast, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
+            (BufferKind::Scattered, ResourceAccess::Read) => {
+                backend.buffer_bindless_srv_index(self.handle)
+            }
+            (BufferKind::Scattered, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
+                backend.buffer_bindless_index(self.handle)
+            }
+        }
     }
 
-    /// Get this buffer's typed bindless descriptor handle.
-    ///
-    /// The returned handle carries both the raw u32 index and the
-    /// [`BindlessCategory`] implied by the buffer's [`DataAccess`]:
-    /// `Scattered` → [`BindlessCategory::Scattered`],
-    /// `Broadcast` → [`BindlessCategory::Broadcast`].
-    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
-        self.bindless_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
-    }
-
-    /// Get this buffer's typed bindless handle for read-only structured-buffer
-    /// access (maps to `goldy_buf_ro` / `StructuredBuffer<T>`).
-    ///
-    /// Uses [`Self::bindless_srv_index`]: on Direct3D 12, scattered storage buffers have a
-    /// separate SRV heap slot from the UAV; on Vulkan and Metal the read index matches
-    /// [`Self::bindless_index`]. The handle's [`BindlessCategory`] follows
-    /// [`Self::access`], same as [`Self::bindless_handle`], so non-DX12 backends produce the
-    /// same handle as `bindless_handle()` when the indices coincide.
-    pub fn bindless_srv_handle(&self) -> Option<BindlessHandle> {
-        self.bindless_srv_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
-    }
-
-    /// Get the buffer's SRV (read-only) bindless index for `StructuredBuffer<T>` / `goldy_buf_ro` access.
-    ///
-    /// On DX12, scattered buffers have separate UAV (write) and SRV (read-only) descriptors at
-    /// different heap indices. Use this index when the shader declares `StructuredBuffer<T>`.
-    /// On Vulkan and Metal, returns the same value as `bindless_index()`.
-    pub fn bindless_srv_index(&self) -> Option<u32> {
-        let backend = self.backend.lock().unwrap();
-        backend.buffer_bindless_srv_index(self.handle)
+    /// Typed resource descriptor handle for validation and dispatch wiring.
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.resource_index(access)
+            .map(|i| ResourceHandle::new(ResourceCategory::from(self.access), i))
     }
 
     /// Read buffer contents back to CPU memory.
@@ -553,7 +538,7 @@ impl Drop for Buffer {
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_buffer(self.handle);
         if let Some(allocator) = self.deed.as_ref().and_then(Weak::upgrade) {
-            allocator.notify_freed(self.allocated_size, self.size, ParcelKind::Buffer);
+            allocator.notify_freed(self.allocated_size, self.size, ParcelType::Buffer);
         }
     }
 }
@@ -599,33 +584,25 @@ pub struct BufferView {
 }
 
 impl BufferView {
-    /// Get the view's index in the global bindless descriptor set.
-    pub fn bindless_index(&self) -> Option<u32> {
+    /// Resource descriptor index for how this view will be accessed in the current dispatch.
+    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
-        backend.buffer_bindless_index(self.handle)
+        match access {
+            ResourceAccess::Read => backend.buffer_bindless_srv_index(self.handle),
+            ResourceAccess::Write | ResourceAccess::ReadWrite => {
+                backend.buffer_bindless_index(self.handle)
+            }
+        }
     }
 
-    /// Get the view's typed bindless handle.
+    /// Typed resource descriptor handle for validation and dispatch wiring.
     ///
-    /// Views are always created on top of `DataAccess::Scattered` backing storage
+    /// Views are always created on top of `BufferKind::Scattered` backing storage
     /// (the only access pattern for which sub-ranges make sense), so the handle
-    /// is always tagged [`BindlessCategory::Scattered`].
-    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
-        self.bindless_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))
-    }
-
-    /// Get the view's SRV (read-only) bindless index.
-    pub fn bindless_srv_index(&self) -> Option<u32> {
-        let backend = self.backend.lock().unwrap();
-        backend.buffer_bindless_srv_index(self.handle)
-    }
-
-    /// Get the view's typed bindless handle for read-only structured-buffer
-    /// access (maps to `goldy_buf_ro`, [`BindlessCategory::Scattered`]).
-    pub fn bindless_srv_handle(&self) -> Option<BindlessHandle> {
-        self.bindless_srv_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::Scattered, i))
+    /// is always tagged [`ResourceCategory::Scattered`].
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.resource_index(access)
+            .map(|i| ResourceHandle::new(ResourceCategory::Scattered, i))
     }
 
     /// Get the handle of the backing buffer that owns this view's memory.
@@ -754,7 +731,7 @@ pub(crate) fn lcm(a: u64, b: u64) -> u64 {
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions, BufferPool};
+/// use goldy::{BufferPool, DeviceDescriptor, Instance, RequestAdapterOptions, ResourceAccess};
 ///
 /// let instance = Instance::new()?;
 /// let device = instance
@@ -766,9 +743,9 @@ pub(crate) fn lcm(a: u64, b: u64) -> u64 {
 /// let tiles = pool.alloc::<[u32; 2]>(1024)?;   // 8 KB for 1024 tiles
 /// let segments = pool.alloc::<[f32; 6]>(4096)?; // 96 KB for 4096 segments
 ///
-/// // Use views via bindless indices
-/// let tile_idx = tiles.bindless_index().unwrap();
-/// let seg_idx = segments.bindless_index().unwrap();
+/// // Use views via resource indices
+/// let tile_idx = tiles.resource_index(ResourceAccess::Write).unwrap();
+/// let seg_idx = segments.resource_index(ResourceAccess::Write).unwrap();
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct BufferPool {
@@ -798,7 +775,7 @@ impl BufferPool {
 
     /// Create a new buffer pool with the given total size.
     ///
-    /// The backing buffer is allocated as `DataAccess::Scattered` (storage buffer)
+    /// The backing buffer is allocated as `BufferKind::Scattered` (storage buffer)
     /// since sub-allocation only makes sense for storage buffers.
     ///
     /// `alignment` defaults to 256 bytes, which satisfies `minStorageBufferOffsetAlignment`
@@ -816,7 +793,7 @@ impl BufferPool {
         tracing::debug!(total_size, alignment, "Creating buffer pool");
         let backing = device.alloc_buffer(
             total_size,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             None,
             BufferFlags::empty(),
         )?;
@@ -865,7 +842,7 @@ impl BufferPool {
         let backing = device.alloc_buffer_with_capacity(
             total_size,
             expected_max,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             flags,
         )?;
         Ok(Self {
@@ -895,7 +872,7 @@ impl BufferPool {
     /// Allocate and fill a typed region in one call.
     ///
     /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
-    /// Same element-stride rules as [`Buffer::with_data`].
+    /// Same element-stride rules as [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data).
     pub fn alloc_with_data<T: StructuredBufferElement>(
         &mut self,
         data: &[T],

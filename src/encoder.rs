@@ -3,7 +3,7 @@
 use crate::backend::RenderCommand;
 use crate::buffer::{Buffer, BufferSource};
 use crate::pipeline::RenderPipeline;
-use crate::types::{BindlessHandle, Color, IndexFormat};
+use crate::types::{Color, IndexFormat, ResourceHandle};
 
 /// Command encoder for recording GPU commands.
 ///
@@ -126,8 +126,8 @@ impl<'a> RenderPass<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// let tex_idx = texture.bindless_index().unwrap();
-    /// let samp_idx = sampler.bindless_index().unwrap();
+    /// let tex_idx = texture.resource_index(ResourceAccess::Read).unwrap();
+    /// let samp_idx = sampler.resource_index(ResourceAccess::Read).unwrap();
     /// pass.bind_resources_raw(&[tex_idx, samp_idx]);
     /// // In shader: GET_TEXTURE() and GET_SAMPLER() macros use these indices
     /// ```
@@ -146,20 +146,20 @@ impl<'a> RenderPass<'a> {
         });
     }
 
-    /// Bind resource slots from typed [`BindlessHandle`]s.
+    /// Bind resource slots from typed [`ResourceHandle`]s.
     ///
     /// Each handle carries both the raw index and the
-    /// [`crate::types::BindlessCategory`] implied by the
+    /// [`crate::types::ResourceCategory`] implied by the
     /// resource. At dispatch time the backend validates each slot against the
     /// bound shader's reflection and returns an error on mismatch.
     ///
     /// # Example
     /// ```ignore
-    /// let tex = texture.bindless_handle().unwrap();  // Texture
-    /// let samp = sampler.bindless_handle().unwrap(); // Sampler
+    /// let tex = texture.handle(ResourceAccess::Read).unwrap();  // Texture
+    /// let samp = sampler.handle(ResourceAccess::Read).unwrap(); // Sampler
     /// pass.bind_resources_typed(&[tex, samp]);
     /// ```
-    pub fn bind_resources_typed(&mut self, handles: &[BindlessHandle]) {
+    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) {
         self.encoder
             .commands
             .push(RenderCommand::BindResourcesTyped {

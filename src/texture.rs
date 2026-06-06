@@ -6,8 +6,10 @@
 
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
-use crate::types::{BindlessCategory, BindlessHandle, SpatialAccess, TextureFlags, TextureFormat};
-use crate::vram_allocator::{ParcelKind, VramAllocator};
+use crate::types::{
+    ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind,
+};
+use crate::vram_allocator::{ParcelType, VramAllocator};
 use anyhow::Result;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -23,7 +25,7 @@ pub struct Texture {
     width: u32,
     height: u32,
     format: TextureFormat,
-    access: SpatialAccess,
+    access: TextureKind,
     flags: TextureFlags,
     owned: bool,
     /// Allocator deed for accounting on drop; set only when allocated via [`Device::alloc_texture`].
@@ -43,10 +45,10 @@ impl Texture {
     ///
     /// # Access Patterns
     ///
-    /// - `SpatialAccess::Interpolated`: Hardware filtering between neighbors (texture units).
+    /// - `TextureKind::Interpolated`: Hardware filtering between neighbors (texture units).
     ///   Use for textures sampled with bilinear/trilinear filtering.
     ///
-    /// - `SpatialAccess::Direct`: Direct 2D indexing without filtering.
+    /// - `TextureKind::Direct`: Direct 2D indexing without filtering.
     ///   Use for storage images, compute output, or when you need exact pixel values.
     ///
     /// # Arguments
@@ -61,12 +63,12 @@ impl Texture {
     /// # Errors
     ///
     /// Returns an error if GPU resource allocation fails.
-    pub fn new(
+    pub(crate) fn new(
         device: &Device,
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Self> {
         tracing::debug!(width, height, ?format, ?access, ?flags, "Creating texture");
@@ -94,7 +96,7 @@ impl Texture {
     /// The data must be in the correct format for the texture's pixel format.
     /// For RGBA8 textures, this is 4 bytes per pixel in RGBA order.
     ///
-    /// See [`Texture::new`] for access pattern documentation.
+    /// See [`Device::alloc_texture`](crate::Device::alloc_texture) for access pattern documentation.
     ///
     /// # Arguments
     ///
@@ -117,7 +119,7 @@ impl Texture {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Self> {
         let expected_size = (width * height * format.bytes_per_pixel()) as usize;
@@ -234,7 +236,10 @@ impl Texture {
 
     /// Get the size of the texture data in bytes.
     pub fn byte_size(&self) -> usize {
-        (self.width * self.height * self.format.bytes_per_pixel()) as usize
+        let bytes = u64::from(self.width)
+            * u64::from(self.height)
+            * u64::from(self.format.bytes_per_pixel());
+        usize::try_from(bytes).unwrap_or(usize::MAX)
     }
 
     /// Read texture contents to CPU memory.
@@ -262,55 +267,48 @@ impl Texture {
     }
 
     /// Get the backend handle for this texture.
-    pub fn handle(&self) -> TextureHandle {
+    pub fn gpu_handle(&self) -> TextureHandle {
         self.handle
     }
 
-    /// Get the texture's index in the global descriptor set.
-    ///
-    /// Returns `Some(index)` if this texture is registered.
-    /// Returns `None` otherwise.
-    ///
-    /// **Prefer [`Texture::bindless_handle`]** for new code: the typed handle
-    /// distinguishes storage-image slots (`SpatialAccess::Direct`) from
-    /// sampled-texture slots (`SpatialAccess::Interpolated`), which on Metal
-    /// map to different argument-buffer pools.
-    pub fn bindless_index(&self) -> Option<u32> {
+    /// Resource descriptor index for how this texture will be accessed in the current dispatch.
+    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
-        backend.texture_bindless_index(self.handle)
+        match (self.access, access) {
+            (TextureKind::Interpolated, ResourceAccess::Read) => {
+                backend.texture_bindless_index(self.handle)
+            }
+            (TextureKind::Interpolated, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
+            (TextureKind::Direct, ResourceAccess::Read) => None,
+            (TextureKind::Direct, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
+                backend.texture_bindless_index(self.handle)
+            }
+            (TextureKind::DirectInterpolated, ResourceAccess::Read) => {
+                backend.texture_bindless_sampled_index(self.handle)
+            }
+            (
+                TextureKind::DirectInterpolated,
+                ResourceAccess::Write | ResourceAccess::ReadWrite,
+            ) => backend.texture_bindless_index(self.handle),
+        }
     }
 
-    /// Get this texture's typed bindless descriptor handle.
-    ///
-    /// The category is derived from the texture's [`SpatialAccess`]:
-    /// `Interpolated` → [`BindlessCategory::Texture`],
-    /// `Direct` → [`BindlessCategory::StorageImage`].
-    pub fn bindless_handle(&self) -> Option<BindlessHandle> {
-        self.bindless_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::from(self.access), i))
+    /// Typed resource descriptor handle for validation and dispatch wiring.
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.resource_index(access).map(|i| {
+            let category = match (self.access, access) {
+                (TextureKind::DirectInterpolated, ResourceAccess::Read) => {
+                    ResourceCategory::Texture
+                }
+                _ => ResourceCategory::from(self.access),
+            };
+            ResourceHandle::new(category, i)
+        })
     }
 
     /// Get the access pattern this texture was created with.
-    pub fn access(&self) -> SpatialAccess {
+    pub fn access(&self) -> TextureKind {
         self.access
-    }
-
-    /// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture (SRV)
-    /// bindless index that can be used with hardware filtering (`.Sample()` calls).
-    ///
-    /// Returns `None` for textures that were not created with `DirectInterpolated` access.
-    pub fn bindless_sampled_index(&self) -> Option<u32> {
-        let backend = self.backend.lock().unwrap();
-        backend.texture_bindless_sampled_index(self.handle)
-    }
-
-    /// For `SpatialAccess::DirectInterpolated` textures, return the typed sampled-texture
-    /// bindless handle (`BindlessCategory::Texture`).
-    ///
-    /// Returns `None` for textures that were not created with `DirectInterpolated` access.
-    pub fn bindless_sampled_handle(&self) -> Option<BindlessHandle> {
-        self.bindless_sampled_index()
-            .map(|i| BindlessHandle::new(BindlessCategory::Texture, i))
     }
     /// Creation flags ([`TextureFlags`]) used when this texture was allocated.
     ///
@@ -359,7 +357,7 @@ impl Texture {
     /// like surface frame drawables whose lifetime is managed elsewhere.
     ///
     /// Swapchain drawables on surfaces with compute-to-surface support are
-    /// writable, so we tag them as `SpatialAccess::Direct` (storage image).
+    /// writable, so we tag them as `TextureKind::Direct` (storage image).
     pub(crate) fn borrowed(
         backend: Arc<Mutex<Box<dyn GpuBackend>>>,
         handle: TextureHandle,
@@ -374,7 +372,7 @@ impl Texture {
             width,
             height,
             format,
-            access: SpatialAccess::Direct,
+            access: TextureKind::Direct,
             flags: TextureFlags::empty(),
             owned: false,
             deed: None,
@@ -398,7 +396,7 @@ impl Drop for Texture {
         }
         if let Some(allocator) = self.deed.as_ref().and_then(Weak::upgrade) {
             let byte_size = self.byte_size() as u64;
-            allocator.notify_freed(byte_size, byte_size, ParcelKind::Texture);
+            allocator.notify_freed(byte_size, byte_size, ParcelType::Texture);
         }
     }
 }
@@ -421,7 +419,7 @@ mod tests {
             256,
             256,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -450,7 +448,7 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -472,7 +470,7 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         );
 
@@ -487,7 +485,7 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -504,7 +502,7 @@ mod tests {
             2,
             2,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -525,7 +523,7 @@ mod tests {
             64,
             64,
             TextureFormat::R8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -546,7 +544,7 @@ mod tests {
             32,
             32,
             TextureFormat::Rg8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -567,7 +565,7 @@ mod tests {
             64,
             64,
             TextureFormat::R8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         );
         assert!(result.is_err());

@@ -104,7 +104,7 @@ let mut graph = TaskGraph::new();
 graph
     .node("update", &compute_pipeline)
     .bind_buffer(&buffer, NodeAccess::ReadWrite)
-    .bind_resources_raw(&[buffer.bindless_index().unwrap()])
+    .bind_resources_raw(&[buffer.resource_index(ResourceAccess::Read).unwrap()])
     .dispatch(workgroups, 1, 1);
 graph.dispatch(&device)?;
 ```

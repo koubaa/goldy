@@ -69,17 +69,17 @@ struct Uniforms {
 impl goldy::StructuredBufferElement for Uniforms {}
 ```
 
-Create the buffer with `DataAccess::Scattered` so it gets a bindless descriptor:
+Create the buffer with `BufferKind::Scattered` so it gets a bindless descriptor:
 
 ```rust
-let uniform_buffer = Buffer::with_data(
+let uniform_buffer = device.alloc_buffer_with_data(
     &device,
     &[Uniforms { width, height, time: 0.0, _padding: 0.0 }],
-    DataAccess::Scattered,
+    BufferKind::Scattered,
 )?;
 ```
 
-Pass a typed `&[Uniforms]` slice, not raw bytes. `Buffer::with_data::<T>` uses `size_of::<T>()` as the structured-buffer stride, which backends rely on for correct addressing.
+Pass a typed `&[Uniforms]` slice, not raw bytes. `device.alloc_buffer_with_data` uses `size_of::<T>()` as the structured-buffer stride, which backends rely on for correct addressing.
 
 ### Compute Pipeline
 
@@ -116,10 +116,10 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     let wg_y = height.div_ceil(8);
 
     let uniform_handle = state.uniform_buffer
-        .bindless_srv_handle()
+        .handle(ResourceAccess::Read)
         .expect("Uniform buffer has no bindless SRV handle");
     let texture_handle = texture
-        .bindless_handle()
+        .handle(ResourceAccess::Read)
         .expect("Surface texture has no bindless handle");
 
     let mut graph = TaskGraph::new();

@@ -24,7 +24,7 @@ def test_import():
     # Verify enums
     assert hasattr(goldy, 'DeviceType')
     assert hasattr(goldy, 'TextureFormat')
-    assert hasattr(goldy, 'DataAccess')
+    assert hasattr(goldy, 'BufferKind')
     
     # Verify types
     assert hasattr(goldy, 'Color')
@@ -66,16 +66,16 @@ def test_color():
 
 
 def test_data_access():
-    """Test DataAccess enum."""
+    """Test BufferKind enum."""
     import goldy
     
     # Scattered access (any thread, any address)
-    scattered = goldy.DataAccess.SCATTERED
-    assert scattered == goldy.DataAccess.SCATTERED
+    scattered = goldy.BufferKind.SCATTERED
+    assert scattered == goldy.BufferKind.SCATTERED
     
     # Broadcast access (all threads same address)
-    broadcast = goldy.DataAccess.BROADCAST
-    assert broadcast == goldy.DataAccess.BROADCAST
+    broadcast = goldy.BufferKind.BROADCAST
+    assert broadcast == goldy.BufferKind.BROADCAST
     
     # Different values
     assert scattered != broadcast

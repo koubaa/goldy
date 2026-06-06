@@ -68,7 +68,7 @@ pub(crate) struct ResourceRegistry {
     /// Maps buffer handle to its secondary SRV offset (for storage buffers that need read access)
     pub buffer_srv_offsets: HashMap<BufferHandle, u32>,
     pub texture_offsets: HashMap<TextureHandle, u32>,
-    /// Maps texture handle to UAV offset (for storage textures / SpatialAccess::Direct)
+    /// Maps texture handle to UAV offset (for storage textures / TextureKind::Direct)
     pub texture_uav_offsets: HashMap<TextureHandle, u32>,
     pub sampler_offsets: HashMap<SamplerHandle, u32>,
 }
@@ -103,7 +103,7 @@ impl ResourceRegistry {
         offset
     }
 
-    /// Register a UAV descriptor for a texture (e.g. storage image / SpatialAccess::Direct).
+    /// Register a UAV descriptor for a texture (e.g. storage image / TextureKind::Direct).
     pub fn register_texture_uav(&mut self, handle: TextureHandle) -> u32 {
         let offset = self.cbv_srv_uav.alloc();
         self.texture_uav_offsets.insert(handle, offset);
@@ -171,9 +171,9 @@ impl ResourceRegistry {
     /// DX12 uses a unified CBV/SRV/UAV heap for all non-sampler categories,
     /// so Scattered/Broadcast/Texture/StorageImage all report against the
     /// same pool. Sampler has its own heap.
-    pub fn available_slots(&self, category: crate::types::BindlessCategory) -> u32 {
+    pub fn available_slots(&self, category: crate::types::ResourceCategory) -> u32 {
         match category {
-            crate::types::BindlessCategory::Sampler => {
+            crate::types::ResourceCategory::Sampler => {
                 MAX_BINDLESS_SAMPLERS.saturating_sub(self.sampler.live_count())
             }
             _ => MAX_BINDLESS_CBV_SRV_UAV.saturating_sub(self.cbv_srv_uav.live_count()),
@@ -181,9 +181,9 @@ impl ResourceRegistry {
     }
 
     /// Maximum slots for the given category.
-    pub fn max_slots(category: crate::types::BindlessCategory) -> u32 {
+    pub fn max_slots(category: crate::types::ResourceCategory) -> u32 {
         match category {
-            crate::types::BindlessCategory::Sampler => MAX_BINDLESS_SAMPLERS,
+            crate::types::ResourceCategory::Sampler => MAX_BINDLESS_SAMPLERS,
             _ => MAX_BINDLESS_CBV_SRV_UAV,
         }
     }
@@ -650,7 +650,7 @@ pub(crate) struct PipelineState {
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
@@ -666,7 +666,7 @@ pub(crate) struct ComputePipelineState {
     /// ParameterBlock layouts from shader reflection (for bindless rendering)
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::BindlessCategory>>,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
@@ -709,11 +709,11 @@ pub(crate) struct TextureState {
     /// Bindless descriptor heap offset (same as srv_offset when bindless is enabled).
     /// For `DirectInterpolated` textures this is the UAV (storage-image) slot.
     pub bindless_offset: Option<u32>,
-    /// For `SpatialAccess::DirectInterpolated` textures, the SRV (sampled-texture) slot.
+    /// For `TextureKind::DirectInterpolated` textures, the SRV (sampled-texture) slot.
     pub sampled_bindless_offset: Option<u32>,
     /// Last known layout for enhanced texture barriers (replaces legacy `current_state`).
     pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
-    /// Whether this texture was created with UAV access (SpatialAccess::Direct).
+    /// Whether this texture was created with UAV access (TextureKind::Direct).
     pub is_storage: bool,
     /// Placed resource from a transient DX12 heap (`place_texture_in_transient_heap`).
     pub transient_placed: bool,

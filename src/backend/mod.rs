@@ -42,9 +42,9 @@ pub(crate) mod shared;
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, BindlessHandle, BufferFlags, Color, DataAccess, DepthFormat, DepthStencilState,
-    DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, SpatialAccess,
-    TextureFlags, TextureFormat, VertexBufferLayout,
+    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType,
+    IndexFormat, PresentMode, PrimitiveTopology, ResourceHandle, SamplerDesc, TextureFlags,
+    TextureFormat, TextureKind, VertexBufferLayout,
 };
 use anyhow::Result;
 use std::sync::Arc;
@@ -70,7 +70,7 @@ pub(crate) fn goldy_validation_enabled() -> bool {
     all(feature = "dx12", target_os = "windows"),
     all(feature = "metal", target_os = "macos"),
 ))]
-use crate::types::BindlessCategory;
+use crate::types::ResourceCategory;
 
 /// Validate a typed push-constant array against per-slot category expectations
 /// reported by shader reflection.
@@ -89,8 +89,8 @@ use crate::types::BindlessCategory;
     all(feature = "metal", target_os = "macos"),
 ))]
 pub(crate) fn validate_typed_push_constants(
-    handles: &[BindlessHandle],
-    expectations: &[Option<BindlessCategory>],
+    handles: &[ResourceHandle],
+    expectations: &[Option<ResourceCategory>],
     shader_name: &str,
 ) -> Result<()> {
     let mut mismatches: Vec<String> = Vec::new();
@@ -112,8 +112,8 @@ pub(crate) fn validate_typed_push_constants(
     } else {
         anyhow::bail!(
             "push-constant category mismatch in shader `{shader_name}`:\n  {}\n\
-             Hint: use `Buffer::bindless_handle()` / `Texture::bindless_handle()` \
-             rather than `.bindless_index()` so the resource's category flows \
+             Hint: use `Buffer::handle(access)` / `Texture::handle(access)` \
+             rather than raw backend indices so the resource's category flows \
              through to the push-constant setter.",
             mismatches.join("\n  ")
         );
@@ -240,10 +240,10 @@ pub enum RenderCommand {
     /// **Prefer [`RenderCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
     BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
-    /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
-    /// each handle's [`crate::types::BindlessCategory`]
+    /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
+    /// each handle's [`crate::types::ResourceCategory`]
     /// against the bound shader's reflection and emit the raw indices.
-    BindResourcesTyped { handles: Vec<BindlessHandle> },
+    BindResourcesTyped { handles: Vec<ResourceHandle> },
     /// Draw primitives (non-indexed).
     Draw {
         vertex_count: u32,
@@ -280,10 +280,10 @@ pub enum GpuCommand {
     /// **Prefer [`GpuCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
     BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
-    /// Bind resource slots with typed [`BindlessHandle`]s. Backends validate
-    /// each handle's [`crate::types::BindlessCategory`]
+    /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
+    /// each handle's [`crate::types::ResourceCategory`]
     /// against the bound shader's reflection and emit the raw indices.
-    BindResourcesTyped { handles: Vec<BindlessHandle> },
+    BindResourcesTyped { handles: Vec<ResourceHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         /// Debug label from [`crate::task_graph::TaskGraph::node`] when emitted by the analyzer.
@@ -433,7 +433,7 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         device: DeviceHandle,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<BufferHandle>;
@@ -445,7 +445,7 @@ pub trait GpuBackend: Send + Sync {
         device: DeviceHandle,
         initial_size: u64,
         capacity: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
@@ -626,7 +626,7 @@ pub trait GpuBackend: Send + Sync {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle>;
     fn write_texture(
@@ -655,7 +655,7 @@ pub trait GpuBackend: Send + Sync {
     /// Returns None if the texture is not registered.
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;
 
-    /// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture-pool
+    /// For `TextureKind::DirectInterpolated` textures, return the sampled-texture-pool
     /// (SRV) bindless index.  Returns `None` for textures without a secondary SRV slot.
     fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32>;
 
@@ -929,7 +929,7 @@ pub trait GpuBackend: Send + Sync {
     fn available_bindless_slots(
         &self,
         _device: DeviceHandle,
-        _category: crate::types::BindlessCategory,
+        _category: crate::types::ResourceCategory,
     ) -> u32 {
         u32::MAX
     }
@@ -940,7 +940,7 @@ pub trait GpuBackend: Send + Sync {
     fn max_bindless_slots_per_category(
         &self,
         _device: DeviceHandle,
-        _category: crate::types::BindlessCategory,
+        _category: crate::types::ResourceCategory,
     ) -> u32 {
         u32::MAX
     }
@@ -1135,17 +1135,17 @@ pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> 
 #[cfg(test)]
 mod push_constant_validation_tests {
     use super::validate_typed_push_constants;
-    use crate::types::{BindlessCategory, BindlessHandle};
+    use crate::types::{ResourceCategory, ResourceHandle};
 
     #[test]
     fn valid_categories_pass() {
         let handles = vec![
-            BindlessHandle::new(BindlessCategory::Scattered, 0),
-            BindlessHandle::new(BindlessCategory::Broadcast, 1),
+            ResourceHandle::new(ResourceCategory::Scattered, 0),
+            ResourceHandle::new(ResourceCategory::Broadcast, 1),
         ];
         let expectations = vec![
-            Some(BindlessCategory::Scattered),
-            Some(BindlessCategory::Broadcast),
+            Some(ResourceCategory::Scattered),
+            Some(ResourceCategory::Broadcast),
         ];
         validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
     }
@@ -1153,8 +1153,8 @@ mod push_constant_validation_tests {
     #[test]
     fn none_expectations_are_skipped() {
         let handles = vec![
-            BindlessHandle::new(BindlessCategory::Scattered, 0),
-            BindlessHandle::new(BindlessCategory::Texture, 1),
+            ResourceHandle::new(ResourceCategory::Scattered, 0),
+            ResourceHandle::new(ResourceCategory::Texture, 1),
         ];
         let expectations = vec![None, None];
         validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
@@ -1163,16 +1163,16 @@ mod push_constant_validation_tests {
     #[test]
     fn empty_expectations_passes_any_handles() {
         let handles = vec![
-            BindlessHandle::new(BindlessCategory::Scattered, 5),
-            BindlessHandle::new(BindlessCategory::Sampler, 2),
+            ResourceHandle::new(ResourceCategory::Scattered, 5),
+            ResourceHandle::new(ResourceCategory::Sampler, 2),
         ];
         validate_typed_push_constants(&handles, &[], "test_shader").unwrap();
     }
 
     #[test]
     fn scattered_where_broadcast_expected_fails() {
-        let handles = vec![BindlessHandle::new(BindlessCategory::Scattered, 0)];
-        let expectations = vec![Some(BindlessCategory::Broadcast)];
+        let handles = vec![ResourceHandle::new(ResourceCategory::Scattered, 0)];
+        let expectations = vec![Some(ResourceCategory::Broadcast)];
         let err = validate_typed_push_constants(&handles, &expectations, "my_shader")
             .unwrap_err()
             .to_string();
@@ -1190,12 +1190,12 @@ mod push_constant_validation_tests {
     #[test]
     fn texture_where_scattered_expected_fails() {
         let handles = vec![
-            BindlessHandle::new(BindlessCategory::Scattered, 0),
-            BindlessHandle::new(BindlessCategory::Texture, 3),
+            ResourceHandle::new(ResourceCategory::Scattered, 0),
+            ResourceHandle::new(ResourceCategory::Texture, 3),
         ];
         let expectations = vec![
-            Some(BindlessCategory::Scattered),
-            Some(BindlessCategory::Scattered),
+            Some(ResourceCategory::Scattered),
+            Some(ResourceCategory::Scattered),
         ];
         let err = validate_typed_push_constants(&handles, &expectations, "compute_cs")
             .unwrap_err()
@@ -1210,12 +1210,12 @@ mod push_constant_validation_tests {
     #[test]
     fn multiple_mismatches_reported() {
         let handles = vec![
-            BindlessHandle::new(BindlessCategory::Texture, 0),
-            BindlessHandle::new(BindlessCategory::Sampler, 1),
+            ResourceHandle::new(ResourceCategory::Texture, 0),
+            ResourceHandle::new(ResourceCategory::Sampler, 1),
         ];
         let expectations = vec![
-            Some(BindlessCategory::Scattered),
-            Some(BindlessCategory::Broadcast),
+            Some(ResourceCategory::Scattered),
+            Some(ResourceCategory::Broadcast),
         ];
         let err = validate_typed_push_constants(&handles, &expectations, "sh")
             .unwrap_err()

@@ -5,8 +5,8 @@
 //! Run with: cargo run --example textured_quad
 
 use goldy::{
-    types::{AddressMode, FilterMode, SamplerDesc, SpatialAccess, TextureFlags, TextureFormat},
-    Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance, RenderPipeline,
+    types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
+    Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance, RenderPipeline,
     RequestAdapterOptions, RenderPipelineDesc, Sampler, ShaderModule, Surface, Texture, Vertex2DUv,
 };
 use std::sync::Arc;
@@ -166,7 +166,7 @@ impl App {
             tex_width,
             tex_height,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )?;
 
@@ -200,7 +200,7 @@ impl App {
         )?;
 
         // Create vertex buffer
-        let vertex_buffer = Buffer::with_data(&device, &QUAD_VERTICES, DataAccess::Scattered)?;
+        let vertex_buffer = device.alloc_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
 
         self.device = Some(device);
         self.shader = Some(shader);
@@ -226,8 +226,8 @@ impl App {
         let texture = self.texture.as_ref().unwrap();
         let sampler = self.sampler.as_ref().unwrap();
 
-        let tex_handle = texture.bindless_handle().unwrap();
-        let samp_handle = sampler.bindless_handle().unwrap();
+        let tex_handle = texture.handle(ResourceAccess::Read).unwrap();
+        let samp_handle = sampler.handle(ResourceAccess::Read).unwrap();
 
         let frame = surface.begin()?;
 

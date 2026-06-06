@@ -3,7 +3,7 @@
 //! Run with: cargo run --example metaballs
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance, RenderPipeline,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
@@ -77,10 +77,11 @@ impl App {
         )?;
 
         // Create uniform buffer
-        let uniform_buffer = Buffer::new(
-            device.as_ref(),
+        let uniform_buffer = device.as_ref().alloc_buffer(
             std::mem::size_of::<Uniforms>() as u64,
-            DataAccess::Broadcast,
+            BufferKind::Broadcast,
+            None,
+            goldy::BufferFlags::empty(),
         )?;
 
         self.device = Some(device);

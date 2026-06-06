@@ -10,7 +10,7 @@ use crate::task_graph::TaskGraph;
 use crate::timeline::TimelineValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// GPU submission/timeline context for a single device.
 ///
@@ -26,6 +26,13 @@ pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
     high_water_timeline: AtomicU64,
+    /// Per-context transient resource heap (backing buffer + cached views/textures).
+    ///
+    /// Scoped to the context rather than the device so that independent contexts —
+    /// e.g. concurrent renders that each own a context — never share transient
+    /// `BufferView`/`Texture` handles. Sharing a device-global heap across contexts
+    /// caused GPU-level write-write races on the cached transient textures.
+    pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
 }
 
 impl Clone for Context {
@@ -44,6 +51,12 @@ impl std::fmt::Debug for Context {
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
+        // Drop the placement heap (and its views/buffer/textures) while the device is
+        // still alive (this `ContextInner` still holds a `Device` clone). The heap's
+        // resource `Drop`s route through the backend deletion queue.
+        if let Ok(mut heap_guard) = self.placement_heap.lock() {
+            *heap_guard = None;
+        }
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         let mut backend = self.device.inner.backend.lock().unwrap();
@@ -64,6 +77,7 @@ impl Context {
                 device,
                 handle,
                 high_water_timeline: AtomicU64::new(0),
+                placement_heap: Mutex::new(None),
             }),
         })
     }
@@ -189,11 +203,6 @@ impl Context {
             backend.set_reclamation_context(self.inner.handle, Some(epoch));
             drop(backend);
             self.device().vram_allocator().boundary_crossed(retired);
-            if let Ok(mut heap_guard) = self.inner.device.inner.placement_heap.lock() {
-                if let Some(heap) = heap_guard.as_mut() {
-                    heap.reclaim(epoch);
-                }
-            }
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_post");
@@ -335,6 +344,45 @@ impl Context {
         self.wait_until(v)
     }
 
+    /// Snapshot of this context's placement-heap state for diagnostics.
+    ///
+    /// Returns `None` if the heap hasn't been created yet (no transient-resource
+    /// graphs have been submitted on this context).
+    pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        heap_guard.as_ref().map(|h| h.stats())
+    }
+
+    /// Number of `BufferView`s and `Texture`s currently held in this context's placement
+    /// heap caches. Returns `(cached_views, cached_textures)`.
+    pub fn transient_cache_counts(&self) -> (usize, usize) {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        match heap_guard.as_ref() {
+            Some(h) => (h.cached_view_count(), h.cached_texture_count()),
+            None => (0, 0),
+        }
+    }
+
+    /// Total number of `create_buffer_view` backend calls made by this context's placement
+    /// heap view cache since initialization. Monotonically increasing.
+    pub fn transient_view_create_count(&self) -> usize {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        heap_guard
+            .as_ref()
+            .map(|h| h.view_create_count())
+            .unwrap_or(0)
+    }
+
+    /// Total number of `Texture::new` calls made by this context's placement heap texture
+    /// cache since initialization. Monotonically increasing.
+    pub fn transient_texture_create_count(&self) -> usize {
+        let heap_guard = self.inner.placement_heap.lock().unwrap();
+        heap_guard
+            .as_ref()
+            .map(|h| h.texture_create_count())
+            .unwrap_or(0)
+    }
+
     pub(crate) const DEFAULT_PIPELINE_DEPTH: u64 = 4;
 
     fn submit_with_placement_heap(
@@ -360,7 +408,12 @@ impl Context {
             (0u64, 1u64, None)
         };
 
-        let mut heap_guard = device.inner.placement_heap.lock().unwrap();
+        // Query GPU-retired timeline BEFORE locking the heap so we can use it
+        // inside get_or_create_textures without acquiring the backend lock a
+        // second time while the heap guard is held.
+        let retired_timeline = device.timeline_retired();
+
+        let mut heap_guard = self.inner.placement_heap.lock().unwrap();
 
         if heap_guard.is_none() {
             let cap = (256 * 1024 * 1024u64).max(alloc_size * Self::DEFAULT_PIPELINE_DEPTH);
@@ -378,7 +431,18 @@ impl Context {
 
         let mut resolver = SlotResolver::new();
 
-        let tex_handles = graph.resolve_transient_textures_with_heap(device, heap, &node_waves)?;
+        // Obtain the page slot BEFORE advance_page so that transient textures
+        // are tied to the same slot as transient buffers.  Concurrent renders on
+        // the same device get distinct page slots (0, 1, 2, 3, 0, …), so each
+        // render writes to a different set of textures on the GPU.
+        let tex_page_slot = heap.current_page_slot();
+        let tex_handles = graph.resolve_transient_textures_with_heap(
+            device,
+            heap,
+            &node_waves,
+            tex_page_slot,
+            retired_timeline,
+        )?;
         for (id, handle) in &tex_handles {
             resolver
                 .textures
@@ -410,8 +474,11 @@ impl Context {
             }
         }
 
-        drop(heap_guard);
-
+        // Submit while heap_guard is still held so that stamp_pending happens before
+        // any other thread can observe last_timeline.  Releasing heap_guard before
+        // stamping creates a window where a concurrent submit sees last_timeline = None
+        // and evicts in-flight transient textures synchronously, causing GPU UAF.
+        // Lock order is always heap → backend; no other code path reverses this.
         let mut backend = device.inner.backend.lock().unwrap();
         let tv = graph.submit_ir_with_resolver(
             self,
@@ -421,7 +488,6 @@ impl Context {
         )?;
         drop(backend);
 
-        let mut heap_guard = device.inner.placement_heap.lock().unwrap();
         if let Some(heap) = heap_guard.as_mut() {
             heap.stamp_pending(tv);
         }

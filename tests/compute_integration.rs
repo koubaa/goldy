@@ -9,9 +9,9 @@ mod common;
 mod submission;
 
 use goldy::{
-    types::{BackendType, BufferFlags, SpatialAccess, TextureFlags, TextureFormat},
-    Buffer, BufferPool, ComputeEncoder, ComputePipeline, DataAccess, Device, DeviceDescriptor,
-    DeviceType, Instance, RequestAdapterOptions, ShaderModule, Texture,
+    types::{BackendType, BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
+    Buffer, BufferKind, BufferPool, ComputeEncoder, ComputePipeline, Device, DeviceDescriptor,
+    DeviceType, Instance, RequestAdapterOptions, ShaderModule,
 };
 use submission::submission_context;
 
@@ -142,7 +142,8 @@ fn test_compute_with_uav_buffer() {
 
     // Create buffer with initial data
     let initial_data: Vec<u32> = (0..64).collect();
-    let buffer = Buffer::with_data(&device, &initial_data, DataAccess::Scattered)
+    let buffer = device
+        .alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
         .expect("Failed to create buffer");
 
     let pipeline =
@@ -175,12 +176,14 @@ fn test_compute_with_srv_and_uav() {
 
     // Create input buffer (read-only)
     let input_data: Vec<u32> = (0..64).collect();
-    let input_buffer = Buffer::with_data(&device, &input_data, DataAccess::Scattered)
+    let input_buffer = device
+        .alloc_buffer_with_data(&input_data, BufferKind::Scattered)
         .expect("Failed to create input buffer");
 
     // Create output buffer (read-write)
     let output_data: Vec<u32> = vec![0; 64];
-    let output_buffer = Buffer::with_data(&device, &output_data, DataAccess::Scattered)
+    let output_buffer = device
+        .alloc_buffer_with_data(&output_data, BufferKind::Scattered)
         .expect("Failed to create output buffer");
 
     let pipeline =
@@ -312,7 +315,9 @@ fn vk_api_validation_timeline_semaphore() {
     }
     let tv = encoder.submit(&ctx).expect("submit");
 
-    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+    let buf = device
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("buffer");
     drop(buf);
 
     ctx.wait_until(tv).expect("wait_until");
@@ -350,7 +355,9 @@ fn vk_api_validation_two_device_teardown() {
         .expect("adapter d1")
         .request_device(&DeviceDescriptor::default())
         .expect("d1");
-    let _b1 = Buffer::new(&d1, 256, DataAccess::Scattered).expect("b1");
+    let _b1 = d1
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("b1");
     submit_minimal(&d1);
 
     let i2 = Instance::new().expect("i2");
@@ -359,7 +366,9 @@ fn vk_api_validation_two_device_teardown() {
         .expect("adapter d2")
         .request_device(&DeviceDescriptor::default())
         .expect("d2");
-    let _b2 = Buffer::new(&d2, 256, DataAccess::Scattered).expect("b2");
+    let _b2 = d2
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("b2");
     submit_minimal(&d2);
 
     drop(d1);
@@ -373,7 +382,9 @@ fn vk_api_validation_two_device_teardown() {
 #[test]
 fn resize_preserves_contents() {
     let device = make_device();
-    let mut buf = Buffer::with_data(&device, &[1u32, 2, 3, 4], DataAccess::Scattered).expect("buf");
+    let mut buf = device
+        .alloc_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)
+        .expect("buf");
     buf.resize_to(32).expect("resize");
     let mut out = vec![0u8; 32];
     buf.read_to_cpu(&device, &mut out).expect("read");
@@ -387,17 +398,20 @@ fn resize_preserves_contents() {
 #[test]
 fn resize_preserves_bindless_index() {
     let device = make_device();
-    let mut buf = Buffer::new(&device, 16, DataAccess::Scattered).expect("buf");
-    let idx = buf.bindless_index().expect("bindless");
+    let mut buf = device
+        .alloc_buffer(16, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("buf");
+    let idx = buf.resource_index(ResourceAccess::Write).expect("bindless");
     buf.resize_to(256).expect("resize");
-    assert_eq!(buf.bindless_index(), Some(idx));
+    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(idx));
 }
 
 #[test]
 fn resize_down_truncates() {
     let device = make_device();
-    let mut buf =
-        Buffer::with_data(&device, &[10u32, 20, 30, 40], DataAccess::Scattered).expect("buf");
+    let mut buf = device
+        .alloc_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)
+        .expect("buf");
     buf.resize_to(8).expect("resize down");
     let mut out = vec![0u8; 8];
     buf.read_to_cpu(&device, &mut out).expect("read");
@@ -408,8 +422,9 @@ fn resize_down_truncates() {
 #[test]
 fn resize_uninitialized_skips_copy() {
     let device = make_device();
-    let mut buf =
-        Buffer::with_data(&device, &[0xABCD_BEEFu32], DataAccess::Scattered).expect("buf");
+    let mut buf = device
+        .alloc_buffer_with_data(&[0xABCD_BEEFu32], BufferKind::Scattered)
+        .expect("buf");
     buf.resize_to_uninitialized(8).expect("resize uni");
     let mut out = vec![0u8; 8];
     buf.read_to_cpu(&device, &mut out).expect("read");
@@ -421,18 +436,20 @@ fn buffer_pool_resize() {
     let mut pool = BufferPool::new(&device, 1024).expect("pool");
     let v1 = pool.alloc::<u32>(4).expect("v1");
     let v2 = pool.alloc::<u32>(4).expect("v2");
-    let i1 = v1.bindless_index().unwrap();
-    let i2 = v2.bindless_index().unwrap();
+    let i1 = v1.resource_index(ResourceAccess::Write).unwrap();
+    let i2 = v2.resource_index(ResourceAccess::Write).unwrap();
     pool.resize(2048).expect("resize pool");
     let _v3 = pool.alloc::<u32>(8).expect("v3");
-    assert_eq!(v1.bindless_index(), Some(i1));
-    assert_eq!(v2.bindless_index(), Some(i2));
+    assert_eq!(v1.resource_index(ResourceAccess::Write), Some(i1));
+    assert_eq!(v2.resource_index(ResourceAccess::Write), Some(i2));
 }
 
 #[test]
 fn new_with_capacity_hint_smoke() {
     let device = make_device();
-    let b = Buffer::new_with_capacity_hint(&device, 16, 4096, DataAccess::Scattered).expect("b");
+    let b = device
+        .alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
+        .expect("b");
     assert_eq!(b.size(), 16);
     assert!(b.allocated_size() >= 4096, "expected oversize allocation");
 }
@@ -440,12 +457,13 @@ fn new_with_capacity_hint_smoke() {
 #[test]
 fn oversize_resize_within_capacity_preserves_and_zeros_tail() {
     let device = make_device();
-    let mut buf =
-        Buffer::new_with_capacity_hint(&device, 16, 4096, DataAccess::Scattered).expect("buf");
-    let idx = buf.bindless_index().expect("bindless");
+    let mut buf = device
+        .alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
+        .expect("buf");
+    let idx = buf.resource_index(ResourceAccess::Write).expect("bindless");
     buf.write(0, &[0xabu8; 16]).expect("seed");
     buf.resize_to(256).expect("grow within cap");
-    assert_eq!(buf.bindless_index(), Some(idx));
+    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(idx));
     assert!(buf.size() >= 256);
     let mut got = vec![0u8; 256];
     buf.read_to_cpu(&device, &mut got).expect("read");
@@ -456,8 +474,9 @@ fn oversize_resize_within_capacity_preserves_and_zeros_tail() {
 #[test]
 fn oversize_resize_beyond_capacity_falls_back_and_preserves() {
     let device = make_device();
-    let mut buf =
-        Buffer::new_with_capacity_hint(&device, 16, 256, DataAccess::Scattered).expect("buf");
+    let mut buf = device
+        .alloc_buffer_with_capacity(16, 256, BufferKind::Scattered, BufferFlags::empty())
+        .expect("buf");
     buf.write(0, &[7u8; 16]).expect("w");
     buf.resize_to(512).expect("grow past cap");
     assert!(buf.allocated_size() >= 512);
@@ -469,8 +488,9 @@ fn oversize_resize_beyond_capacity_falls_back_and_preserves() {
 #[test]
 fn hint_unused_above_does_not_corrupt_prefix() {
     let device = make_device();
-    let mut buf =
-        Buffer::new_with_capacity_hint(&device, 64, 4096, DataAccess::Scattered).expect("buf");
+    let mut buf = device
+        .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
+        .expect("buf");
     buf.write(0, &[0x11u8; 64]).expect("w");
     buf.hint_unused_above(32);
     let mut got = vec![0u8; 32];
@@ -533,8 +553,9 @@ fn sparse_backend_oversize_resize_and_hint_within_capacity() {
     if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
         return;
     }
-    let mut buf =
-        Buffer::new_with_capacity_hint(&device, 64, 4096, DataAccess::Scattered).expect("buf");
+    let mut buf = device
+        .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
+        .expect("buf");
     buf.write(0, &[0x11u8; 64]).expect("w");
     buf.resize_to(256).expect("grow within cap");
     let mut got = vec![0u8; 256];
@@ -572,16 +593,21 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         return;
     }
 
-    let mut buf =
-        Buffer::new_with_capacity_hint(&device, 256, 4 * 64 * 1024, DataAccess::Scattered)
-            .expect("buf");
-    let bindless = buf.bindless_index().expect("bindless");
+    let mut buf = device
+        .alloc_buffer_with_capacity(
+            256,
+            4 * 64 * 1024,
+            BufferKind::Scattered,
+            BufferFlags::empty(),
+        )
+        .expect("buf");
+    let bindless = buf.resource_index(ResourceAccess::Write).expect("bindless");
 
     let initial: Vec<u32> = (1..=16).collect();
     buf.write(0, bytemuck::cast_slice(&initial)).expect("w");
 
     buf.resize_to(200 * 1024).expect("grow across tiles");
-    assert_eq!(buf.bindless_index(), Some(bindless));
+    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
 
     let mut read = vec![0u32; 16];
     buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
@@ -607,10 +633,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     // Shrink to one tile, decommit reserved tail with `hint_unused_above`, then grow again.
     buf.resize_to(64 * 1024).expect("shrink to one tile");
-    assert_eq!(buf.bindless_index(), Some(bindless));
+    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
     buf.hint_unused_above(64 * 1024);
     buf.resize_to(200 * 1024).expect("grow after decommit hint");
-    assert_eq!(buf.bindless_index(), Some(bindless));
+    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
 
     let initial2: Vec<u32> = (0..16).collect();
     buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
@@ -633,7 +659,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 #[test]
 fn hint_unused_above_smoke() {
     let device = make_device();
-    let mut buf = Buffer::new(&device, 64, DataAccess::Scattered).expect("buf");
+    let mut buf = device
+        .alloc_buffer(64, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("buf");
     buf.hint_unused_above(32);
 }
 
@@ -650,8 +678,9 @@ fn test_compute_write_and_readback() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let initial: Vec<u32> = (0..64).collect();
-    let buffer =
-        Buffer::with_data(&device, &initial, DataAccess::Scattered).expect("create buffer");
+    let buffer = device
+        .alloc_buffer_with_data(&initial, BufferKind::Scattered)
+        .expect("create buffer");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -686,7 +715,9 @@ fn test_buffer_clear_standalone() {
     let device = make_device();
 
     let data: Vec<u32> = vec![0xDEAD_BEEF; 64];
-    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+    let buffer = device
+        .alloc_buffer_with_data(&data, BufferKind::Scattered)
+        .expect("create buffer");
 
     buffer.clear(&device, 0, 0).expect("clear (full)");
 
@@ -713,7 +744,9 @@ fn test_buffer_clear_partial() {
     // 64 u32s = 256 bytes. Clear bytes 64–128 (elements 16–31).
     let sentinel = 0xDEAD_BEEFu32;
     let data: Vec<u32> = vec![sentinel; 64];
-    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+    let buffer = device
+        .alloc_buffer_with_data(&data, BufferKind::Scattered)
+        .expect("create buffer");
 
     buffer.clear(&device, 64, 64).expect("partial clear");
 
@@ -741,7 +774,9 @@ fn test_buffer_clear_to_end() {
     // Fill with sentinel, then clear from element 32 to end (offset 128, size 0).
     let sentinel = 0xCAFE_BABEu32;
     let data: Vec<u32> = vec![sentinel; 64];
-    let buffer = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create buffer");
+    let buffer = device
+        .alloc_buffer_with_data(&data, BufferKind::Scattered)
+        .expect("create buffer");
 
     buffer.clear(&device, 128, 0).expect("clear to end");
 
@@ -774,9 +809,11 @@ fn test_compute_batched_clear_before_dispatch() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let input: Vec<u32> = vec![0xDEAD_BEEF; 64];
-    let input_buf =
-        Buffer::with_data(&device, &input, DataAccess::Scattered).expect("input buffer");
-    let output_buf = Buffer::with_data(&device, &vec![0xFFFF_FFFFu32; 64], DataAccess::Scattered)
+    let input_buf = device
+        .alloc_buffer_with_data(&input, BufferKind::Scattered)
+        .expect("input buffer");
+    let output_buf = device
+        .alloc_buffer_with_data(&vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered)
         .expect("output buffer");
 
     let mut encoder = ComputeEncoder::new();
@@ -817,10 +854,12 @@ fn test_compute_clear_between_dispatches() {
     let inc_pipeline = ComputePipeline::new(&device, &inc_shader).expect("inc pipeline");
 
     // Input with 42s; output starts empty.
-    let input_buf =
-        Buffer::with_data(&device, &vec![42u32; 64], DataAccess::Scattered).expect("input");
-    let output_buf =
-        Buffer::with_data(&device, &vec![0u32; 64], DataAccess::Scattered).expect("output");
+    let input_buf = device
+        .alloc_buffer_with_data(&vec![42u32; 64], BufferKind::Scattered)
+        .expect("input");
+    let output_buf = device
+        .alloc_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
+        .expect("output");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -866,10 +905,14 @@ fn test_compute_dispatch_indirect() {
 
     // Dispatch args: 1 workgroup in each dimension (3 × u32 = 12 bytes).
     let args: [u32; 3] = [1, 1, 1];
-    let args_buf = Buffer::with_data(&device, &args, DataAccess::Scattered).expect("args buffer");
+    let args_buf = device
+        .alloc_buffer_with_data(&args, BufferKind::Scattered)
+        .expect("args buffer");
 
     let data: Vec<u32> = (0..64).collect();
-    let data_buf = Buffer::with_data(&device, &data, DataAccess::Scattered).expect("data buffer");
+    let data_buf = device
+        .alloc_buffer_with_data(&data, BufferKind::Scattered)
+        .expect("data buffer");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -907,8 +950,9 @@ fn test_dispatch_indirect_invalid_buffer() {
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let data_buf =
-        Buffer::with_data(&device, &vec![1u32; 64], DataAccess::Scattered).expect("data");
+    let data_buf = device
+        .alloc_buffer_with_data(&vec![1u32; 64], BufferKind::Scattered)
+        .expect("data");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -919,7 +963,8 @@ fn test_dispatch_indirect_invalid_buffer() {
         // Record indirect dispatch with a temp buffer, then drop the buffer.
         // The encoder stores the raw handle; after drop it's stale.
         {
-            let temp = Buffer::with_data(&device, &[1u32, 1, 1], DataAccess::Scattered)
+            let temp = device
+                .alloc_buffer_with_data(&[1u32, 1, 1], BufferKind::Scattered)
                 .expect("temp buffer");
             pass.dispatch_indirect(&temp, 0);
         } // temp dropped — backend destroys the buffer here
@@ -946,12 +991,24 @@ fn test_compute_many_resource_slots() {
 
     // Each input buffer contains a constant value; OUT[i] = sum = 1+2+3+4+5 = 15.
     const N: usize = 16;
-    let a = Buffer::with_data(&device, &[1u32; N], DataAccess::Scattered).expect("a");
-    let b = Buffer::with_data(&device, &[2u32; N], DataAccess::Scattered).expect("b");
-    let c = Buffer::with_data(&device, &[3u32; N], DataAccess::Scattered).expect("c");
-    let d = Buffer::with_data(&device, &[4u32; N], DataAccess::Scattered).expect("d");
-    let e = Buffer::with_data(&device, &[5u32; N], DataAccess::Scattered).expect("e");
-    let out = Buffer::with_data(&device, &[0u32; N], DataAccess::Scattered).expect("out");
+    let a = device
+        .alloc_buffer_with_data(&[1u32; N], BufferKind::Scattered)
+        .expect("a");
+    let b = device
+        .alloc_buffer_with_data(&[2u32; N], BufferKind::Scattered)
+        .expect("b");
+    let c = device
+        .alloc_buffer_with_data(&[3u32; N], BufferKind::Scattered)
+        .expect("c");
+    let d = device
+        .alloc_buffer_with_data(&[4u32; N], BufferKind::Scattered)
+        .expect("d");
+    let e = device
+        .alloc_buffer_with_data(&[5u32; N], BufferKind::Scattered)
+        .expect("e");
+    let out = device
+        .alloc_buffer_with_data(&[0u32; N], BufferKind::Scattered)
+        .expect("out");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1020,7 +1077,8 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
         4
     ];
 
-    let buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)
+    let buffer = device
+        .alloc_buffer_with_data(&particles, BufferKind::Scattered)
         .expect("Failed to create buffer");
 
     let pipeline =
@@ -1062,8 +1120,9 @@ fn test_buffer_view_copy_between_sub_regions() {
     }
     // Second half: zeros (destination)
 
-    let pool_buf =
-        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool buffer");
+    let pool_buf = device
+        .alloc_buffer_with_data(&data, BufferKind::Scattered)
+        .expect("create pool buffer");
 
     let view_a = pool_buf
         .create_view(0, (N * 4) as u64, Some(4))
@@ -1072,8 +1131,16 @@ fn test_buffer_view_copy_between_sub_regions() {
         .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
         .expect("create view B");
 
-    let idx_a = view_a.bindless_index().expect("view A bindless index");
-    let idx_b = view_b.bindless_index().expect("view B bindless index");
+    // `COPY_SHADER` declares its source as `Scattered<uint>` (an `RWStructuredBuffer` /
+    // UAV on DX12), which reads through the UAV descriptor. Bind the UAV index — the SRV
+    // index (`ResourceAccess::Read`) would point a UAV-typed access at an SRV descriptor
+    // and read back garbage (zeros on WARP). `Read` is reserved for `BufRO<T>` params.
+    let idx_a = view_a
+        .resource_index(ResourceAccess::ReadWrite)
+        .expect("view A bindless index");
+    let idx_b = view_b
+        .resource_index(ResourceAccess::Write)
+        .expect("view B bindless index");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1119,15 +1186,18 @@ fn test_buffer_view_isolation() {
         *slot = (i + 1) as u32; // second half: values to double
     }
 
-    let pool_buf =
-        Buffer::with_data(&device, &data, DataAccess::Scattered).expect("create pool buffer");
+    let pool_buf = device
+        .alloc_buffer_with_data(&data, BufferKind::Scattered)
+        .expect("create pool buffer");
 
     // View only the second half
     let view = pool_buf
         .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
         .expect("create view");
 
-    let idx = view.bindless_index().expect("view bindless index");
+    let idx = view
+        .resource_index(ResourceAccess::Write)
+        .expect("view bindless index");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1188,8 +1258,14 @@ fn test_buffer_pool_alloc_and_dispatch() {
         .write_data(0, &src_data)
         .expect("write src data");
 
-    let src_idx = src_view.bindless_index().expect("src bindless index");
-    let dst_idx = dst_view.bindless_index().expect("dst bindless index");
+    // `COPY_SHADER` reads its source as `Scattered<uint>` (UAV), so bind the UAV index.
+    // `ResourceAccess::Read` would yield the SRV index, which only matches `BufRO<T>` params.
+    let src_idx = src_view
+        .resource_index(ResourceAccess::ReadWrite)
+        .expect("src bindless index");
+    let dst_idx = dst_view
+        .resource_index(ResourceAccess::Write)
+        .expect("dst bindless index");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1291,7 +1367,8 @@ void cs_main(Scattered<float> out, ThreadId id) {
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile positive_mod shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let buf = Buffer::with_data(&device, &[0.0f32; 7], DataAccess::Scattered)
+    let buf = device
+        .alloc_buffer_with_data(&[0.0f32; 7], BufferKind::Scattered)
         .expect("create output buffer");
 
     let mut encoder = ComputeEncoder::new();
@@ -1379,7 +1456,8 @@ void cs_main(Scattered<float> out, ThreadId id) {
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile billboard shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let buf = Buffer::with_data(&device, &[0.0f32; 9], DataAccess::Scattered)
+    let buf = device
+        .alloc_buffer_with_data(&[0.0f32; 9], BufferKind::Scattered)
         .expect("create output buffer");
 
     let mut encoder = ComputeEncoder::new();
@@ -1460,9 +1538,11 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
             b: i + 10,
         })
         .collect();
-    let input_buf =
-        Buffer::with_data(&device, &input_data, DataAccess::Scattered).expect("input buffer");
-    let output_buf = Buffer::with_data(&device, &[Pair { a: 0, b: 0 }; 8], DataAccess::Scattered)
+    let input_buf = device
+        .alloc_buffer_with_data(&input_data, BufferKind::Scattered)
+        .expect("input buffer");
+    let output_buf = device
+        .alloc_buffer_with_data(&[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered)
         .expect("output buffer");
 
     let mut encoder = ComputeEncoder::new();
@@ -1470,8 +1550,10 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
         pass.bind_resources_raw(&[
-            input_buf.bindless_srv_index().expect("srv"),
-            output_buf.bindless_index().expect("uav"),
+            input_buf.resource_index(ResourceAccess::Read).expect("srv"),
+            output_buf
+                .resource_index(ResourceAccess::Write)
+                .expect("uav"),
         ]);
         pass.dispatch(1, 1, 1);
     }
@@ -1534,7 +1616,8 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
             vec![0u32; ELEM_COUNT]
         };
         buffers.push(
-            Buffer::with_data(&device, &data, DataAccess::Scattered)
+            device
+                .alloc_buffer_with_data(&data, BufferKind::Scattered)
                 .unwrap_or_else(|e| panic!("Failed to create buffer {}: {}", i, e)),
         );
     }
@@ -1589,15 +1672,15 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 
     let width = 16u32;
     let height = 16u32;
-    let texture = Texture::new(
-        &device,
-        width,
-        height,
-        TextureFormat::Rgba8Unorm,
-        SpatialAccess::Direct,
-        TextureFlags::COPY_SRC,
-    )
-    .expect("texture");
+    let texture = device
+        .alloc_texture(
+            width,
+            height,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+        )
+        .expect("texture");
 
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
@@ -1605,7 +1688,9 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.bind_resources_raw(&[texture.bindless_index().expect("tex bindless")]);
+        pass.bind_resources_raw(&[texture
+            .resource_index(ResourceAccess::Write)
+            .expect("tex resource index")]);
         pass.dispatch(wg_x, wg_y, 1);
     }
     encoder.dispatch(&ctx).expect("dispatch");
@@ -1652,14 +1737,14 @@ fn test_cpu_readable_compute_write_and_read() {
     const N: usize = 64;
     let initial: Vec<u32> = (0..N as u32).collect();
 
-    let buffer = Buffer::with_bytes_stride_and_flags(
-        &device,
-        bytemuck::cast_slice(&initial),
-        DataAccess::Scattered,
-        size_of::<u32>() as u32,
-        BufferFlags::CPU_READABLE,
-    )
-    .expect("create CPU_READABLE buffer");
+    let buffer = device
+        .alloc_buffer_with_bytes_stride_and_flags(
+            bytemuck::cast_slice(&initial),
+            BufferKind::Scattered,
+            size_of::<u32>() as u32,
+            BufferFlags::CPU_READABLE,
+        )
+        .expect("create CPU_READABLE buffer");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1697,28 +1782,40 @@ fn test_write_buffer_reuse_across_submissions() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     const N: usize = 16;
-    let mid = Buffer::new(
-        &device,
-        (N * core::mem::size_of::<u32>()) as u64,
-        DataAccess::Scattered,
-    )
-    .expect("mid buffer");
-    let out_a = Buffer::new(
-        &device,
-        (N * core::mem::size_of::<u32>()) as u64,
-        DataAccess::Scattered,
-    )
-    .expect("out_a");
-    let out_b = Buffer::new(
-        &device,
-        (N * core::mem::size_of::<u32>()) as u64,
-        DataAccess::Scattered,
-    )
-    .expect("out_b");
+    let mid = device
+        .alloc_buffer(
+            (N * core::mem::size_of::<u32>()) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .expect("mid buffer");
+    let out_a = device
+        .alloc_buffer(
+            (N * core::mem::size_of::<u32>()) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .expect("out_a");
+    let out_b = device
+        .alloc_buffer(
+            (N * core::mem::size_of::<u32>()) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .expect("out_b");
 
-    let idx_in = mid.bindless_index().expect("mid bindless");
-    let idx_out_a = out_a.bindless_index().expect("out_a bindless");
-    let idx_out_b = out_b.bindless_index().expect("out_b bindless");
+    let idx_in = mid
+        .resource_index(ResourceAccess::Write)
+        .expect("mid bindless");
+    let idx_out_a = out_a
+        .resource_index(ResourceAccess::Write)
+        .expect("out_a bindless");
+    let idx_out_b = out_b
+        .resource_index(ResourceAccess::Write)
+        .expect("out_b bindless");
 
     let data_a: Vec<u32> = (100..100 + N as u32).collect();
     let data_b: Vec<u32> = (900..900 + N as u32).collect();
@@ -1771,14 +1868,14 @@ fn test_cpu_readable_cpu_write_read_roundtrip() {
     const N: usize = 16;
     let initial: Vec<u32> = vec![0xABCD_1234u32; N];
 
-    let buffer = Buffer::with_bytes_stride_and_flags(
-        &device,
-        bytemuck::cast_slice(&initial),
-        DataAccess::Scattered,
-        size_of::<u32>() as u32,
-        BufferFlags::CPU_READABLE,
-    )
-    .expect("create CPU_READABLE buffer");
+    let buffer = device
+        .alloc_buffer_with_bytes_stride_and_flags(
+            bytemuck::cast_slice(&initial),
+            BufferKind::Scattered,
+            size_of::<u32>() as u32,
+            BufferFlags::CPU_READABLE,
+        )
+        .expect("create CPU_READABLE buffer");
 
     let new_values: Vec<u32> = (100..100 + N as u32).collect();
     buffer
@@ -1827,14 +1924,16 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+    let out = device
+        .alloc_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("out");
 
     const EXPECTED: u32 = 42;
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        let heap_idx = out.bindless_index().unwrap();
+        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
         pass.bind_resources_raw_with_user(&[heap_idx], &[EXPECTED]);
         pass.dispatch(1, 1, 1);
     }
@@ -1862,13 +1961,15 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = Buffer::with_data(&device, &[0xDEAD_BEEFu32; 1], DataAccess::Scattered).expect("out");
+    let out = device
+        .alloc_buffer_with_data(&[0xDEAD_BEEFu32; 1], BufferKind::Scattered)
+        .expect("out");
 
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        let heap_idx = out.bindless_index().unwrap();
+        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
         pass.bind_resources_raw_with_user(&[heap_idx], &[0u32]);
         pass.dispatch(1, 1, 1);
     }
@@ -1899,13 +2000,15 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+    let out = device
+        .alloc_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("out");
 
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        let heap_idx = out.bindless_index().unwrap();
+        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
         pass.bind_resources_raw_with_user(&[heap_idx], &[u32::MAX]);
         pass.dispatch(1, 1, 1);
     }
@@ -1939,7 +2042,9 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = Buffer::with_data(&device, &[0u32; 1], DataAccess::Scattered).expect("out");
+    let out = device
+        .alloc_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("out");
 
     #[allow(clippy::approx_constant)]
     let value: f32 = 3.14159;
@@ -1949,7 +2054,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        let heap_idx = out.bindless_index().unwrap();
+        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
         pass.bind_resources_raw_with_user(&[heap_idx], &[bits]);
         pass.dispatch(1, 1, 1);
     }
@@ -1982,7 +2087,9 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = Buffer::with_data(&device, &[0u32; 2], DataAccess::Scattered).expect("out");
+    let out = device
+        .alloc_buffer_with_data(&[0u32; 2], BufferKind::Scattered)
+        .expect("out");
 
     const A: u32 = 0xABCD;
     const B: u32 = 0x1234;
@@ -1991,7 +2098,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        let heap_idx = out.bindless_index().unwrap();
+        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
         pass.bind_resources_raw_with_user(&[heap_idx], &[A, B]);
         pass.dispatch(1, 1, 1);
     }
@@ -2024,8 +2131,12 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
 
     const N: usize = 64;
     let input: Vec<u32> = (0..N as u32).collect();
-    let inp = Buffer::with_data(&device, &input, DataAccess::Scattered).expect("inp");
-    let out = Buffer::with_data(&device, &[0u32; N], DataAccess::Scattered).expect("out");
+    let inp = device
+        .alloc_buffer_with_data(&input, BufferKind::Scattered)
+        .expect("inp");
+    let out = device
+        .alloc_buffer_with_data(&[0u32; N], BufferKind::Scattered)
+        .expect("out");
 
     const OFFSET: u32 = 100;
 
@@ -2033,8 +2144,8 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        let inp_idx = inp.bindless_index().unwrap();
-        let out_idx = out.bindless_index().unwrap();
+        let inp_idx = inp.resource_index(ResourceAccess::Write).unwrap();
+        let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
         pass.bind_resources_raw_with_user(&[inp_idx, out_idx], &[OFFSET]);
         pass.dispatch(1, 1, 1);
     }
@@ -2077,7 +2188,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     }
     let tv = encoder.submit(&ctx).expect("submit");
 
-    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+    let buf = device
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("buffer");
 
     let pending_after_drop = {
         drop(buf);
@@ -2108,7 +2221,9 @@ fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
 
     // Allocate, submit some work, then drop the buffer so its slot enters
     // the pending-free list.
-    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+    let buf = device
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("buffer");
     let tv = {
         let encoder = ComputeEncoder::new();
         encoder.submit(&ctx).expect("submit empty work")
@@ -2142,7 +2257,9 @@ fn flush_deferred_deletions_respects_gpu_progress() {
     };
 
     // Drop a buffer while GPU may still be in flight.
-    let buf = Buffer::new(&device, 256, DataAccess::Scattered).expect("buffer");
+    let buf = device
+        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("buffer");
     drop(buf);
 
     // Without waiting for the GPU, calling flush is safe (no panic/crash).
@@ -2229,8 +2346,9 @@ fn stride_validation_matching_uint_passes() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let initial: Vec<u32> = (0..64).collect();
-    let buffer =
-        Buffer::with_data(&device, &initial, DataAccess::Scattered).expect("create buffer");
+    let buffer = device
+        .alloc_buffer_with_data(&initial, BufferKind::Scattered)
+        .expect("create buffer");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -2260,7 +2378,8 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let data = vec![0u8; 64 * 16];
-    let buffer = Buffer::with_bytes_stride(&device, &data, DataAccess::Scattered, 16)
+    let buffer = device
+        .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
         .expect("create buffer with stride 16");
 
     let mut encoder = ComputeEncoder::new();
@@ -2297,7 +2416,8 @@ fn stride_validation_disabled_allows_mismatch() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let data = vec![0u8; 64 * 16];
-    let buffer = Buffer::with_bytes_stride(&device, &data, DataAccess::Scattered, 16)
+    let buffer = device
+        .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
         .expect("create buffer with stride 16");
 
     let mut encoder = ComputeEncoder::new();
@@ -2327,11 +2447,13 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let params_data = vec![0u8; 16];
-    let params = Buffer::with_bytes_stride(&device, &params_data, DataAccess::Broadcast, 16)
+    let params = device
+        .alloc_buffer_with_bytes_stride(&params_data, BufferKind::Broadcast, 16)
         .expect("create broadcast buffer with stride 16");
 
     let wrong_data = vec![0u8; 64 * 4];
-    let data_buf = Buffer::with_bytes_stride(&device, &wrong_data, DataAccess::Scattered, 4)
+    let data_buf = device
+        .alloc_buffer_with_bytes_stride(&wrong_data, BufferKind::Scattered, 4)
         .expect("create data buf with stride 4");
 
     let mut encoder = ComputeEncoder::new();
@@ -2367,11 +2489,13 @@ fn stride_validation_multi_binding_all_correct_passes() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let params_data = vec![0u8; 16];
-    let params = Buffer::with_bytes_stride(&device, &params_data, DataAccess::Broadcast, 16)
+    let params = device
+        .alloc_buffer_with_bytes_stride(&params_data, BufferKind::Broadcast, 16)
         .expect("create broadcast buffer with stride 16");
 
     let data = vec![0u8; 64 * 16];
-    let data_buf = Buffer::with_bytes_stride(&device, &data, DataAccess::Scattered, 16)
+    let data_buf = device
+        .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
         .expect("create data buf with stride 16");
 
     let mut encoder = ComputeEncoder::new();
@@ -2559,8 +2683,12 @@ fn test_transient_buffer_write_then_copy() {
     const N: usize = 64;
     let byte_size = (N * core::mem::size_of::<u32>()) as u64;
 
-    let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
-    let output_uav = output.bindless_index().expect("output UAV");
+    let output = device
+        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
+    let output_uav = output
+        .resource_index(ResourceAccess::Write)
+        .expect("output UAV");
 
     let mut graph = TaskGraph::new();
     let tid = graph.transient_buffer(byte_size);
@@ -2613,11 +2741,19 @@ fn test_regular_buffer_write_then_copy() {
     const N: usize = 64;
     let byte_size = (N * core::mem::size_of::<u32>()) as u64;
 
-    let scratch = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("scratch buffer");
-    let scratch_uav = scratch.bindless_index().expect("scratch UAV");
+    let scratch = device
+        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("scratch buffer");
+    let scratch_uav = scratch
+        .resource_index(ResourceAccess::Write)
+        .expect("scratch UAV");
 
-    let output = Buffer::new(&device, byte_size, DataAccess::Scattered).expect("output buffer");
-    let output_uav = output.bindless_index().expect("output UAV");
+    let output = device
+        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
+    let output_uav = output
+        .resource_index(ResourceAccess::Write)
+        .expect("output UAV");
 
     let mut graph = TaskGraph::new();
 
@@ -2858,7 +2994,9 @@ fn test_wave_inclusive_scan_uniform_64() {
         .expect("compile WAVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -2890,7 +3028,9 @@ fn test_wave_inclusive_scan_ramp_64() {
         ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP).expect("compile WAVE_SCAN_64_RAMP");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -2923,7 +3063,9 @@ fn test_wave_inclusive_scan_uniform_256() {
         .expect("compile WAVE_SCAN_256_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = Buffer::new(&device, 256 * 4, DataAccess::Scattered).expect("output buffer");
+    let out = device
+        .alloc_buffer(256 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -2955,7 +3097,9 @@ fn test_workgroup_reduce_uint_correct() {
         ShaderModule::from_slang(&device, REDUCE_64_UNIFORM).expect("compile REDUCE_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -2985,7 +3129,9 @@ fn test_workgroup_inclusive_scan_uint_correct() {
         .expect("compile INCLUSIVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -3016,7 +3162,9 @@ fn test_workgroup_broadcast_correct() {
     let shader = ShaderModule::from_slang(&device, BROADCAST_64).expect("compile BROADCAST_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -3042,7 +3190,9 @@ fn test_workgroup_upper_bound_linear() {
     let shader = ShaderModule::from_slang(&device, UPPER_BOUND_64).expect("compile UPPER_BOUND_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).expect("output buffer");
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .expect("output buffer");
     let mut encoder = ComputeEncoder::new();
     {
         let mut pass = encoder.begin_compute_pass();
@@ -3065,7 +3215,7 @@ fn test_workgroup_upper_bound_linear() {
     }
 }
 
-/// Round-trip test for `SpatialAccess::DirectInterpolated`:
+/// Round-trip test for `TextureKind::DirectInterpolated`:
 /// 1. Write a known pattern into the texture via UAV (storage image) in a compute pass.
 /// 2. Read it back via SRV (sampled image) using hardware bilinear (at texel centres, so
 ///    the result should be exact) in a second compute pass.
@@ -3117,21 +3267,21 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let ctx = submission_context(&device);
 
     // Check that the device supports DirectInterpolated (all backends should).
-    let tex = Texture::new(
-        &device,
-        W,
-        H,
-        TextureFormat::Rgba8Unorm,
-        SpatialAccess::DirectInterpolated,
-        TextureFlags::empty(),
-    )
-    .expect("create DirectInterpolated texture");
+    let tex = device
+        .alloc_texture(
+            W,
+            H,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::DirectInterpolated,
+            TextureFlags::empty(),
+        )
+        .expect("create DirectInterpolated texture");
 
     let storage_idx = tex
-        .bindless_index()
-        .expect("DirectInterpolated must have a storage bindless index");
+        .resource_index(ResourceAccess::Write)
+        .expect("DirectInterpolated must have a storage resource index");
     let sampled_idx = tex
-        .bindless_sampled_index()
+        .resource_index(ResourceAccess::Read)
         .expect("DirectInterpolated must have a sampled bindless index");
     // storage_idx and sampled_idx index into *different* descriptor pools (UAV vs SRV),
     // so the same integer value is valid — they just happen to both be the first slot in
@@ -3151,7 +3301,14 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 
     // Read pass (SRV + sampler).
     let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
-    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).expect("out buffer");
+    let out = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .expect("out buffer");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
     let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
     let mut enc2 = ComputeEncoder::new();
@@ -3160,9 +3317,9 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         pass.set_pipeline(&read_pipeline);
         // Bind: Interpolated<float4> src, Filter smp, Scattered<uint> out
         pass.bind_resources_raw(&[
-            sampled_idx,                       // Texture2D<float4> SRV
-            sampler.bindless_index().unwrap(), // Filter sampler
-            out.bindless_index().unwrap(),     // Scattered<uint> output
+            sampled_idx,                                           // Texture2D<float4> SRV
+            sampler.resource_index(ResourceAccess::Read).unwrap(), // Filter sampler
+            out.resource_index(ResourceAccess::Write).unwrap(),    // Scattered<uint> output
         ]);
         pass.dispatch(1, 1, 1);
     }

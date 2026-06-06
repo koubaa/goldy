@@ -314,7 +314,6 @@ impl Adapter {
                 adapter: self.clone(),
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
-                placement_heap: Mutex::new(None),
                 owns_backend_device: true,
             }),
         })
@@ -443,7 +442,6 @@ pub(crate) struct DeviceInner {
     adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
-    pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
@@ -611,7 +609,6 @@ impl Device {
                 adapter: self.inner.adapter.clone(),
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
-                placement_heap: Mutex::new(None),
                 owns_backend_device: false,
             }),
         }
@@ -619,17 +616,16 @@ impl Device {
 
     /// Allocate a GPU buffer through the device's [`VramAllocator`].
     ///
-    /// Equivalent to calling [`VramAllocator::alloc_buffer`] on the installed
-    /// allocator. Prefer this over [`Buffer::new`] when you want allocations to
-    /// go through the unified allocator for tracking and budgeting.
+    /// All public buffer creation goes through this method (or the `alloc_buffer_with_*`
+    /// helpers below). Allocations receive an accounting deed and honor the installed
+    /// allocator's budget and telemetry.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`VramAllocator::alloc_buffer`]: crate::vram_allocator::VramAllocator::alloc_buffer
-    /// [`Buffer::new`]: crate::buffer::Buffer::new
     pub fn alloc_buffer(
         &self,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
@@ -648,7 +644,7 @@ impl Device {
         &self,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
         let mut buf = self.inner.vram_allocator.alloc_buffer_with_capacity(
@@ -662,21 +658,67 @@ impl Device {
         Ok(buf)
     }
 
+    /// Allocate a buffer initialized with typed data (element stride from `T`).
+    pub fn alloc_buffer_with_data<T: crate::buffer::StructuredBufferElement>(
+        &self,
+        data: &[T],
+        access: BufferKind,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        let bytes = bytemuck::cast_slice(data);
+        let stride = std::mem::size_of::<T>() as u32;
+        self.alloc_buffer_with_bytes_stride(bytes, access, stride)
+    }
+
+    /// Allocate a buffer initialized with raw bytes (element stride 1).
+    pub fn alloc_buffer_with_bytes(
+        &self,
+        data: &[u8],
+        access: BufferKind,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        self.alloc_buffer_with_bytes_stride(data, access, 1)
+    }
+
+    /// Allocate a buffer initialized with raw bytes and a custom element stride.
+    pub fn alloc_buffer_with_bytes_stride(
+        &self,
+        data: &[u8],
+        access: BufferKind,
+        element_stride: u32,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        self.alloc_buffer_with_bytes_stride_and_flags(
+            data,
+            access,
+            element_stride,
+            BufferFlags::empty(),
+        )
+    }
+
+    /// Like [`Self::alloc_buffer_with_bytes_stride`], with explicit [`BufferFlags`].
+    pub fn alloc_buffer_with_bytes_stride_and_flags(
+        &self,
+        data: &[u8],
+        access: BufferKind,
+        element_stride: u32,
+        flags: BufferFlags,
+    ) -> anyhow::Result<crate::buffer::Buffer> {
+        let buf = self.alloc_buffer(data.len() as u64, access, Some(element_stride), flags)?;
+        buf.write(0, data)?;
+        Ok(buf)
+    }
+
     /// Allocate a GPU texture through the device's [`VramAllocator`].
     ///
-    /// Equivalent to calling [`VramAllocator::alloc_texture`] on the installed
-    /// allocator. Prefer this over [`Texture::new`] when you want allocations to
-    /// go through the unified allocator for tracking and budgeting.
+    /// All public texture creation goes through this method. Allocations receive an
+    /// accounting deed and honor the installed allocator's budget and telemetry.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`VramAllocator::alloc_texture`]: crate::vram_allocator::VramAllocator::alloc_texture
-    /// [`Texture::new`]: crate::texture::Texture::new
     pub fn alloc_texture(
         &self,
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> anyhow::Result<crate::texture::Texture> {
         let mut tex = self
@@ -785,7 +827,7 @@ impl Device {
     ///
     /// Returns `u32::MAX` on backends that don't enforce a per-category cap
     /// (currently Vulkan and DX12, which support 16 384+ per category).
-    pub fn available_bindless_slots(&self, category: BindlessCategory) -> u32 {
+    pub fn available_bindless_slots(&self, category: ResourceCategory) -> u32 {
         let backend = self.inner.backend.lock().unwrap();
         backend.available_bindless_slots(self.inner.handle, category)
     }
@@ -793,7 +835,7 @@ impl Device {
     /// Maximum number of bindless descriptor slots per category for this device.
     ///
     /// Returns `u32::MAX` on backends that don't enforce a meaningful per-category cap.
-    pub fn max_bindless_slots_per_category(&self, category: BindlessCategory) -> u32 {
+    pub fn max_bindless_slots_per_category(&self, category: ResourceCategory) -> u32 {
         let backend = self.inner.backend.lock().unwrap();
         backend.max_bindless_slots_per_category(self.inner.handle, category)
     }
@@ -812,50 +854,6 @@ impl Device {
     pub fn texture_heap_stats(&self) -> Option<crate::backend::TextureHeapStats> {
         let backend = self.inner.backend.lock().unwrap();
         backend.texture_heap_stats(self.inner.handle)
-    }
-
-    /// Snapshot of the device-owned placement heap's state for diagnostics.
-    ///
-    /// Returns `None` if the heap hasn't been created yet (no transient-buffer
-    /// graphs have been submitted).
-    pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.stats())
-    }
-
-    /// Number of `BufferView`s and `Texture`s currently held in the placement heap's
-    /// stable-slot view cache. Returns `(cached_views, cached_textures)`.
-    ///
-    /// Useful for the `[PERF]` log and diagnostics; non-zero values in steady state
-    /// confirm that the cache is active and hitting.
-    pub fn transient_cache_counts(&self) -> (usize, usize) {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        match heap_guard.as_ref() {
-            Some(h) => (h.cached_view_count(), h.cached_texture_count()),
-            None => (0, 0),
-        }
-    }
-
-    /// Total number of `create_buffer_view` backend calls made by the placement heap's
-    /// view cache since initialization. Monotonically increasing.
-    ///
-    /// Use this in tests to verify that steady-state frames produce zero new creates.
-    pub fn transient_view_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard
-            .as_ref()
-            .map(|h| h.view_create_count())
-            .unwrap_or(0)
-    }
-
-    /// Total number of `Texture::new` calls made by the placement heap's texture cache
-    /// since initialization. Monotonically increasing.
-    pub fn transient_texture_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard
-            .as_ref()
-            .map(|h| h.texture_create_count())
-            .unwrap_or(0)
     }
 
     /// Get device capabilities and format preferences.
@@ -1105,7 +1103,6 @@ impl Device {
                 adapter,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
-                placement_heap: Mutex::new(None),
                 owns_backend_device: true,
             }),
         })
@@ -1131,10 +1128,9 @@ impl Drop for DeviceInner {
         }
         // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
-        // Drop the placement heap (and its views/buffer) while the device is still alive.
-        if let Ok(mut heap_guard) = self.placement_heap.lock() {
-            *heap_guard = None;
-        }
+        // The placement heap is owned per-`Context` and dropped in `ContextInner::drop`,
+        // which runs before this (contexts hold a `Device` clone, so they outlive nothing
+        // but are dropped first by ekrano/users tearing down renderers before devices).
         if self.owns_backend_device {
             let mut backend = self.backend.lock().unwrap();
             backend.destroy_device(self.handle);

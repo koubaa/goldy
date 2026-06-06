@@ -128,7 +128,7 @@ struct MockTexture {
     format: TextureFormat,
     data: Vec<u8>,
     bindless_index: u32,
-    /// For `SpatialAccess::DirectInterpolated`, a second bindless index in the
+    /// For `TextureKind::DirectInterpolated`, a second bindless index in the
     /// sampled-texture pool. `None` for all other access modes.
     sampled_bindless_index: Option<u32>,
 }
@@ -365,7 +365,7 @@ impl GpuBackend for MockBackend {
         &mut self,
         device: DeviceHandle,
         size: u64,
-        _access: DataAccess,
+        _access: BufferKind,
         _element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<BufferHandle> {
@@ -399,7 +399,7 @@ impl GpuBackend for MockBackend {
         device: DeviceHandle,
         initial_size: u64,
         capacity: u64,
-        _access: DataAccess,
+        _access: BufferKind,
         _element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
@@ -935,7 +935,7 @@ impl GpuBackend for MockBackend {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         _flags: TextureFlags,
     ) -> Result<TextureHandle> {
         if !self.devices.contains_key(&device) {
@@ -949,7 +949,7 @@ impl GpuBackend for MockBackend {
         self.next_bindless_index += 1;
 
         // For DirectInterpolated, allocate a second slot for the sampled-texture pool.
-        let sampled_bindless_index = if matches!(access, SpatialAccess::DirectInterpolated) {
+        let sampled_bindless_index = if matches!(access, TextureKind::DirectInterpolated) {
             let idx = self.next_bindless_index;
             self.next_bindless_index += 1;
             Some(idx)
@@ -1499,7 +1499,7 @@ mod tests {
             .create_buffer(
                 device,
                 12,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -1580,7 +1580,7 @@ mod tests {
             .create_buffer(
                 device,
                 24,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -1797,7 +1797,7 @@ mod tests {
             .create_buffer(
                 device,
                 64,
-                DataAccess::Broadcast,
+                BufferKind::Broadcast,
                 None,
                 BufferFlags::empty(),
             )
@@ -1806,7 +1806,7 @@ mod tests {
             .create_buffer(
                 device,
                 128,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -1815,7 +1815,7 @@ mod tests {
             .create_buffer(
                 device,
                 256,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -1836,7 +1836,7 @@ mod tests {
             .create_buffer(
                 device,
                 64,
-                DataAccess::Broadcast,
+                BufferKind::Broadcast,
                 None,
                 BufferFlags::empty(),
             )
@@ -1848,7 +1848,7 @@ mod tests {
                 256,
                 256,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Interpolated,
+                TextureKind::Interpolated,
                 TextureFlags::empty(),
             )
             .unwrap();
@@ -1858,7 +1858,7 @@ mod tests {
                 512,
                 512,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Interpolated,
+                TextureKind::Interpolated,
                 TextureFlags::empty(),
             )
             .unwrap();
@@ -1894,7 +1894,7 @@ mod tests {
             .create_buffer(
                 device,
                 64,
-                DataAccess::Broadcast,
+                BufferKind::Broadcast,
                 None,
                 BufferFlags::empty(),
             )
@@ -1905,7 +1905,7 @@ mod tests {
                 256,
                 256,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Interpolated,
+                TextureKind::Interpolated,
                 TextureFlags::empty(),
             )
             .unwrap();
@@ -1916,7 +1916,7 @@ mod tests {
             .create_buffer(
                 device,
                 128,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -1951,7 +1951,7 @@ mod tests {
             .create_buffer(
                 device,
                 64,
-                DataAccess::Broadcast,
+                BufferKind::Broadcast,
                 None,
                 BufferFlags::empty(),
             )
@@ -1960,7 +1960,7 @@ mod tests {
             .create_buffer(
                 device,
                 128,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -2026,7 +2026,7 @@ mod tests {
             .create_buffer(
                 device,
                 64,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -2035,7 +2035,7 @@ mod tests {
             .create_buffer(
                 device,
                 128,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )

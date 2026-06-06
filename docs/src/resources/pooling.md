@@ -4,7 +4,7 @@ GPU resource allocation is expensive. Creating many small buffers or textures ea
 
 ## BufferPool
 
-`BufferPool` sub-allocates typed regions from a single large `DataAccess::Scattered` backing buffer. Each region gets its own bindless descriptor, so shaders see independent zero-based buffers.
+`BufferPool` sub-allocates typed regions from a single large `BufferKind::Scattered` backing buffer. Each region gets its own bindless descriptor, so shaders see independent zero-based buffers.
 
 ### Creating a Pool
 
@@ -14,7 +14,7 @@ use goldy::BufferPool;
 let mut pool = BufferPool::new(&device, 1024 * 1024)?; // 1 MB pool
 ```
 
-The backing buffer uses `DataAccess::Scattered` and a default sub-allocation alignment of 256 bytes (satisfies `minStorageBufferOffsetAlignment` on all known Vulkan/DX12 hardware).
+The backing buffer uses `BufferKind::Scattered` and a default sub-allocation alignment of 256 bytes (satisfies `minStorageBufferOffsetAlignment` on all known Vulkan/DX12 hardware).
 
 For custom alignment:
 
@@ -51,7 +51,7 @@ Each allocation is aligned to satisfy both the pool alignment (256) and `offset 
 Every `BufferView` from a pool has its own bindless descriptor. Bind it like any buffer:
 
 ```rust
-let tile_handle = tiles.bindless_handle().unwrap();
+let tile_handle = tiles.handle(ResourceAccess::Write).unwrap();
 pass.bind_resources_typed(&[tile_handle]);
 
 // Or as a vertex/index buffer
@@ -114,14 +114,14 @@ let mut pool = TexturePool::default();
 ### Acquire and Release
 
 ```rust
-use goldy::{SpatialAccess, TextureFormat, TextureFlags};
+use goldy::{TextureKind, TextureFormat, TextureFlags};
 
 // Acquire — returns a pooled texture if available, otherwise creates a new one
 let texture = pool.acquire(
     &device,
     1920, 1080,
     TextureFormat::Rgba16Float,
-    SpatialAccess::Direct,
+    TextureKind::Direct,
     TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
 )?;
 
@@ -209,7 +209,7 @@ Pool intermediate textures in a multi-pass compute pipeline:
 let mut tex_pool = TexturePool::default();
 
 // Each frame:
-let temp = tex_pool.acquire(&device, w, h, fmt, SpatialAccess::Direct, flags)?;
+let temp = tex_pool.acquire(&device, w, h, fmt, TextureKind::Direct, flags)?;
 // ... compute pass writes to temp ...
 // ... next pass reads from temp ...
 tex_pool.release(temp); // return for reuse next frame

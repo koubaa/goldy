@@ -7,7 +7,8 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    Buffer, ComputeEncoder, ComputePipeline, DataAccess, NodeAccess, ShaderModule, TaskGraph,
+    types::{BufferFlags, ResourceAccess},
+    Buffer, BufferKind, ComputeEncoder, ComputePipeline, NodeAccess, ShaderModule, TaskGraph,
 };
 
 mod common;
@@ -132,11 +133,17 @@ fn graph_linear_chain() {
     let add_pipe = ComputePipeline::new(&device, &add_shader).unwrap();
 
     let input: Vec<u32> = (0..64).collect();
-    let src = Buffer::with_data(&device, &input, DataAccess::Scattered).unwrap();
-    let dst = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let src = device
+        .alloc_buffer_with_data(&input, BufferKind::Scattered)
+        .unwrap();
+    let dst = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let src_idx = src.bindless_index().unwrap();
-    let dst_idx = dst.bindless_index().unwrap();
+    // `DOUBLE_SHADER` reads `src` as `Scattered<uint>` (RWStructuredBuffer / UAV on DX12).
+    // Bind the UAV index — `ResourceAccess::Read` returns the SRV slot, which WARP reads as zeros.
+    let src_idx = src.resource_index(ResourceAccess::ReadWrite).unwrap();
+    let dst_idx = dst.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
     graph
@@ -173,11 +180,17 @@ fn graph_independent_dispatches() {
     let pipe_42 = ComputePipeline::new(&device, &fill42_shader).unwrap();
     let pipe_99 = ComputePipeline::new(&device, &fill99_shader).unwrap();
 
-    let buf_a = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let buf_b = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let buf_a = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
+    let buf_b = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let idx_a = buf_a.bindless_index().unwrap();
-    let idx_b = buf_b.bindless_index().unwrap();
+    // `FILL_42_SHADER` writes `buf_a` via `Scattered<uint>` (UAV on DX12).
+    // `ResourceAccess::Read` returns the SRV slot — use Write for the UAV index.
+    let idx_a = buf_a.resource_index(ResourceAccess::Write).unwrap();
+    let idx_b = buf_b.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
     graph
@@ -235,15 +248,26 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     let sum_shader = ShaderModule::from_slang(&device, SUM_SHADER).unwrap();
     let sum_pipe = ComputePipeline::new(&device, &sum_shader).unwrap();
 
-    let src = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let y = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let z = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let src = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
+    let y = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
+    let z = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let src_idx = src.bindless_index().unwrap();
-    let y_idx = y.bindless_index().unwrap();
-    let z_idx = z.bindless_index().unwrap();
-    let out_idx = out.bindless_index().unwrap();
+    // `src` is accessed as `Scattered<uint>` by both the fill node (write) and the
+    // double nodes (read-via-RWStructuredBuffer). All `Scattered` params need the UAV
+    // index; `ResourceAccess::Read` would return the SRV slot and read zeros on WARP.
+    let src_idx = src.resource_index(ResourceAccess::ReadWrite).unwrap();
+    let y_idx = y.resource_index(ResourceAccess::Write).unwrap();
+    let z_idx = z.resource_index(ResourceAccess::Write).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
 
@@ -302,11 +326,17 @@ fn graph_matches_encoder() {
     let input: Vec<u32> = (0..64).collect();
 
     // --- Run via ComputeEncoder (manual barriers) ---
-    let src_enc = Buffer::with_data(&device, &input, DataAccess::Scattered).unwrap();
-    let dst_enc = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let src_enc = device
+        .alloc_buffer_with_data(&input, BufferKind::Scattered)
+        .unwrap();
+    let dst_enc = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let src_enc_idx = src_enc.bindless_index().unwrap();
-    let dst_enc_idx = dst_enc.bindless_index().unwrap();
+    // `DOUBLE_SHADER` reads `src` as `Scattered<uint>` (UAV on DX12). Use ReadWrite
+    // for the UAV index; ResourceAccess::Read returns the SRV slot and reads zeros on WARP.
+    let src_enc_idx = src_enc.resource_index(ResourceAccess::ReadWrite).unwrap();
+    let dst_enc_idx = dst_enc.resource_index(ResourceAccess::Write).unwrap();
 
     {
         let mut encoder = ComputeEncoder::new();
@@ -332,11 +362,16 @@ fn graph_matches_encoder() {
     let result_enc = readback_u32(&device, &dst_enc, 64);
 
     // --- Run via TaskGraph ---
-    let src_graph = Buffer::with_data(&device, &input, DataAccess::Scattered).unwrap();
-    let dst_graph = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let src_graph = device
+        .alloc_buffer_with_data(&input, BufferKind::Scattered)
+        .unwrap();
+    let dst_graph = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let src_graph_idx = src_graph.bindless_index().unwrap();
-    let dst_graph_idx = dst_graph.bindless_index().unwrap();
+    // Same: `Scattered<uint> input` in DOUBLE_SHADER requires the UAV index.
+    let src_graph_idx = src_graph.resource_index(ResourceAccess::ReadWrite).unwrap();
+    let dst_graph_idx = dst_graph.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
     graph
@@ -370,8 +405,10 @@ fn graph_nonblocking_submit() {
     let fill_shader = ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap();
     let pipe = ComputePipeline::new(&device, &fill_shader).unwrap();
 
-    let buf = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let idx = buf.bindless_index().unwrap();
+    let buf = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
+    let idx = buf.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
     graph
@@ -416,11 +453,15 @@ fn clear_then_dispatch_reads_zeros() {
 
     // Allocate and fill a buffer with nonzero values.
     let nonzero: Vec<u32> = (1..=64).collect();
-    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let buf = device
+        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
+        .unwrap();
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let buf_idx = buf.bindless_index().unwrap();
-    let out_idx = out.bindless_index().unwrap();
+    let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
 
     // Build a graph: clear buf → copy buf→out
     // The analyzer must insert a barrier between the clear and the copy.
@@ -459,11 +500,15 @@ fn write_then_dispatch_reads_uploaded_data() {
     let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
 
     // Buffer starts empty (zeroed).
-    let buf = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
-    let out = Buffer::new(&device, 64 * 4, DataAccess::Scattered).unwrap();
+    let buf = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let buf_idx = buf.bindless_index().unwrap();
-    let out_idx = out.bindless_index().unwrap();
+    let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
 
     // Known data to upload: values 100..163.
     let known_data: Vec<u32> = (100..164).collect();
@@ -519,11 +564,20 @@ fn stress_clear_then_dispatch_large() {
 
     const N: usize = 16384;
     let nonzero: Vec<u32> = (1..=N as u32).collect();
-    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
-    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+    let buf = device
+        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
+        .unwrap();
+    let out = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .unwrap();
 
-    let buf_idx = buf.bindless_index().unwrap();
-    let out_idx = out.bindless_index().unwrap();
+    let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&buf, 0, (N * 4) as u64);
@@ -564,8 +618,21 @@ fn stress_many_clears_many_dispatches() {
     let mut outs = Vec::new();
     for _ in 0..NUM_BUFS {
         let nonzero: Vec<u32> = (1..=N as u32).collect();
-        srcs.push(Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap());
-        outs.push(Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap());
+        srcs.push(
+            device
+                .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
+                .unwrap(),
+        );
+        outs.push(
+            device
+                .alloc_buffer(
+                    (N * 4) as u64,
+                    BufferKind::Scattered,
+                    None,
+                    BufferFlags::empty(),
+                )
+                .unwrap(),
+        );
     }
 
     let mut graph = TaskGraph::new();
@@ -573,8 +640,8 @@ fn stress_many_clears_many_dispatches() {
         graph.clear_buffer(src, 0, (N * 4) as u64);
     }
     for (src, out) in srcs.iter().zip(outs.iter()) {
-        let src_idx = src.bindless_index().unwrap();
-        let out_idx = out.bindless_index().unwrap();
+        let src_idx = src.resource_index(ResourceAccess::Read).unwrap();
+        let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
         graph
             .node("copy", &copy_pipe)
             .bind_buffer(src, NodeAccess::Read)
@@ -610,11 +677,20 @@ fn stress_clear_write_dispatch_chain() {
 
     const N: usize = 1024;
     let nonzero: Vec<u32> = (1..=N as u32).collect();
-    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
-    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+    let buf = device
+        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
+        .unwrap();
+    let out = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .unwrap();
 
-    let buf_idx = buf.bindless_index().unwrap();
-    let out_idx = out.bindless_index().unwrap();
+    let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
 
     let known_data: Vec<u32> = (0..N as u32).map(|i| i * 7 + 42).collect();
     let data_bytes: Vec<u8> = bytemuck::cast_slice(&known_data).to_vec();
@@ -656,13 +732,22 @@ fn stress_two_phase_submission() {
 
     const N: usize = 4096;
     let input: Vec<u32> = (0..N as u32).collect();
-    let buf = Buffer::with_data(&device, &input, DataAccess::Scattered).unwrap();
-    let buf_idx = buf.bindless_index().unwrap();
+    let buf = device
+        .alloc_buffer_with_data(&input, BufferKind::Scattered)
+        .unwrap();
+    let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
 
     // Phase 1: double in-place. Use a tmp buffer since DOUBLE_SHADER reads
     // from one buffer and writes to another.
-    let tmp = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
-    let tmp_idx = tmp.bindless_index().unwrap();
+    let tmp = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .unwrap();
+    let tmp_idx = tmp.resource_index(ResourceAccess::Write).unwrap();
 
     {
         let mut graph = TaskGraph::new();
@@ -709,8 +794,10 @@ fn stress_rapid_submissions() {
 
     const N: usize = 256;
     let zeros: Vec<u32> = vec![0; N];
-    let buf = Buffer::with_data(&device, &zeros, DataAccess::Scattered).unwrap();
-    let idx = buf.bindless_index().unwrap();
+    let buf = device
+        .alloc_buffer_with_data(&zeros, BufferKind::Scattered)
+        .unwrap();
+    let idx = buf.resource_index(ResourceAccess::Write).unwrap();
 
     const ROUNDS: u32 = 20;
     let mut last_tv = None;
@@ -764,13 +851,24 @@ void cs_main(Scattered<uint> args, ThreadId id) {
     const N: usize = 256;
 
     let nonzero: Vec<u32> = (1..=N as u32).collect();
-    let buf = Buffer::with_data(&device, &nonzero, DataAccess::Scattered).unwrap();
-    let out = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
-    let args = Buffer::new(&device, 12, DataAccess::Scattered).unwrap();
+    let buf = device
+        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
+        .unwrap();
+    let out = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .unwrap();
+    let args = device
+        .alloc_buffer(12, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
 
-    let buf_idx = buf.bindless_index().unwrap();
-    let out_idx = out.bindless_index().unwrap();
-    let args_idx = args.bindless_index().unwrap();
+    let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
+    let args_idx = args.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&buf, 0, (N * 4) as u64);
@@ -812,13 +910,34 @@ fn stress_alternating_write_dispatch() {
 
     const N: usize = 256;
 
-    let buf = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
-    let out1 = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
-    let out2 = Buffer::new(&device, (N * 4) as u64, DataAccess::Scattered).unwrap();
+    let buf = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .unwrap();
+    let out1 = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .unwrap();
+    let out2 = device
+        .alloc_buffer(
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .unwrap();
 
-    let buf_idx = buf.bindless_index().unwrap();
-    let out1_idx = out1.bindless_index().unwrap();
-    let out2_idx = out2.bindless_index().unwrap();
+    let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
+    let out1_idx = out1.resource_index(ResourceAccess::Write).unwrap();
+    let out2_idx = out2.resource_index(ResourceAccess::Write).unwrap();
 
     let data1: Vec<u32> = (0..N as u32).map(|i| i + 100).collect();
     let data2: Vec<u32> = (0..N as u32).map(|i| i + 200).collect();

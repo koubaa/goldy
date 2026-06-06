@@ -67,7 +67,7 @@ vertices = np.array([
    -0.5,  0.5, 0.0, 0.0, 1.0, 1.0,
 ], dtype=np.float32)
 
-buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
+buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
 ```
 
 ### Supported dtypes
@@ -94,7 +94,7 @@ print(pixels.dtype)   # uint8
 ### Updating Buffers
 
 ```python
-buffer = goldy.Buffer(device, np.zeros(256, dtype=np.float32), goldy.DataAccess.BROADCAST)
+buffer = goldy.Buffer(device, np.zeros(256, dtype=np.float32), goldy.BufferKind.BROADCAST)
 
 # Full update
 buffer.write(0, np.random.rand(256).astype(np.float32))
@@ -123,7 +123,7 @@ instance = goldy.Instance()
 device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
 
 data = np.arange(256, dtype=np.float32)
-buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
+buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
 
 SHADER = """
 import goldy_exp;
@@ -151,8 +151,8 @@ encoder.dispatch(device)
 For iterative algorithms, alternate two buffers as input/output:
 
 ```python
-buf_a = goldy.Buffer(device, initial_data, goldy.DataAccess.SCATTERED)
-buf_b = goldy.Buffer(device, initial_data, goldy.DataAccess.SCATTERED)
+buf_a = goldy.Buffer(device, initial_data, goldy.BufferKind.SCATTERED)
+buf_b = goldy.Buffer(device, initial_data, goldy.BufferKind.SCATTERED)
 
 use_a = True
 for _ in range(100):
@@ -193,7 +193,7 @@ target.render(render_encoder)
 |--------|------|--------|
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
-| Buffer data | `Buffer::with_data(&device, &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
+| Buffer data | `device.alloc_buffer_with_data( &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
 | Render pass | `encoder.begin_render_pass()` returns struct | Context manager (`with ... as rp`) |
 | Pixel readback | `target.read_to_cpu()` → `Vec<u8>` | `target.read_to_cpu()` → NumPy array `(H, W, 4)` |
 | Resource lifetime | Explicit `Arc<Device>` ownership | Managed by Python GC via PyO3 |
@@ -317,12 +317,12 @@ goldy.TextureFormat.RGBA8_UNORM | RGBA8_UNORM_SRGB | BGRA8_UNORM
                    | R8_UNORM | RG8_UNORM | RGBA16_FLOAT | RGBA32_FLOAT
 
 # Buffer access patterns
-goldy.DataAccess.SCATTERED    # any thread, any address (StructuredBuffer)
-goldy.DataAccess.BROADCAST    # all threads same address (ConstantBuffer)
+goldy.BufferKind.SCATTERED    # any thread, any address (StructuredBuffer)
+goldy.BufferKind.BROADCAST    # all threads same address (ConstantBuffer)
 
 # Texture access patterns
-goldy.SpatialAccess.INTERPOLATED   # hardware-filtered (Texture2D + sampler)
-goldy.SpatialAccess.DIRECT         # direct indexing (RWTexture2D)
+goldy.TextureKind.INTERPOLATED   # hardware-filtered (Texture2D + sampler)
+goldy.TextureKind.DIRECT         # direct indexing (RWTexture2D)
 
 # Primitive topology
 goldy.PrimitiveTopology.POINT_LIST | LINE_LIST | LINE_STRIP

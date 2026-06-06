@@ -3,7 +3,7 @@
 use super::types::{self, TextureState};
 use super::utils::format_to_vk;
 use super::{DeviceHandle, TextureHandle};
-use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ pub(super) fn create(
     width: u32,
     height: u32,
     format: TextureFormat,
-    access: SpatialAccess,
+    access: TextureKind,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
     // Get physical device for memory type lookup
@@ -53,13 +53,13 @@ pub(super) fn create(
 
     // Interpolated access -> sampled image, Direct access -> storage image
     match access {
-        SpatialAccess::Interpolated => {
+        TextureKind::Interpolated => {
             vk_usage |= vk::ImageUsageFlags::SAMPLED;
         }
-        SpatialAccess::Direct => {
+        TextureKind::Direct => {
             vk_usage |= vk::ImageUsageFlags::STORAGE;
         }
-        SpatialAccess::DirectInterpolated => {
+        TextureKind::DirectInterpolated => {
             vk_usage |= vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
         }
     }
@@ -138,9 +138,9 @@ pub(super) fn create(
 
     let is_storage_image = matches!(
         access,
-        SpatialAccess::Direct | SpatialAccess::DirectInterpolated
+        TextureKind::Direct | TextureKind::DirectInterpolated
     );
-    let is_dual_access = matches!(access, SpatialAccess::DirectInterpolated);
+    let is_dual_access = matches!(access, TextureKind::DirectInterpolated);
 
     let bindless_index = {
         let logical_device = devices.get_mut(&device_handle).unwrap();
@@ -1362,7 +1362,7 @@ pub(super) fn bindless_index(
     textures.get(&texture_handle).and_then(|t| t.bindless_index)
 }
 
-/// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
+/// For `TextureKind::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
 pub(super) fn bindless_sampled_index(
     textures: &HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,

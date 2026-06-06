@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, ComputePipeline, DataAccess, DeviceDescriptor, Instance,
-    PresentMode, RequestAdapterOptions, ShaderModule, Surface, SurfaceConfig, TaskGraph,
-    SWAPCHAIN_SLOT_PLACEHOLDER,
+    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Instance,
+    PresentMode, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface, SurfaceConfig,
+    TaskGraph, SWAPCHAIN_SLOT_PLACEHOLDER,
 };
 use std::sync::Arc;
 use winit::{
@@ -134,15 +134,14 @@ impl App {
         // for a stride-1 structured buffer) — turning `u.height` into 0 and
         // triggering the `if (tid.y >= u.height) return;` guard for every
         // thread on the `compute_to_surface` path.
-        let uniform_buffer = Buffer::with_data(
-            &device,
+        let uniform_buffer = device.alloc_buffer_with_data(
             &[Uniforms {
                 width: surface.width(),
                 height: surface.height(),
                 time: 0.0,
                 _padding: 0.0,
             }],
-            DataAccess::Scattered,
+            BufferKind::Scattered,
         )?;
 
         self.state = Some(RenderState {
@@ -273,7 +272,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     // the unified storage-buffer index.
     let uniform_handle = state
         .uniform_buffer
-        .bindless_srv_handle()
+        .handle(ResourceAccess::Read)
         .expect("Uniform buffer has no bindless SRV handle");
 
     let mut graph = TaskGraph::new();

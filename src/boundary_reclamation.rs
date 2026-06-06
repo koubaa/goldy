@@ -8,7 +8,6 @@
 //! Contract under test:
 //! 1. VRAM deferred ring empties after `submit + wait + flush`
 //! 2. `HeapTransientAllocator` returns freed ranges after epoch retirement
-//! 3. `PlacementHeap` ring reclaims stamped regions once `gpu_progress >= epoch`
 //!
 //! Run with: `cargo test -p goldy boundary_reclamation`
 
@@ -19,7 +18,6 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::context::Context;
     use crate::device::Device;
-    use crate::placement_heap::PlacementHeap;
     use crate::signal::Signal;
     use crate::task_graph::TaskGraph;
     use crate::transient_allocator::{
@@ -133,67 +131,6 @@ mod tests {
             reused.offset(),
             offset,
             "freed range should be reused after wait + begin_frame"
-        );
-    }
-
-    /// PlacementHeap ring must release stamped regions once gpu_progress >= epoch.
-    #[test]
-    fn u0_placement_heap_ring_reclaims_after_epoch() {
-        let device = test_device();
-        let mut heap = PlacementHeap::new(&device, 3 * 1024, 1024).unwrap();
-
-        let _o1 = heap.acquire(1024).unwrap();
-        heap.stamp(1);
-        let _o2 = heap.acquire(1024).unwrap();
-        heap.stamp(2);
-        let _o3 = heap.acquire(1024).unwrap();
-        heap.stamp(3);
-
-        assert!(
-            heap.acquire(1024).is_none(),
-            "ring must be full with three stamped regions"
-        );
-        assert_eq!(heap.in_flight_count(), 3);
-
-        // Before reclaim at epoch 1: still full.
-        assert!(
-            heap.acquire(1024).is_none(),
-            "ring must stay full before reclaim"
-        );
-
-        let reclaimed = heap.reclaim(1);
-        assert_eq!(reclaimed, 1, "one region should reclaim at epoch 1");
-
-        let o4 = heap.acquire(1024).expect("space available after reclaim");
-        assert_eq!(o4, 0, "reclaimed region should wrap to offset 0");
-        assert_eq!(heap.in_flight_count(), 3, "two old + one new in flight");
-    }
-
-    /// `Context::boundary_crossed` drives placement-heap ring reclaim for device-owned heaps.
-    #[test]
-    fn u7_boundary_crossed_reclaims_placement_heap_ring() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut heap = PlacementHeap::new(&device, 3 * 1024, 1024).unwrap();
-
-        let _o1 = heap.acquire(1024).unwrap();
-        heap.stamp(1);
-        let _o2 = heap.acquire(1024).unwrap();
-        heap.stamp(2);
-        let _o3 = heap.acquire(1024).unwrap();
-        heap.stamp(3);
-        assert_eq!(heap.in_flight_count(), 3);
-
-        *device.inner.placement_heap.lock().unwrap() = Some(heap);
-
-        ctx.boundary_crossed(1);
-
-        let stats = device
-            .placement_heap_stats()
-            .expect("device-owned placement heap");
-        assert_eq!(
-            stats.in_flight_count, 2,
-            "boundary_crossed(epoch=1) must reclaim one ring region"
         );
     }
 

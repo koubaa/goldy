@@ -1,61 +1,72 @@
 //! Unified GPU memory allocation interface.
 //!
-//! Goldy has three independent GPU memory allocation paths:
+//! [`VramAllocator`] is the single customization point for *where* GPU memory comes from.
+//! It sits below Goldy's pooling layers; every allocation that goes through a
+//! [`Device::alloc_buffer`] / [`Device::alloc_buffer_with_capacity`] / [`Device::alloc_texture`]
+//! method passes through the installed allocator:
 //!
-//! 1. **Transient sub-allocations** — [`TransientAllocator`] → [`BufferPool`] → [`Buffer::new`].
-//!    Pluggable recycling policy via the [`TransientAllocator`] trait, but no control over
-//!    *where* memory comes from.
-//! 2. **Standalone named buffers** — consumers call [`Buffer::new`] directly for bump readback,
-//!    staging, indirect dispatch, etc.
-//! 3. **Textures** — [`TexturePool`] → [`Texture::new`]. No interception point.
+//! - **Transient backing** — [`TransientAllocator`] → [`BufferPool`] → [`Device::alloc_buffer`] ✓
+//! - **Standalone named buffers** — [`Device::alloc_buffer`] / [`Device::alloc_buffer_with_capacity`] ✓
+//! - **Textures** — [`TexturePool`] → [`Device::alloc_texture`] ✓
 //!
-//! [`VramAllocator`] sits **below** all three pooling systems, providing a single customization
-//! point for *where* GPU memory comes from. This enables:
+//! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
+//! a `Weak` back-reference to the allocator. When the [`Buffer`] or [`Texture`] is dropped,
+//! [`VramAllocator::notify_freed`] is called automatically so the allocator can update its
+//! byte counters. Sub-parcels ([`crate::buffer::BufferView`]) carry no deed and are never
+//! accounted.
 //!
-//! - **Unified memory control** — alias transient, standalone, and texture allocations into one
-//!   address space or placement heap.
-//! - **Backend-native strategies** — Metal `makeAliasable` placement heaps, Vulkan sparse
-//!   binding, DX12 tiled resources as first-class allocator implementations.
-//! - **Budgeting / telemetry** — VRAM caps, fragmentation monitoring, eviction policies.
-//! - **Defragmentation** — move allocations and update bindless descriptors atomically.
+//! External callers use [`Device::alloc_buffer`] / [`Device::alloc_texture`] (and the
+//! `alloc_buffer_with_*` helpers). Raw `Buffer::new_with_stride_and_flags` is
+//! `pub(crate)` for allocator backends and in-crate tests only.
+//!
+//! **Deferred-reclamation ring.** The allocator also owns the timeline-gated reclamation ring.
+//! Resources with in-flight GPU work are registered via [`VramAllocator::defer_release`] and
+//! dropped by [`VramAllocator::boundary_crossed`] once the timeline retires past their epoch.
+//! [`DefaultVramAllocator`] implements the ring; [`TrackingVramAllocator`] delegates through it.
 //!
 //! # Architecture
 //!
 //! ```text
-//! ┌────────────────────────────────────────────────┐
-//! │  Consumers (ekrano, user code)                 │
-//! │  ┌─────────────┐  ┌──────────┐  ┌───────────┐ │
-//! │  │ TransientAlloc│ │ Buffer:: │  │ Texture:: │ │
-//! │  │ (recycling)  │  │ new()    │  │ new()     │ │
-//! │  └──────┬───────┘  └────┬─────┘  └─────┬─────┘ │
-//! │         │               │              │       │
-//! │  ┌──────▼───────────────▼──────────────▼──────┐│
-//! │  │           VramAllocator trait               ││
-//! │  │  alloc_buffer / alloc_texture / free / ...  ││
-//! │  └──────────────────┬──────────────────────────┘│
-//! │                     │                           │
-//! │  ┌──────────────────▼──────────────────────────┐│
-//! │  │           GpuBackend (Metal/Vulkan/DX12)    ││
-//! │  └─────────────────────────────────────────────┘│
-//! └────────────────────────────────────────────────┘
+//! ┌───────────────────────────────────────────────────┐
+//! │  Consumers (ekrano, user code)                    │
+//! │  ┌──────────────┐  ┌──────────────┐  ┌─────────┐ │
+//! │  │TransientAlloc│  │Device::alloc_│  │Texture  │ │
+//! │  │ (recycling)  │  │buffer()      │  │Pool     │ │
+//! │  └──────┬───────┘  └──────┬───────┘  └────┬────┘ │
+//! │         │ via BufferPool  │               │      │
+//! │  ┌──────▼─────────────────▼───────────────▼─────┐│
+//! │  │              VramAllocator trait              ││
+//! │  │  alloc_buffer / alloc_texture / notify_freed  ││
+//! │  │  defer_release / boundary_crossed / drain     ││
+//! │  └──────────────────┬────────────────────────────┘│
+//! │                     │                             │
+//! │  ┌──────────────────▼────────────────────────────┐│
+//! │  │          GpuBackend (Metal/Vulkan/DX12)       ││
+//! │  └───────────────────────────────────────────────┘│
+//! └───────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Usage
 //!
-//! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. Call
-//! [`Device::with_vram_allocator`] before creating any GPU resources to install
-//! a custom allocator. The default ([`DefaultVramAllocator`]) delegates directly
-//! to the backend with zero overhead.
+//! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. Call [`Device::with_vram_allocator`]
+//! before creating any GPU resources to install a custom allocator. The default
+//! ([`DefaultVramAllocator`]) delegates directly to the backend and implements the deferred
+//! ring at zero overhead when no budget enforcement is needed. Wrap it with
+//! [`TrackingVramAllocator`] to add byte-level tracking and an optional VRAM budget.
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`BufferPool`]: crate::buffer::BufferPool
-//! [`Buffer::new`]: crate::buffer::Buffer::new
-//! [`Texture::new`]: crate::texture::Texture::new
+//! [`Buffer`]: crate::buffer::Buffer
+//! [`Texture`]: crate::texture::Texture
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
+//! [`Device::alloc_buffer`]: crate::device::Device::alloc_buffer
+//! [`Device::alloc_buffer_with_capacity`]: crate::device::Device::alloc_buffer_with_capacity
+//! [`Device::alloc_texture`]: crate::device::Device::alloc_texture
 //! [`Device::with_vram_allocator`]: crate::device::Device::with_vram_allocator
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
+//! [`TrackingVramAllocator`]: crate::vram_allocator::TrackingVramAllocator
 
 use crate::buffer::Buffer;
 use crate::device::Device;
@@ -120,14 +131,14 @@ impl Default for DeferredPayload {
 }
 
 // -----------------------------------------------------------------------
-// ParcelKind
+// ParcelType
 // -----------------------------------------------------------------------
 
 /// Zoning / telemetry label for a freed parcel (buffer-kind vs texture-kind).
 ///
 /// Not used for separate accounting code paths — only passed to [`VramAllocator::notify_freed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParcelKind {
+pub enum ParcelType {
     Buffer,
     Texture,
 }
@@ -147,14 +158,14 @@ pub enum ParcelKind {
 pub trait VramAllocator: Send + Sync {
     /// Allocate a GPU buffer.
     ///
-    /// The default implementation calls [`Buffer::new_with_stride_and_flags`] directly.
+    /// The default implementation calls the raw `Buffer::new_with_stride_and_flags` constructor directly.
     /// Custom implementations may allocate from a placement heap, enforce a budget, or
     /// track the allocation for telemetry.
     fn alloc_buffer(
         &self,
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<Buffer> {
@@ -163,13 +174,13 @@ pub trait VramAllocator: Send + Sync {
 
     /// Allocate a GPU buffer with a pre-reserved capacity hint.
     ///
-    /// The default implementation calls [`Buffer::new_with_capacity_hint_and_flags`].
+    /// The default implementation calls the raw `Buffer::new_with_capacity_hint_and_flags` constructor.
     fn alloc_buffer_with_capacity(
         &self,
         device: &Device,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Buffer> {
         Buffer::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)
@@ -177,14 +188,14 @@ pub trait VramAllocator: Send + Sync {
 
     /// Allocate a GPU texture.
     ///
-    /// The default implementation calls [`Texture::new`] directly.
+    /// The default implementation calls the raw `Texture::new` constructor directly.
     fn alloc_texture(
         &self,
         device: &Device,
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Texture> {
         Texture::new(device, width, height, format, access, flags)
@@ -198,7 +209,7 @@ pub trait VramAllocator: Send + Sync {
     ///
     /// `reserved` is the parcel's reserved backing size; `committed` is the runtime's
     /// handed-out estimate (logical size for buffers, [`Texture::byte_size`] for textures).
-    fn notify_freed(&self, _reserved: u64, _committed: u64, _kind: ParcelKind) {}
+    fn notify_freed(&self, _reserved: u64, _committed: u64, _kind: ParcelType) {}
 
     /// Net bytes allocated by this allocator (allocations minus frees).
     ///
@@ -276,7 +287,7 @@ pub trait VramAllocator: Send + Sync {
 // Default implementation
 // -----------------------------------------------------------------------
 
-/// The default allocator: delegates directly to [`Buffer::new`] / [`Texture::new`]
+/// The default allocator: delegates directly to raw buffer / texture constructors
 /// with no tracking, budgeting, or overhead.
 ///
 /// Installed automatically when a [`Device`] is created. Implements the full
@@ -423,7 +434,7 @@ impl VramAllocator for TrackingVramAllocator {
         &self,
         device: &Device,
         size: u64,
-        access: DataAccess,
+        access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<Buffer> {
@@ -441,7 +452,7 @@ impl VramAllocator for TrackingVramAllocator {
         device: &Device,
         initial_size: u64,
         expected_max: u64,
-        access: DataAccess,
+        access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(expected_max.max(initial_size))?;
@@ -463,7 +474,7 @@ impl VramAllocator for TrackingVramAllocator {
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Texture> {
         let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
@@ -476,7 +487,7 @@ impl VramAllocator for TrackingVramAllocator {
         Ok(tex)
     }
 
-    fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelKind) {
+    fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
         self.live_bytes
             .fetch_sub(reserved as i64, Ordering::Relaxed);
         self.inner.notify_freed(reserved, committed, kind);
@@ -563,7 +574,7 @@ mod tests {
             .alloc_buffer(
                 &device,
                 1024,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -581,7 +592,7 @@ mod tests {
                 64,
                 64,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Interpolated,
+                TextureKind::Interpolated,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .unwrap();
@@ -596,7 +607,7 @@ mod tests {
         assert_eq!(tracking.allocated_bytes(), 0);
 
         let buf = device
-            .alloc_buffer(4096, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         assert!(tracking.allocated_bytes() >= 4096);
 
@@ -613,7 +624,7 @@ mod tests {
             .alloc_buffer(
                 &device,
                 4096,
-                DataAccess::Scattered,
+                BufferKind::Scattered,
                 None,
                 BufferFlags::empty(),
             )
@@ -622,7 +633,7 @@ mod tests {
         let result = alloc.alloc_buffer(
             &device,
             8192,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             None,
             BufferFlags::empty(),
         );
@@ -638,7 +649,7 @@ mod tests {
                 32,
                 32,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Interpolated,
+                TextureKind::Interpolated,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .unwrap();
@@ -657,17 +668,17 @@ mod tests {
             assert_eq!(tracking.allocated_bytes(), 0);
 
             let buf = device
-                .alloc_buffer(1024, DataAccess::Scattered, None, BufferFlags::empty())
+                .alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap();
             let hinted = device
-                .alloc_buffer_with_capacity(512, 4096, DataAccess::Scattered, BufferFlags::empty())
+                .alloc_buffer_with_capacity(512, 4096, BufferKind::Scattered, BufferFlags::empty())
                 .unwrap();
             let tex = device
                 .alloc_texture(
                     16,
                     16,
                     TextureFormat::Rgba8Unorm,
-                    SpatialAccess::Interpolated,
+                    TextureKind::Interpolated,
                     TextureFlags::COPY_DST,
                 )
                 .unwrap();
@@ -700,7 +711,7 @@ mod tests {
         let device = base.with_vram_allocator(tracking.clone());
 
         let buf = device
-            .alloc_buffer(2048, DataAccess::Scattered, None, BufferFlags::empty())
+            .alloc_buffer(2048, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         assert!(tracking.allocated_bytes() >= 2048);
         drop(buf);

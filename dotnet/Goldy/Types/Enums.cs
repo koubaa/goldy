@@ -53,7 +53,7 @@ public enum TextureFormat
 /// Data access pattern for buffers.
 /// Describes how threads will access the buffer, which determines hardware optimization strategies.
 /// </summary>
-public enum DataAccess
+public enum BufferKind
 {
     /// <summary>
     /// Any thread, any address, read/write. No coherence assumptions.
@@ -71,7 +71,7 @@ public enum DataAccess
 /// Spatial access pattern for textures.
 /// Describes how the texture will be accessed, which determines hardware optimization strategies.
 /// </summary>
-public enum SpatialAccess
+public enum TextureKind
 {
     /// <summary>
     /// Hardware filtering between neighbors (texture units).

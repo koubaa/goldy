@@ -79,40 +79,40 @@ class TestBuffer:
         import goldy
         
         data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-        buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
+        buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
         assert buffer.size == 16  # 4 floats * 4 bytes
     
     def test_create_from_int32(self, device):
         import goldy
         
         data = np.array([1, 2, 3], dtype=np.int32)
-        buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
+        buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
         assert buffer.size == 12  # 3 ints * 4 bytes
     
     def test_create_from_uint16(self, device):
         import goldy
         
         data = np.array([0, 1, 2, 3, 4, 5], dtype=np.uint16)
-        buffer = goldy.Buffer(device, data, goldy.DataAccess.SCATTERED)
+        buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
         assert buffer.size == 12  # 6 shorts * 2 bytes
     
     def test_create_empty(self, device):
         import goldy
         
-        buffer = goldy.Buffer.empty(device, 1024, goldy.DataAccess.BROADCAST)
+        buffer = goldy.Buffer.empty(device, 1024, goldy.BufferKind.BROADCAST)
         assert buffer.size == 1024
     
     def test_write(self, device):
         import goldy
         
-        buffer = goldy.Buffer.empty(device, 64, goldy.DataAccess.BROADCAST)
+        buffer = goldy.Buffer.empty(device, 64, goldy.BufferKind.BROADCAST)
         data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
         buffer.write(0, data)  # Should not raise
     
     def test_write_with_offset(self, device):
         import goldy
         
-        buffer = goldy.Buffer.empty(device, 64, goldy.DataAccess.BROADCAST)
+        buffer = goldy.Buffer.empty(device, 64, goldy.BufferKind.BROADCAST)
         data = np.array([1.0, 2.0], dtype=np.float32)
         buffer.write(16, data)  # Write at offset 16
 
@@ -246,7 +246,7 @@ class TestFullPipeline:
              0.5,  0.5, 0.0, 0.0, 1.0, 1.0,
         ], dtype=np.float32)
         
-        vertex_buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
+        vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
         
         target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
         
@@ -289,7 +289,7 @@ class TestFullPipeline:
              0.9,  0.5, 0.0, 0.0, 1.0, 1.0,
         ], dtype=np.float32)
         
-        vertex_buffer = goldy.Buffer(device, vertices, goldy.DataAccess.SCATTERED)
+        vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
         target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
         
         encoder = goldy.CommandEncoder()
@@ -358,7 +358,7 @@ void cs_main(Scattered<float> data, ThreadId id) {
         input_data = np.arange(256, dtype=np.float32)
         
         # Create GPU storage buffer
-        buffer = goldy.Buffer(device, input_data, goldy.DataAccess.SCATTERED)
+        buffer = goldy.Buffer(device, input_data, goldy.BufferKind.SCATTERED)
         
         # Compile compute shader
         shader = goldy.ShaderModule.from_slang(device, compute_shader_src)

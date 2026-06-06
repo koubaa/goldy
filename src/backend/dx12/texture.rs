@@ -4,7 +4,7 @@ use super::barriers;
 use super::types::{Dx12State, PendingDeletion, TextureState};
 use super::utils::{format_to_dxgi, wait_for_fence};
 use super::{DeviceHandle, TextureHandle};
-use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
@@ -123,14 +123,14 @@ pub(super) fn create(
     width: u32,
     height: u32,
     format: TextureFormat,
-    access: SpatialAccess,
+    access: TextureKind,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
     let is_storage = matches!(
         access,
-        SpatialAccess::Direct | SpatialAccess::DirectInterpolated
+        TextureKind::Direct | TextureKind::DirectInterpolated
     );
-    let is_dual_access = matches!(access, SpatialAccess::DirectInterpolated);
+    let is_dual_access = matches!(access, TextureKind::DirectInterpolated);
 
     let logical_device = state
         .devices
@@ -1085,7 +1085,7 @@ pub(super) fn bindless_index(state: &Dx12State, texture_handle: TextureHandle) -
         .and_then(|t| t.bindless_offset)
 }
 
-/// For `SpatialAccess::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
+/// For `TextureKind::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
 pub(super) fn bindless_sampled_index(
     state: &Dx12State,
     texture_handle: TextureHandle,

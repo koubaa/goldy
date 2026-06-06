@@ -27,12 +27,12 @@
 //
 // - `Scattered`: Any thread, any address, read/write. No coherence assumptions.
 // - `Broadcast`: All threads read same address. Hardware broadcast optimization.
-typedef enum GoldyDataAccess {
+typedef enum GoldyBufferKind {
     // Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
-    GOLDY_DATA_ACCESS_SCATTERED = 0,
+    GOLDY_BUFFER_KIND_SCATTERED = 0,
     // All threads same address, broadcast optimized (ConstantBuffer).
-    GOLDY_DATA_ACCESS_BROADCAST = 1,
-} GoldyDataAccess;
+    GOLDY_BUFFER_KIND_BROADCAST = 1,
+} GoldyBufferKind;
 
 // Result codes for FFI functions.
 typedef enum GoldyResult {
@@ -146,14 +146,14 @@ typedef enum GoldyFilterMode {
 // - `Interpolated`: Hardware filtering between neighbors (texture units).
 // - `Direct`: Direct 2D/3D indexing, no filtering, read/write.
 // - `DirectInterpolated`: Both storage (UAV) and sampled (SRV) access on the same texture.
-typedef enum GoldySpatialAccess {
+typedef enum GoldyTextureKind {
     // Hardware filtering between neighbors (Texture2D with sampler).
-    GOLDY_SPATIAL_ACCESS_INTERPOLATED = 0,
+    GOLDY_TEXTURE_KIND_INTERPOLATED = 0,
     // Direct 2D/3D indexing, no filtering (RWTexture2D).
-    GOLDY_SPATIAL_ACCESS_DIRECT = 1,
+    GOLDY_TEXTURE_KIND_DIRECT = 1,
     // Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
-    GOLDY_SPATIAL_ACCESS_DIRECT_INTERPOLATED = 2,
-} GoldySpatialAccess;
+    GOLDY_TEXTURE_KIND_DIRECT_INTERPOLATED = 2,
+} GoldyTextureKind;
 
 // Opaque handle to a Goldy Buffer.
 typedef struct GoldyBuffer GoldyBuffer;
@@ -272,7 +272,7 @@ extern "C" {
 //
 // # Safety
 // The buffer pointer must be valid.
-enum GoldyDataAccess goldy_buffer_access(const struct GoldyBuffer *buffer);
+enum GoldyBufferKind goldy_buffer_access(const struct GoldyBuffer *buffer);
 
 // Create a new buffer with the specified access pattern.
 //
@@ -286,7 +286,7 @@ enum GoldyDataAccess goldy_buffer_access(const struct GoldyBuffer *buffer);
 // The device pointer must be valid.
 struct GoldyBuffer *goldy_buffer_create(const struct GoldyDevice *device,
                                         uint64_t size,
-                                        enum GoldyDataAccess access);
+                                        enum GoldyBufferKind access);
 
 // Create a buffer initialized with data.
 //
@@ -300,7 +300,7 @@ struct GoldyBuffer *goldy_buffer_create(const struct GoldyDevice *device,
 struct GoldyBuffer *goldy_buffer_create_with_data(const struct GoldyDevice *device,
                                                   const uint8_t *data,
                                                   size_t size,
-                                                  enum GoldyDataAccess access);
+                                                  enum GoldyBufferKind access);
 
 // Destroy a buffer.
 //
@@ -791,7 +791,7 @@ struct GoldyTexture *goldy_texture_create(const struct GoldyDevice *device,
                                           uint32_t width,
                                           uint32_t height,
                                           enum GoldyTextureFormat format,
-                                          enum GoldySpatialAccess access,
+                                          enum GoldyTextureKind access,
                                           struct GoldyTextureFlags flags);
 
 // Destroy a texture.

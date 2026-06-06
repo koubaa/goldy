@@ -612,6 +612,8 @@ impl TaskGraph {
         device: &Device,
         heap: &mut crate::placement_heap::PlacementHeap,
         node_waves: &[u32],
+        page_slot: usize,
+        retired_timeline: crate::timeline::TimelineValue,
     ) -> Result<HashMap<u32, TextureHandle>> {
         if self.transient_texture_specs.is_empty() {
             return Ok(HashMap::new());
@@ -627,7 +629,8 @@ impl TaskGraph {
         }
         let (id_to_color, color_keys) =
             Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
-        let per_color_handles = heap.get_or_create_textures(device, &color_keys)?;
+        let per_color_handles =
+            heap.get_or_create_textures(device, &color_keys, page_slot, retired_timeline)?;
         let mut out = HashMap::new();
         for s in &self.transient_texture_specs {
             let c = id_to_color[&s.id];
@@ -862,7 +865,7 @@ impl TaskGraph {
         }
         let width = texture.width();
         let height = texture.height();
-        let th = texture.handle();
+        let th = texture.gpu_handle();
         self.ir.nodes.push(TaskNode {
             label: "write_texture",
             bindings: vec![ResourceBinding {
@@ -886,8 +889,8 @@ impl TaskGraph {
     /// `src` should have [`crate::types::TextureFlags::COPY_SRC`] and
     /// `dst` should have [`crate::types::TextureFlags::COPY_DST`].
     pub fn copy_texture(&mut self, src: &Texture, dst: &Texture) {
-        let src_h = src.handle();
-        let dst_h = dst.handle();
+        let src_h = src.gpu_handle();
+        let dst_h = dst.gpu_handle();
         self.ir.nodes.push(TaskNode {
             label: "copy_texture",
             bindings: vec![
@@ -913,7 +916,7 @@ impl TaskGraph {
     /// after acquire. This keeps swapchain presentation as an abstract graph resource while allowing
     /// expensive producer work to run before WSI image availability.
     pub fn copy_texture_to_swapchain(&mut self, src: &Texture, _dst: SwapchainOutputHandle) {
-        let src_h = src.handle();
+        let src_h = src.gpu_handle();
         self.ir.nodes.push(TaskNode {
             label: "copy_texture_to_swapchain",
             bindings: vec![
@@ -964,7 +967,7 @@ impl TaskGraph {
                 data.len()
             );
         }
-        let th = texture.handle();
+        let th = texture.gpu_handle();
         self.ir.nodes.push(TaskNode {
             label: "write_texture_region",
             bindings: vec![ResourceBinding {
@@ -1500,6 +1503,22 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
+    /// Declare that this node accesses a retained [`crate::Parcel`] (buffer or texture).
+    ///
+    /// The backend resource handle is resolved inside the runtime; the client does not
+    /// pass a raw handle.
+    pub fn bind_parcel(
+        mut self,
+        parcel: &crate::Parcel,
+        access: crate::types::ResourceAccess,
+    ) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access: access.into(),
+        });
+        self
+    }
+
     pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientBuffer(id),
@@ -1702,7 +1721,7 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
         let mut graph = TaskGraph::new();
@@ -1770,7 +1789,7 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 4, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 4, crate::BufferKind::Scattered).unwrap();
         let mut graph = TaskGraph::new();
         let t0 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
         let t1 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
@@ -1795,7 +1814,7 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 4, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 4, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         let t0 = graph.transient_buffer(256);
@@ -1865,8 +1884,8 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
@@ -1914,8 +1933,8 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
@@ -1948,7 +1967,7 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
@@ -1970,9 +1989,9 @@ mod tests {
         let p3 = mock_pipeline(&device, &shader);
         let p4 = mock_pipeline(&device, &shader);
 
-        let buf_x = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
-        let buf_y = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
-        let buf_z = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_x = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_y = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_z = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         // A writes X
@@ -2026,7 +2045,7 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -2051,7 +2070,7 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf, 0, 256);
@@ -2077,8 +2096,8 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf_a, 0, 256);
@@ -2106,7 +2125,7 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_buffer(&buf, 0, vec![0u8; 256]);
@@ -2131,8 +2150,8 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_buffer(&buf_a, 0, vec![0u8; 4]);
@@ -2159,7 +2178,7 @@ mod tests {
             4,
             4,
             crate::types::TextureFormat::Rgba8Unorm,
-            crate::types::SpatialAccess::Interpolated,
+            crate::types::TextureKind::Interpolated,
             crate::types::TextureFlags::COPY_DST,
         )
         .unwrap();
@@ -2191,11 +2210,11 @@ mod tests {
             2,
             2,
             crate::types::TextureFormat::Rgba8Unorm,
-            crate::types::SpatialAccess::Interpolated,
+            crate::types::TextureKind::Interpolated,
             crate::types::TextureFlags::COPY_DST,
         )
         .unwrap();
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_texture(&tex, vec![0u8; 16]).unwrap();
@@ -2213,8 +2232,8 @@ mod tests {
     #[test]
     fn multiple_clears_independent_same_wave() {
         let device = mock_device();
-        let buf_a = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf_a, 0, 256);
@@ -2236,7 +2255,7 @@ mod tests {
     #[test]
     fn is_empty_with_clear_node() {
         let device = mock_device();
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -2248,7 +2267,7 @@ mod tests {
     #[test]
     fn is_empty_with_write_node() {
         let device = mock_device();
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -2344,7 +2363,7 @@ mod tests {
         let p2 = mock_pipeline(&device, &shader);
         let p3 = mock_pipeline(&device, &shader);
 
-        let owned = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let owned = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
         let view = pool.alloc::<u32>(64).unwrap();
 
         let mut graph = TaskGraph::new();
@@ -2631,7 +2650,7 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
@@ -2659,7 +2678,7 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
@@ -2694,7 +2713,7 @@ mod tests {
         let shader = mock_shader(&device);
         let p1 = mock_pipeline(&device, &shader);
         let p2 = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &p1)
@@ -2736,7 +2755,7 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::DataAccess::Scattered).unwrap();
+        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)

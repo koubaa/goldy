@@ -2,7 +2,7 @@
 
 use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
-use crate::types::{GoldySpatialAccess, GoldyTextureFlags, GoldyTextureFormat};
+use crate::types::{GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind};
 use std::ptr;
 
 /// Opaque handle to a Goldy Texture.
@@ -31,7 +31,7 @@ pub unsafe extern "C" fn goldy_texture_create(
     width: u32,
     height: u32,
     format: GoldyTextureFormat,
-    access: GoldySpatialAccess,
+    access: GoldyTextureKind,
     flags: GoldyTextureFlags,
 ) -> *mut GoldyTexture {
     if device.is_null() {
@@ -39,14 +39,10 @@ pub unsafe extern "C" fn goldy_texture_create(
         return ptr::null_mut();
     }
 
-    match goldy::Texture::new(
-        &(*device).inner,
-        width,
-        height,
-        format.into(),
-        access.into(),
-        flags.into(),
-    ) {
+    match (*device)
+        .inner
+        .alloc_texture(width, height, format.into(), access.into(), flags.into())
+    {
         Ok(texture) => Box::into_raw(Box::new(GoldyTexture { inner: texture })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

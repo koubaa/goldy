@@ -88,8 +88,8 @@ impl SlotUsageSet {
 }
 
 /// Logical access a task node has on a resource, orthogonal to the
-/// resource's physical [`DataAccess`](crate::DataAccess) /
-/// [`SpatialAccess`](crate::SpatialAccess).
+/// resource's physical [`BufferKind`](crate::BufferKind) /
+/// [`TextureKind`](crate::TextureKind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeAccess {
     /// Node only reads — can overlap with other `Read` nodes on the same resource.
@@ -107,6 +107,16 @@ impl NodeAccess {
 
     pub fn reads(self) -> bool {
         matches!(self, NodeAccess::Read | NodeAccess::ReadWrite)
+    }
+}
+
+impl From<crate::types::ResourceAccess> for NodeAccess {
+    fn from(access: crate::types::ResourceAccess) -> Self {
+        match access {
+            crate::types::ResourceAccess::Read => NodeAccess::Read,
+            crate::types::ResourceAccess::Write => NodeAccess::Write,
+            crate::types::ResourceAccess::ReadWrite => NodeAccess::ReadWrite,
+        }
     }
 }
 

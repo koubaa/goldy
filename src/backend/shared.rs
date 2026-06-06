@@ -108,25 +108,16 @@ pub fn fill_raw(layout: &mut PushLayout, indices: &[u32], user: &[u32]) {
     }
 }
 
-/// Fill region A of `layout` from an iterator of typed [`BindlessHandle`]s.
+/// Fill region A of `layout` from an iterator of typed [`ResourceHandle`]s.
 ///
 /// Handles beyond [`MAX_BINDLESS_SLOTS`] are silently dropped.
 #[inline]
-pub fn fill_typed(layout: &mut PushLayout, handles: impl IntoIterator<Item = impl BindlessIndex>) {
+pub fn fill_typed(
+    layout: &mut PushLayout,
+    handles: impl IntoIterator<Item = crate::types::ResourceHandle>,
+) {
     for (i, h) in handles.into_iter().enumerate().take(MAX_BINDLESS_SLOTS) {
-        layout.bindless[i] = h.bindless_index() as u16;
-    }
-}
-
-/// Minimal interface for a typed bindless handle used by [`fill_typed`].
-pub trait BindlessIndex {
-    fn bindless_index(&self) -> u32;
-}
-
-impl BindlessIndex for crate::types::BindlessHandle {
-    #[inline]
-    fn bindless_index(&self) -> u32 {
-        self.index()
+        layout.bindless[i] = h.index() as u16;
     }
 }
 

@@ -9,7 +9,7 @@
 //! `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient`
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, DataAccess, DeviceDescriptor, Instance,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance,
     LayoutCheckable, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule,
     Surface, VertexBufferLayout,
 };
@@ -87,10 +87,11 @@ impl App {
         )?;
 
         // Create uniform buffer for time
-        let uniform_buffer = Buffer::new(
-            device.as_ref(),
+        let uniform_buffer = device.as_ref().alloc_buffer(
             std::mem::size_of::<TimeUniforms>() as u64,
-            DataAccess::Broadcast,
+            BufferKind::Broadcast,
+            None,
+            goldy::BufferFlags::empty(),
         )?;
 
         self.device = Some(device);

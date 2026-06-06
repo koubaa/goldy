@@ -59,7 +59,7 @@
 //! # SWMR scheduling
 //!
 //! [`NodeAccess`] is orthogonal to a buffer's physical
-//! [`DataAccess`](crate::DataAccess). A `Scattered` (read/write) buffer might
+//! [`BufferKind`](crate::BufferKind). A `Scattered` (read/write) buffer might
 //! be read-only in one dispatch and read-write in another. The graph uses
 //! per-node logical access to enable single-writer/multiple-reader parallelism:
 //!

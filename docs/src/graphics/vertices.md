@@ -62,7 +62,7 @@ let pipeline = RenderPipeline::new(&device, &vs, &fs, &RenderPipelineDesc {
 })?;
 ```
 
-Both types implement `StructuredBufferElement`, so they can also be stored in `Buffer::with_data` and `BufferPool::alloc_with_data`.
+Both types implement `StructuredBufferElement`, so they can also be stored via `device.alloc_buffer_with_data` and `BufferPool::alloc_with_data`.
 
 ## Custom Vertex Layouts
 

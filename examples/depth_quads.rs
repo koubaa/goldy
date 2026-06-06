@@ -11,7 +11,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    Buffer, Color, CommandEncoder, CompareFunction, DataAccess, DepthFormat, DepthStencilState,
+    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState,
     DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
@@ -170,8 +170,8 @@ impl App {
         let warm_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, warm_z, 0.95, 0.35, 0.1);
         let cool_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, cool_z, 0.1, 0.6, 0.95);
 
-        let warm_vb = Buffer::with_data(device, &warm_verts, DataAccess::Scattered)?;
-        let cool_vb = Buffer::with_data(device, &cool_verts, DataAccess::Scattered)?;
+        let warm_vb = device.alloc_buffer_with_data(&warm_verts, BufferKind::Scattered)?;
+        let cool_vb = device.alloc_buffer_with_data(&cool_verts, BufferKind::Scattered)?;
 
         // Update window title with live depth values so it is easy to reason
         // about what is happening.

@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputePipeline, DataAccess, DeviceDescriptor, Instance,
+    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    ResourceAccess, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -118,7 +118,7 @@ impl RenderState {
 
         // Create particle buffer with initial rain particles
         let particles = Self::create_particles(false);
-        let particle_buffer = Buffer::with_data(&device, &particles, DataAccess::Scattered)?;
+        let particle_buffer = device.alloc_buffer_with_data(&particles, BufferKind::Scattered)?;
 
         // Create params buffer
         let initial_params = ParticleParams {
@@ -127,7 +127,8 @@ impl RenderState {
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer = Buffer::with_data(&device, &[initial_params], DataAccess::Broadcast)?;
+        let params_buffer =
+            device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
@@ -231,8 +232,12 @@ impl RenderState {
             .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
             .bind_buffer(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
-                self.particle_buffer.bindless_index().unwrap(),
-                self.params_buffer.bindless_index().unwrap(),
+                self.particle_buffer
+                    .resource_index(ResourceAccess::Write)
+                    .unwrap(),
+                self.params_buffer
+                    .resource_index(ResourceAccess::Read)
+                    .unwrap(),
             ])
             .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
         graph.dispatch(&self.context)?;

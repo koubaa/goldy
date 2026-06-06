@@ -4,7 +4,7 @@ use super::barriers;
 use super::tiles;
 use super::types::{BufferState, Dx12State};
 use super::{BufferHandle, DeviceHandle};
-use crate::backend::DataAccess;
+use crate::backend::BufferKind;
 use crate::types::BufferFlags;
 use anyhow::{Context, Result};
 use windows::core::Interface;
@@ -631,12 +631,12 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     logical_size: u64,
     allocation_size: u64,
-    access: DataAccess,
+    access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
     debug_assert!(logical_size <= allocation_size);
-    let allocation_size = if access == DataAccess::Broadcast {
+    let allocation_size = if access == BufferKind::Broadcast {
         uniform_buffer_allocation_width(logical_size, allocation_size)
     } else {
         allocation_size
@@ -650,10 +650,10 @@ pub(super) fn create(
             .context("Invalid device handle")?;
 
         // Scattered access -> storage buffer (UAV), Broadcast access -> uniform buffer (CBV)
-        let is_storage = access == DataAccess::Scattered;
+        let is_storage = access == BufferKind::Scattered;
 
         if cpu_readable && !is_storage {
-            anyhow::bail!("BufferFlags::CPU_READABLE is only valid for DataAccess::Scattered (storage) buffers");
+            anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
         }
 
         // Storage buffers need DEFAULT heap for UAV support (bindless)
@@ -787,7 +787,7 @@ pub(super) fn create(
 
     // Second pass: register in bindless heap
     // Scattered access -> UAV + SRV descriptors, Broadcast access -> CBV descriptors
-    let is_uniform = access == DataAccess::Broadcast;
+    let is_uniform = access == BufferKind::Broadcast;
     let (bindless_offset, bindless_srv_offset) = if is_storage || is_uniform {
         let logical_device = state
             .devices
@@ -1116,7 +1116,7 @@ pub(super) fn create_with_capacity(
     device_handle: DeviceHandle,
     initial_size: u64,
     requested_capacity: u64,
-    access: DataAccess,
+    access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<(BufferHandle, u64)> {
@@ -1126,7 +1126,7 @@ pub(super) fn create_with_capacity(
             d.supports_reserved_buffers
                 && d.tile_heap_pool.is_some()
                 && cap > initial_size
-                && access == DataAccess::Scattered
+                && access == BufferKind::Scattered
                 && !flags.contains(BufferFlags::CPU_READABLE)
         });
     if use_reserved {

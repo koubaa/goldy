@@ -71,10 +71,10 @@ internal static partial class NativeMethods
     // ========================================================================
 
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_create")]
-    internal static partial nint BufferCreate(nint device, ulong size, DataAccess access);
+    internal static partial nint BufferCreate(nint device, ulong size, BufferKind access);
 
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_create_with_data")]
-    internal static partial nint BufferCreateWithData(nint device, nint data, nuint size, DataAccess access);
+    internal static partial nint BufferCreateWithData(nint device, nint data, nuint size, BufferKind access);
 
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_destroy")]
     internal static partial void BufferDestroy(nint buffer);
@@ -86,7 +86,7 @@ internal static partial class NativeMethods
     internal static partial ulong BufferSize(nint buffer);
 
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_access")]
-    internal static partial DataAccess BufferAccess(nint buffer);
+    internal static partial BufferKind BufferAccess(nint buffer);
 
     // ========================================================================
     // RenderTarget
@@ -216,7 +216,7 @@ internal static partial class NativeMethods
     // ========================================================================
 
     [LibraryImport(LibName, EntryPoint = "goldy_texture_create")]
-    internal static partial nint TextureCreate(nint device, uint width, uint height, TextureFormat format, SpatialAccess access, TextureFlags flags);
+    internal static partial nint TextureCreate(nint device, uint width, uint height, TextureFormat format, TextureKind access, TextureFlags flags);
 
     [LibraryImport(LibName, EntryPoint = "goldy_texture_destroy")]
     internal static partial void TextureDestroy(nint texture);

@@ -12,7 +12,7 @@
 
 use crate::device::Device;
 use crate::texture::Texture;
-use crate::types::{SpatialAccess, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -39,7 +39,7 @@ pub struct TexturePoolStats {
     pub estimated_bytes: usize,
 }
 
-type PoolKey = (u32, u32, TextureFormat, SpatialAccess, TextureFlags);
+type PoolKey = (u32, u32, TextureFormat, TextureKind, TextureFlags);
 
 /// User-managed pool of textures for reuse.
 ///
@@ -59,14 +59,14 @@ impl TexturePool {
         }
     }
 
-    /// Take a pooled texture matching the key, or create a new one with [`Texture::new`].
+    /// Take a pooled texture matching the key, or create a new one through [`Device::alloc_texture`](crate::Device::alloc_texture).
     pub fn acquire(
         &mut self,
         device: &Device,
         width: u32,
         height: u32,
         format: TextureFormat,
-        access: SpatialAccess,
+        access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Texture> {
         let key = (width, height, format, access, flags);
@@ -144,10 +144,10 @@ mod tests {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
-    fn rgba_interpolated() -> (TextureFormat, SpatialAccess, TextureFlags) {
+    fn rgba_interpolated() -> (TextureFormat, TextureKind, TextureFlags) {
         (
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
         )
     }
@@ -181,12 +181,12 @@ mod tests {
         let (fmt, acc, flags) = rgba_interpolated();
 
         let tex = pool.acquire(&device, 32, 32, fmt, acc, flags).unwrap();
-        let handle_before = tex.handle();
+        let handle_before = tex.gpu_handle();
         pool.release(tex);
 
         let tex2 = pool.acquire(&device, 32, 32, fmt, acc, flags).unwrap();
         assert_eq!(
-            tex2.handle(),
+            tex2.gpu_handle(),
             handle_before,
             "pool should return the same GPU resource on reuse"
         );
@@ -223,12 +223,12 @@ mod tests {
         let (fmt, acc, flags) = rgba_interpolated();
 
         let t64 = pool.acquire(&device, 64, 64, fmt, acc, flags).unwrap();
-        let handle_64 = t64.handle();
+        let handle_64 = t64.gpu_handle();
         pool.release(t64);
 
         let t128 = pool.acquire(&device, 128, 128, fmt, acc, flags).unwrap();
         assert_ne!(
-            t128.handle(),
+            t128.gpu_handle(),
             handle_64,
             "128x128 acquire should not reuse a 64x64 resource"
         );
@@ -245,16 +245,16 @@ mod tests {
         let (fmt, _, flags) = rgba_interpolated();
 
         let interp = pool
-            .acquire(&device, 16, 16, fmt, SpatialAccess::Interpolated, flags)
+            .acquire(&device, 16, 16, fmt, TextureKind::Interpolated, flags)
             .unwrap();
-        let handle_interp = interp.handle();
+        let handle_interp = interp.gpu_handle();
         pool.release(interp);
 
         let direct = pool
-            .acquire(&device, 16, 16, fmt, SpatialAccess::Direct, flags)
+            .acquire(&device, 16, 16, fmt, TextureKind::Direct, flags)
             .unwrap();
         assert_ne!(
-            direct.handle(),
+            direct.gpu_handle(),
             handle_interp,
             "Direct access acquire should not reuse an Interpolated resource"
         );
@@ -271,14 +271,14 @@ mod tests {
         let src_only = pool
             .acquire(&device, 16, 16, fmt, acc, TextureFlags::COPY_SRC)
             .unwrap();
-        let handle_src = src_only.handle();
+        let handle_src = src_only.gpu_handle();
         pool.release(src_only);
 
         let dst_only = pool
             .acquire(&device, 16, 16, fmt, acc, TextureFlags::COPY_DST)
             .unwrap();
         assert_ne!(
-            dst_only.handle(),
+            dst_only.gpu_handle(),
             handle_src,
             "COPY_DST acquire must not reuse a COPY_SRC-only resource"
         );

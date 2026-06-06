@@ -47,7 +47,9 @@ pub mod tracy;
 #[cfg(feature = "tracy")]
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
+pub mod parcel;
 pub mod placement_heap;
+pub mod retained_pool;
 pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
@@ -55,7 +57,9 @@ pub mod vram_allocator;
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
-pub use vram_allocator::{DeferredPayload, ParcelKind};
+pub use parcel::{BytesByKind, MosaicSlot, Parcel};
+pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
+pub use vram_allocator::{DeferredPayload, ParcelType};
 
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
