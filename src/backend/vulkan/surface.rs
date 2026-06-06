@@ -2473,9 +2473,7 @@ fn unregister_swapchain_texture_with_device(
     tex_handle: TextureHandle,
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
-        logical_device
-            .resource_registry
-            .unregister_texture(tex_handle);
+        logical_device.reclaim_texture_slots(tex_handle);
         unsafe {
             logical_device
                 .device
@@ -2494,7 +2492,7 @@ fn unregister_swapchain_texture(
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
         if let Some(device) = devices.get_mut(&tex_state.device_handle) {
-            device.resource_registry.unregister_texture(tex_handle);
+            device.reclaim_texture_slots(tex_handle);
             unsafe {
                 device.device.destroy_image_view(tex_state.view, None);
             }

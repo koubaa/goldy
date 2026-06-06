@@ -386,6 +386,12 @@ pub(super) fn render(
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
+    // Reset the single shared command allocator. This is safe only because we do
+    // a blocking CPU wait at the end of every render_to_target call (see below);
+    // that guarantees no GPU work recorded with this allocator is still in-flight.
+    // The compute/submit_graph paths avoid this stall by using a pool of allocators
+    // (ComputeAllocatorSlot) where each slot is reset only after its fence retires.
+    // Upgrading render_to_target to a pool would eliminate the wait but is not yet done.
     unsafe { logical_device.command_allocator.Reset() }
         .context("Failed to reset command allocator")?;
 
@@ -428,6 +434,8 @@ pub(super) fn render(
             .Signal(&logical_device.fence, fence_value)
     }
     .context("Failed to signal fence")?;
+    // Blocking wait — required so the shared command_allocator can be safely
+    // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {

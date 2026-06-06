@@ -1,13 +1,14 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
+use super::super::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
 use super::barriers;
 use super::pso_cache;
 use super::shader;
 use super::staging;
-use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, Dx12State};
+use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
-use crate::backend::{GpuCommand, GraphCommand};
+use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
 use anyhow::{Context, Result};
@@ -16,6 +17,106 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+
+/// Collect bindless heap indices referenced by a flat GPU command stream.
+fn collect_bindless_slots_from_gpu_commands(
+    commands: &[GpuCommand],
+    buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
+) -> Vec<DeferredSlot> {
+    let mut slots = Vec::new();
+    for cmd in commands {
+        match cmd {
+            GpuCommand::BindResources {
+                buffers: buf_handles,
+            } => {
+                for h in buf_handles {
+                    if let Some(offset) = buffers.get(h).and_then(|b| b.bindless_offset) {
+                        slots.push(DeferredSlot::CbvSrvUav(offset));
+                    }
+                }
+            }
+            GpuCommand::BindResourcesRaw { indices, .. } => {
+                slots.extend(indices.iter().copied().map(DeferredSlot::CbvSrvUav));
+            }
+            GpuCommand::BindResourcesTyped { handles } => {
+                slots.extend(handles.iter().map(|h| DeferredSlot::CbvSrvUav(h.index())));
+            }
+            GpuCommand::DispatchBatch {
+                arg_data, count, ..
+            } => {
+                let layout_size = std::mem::size_of::<PushLayout>();
+                for i in 0..*count as usize {
+                    let base = i * DISPATCH_BATCH_STRIDE;
+                    if base + layout_size <= arg_data.len() {
+                        let layout: &PushLayout =
+                            bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                        // Skip zero entries: PushLayout::bindless is a fixed [u16; N]
+                        // array default-initialised to 0. Positions the caller did not
+                        // fill remain 0 and do not correspond to an actual binding.
+                        // Tracking them would create spurious slot_last_seen[0] entries
+                        // on every batch submit, causing CbvSrvUav(0) reclamation to
+                        // wait for unrelated contexts. BindResourcesRaw/Typed are not
+                        // filtered because those vecs contain only the slots the caller
+                        // explicitly provided.
+                        for &idx in &layout.bindless {
+                            if idx != 0 {
+                                slots.push(DeferredSlot::CbvSrvUav(idx as u32));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    slots
+}
+
+/// Collect bindless heap indices from a mixed compute/render graph submission.
+fn collect_bindless_slots_from_graph_commands(
+    commands: &[GraphCommand],
+    buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
+) -> Vec<DeferredSlot> {
+    let mut slots = Vec::new();
+    for gc in commands {
+        match gc {
+            GraphCommand::Compute(cmd) => {
+                slots.extend(collect_bindless_slots_from_gpu_commands(
+                    std::slice::from_ref(cmd),
+                    buffers,
+                ));
+            }
+            GraphCommand::Render {
+                commands: render_cmds,
+                ..
+            } => {
+                for rc in render_cmds {
+                    match rc {
+                        RenderCommand::BindResources {
+                            buffers: buf_handles,
+                        } => {
+                            for h in buf_handles {
+                                if let Some(offset) = buffers.get(h).and_then(|b| b.bindless_offset)
+                                {
+                                    slots.push(DeferredSlot::CbvSrvUav(offset));
+                                }
+                            }
+                        }
+                        RenderCommand::BindResourcesRaw { indices, .. } => {
+                            slots.extend(indices.iter().copied().map(DeferredSlot::CbvSrvUav));
+                        }
+                        RenderCommand::BindResourcesTyped { handles } => {
+                            slots
+                                .extend(handles.iter().map(|h| DeferredSlot::CbvSrvUav(h.index())));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    slots
+}
 
 /// Convert the Koubaa-level producer/consumer kind set to a DX12 sync scope.
 ///
@@ -1286,6 +1387,7 @@ struct SubmitFinish {
     fence_value: u64,
     slot_idx: usize,
     retain_key: Option<u64>,
+    used_slots: Vec<DeferredSlot>,
 }
 
 struct StagingFinish {
@@ -1330,6 +1432,7 @@ fn execute_signal_and_finish(
         fence_value,
         slot_idx,
         retain_key,
+        used_slots,
     } = submit;
     let StagingFinish {
         texture_uploads: staged_texture_uploads,
@@ -1356,6 +1459,10 @@ fn execute_signal_and_finish(
     }
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
+
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+    }
 
     let logical_device = state.devices.get(&device_handle).unwrap();
     let ctx_fence = state
@@ -1403,6 +1510,7 @@ fn execute_signal_and_finish(
                     fingerprint: key,
                     command_list: cl,
                     slot_idx,
+                    used_slots,
                 });
             }
         }
@@ -1412,6 +1520,7 @@ fn execute_signal_and_finish(
     let retired = super::context::device_retired(state, device_handle);
     if let Some(dev) = state.devices.get_mut(&device_handle) {
         dev.process_deletion_queue_up_to(retired);
+        dev.drain_ready_slot_reclamations(&state.contexts);
     }
 
     state
@@ -1655,6 +1764,7 @@ pub(super) fn submit(
         }
     }
 
+    let used_slots = collect_bindless_slots_from_gpu_commands(commands, &state.buffers);
     execute_signal_and_finish(
         state,
         &command_list,
@@ -1665,6 +1775,7 @@ pub(super) fn submit(
             fence_value,
             slot_idx,
             retain_key: None,
+            used_slots,
         },
         StagingFinish {
             texture_uploads: staged_texture_uploads,
@@ -1961,6 +2072,7 @@ pub(super) fn submit_graph(
         }
     }
 
+    let used_slots = collect_bindless_slots_from_graph_commands(commands, &state.buffers);
     let result = execute_signal_and_finish(
         state,
         &command_list,
@@ -1971,6 +2083,7 @@ pub(super) fn submit_graph(
             fence_value,
             slot_idx,
             retain_key,
+            used_slots,
         },
         StagingFinish {
             texture_uploads: staged_texture_uploads,
@@ -2006,12 +2119,14 @@ pub(super) fn try_resubmit_retained(
     let retained = {
         let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
         match sc.retained_graph.as_ref() {
-            Some(r) if r.fingerprint == key => Some((r.command_list.clone(), r.slot_idx)),
+            Some(r) if r.fingerprint == key => {
+                Some((r.command_list.clone(), r.slot_idx, r.used_slots.clone()))
+            }
             _ => None,
         }
     };
 
-    let Some((command_list, slot_idx)) = retained else {
+    let Some((command_list, slot_idx, used_slots)) = retained else {
         return Ok(None);
     };
 
@@ -2046,6 +2161,10 @@ pub(super) fn try_resubmit_retained(
             .context("Failed to signal context fence after retained resubmit")?;
     }
 
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+    }
+
     if let Some(sc) = state.contexts.get_mut(&ctx) {
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
@@ -2056,6 +2175,7 @@ pub(super) fn try_resubmit_retained(
     let retired = super::context::device_retired(state, device_handle);
     if let Some(dev) = state.devices.get_mut(&device_handle) {
         dev.process_deletion_queue_up_to(retired);
+        dev.drain_ready_slot_reclamations(&state.contexts);
     }
 
     Ok(Some(fence_value))

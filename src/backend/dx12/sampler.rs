@@ -69,7 +69,11 @@ pub(super) fn create(
 
 /// Destroy a sampler.
 pub(super) fn destroy(state: &mut Dx12State, sampler_handle: SamplerHandle) {
-    state.samplers.remove(&sampler_handle);
+    if let Some(sampler) = state.samplers.remove(&sampler_handle) {
+        if let Some(ld) = state.devices.get_mut(&sampler.device_handle) {
+            ld.reclaim_sampler_slots(sampler_handle);
+        }
+    }
 }
 
 /// Get the bindless index for a sampler.

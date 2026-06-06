@@ -1,10 +1,13 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
+use super::super::shared::DISPATCH_BATCH_STRIDE;
 use super::staging;
-use super::types::{ComputePipelineState, LogicalDevice, PushLayout};
-use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
-use crate::backend::{GpuCommand, GraphCommand};
+use super::types::{ComputePipelineState, LogicalDevice, PipelineState, PushLayout, SlotKey};
+use super::{
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+};
+use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
 use crate::gpu_profiler::{self, DispatchGpuNs};
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 use crate::timeline::TimelineValue;
@@ -13,6 +16,202 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+
+fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Option<SlotKey> {
+    use crate::types::ResourceCategory;
+    match cat {
+        ResourceCategory::Scattered => Some(SlotKey::StorageBuffer(index)),
+        ResourceCategory::Broadcast => Some(SlotKey::UniformBuffer(index)),
+        ResourceCategory::Texture => Some(SlotKey::SampledTexture(index)),
+        ResourceCategory::StorageImage => Some(SlotKey::StorageImage(index)),
+        ResourceCategory::Sampler => Some(SlotKey::Sampler(index)),
+    }
+}
+
+fn collect_slots_from_raw_bind(
+    indices: &[u32],
+    categories: &[Option<crate::types::ResourceCategory>],
+) -> Vec<SlotKey> {
+    let mut slots = Vec::new();
+    for (i, &idx) in indices.iter().enumerate() {
+        if let Some(Some(cat)) = categories.get(i) {
+            if let Some(key) = slot_key_from_category(*cat, idx) {
+                slots.push(key);
+            }
+        }
+    }
+    slots
+}
+
+fn collect_slot_keys_from_gpu_commands(
+    commands: &[GpuCommand],
+    compute_pipelines: &HashMap<ComputePipelineHandle, ComputePipelineState>,
+    buffers: &HashMap<BufferHandle, super::types::BufferState>,
+) -> Vec<SlotKey> {
+    let mut current_pipeline = None;
+    let mut slots = Vec::new();
+    for cmd in commands {
+        match cmd {
+            GpuCommand::SetPipeline(p) => current_pipeline = Some(*p),
+            GpuCommand::BindResources {
+                buffers: buf_handles,
+            } => {
+                for h in buf_handles {
+                    if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
+                        slots.push(SlotKey::StorageBuffer(idx));
+                    }
+                }
+            }
+            GpuCommand::BindResourcesRaw { indices, .. } => {
+                if let Some(p) = current_pipeline.and_then(|h| compute_pipelines.get(&h)) {
+                    slots.extend(collect_slots_from_raw_bind(
+                        indices,
+                        &p.push_constant_categories,
+                    ));
+                }
+            }
+            GpuCommand::BindResourcesTyped { handles } => {
+                for h in handles {
+                    if let Some(key) = slot_key_from_category(h.category(), h.index()) {
+                        slots.push(key);
+                    }
+                }
+            }
+            GpuCommand::DispatchBatch {
+                arg_data, count, ..
+            } => {
+                if let Some(p) = current_pipeline.and_then(|h| compute_pipelines.get(&h)) {
+                    let layout_size = std::mem::size_of::<PushLayout>();
+                    for i in 0..*count as usize {
+                        let base = i * DISPATCH_BATCH_STRIDE;
+                        if base + layout_size <= arg_data.len() {
+                            let layout: &PushLayout =
+                                bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                            for (slot_i, &idx) in layout.bindless.iter().enumerate() {
+                                if let Some(Some(cat)) =
+                                    p.push_constant_categories.get(slot_i).copied()
+                                {
+                                    if let Some(key) = slot_key_from_category(cat, idx as u32) {
+                                        slots.push(key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    slots
+}
+
+fn collect_slot_keys_from_graph_commands(
+    commands: &[GraphCommand],
+    compute_pipelines: &HashMap<ComputePipelineHandle, ComputePipelineState>,
+    pipelines: &HashMap<PipelineHandle, PipelineState>,
+    buffers: &HashMap<BufferHandle, super::types::BufferState>,
+) -> Vec<SlotKey> {
+    let mut slots = Vec::new();
+    let mut current_compute_pipeline = None;
+    let mut current_render_pipeline = None;
+    for gc in commands {
+        match gc {
+            GraphCommand::Compute(cmd) => match cmd {
+                GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
+                GpuCommand::BindResources {
+                    buffers: buf_handles,
+                } => {
+                    for h in buf_handles {
+                        if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
+                            slots.push(SlotKey::StorageBuffer(idx));
+                        }
+                    }
+                }
+                GpuCommand::BindResourcesRaw { indices, .. } => {
+                    if let Some(p) =
+                        current_compute_pipeline.and_then(|h| compute_pipelines.get(&h))
+                    {
+                        slots.extend(collect_slots_from_raw_bind(
+                            indices,
+                            &p.push_constant_categories,
+                        ));
+                    }
+                }
+                GpuCommand::BindResourcesTyped { handles } => {
+                    for h in handles {
+                        if let Some(key) = slot_key_from_category(h.category(), h.index()) {
+                            slots.push(key);
+                        }
+                    }
+                }
+                GpuCommand::DispatchBatch {
+                    arg_data, count, ..
+                } => {
+                    if let Some(p) =
+                        current_compute_pipeline.and_then(|h| compute_pipelines.get(&h))
+                    {
+                        let layout_size = std::mem::size_of::<PushLayout>();
+                        for i in 0..*count as usize {
+                            let base = i * DISPATCH_BATCH_STRIDE;
+                            if base + layout_size <= arg_data.len() {
+                                let layout: &PushLayout =
+                                    bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                                for (slot_i, &idx) in layout.bindless.iter().enumerate() {
+                                    if let Some(Some(cat)) =
+                                        p.push_constant_categories.get(slot_i).copied()
+                                    {
+                                        if let Some(key) = slot_key_from_category(cat, idx as u32) {
+                                            slots.push(key);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            GraphCommand::Render {
+                commands: render_cmds,
+                ..
+            } => {
+                for rc in render_cmds {
+                    match rc {
+                        RenderCommand::SetPipeline(p) => current_render_pipeline = Some(*p),
+                        RenderCommand::BindResources {
+                            buffers: buf_handles,
+                        } => {
+                            for h in buf_handles {
+                                if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
+                                    slots.push(SlotKey::StorageBuffer(idx));
+                                }
+                            }
+                        }
+                        RenderCommand::BindResourcesRaw { indices, .. } => {
+                            if let Some(p) = current_render_pipeline.and_then(|h| pipelines.get(&h))
+                            {
+                                slots.extend(collect_slots_from_raw_bind(
+                                    indices,
+                                    &p.push_constant_categories,
+                                ));
+                            }
+                        }
+                        RenderCommand::BindResourcesTyped { handles } => {
+                            for h in handles {
+                                if let Some(key) = slot_key_from_category(h.category(), h.index()) {
+                                    slots.push(key);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    slots
+}
 
 /// Map a Koubaa producer/consumer usage set to Vulkan pipeline stage flags.
 fn slot_usage_to_vk_stage(usage: &SlotUsageSet) -> vk::PipelineStageFlags2 {
@@ -1171,6 +1370,12 @@ pub(super) fn submit(
         ld.timeline_next
     };
 
+    let used_slots =
+        collect_slot_keys_from_gpu_commands(commands, &state.compute_pipelines, &state.buffers);
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.record_slot_usage(ctx, signal_value, used_slots);
+    }
+
     let timeline_sem = state
         .contexts
         .get(&ctx)
@@ -1286,6 +1491,7 @@ pub(super) fn submit(
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
+            ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
 
@@ -2136,6 +2342,16 @@ fn submit_graph_impl(
         ld.timeline_next
     };
 
+    let used_slots = collect_slot_keys_from_graph_commands(
+        commands,
+        &state.compute_pipelines,
+        &state.pipelines,
+        &state.buffers,
+    );
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.record_slot_usage(ctx, signal_value, used_slots.iter().copied());
+    }
+
     let timeline_sem = state
         .contexts
         .get(&ctx)
@@ -2193,6 +2409,7 @@ fn submit_graph_impl(
             sc.retained_compute_cb = Some(super::types::RetainedVkCb {
                 fingerprint: key,
                 command_buffer: cmd,
+                used_slots,
             });
         } else {
             sc.timeline_cmd_buffers
@@ -2257,6 +2474,7 @@ fn submit_graph_impl(
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
+            ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
 
@@ -2299,15 +2517,15 @@ pub(super) fn try_resubmit_retained(
         .get(&ctx)
         .context("Invalid context handle")?
         .device;
-    let retained_cb = {
+    let retained = {
         let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
         match sc.retained_compute_cb.as_ref() {
-            Some(r) if r.fingerprint == key => Some(r.command_buffer),
+            Some(r) if r.fingerprint == key => Some((r.command_buffer, r.used_slots.clone())),
             _ => None,
         }
     };
 
-    let Some(cmd) = retained_cb else {
+    let Some((cmd, used_slots)) = retained else {
         return Ok(None);
     };
 
@@ -2349,11 +2567,16 @@ pub(super) fn try_resubmit_retained(
         .context("Failed to queue_submit2 retained dispatch CB")?;
     }
 
+    if let Some(ld) = state.devices.get_mut(&device_handle) {
+        ld.record_slot_usage(ctx, signal_value, used_slots);
+    }
+
     {
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
             ld.timeline_next = signal_value.saturating_add(1);
             ld.process_deletion_queue_up_to(retired);
+            ld.drain_ready_slot_reclamations(&state.contexts);
         }
     }
     if let Some(sc) = state.contexts.get_mut(&ctx) {
