@@ -18,6 +18,8 @@ use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 /// Maximum number of descriptors per resource type in the global bindless set
 pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
@@ -507,7 +509,9 @@ pub(crate) struct LogicalDevice {
     /// Slots waiting for referencing contexts to retire before returning to free lists.
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
     /// Device-global submission sequence (shared value space; contexts signal their own semaphores).
-    pub timeline_next: u64,
+    /// `Arc` allows submit paths to clone the counter out before dropping device/state borrows
+    /// (required for Phase 5 lock-free submit).
+    pub timeline_next: Arc<AtomicU64>,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
     pub retired_floor: u64,
 

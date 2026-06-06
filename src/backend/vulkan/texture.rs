@@ -7,6 +7,7 @@ use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 /// Create a texture with the given dimensions, format, access pattern, and flags.
 #[allow(clippy::too_many_arguments)]
@@ -1017,7 +1018,10 @@ pub(super) fn destroy(
                 return;
             }
 
-            let barrier = logical_device.timeline_next.saturating_sub(1);
+            let barrier = logical_device
+                .timeline_next
+                .load(Ordering::Relaxed)
+                .saturating_sub(1);
             logical_device.deletion_queue.queue(
                 barrier,
                 types::PendingDeletion::Texture {

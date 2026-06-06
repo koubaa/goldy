@@ -3451,7 +3451,7 @@ fn two_contexts_reclaim_independently() {
     let instance = Instance::new().expect("instance");
     let device = request_default_device(&instance);
     let ctx_a = submission_context(&device);
-    let ctx_b = submission_context(&device);
+    let _ctx_b = submission_context(&device);
 
     // Allocate a buffer and do some work on ctx_a.
     let buf = device

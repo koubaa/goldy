@@ -679,7 +679,8 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?
-            .timeline_next;
+            .timeline_next
+            .fetch_add(1, Ordering::Relaxed);
         let timeline_sem = state
             .contexts
             .get(&ctx)
@@ -707,7 +708,6 @@ pub(super) fn submit(
         {
             let retired = super::context::device_retired(state, device_handle);
             if let Some(ld) = state.devices.get_mut(&device_handle) {
-                ld.timeline_next = signal_value.saturating_add(1);
                 ld.process_deletion_queue_up_to(retired);
             }
         }
@@ -1367,7 +1367,7 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
     let used_slots =
@@ -1426,9 +1426,6 @@ pub(super) fn submit(
         ));
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.timeline_next = signal_value.saturating_add(1);
-    }
     if let Some(sc) = state.contexts.get_mut(&ctx) {
         sc.last_submitted_seq = signal_value;
         sc.timeline_cmd_buffers
@@ -2339,7 +2336,7 @@ fn submit_graph_impl(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
     let used_slots = collect_slot_keys_from_graph_commands(
@@ -2396,10 +2393,6 @@ fn submit_graph_impl(
             "Failed to queue_submit2 command buffer: {:?}",
             e
         ));
-    }
-
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.timeline_next = signal_value.saturating_add(1);
     }
 
     // Post-submit: store the CB for lifecycle management.
@@ -2534,7 +2527,7 @@ pub(super) fn try_resubmit_retained(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
     let timeline_sem = state
@@ -2574,7 +2567,6 @@ pub(super) fn try_resubmit_retained(
     {
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.timeline_next = signal_value.saturating_add(1);
             ld.process_deletion_queue_up_to(retired);
             ld.drain_ready_slot_reclamations(&state.contexts);
         }

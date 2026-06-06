@@ -55,6 +55,7 @@ use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
 use ash::{khr, vk, Entry, Instance};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "windows")]
 use raw_window_handle::RawWindowHandle;
@@ -1201,7 +1202,7 @@ where
         let ld = devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
     let wait_acq = vk::SemaphoreSubmitInfo::default()
         .semaphore(image_available_semaphore)
@@ -1234,10 +1235,6 @@ where
         )
     }
     .context("Failed to submit render command buffer")?;
-
-    if let Some(ld) = devices.get_mut(&device_handle) {
-        ld.timeline_next = signal_timeline_value.saturating_add(1);
-    }
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[current_frame];
@@ -1276,7 +1273,7 @@ pub(super) fn submit_frame(
         .devices
         .get(&dh)
         .context("Surface's device is invalid")?;
-    Ok(ld.timeline_next.saturating_sub(1))
+    Ok(ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1))
 }
 
 pub(super) fn present_frame(
@@ -1510,7 +1507,7 @@ pub(super) fn present(
                 .devices
                 .get(&device_handle)
                 .context("Surface's device is invalid")?;
-            ld.timeline_next
+            ld.timeline_next.fetch_add(1, Ordering::Relaxed)
         };
 
         let timeline_sem = state
@@ -1578,8 +1575,6 @@ pub(super) fn present(
 
         {
             let _bk = crate::tracy_zone!("vk.present.post_submit");
-            let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
-            ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
             if let Some(sc) = state.contexts.get_mut(&ctx) {
                 sc.last_submitted_seq = signal_timeline_value;
             }

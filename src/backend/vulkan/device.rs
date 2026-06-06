@@ -8,6 +8,8 @@ use ash::vk;
 use ash::{ext, khr};
 use std::collections::HashMap;
 use std::ffi::CStr;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 /// Enumerate available physical devices/adapters.
 pub(super) fn enumerate(physical_devices: &[PhysicalDeviceInfo]) -> Vec<AdapterInfo> {
@@ -488,7 +490,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             deletion_queue: types::DeletionQueue::new(),
             slot_last_seen: HashMap::new(),
             pending_slot_reclamations: Vec::new(),
-            timeline_next: 1,
+            timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: 0,
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,

@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::atomic::Ordering;
 
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(
@@ -540,7 +541,7 @@ pub(super) fn set_logical_size(
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
             let ld = devices.get_mut(&device_handle).unwrap();
-            let barrier = ld.timeline_next.saturating_sub(1);
+            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
             ld.deletion_queue.queue(
                 barrier,
                 types::PendingDeletion::ReplacedBufferGpu {
@@ -708,7 +709,7 @@ fn set_logical_size_sparse(
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
             let ld = devices.get_mut(&device_handle).unwrap();
-            let barrier = ld.timeline_next.saturating_sub(1);
+            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
             ld.deletion_queue.queue(
                 barrier,
                 types::PendingDeletion::ReplacedBufferGpu {
@@ -1100,6 +1101,7 @@ pub(super) fn resize(
         .get(&device_handle)
         .unwrap()
         .timeline_next
+        .load(Ordering::Relaxed)
         .saturating_sub(1);
     let pending = if old_state.is_sparse {
         let binds = sparse::collect_sparse_binds_for_teardown(
@@ -1206,7 +1208,10 @@ pub(super) fn destroy(
 ) {
     if let Some(buffer) = buffers.remove(&buffer_handle) {
         if let Some(device) = devices.get_mut(&buffer.device_handle) {
-            let barrier = device.timeline_next.saturating_sub(1);
+            let barrier = device
+                .timeline_next
+                .load(Ordering::Relaxed)
+                .saturating_sub(1);
 
             if buffer.is_view {
                 device.deletion_queue.queue(
