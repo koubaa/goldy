@@ -282,8 +282,6 @@ impl VulkanBackend {
             next_sampler_handle: 1,
             slang_compiler,
             compute_fence_pool: HashMap::new(),
-            texture_staging_pools: HashMap::new(),
-            staging_belts: HashMap::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
         };
 
@@ -1322,11 +1320,13 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
-        if let (Some(logical_device), Some(belt)) = (
-            self.state.devices.get(&device_handle),
-            self.state.staging_belts.get_mut(&device_handle),
-        ) {
-            unsafe { belt.trim(logical_device) };
+        let Some(logical_device) = self.state.devices.get(&device_handle) else {
+            return;
+        };
+        for sc in self.state.contexts.values_mut() {
+            if sc.device == device_handle {
+                unsafe { sc.staging_belt.trim(logical_device) };
+            }
         }
     }
 

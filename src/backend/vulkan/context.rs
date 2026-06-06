@@ -82,6 +82,10 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             free_cmd_buffers: Vec::new(),
             retained_compute_cb: None,
             timeline_cmd_buffers: std::collections::HashMap::new(),
+            staging_belt: super::staging::StagingBelt::new(
+                super::staging::DEFAULT_STAGING_CHUNK_SIZE,
+            ),
+            texture_staging_pool: super::staging::TextureStagingPool::new(),
         },
     );
     Ok(id)
@@ -114,6 +118,8 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
     };
     unsafe {
         let _ = ld.device.device_wait_idle();
+        sc.staging_belt.destroy_all(ld);
+        sc.texture_staging_pool.destroy_all(ld);
         for (_, cbs) in sc.timeline_cmd_buffers.drain() {
             for cb in cbs {
                 ld.device.free_command_buffers(sc.command_pool, &[cb]);

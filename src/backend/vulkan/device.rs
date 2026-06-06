@@ -561,9 +561,10 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 state
                     .compute_fence_pool
                     .retain(|_, (dh, _, _)| *dh != device_handle);
-                // Texture staging pool: device is being lost so just drop entries
-                // without Vulkan destroy calls (handles are invalid after device loss).
-                state.texture_staging_pools.remove(&device_handle);
+                // Per-context staging belt and texture pool: device is being lost so just
+                // drop entries without Vulkan destroy calls (handles are invalid after
+                // device loss). Drop the entire context entries for this device.
+                state.contexts.retain(|_, sc| sc.device != device_handle);
                 logical_device.device.destroy_device(None);
                 return;
             }
@@ -574,8 +575,20 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 types::destroy_pending_deletion(&mut logical_device, r);
             }
 
-            if let Some(mut belt) = state.staging_belts.remove(&device_handle) {
-                belt.destroy_all(&logical_device);
+            // Destroy per-context staging belt and texture pool for this device.
+            // Command pools/semaphores in the context are intentionally NOT destroyed
+            // here — they are child objects of the device and reclaimed by vkDestroyDevice.
+            let ctx_keys: Vec<_> = state
+                .contexts
+                .iter()
+                .filter(|(_, sc)| sc.device == device_handle)
+                .map(|(k, _)| *k)
+                .collect();
+            for key in ctx_keys {
+                if let Some(mut sc) = state.contexts.remove(&key) {
+                    sc.staging_belt.destroy_all(&logical_device);
+                    sc.texture_staging_pool.destroy_all(&logical_device);
+                }
             }
 
             // Destroy buffers owned by this device
@@ -803,11 +816,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 }
                 // Texture staging for fence pool tokens is now handled via the
                 // TextureStagingPool; it will be destroyed below.
-            }
-
-            // Destroy all pooled texture staging resources for this device.
-            if let Some(mut pool) = state.texture_staging_pools.remove(&device_handle) {
-                pool.destroy_all(&logical_device);
             }
 
             if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {

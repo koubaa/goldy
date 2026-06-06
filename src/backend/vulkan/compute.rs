@@ -602,19 +602,21 @@ pub(super) fn submit(
         let completed_timeline = super::context::device_retired(state, device_handle);
 
         if has_write_buffer {
-            for belt in state.staging_belts.values_mut() {
-                belt.reclaim(
-                    &state.compute_fence_pool,
-                    &state.devices,
-                    completed_timeline,
-                )?;
+            let (fence_pool, devices, contexts) = (
+                &state.compute_fence_pool,
+                &state.devices,
+                &mut state.contexts,
+            );
+            if let Some(sc) = contexts.get_mut(&ctx) {
+                sc.staging_belt
+                    .reclaim(fence_pool, devices, completed_timeline)?;
             }
             reap_signaled_fences(state);
         }
 
         if has_write_texture {
-            if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-                pool.reclaim(completed_timeline);
+            if let Some(sc) = state.contexts.get_mut(&ctx) {
+                sc.texture_staging_pool.reclaim(completed_timeline);
             }
         }
     }
@@ -622,7 +624,7 @@ pub(super) fn submit(
     // Belt slices for DEVICE_LOCAL WriteBuffer copies (same iteration order as command loop).
     let mut belt_slices: Vec<(vk::Buffer, u64)> = Vec::new();
 
-    // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable buffer
+    // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable belt
     // access before we borrow state immutably for the command loop).
     if has_write_buffer {
         for command in commands {
@@ -632,11 +634,21 @@ pub(super) fn submit(
                 data,
             } = command
             {
-                let buf = state
-                    .buffers
-                    .get(buf_handle)
-                    .context("WriteBuffer: invalid buffer handle")?;
-                if let Some(base) = buf.host_mapped {
+                // Extract Copy fields from the buffer state so the borrow ends
+                // before we take a mutable borrow of state.contexts for the belt.
+                let (host_mapped, is_storage, buf_device, buf_memory) = {
+                    let buf = state
+                        .buffers
+                        .get(buf_handle)
+                        .context("WriteBuffer: invalid buffer handle")?;
+                    (
+                        buf.host_mapped,
+                        buf.is_storage,
+                        buf.device_handle,
+                        buf.memory,
+                    )
+                };
+                if let Some(base) = host_mapped {
                     let p = base as *mut u8;
                     unsafe {
                         std::ptr::copy_nonoverlapping(
@@ -645,29 +657,29 @@ pub(super) fn submit(
                             data.len(),
                         );
                     }
-                } else if !buf.is_storage {
-                    let dev = state
-                        .devices
-                        .get(&buf.device_handle)
-                        .context("WriteBuffer: device invalid")?;
-                    unsafe {
-                        let ptr = dev
-                            .map_memory2(buf.memory, *offset, data.len() as u64)
-                            .context("WriteBuffer: map failed")?;
-                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-                        dev.unmap_memory2(buf.memory)
-                            .context("WriteBuffer: unmap failed")?;
-                    }
-                } else {
-                    let buf_device = buf.device_handle;
+                } else if !is_storage {
                     let dev = state
                         .devices
                         .get(&buf_device)
                         .context("WriteBuffer: device invalid")?;
-                    let belt_entry = state.staging_belts.entry(buf_device).or_insert_with(|| {
-                        staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                    });
-                    let (stg_buf, stg_off) = belt_entry.write(&state.instance, dev, data)?;
+                    unsafe {
+                        let ptr = dev
+                            .map_memory2(buf_memory, *offset, data.len() as u64)
+                            .context("WriteBuffer: map failed")?;
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                        dev.unmap_memory2(buf_memory)
+                            .context("WriteBuffer: unmap failed")?;
+                    }
+                } else {
+                    let dev = state
+                        .devices
+                        .get(&buf_device)
+                        .context("WriteBuffer: device invalid")?;
+                    let sc = state
+                        .contexts
+                        .get_mut(&ctx)
+                        .context("Invalid context handle")?;
+                    let (stg_buf, stg_off) = sc.staging_belt.write(&state.instance, dev, data)?;
                     belt_slices.push((stg_buf, stg_off));
                 }
             }
@@ -721,14 +733,6 @@ pub(super) fn submit(
     let buffers = &state.buffers;
 
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
-    if has_write_texture {
-        // Ensure a pool exists for this device before the upload loop so we can
-        // hold a mutable reference to just the pool while borrowing other fields.
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new);
-    }
     for command in commands {
         match command {
             GpuCommand::WriteTexture {
@@ -737,7 +741,11 @@ pub(super) fn submit(
                 width,
                 height,
             } => {
-                let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                let pool = &mut state
+                    .contexts
+                    .get_mut(&ctx)
+                    .context("Invalid context handle")?
+                    .texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
@@ -759,7 +767,11 @@ pub(super) fn submit(
                 height,
                 data,
             } => {
-                let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                let pool = &mut state
+                    .contexts
+                    .get_mut(&ctx)
+                    .context("Invalid context handle")?
+                    .texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
@@ -1439,18 +1451,14 @@ pub(super) fn submit(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new)
-            .release(signal_value, entries);
+        if let Some(sc) = state.contexts.get_mut(&ctx) {
+            sc.texture_staging_pool.release(signal_value, entries);
+        }
     }
 
-    state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .finish(signal_value);
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.staging_belt.finish(signal_value);
+    }
 
     debug_assert_eq!(
         belt_idx,
@@ -1557,30 +1565,27 @@ fn submit_graph_impl(
         let _rz = tracy_zone!("vk.submit_graph.belt_reclaim");
         let completed_timeline = super::context::device_retired(state, device_handle);
 
-        for belt in state.staging_belts.values_mut() {
-            belt.reclaim(
+        {
+            let (fence_pool, devices, contexts) = (
                 &state.compute_fence_pool,
                 &state.devices,
-                completed_timeline,
-            )?;
+                &mut state.contexts,
+            );
+            if let Some(sc) = contexts.get_mut(&ctx) {
+                sc.staging_belt
+                    .reclaim(fence_pool, devices, completed_timeline)?;
+            }
         }
         reap_signaled_fences(state);
 
         if has_write_texture_graph {
-            if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-                pool.reclaim(completed_timeline);
+            if let Some(sc) = state.contexts.get_mut(&ctx) {
+                sc.texture_staging_pool.reclaim(completed_timeline);
             }
         }
     }
 
-    if has_write_texture_graph {
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new);
-    }
-
-    // --- Pre-pass: stage CPU data for WriteBuffer in compute segments ---
+    // --- Pre-pass: stage CPU data for WriteBuffer/WriteTexture in compute segments ---
     let mut belt_slices: Vec<(vk::Buffer, u64)> = Vec::new();
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
 
@@ -1593,11 +1598,21 @@ fn submit_graph_impl(
                         offset,
                         data,
                     } => {
-                        let buf = state
-                            .buffers
-                            .get(buf_handle)
-                            .context("WriteBuffer: invalid buffer handle")?;
-                        if let Some(base) = buf.host_mapped {
+                        // Extract Copy fields so the state.buffers borrow ends
+                        // before we take &mut state.contexts for the belt.
+                        let (host_mapped, is_storage, buf_device, buf_memory) = {
+                            let buf = state
+                                .buffers
+                                .get(buf_handle)
+                                .context("WriteBuffer: invalid buffer handle")?;
+                            (
+                                buf.host_mapped,
+                                buf.is_storage,
+                                buf.device_handle,
+                                buf.memory,
+                            )
+                        };
+                        if let Some(base) = host_mapped {
                             let p = base as *mut u8;
                             unsafe {
                                 std::ptr::copy_nonoverlapping(
@@ -1606,35 +1621,34 @@ fn submit_graph_impl(
                                     data.len(),
                                 );
                             }
-                        } else if !buf.is_storage {
+                        } else if !is_storage {
                             let dev = state
                                 .devices
-                                .get(&buf.device_handle)
+                                .get(&buf_device)
                                 .context("WriteBuffer: device invalid")?;
                             unsafe {
                                 let ptr = dev
-                                    .map_memory2(buf.memory, *offset, data.len() as u64)
+                                    .map_memory2(buf_memory, *offset, data.len() as u64)
                                     .context("WriteBuffer: map failed")?;
                                 std::ptr::copy_nonoverlapping(
                                     data.as_ptr(),
                                     ptr as *mut u8,
                                     data.len(),
                                 );
-                                dev.unmap_memory2(buf.memory)
+                                dev.unmap_memory2(buf_memory)
                                     .context("WriteBuffer: unmap failed")?;
                             }
                         } else {
-                            let buf_device = buf.device_handle;
                             let dev = state
                                 .devices
                                 .get(&buf_device)
                                 .context("WriteBuffer: device invalid")?;
-                            let belt_entry =
-                                state.staging_belts.entry(buf_device).or_insert_with(|| {
-                                    staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                                });
+                            let sc = state
+                                .contexts
+                                .get_mut(&ctx)
+                                .context("Invalid context handle")?;
                             let (stg_buf, stg_off) =
-                                belt_entry.write(&state.instance, dev, data)?;
+                                sc.staging_belt.write(&state.instance, dev, data)?;
                             belt_slices.push((stg_buf, stg_off));
                         }
                     }
@@ -1644,7 +1658,11 @@ fn submit_graph_impl(
                         width,
                         height,
                     } => {
-                        let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                        let pool = &mut state
+                            .contexts
+                            .get_mut(&ctx)
+                            .context("Invalid context handle")?
+                            .texture_staging_pool;
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -1668,7 +1686,11 @@ fn submit_graph_impl(
                         height,
                         data,
                     } => {
-                        let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                        let pool = &mut state
+                            .contexts
+                            .get_mut(&ctx)
+                            .context("Invalid context handle")?
+                            .texture_staging_pool;
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -2417,18 +2439,14 @@ fn submit_graph_impl(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new)
-            .release(signal_value, entries);
+        if let Some(sc) = state.contexts.get_mut(&ctx) {
+            sc.texture_staging_pool.release(signal_value, entries);
+        }
     }
 
-    state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .finish(signal_value);
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.staging_belt.finish(signal_value);
+    }
 
     if let Some(prof) = vk_gpu_profile {
         let (device_clone, timeline_sem) = {

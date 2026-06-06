@@ -464,6 +464,13 @@ pub(crate) struct SubmissionContext {
     pub retained_compute_cb: Option<RetainedVkCb>,
     /// Command buffers to free once this context's timeline reaches the key.
     pub timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
+    /// Per-context staging belt for DEVICE_LOCAL WriteBuffer uploads.
+    /// Pools HOST_VISIBLE chunks across submits so no staging memory is reused
+    /// before its GPU copy finishes (keyed by this context's timeline values).
+    pub staging_belt: super::staging::StagingBelt,
+    /// Per-context pool for texture-upload staging buffers.
+    /// Eliminates per-frame vkAllocateMemory / vkFreeMemory for WriteTexture.
+    pub texture_staging_pool: super::staging::TextureStagingPool,
 }
 
 /// A logical Vulkan device with associated resources.
@@ -1194,13 +1201,6 @@ pub(super) struct VulkanState {
     /// Per-submission fences for non-blocking compute; token -> (device, `VkFence`, `Option<VkCommandBuffer>`).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
     pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
-    /// Per-device pools that recycle texture-upload staging buffers across frames.
-    /// Entries are released with a GPU timeline value and reclaimed once that
-    /// timeline completes, avoiding per-frame vkAllocateMemory / vkFreeMemory.
-    pub texture_staging_pools:
-        HashMap<DeviceHandle, crate::backend::vulkan::staging::TextureStagingPool>,
-    /// Per-device staging belts for batched WriteBuffer uploads.
-    pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_lost: std::sync::atomic::AtomicBool,
